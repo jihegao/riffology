@@ -127,18 +127,19 @@ scoped to the active `projectId` by the bridge, never by a model-provided ID.
 | Tool/action | Input and effect | Preconditions / result |
 | --- | --- | --- |
 | `inspect_uploaded_files` | optional allowlisted upload IDs; returns bounded text/metadata previews | only current project uploads; binary and oversize content is not returned |
-| `prepare_mesa_model` | `templateId`, structured parameter schema, and model-spec JSON | selects an approved Mesa template; creates a versioned model plan, not arbitrary Python |
-| `load_model` | prepared model-plan ID | Mesa service validates and writes `model_schema.json`; updates state to `model_ready` |
+| `select_and_load_model` | allowlisted `modelId` only | calls `PUT /v1/projects/{projectId}/model` with `{"model_id":"queue-network-v1"}`; the Mesa service materializes the immutable bundled revision and returns its schema |
 | `set_parameters` | parameter key/value patch | validates against active schema and atomically patches `ProjectState` |
-| `run_experiment` | optional run label and seed override | requires `model_ready` and valid parameters; Mesa API creates a run |
+| `run_experiment` | optional documented `steps` and `seeds` overrides | requires an active Mesa revision and valid state parameters; bridge builds the documented run request and calls `POST /v1/projects/{projectId}/runs` |
 | `get_run_status` | optional active run ID | returns backend run state and bounded log tail |
 | `read_run_results` | terminal run ID | returns `summary.json` and bounded series/manifest, never arbitrary files |
 | `drive_workbench_ui` | one allowlisted UI intent: `open_tab`, `set_parameter`, `start_run`, `open_results` | backend action succeeds first; Playwright mirrors and reports observation |
 
-`prepare_mesa_model` is deliberately template-bound.  In the MVP it may choose
-only the documented queue/resource example(s) and populate their declarative
-specification.  It does not write or execute generated Python.  Any later
-"generate Python" phase needs a separate sandbox and review gate.
+`select_and_load_model` is deliberately bundled-model-bound.  In the MVP it
+accepts only `queue-network-v1`; it does not submit a model plan, schema, Python
+source, filesystem path, or uploaded file to Mesa.  The Mesa service itself
+copies that reviewed asset into an immutable project revision.  Any later
+"generate Python" phase needs a separate sandbox, a new Mesa API, and a review
+gate.
 
 The assistant can explain, ask for missing supported inputs, and call the tools
 above.  It cannot claim a model was loaded, a parameter changed, or a run
@@ -175,6 +176,16 @@ The browser reconnects to the demo SSE endpoint with a monotonically increasing
 `ProjectState.revision`; on a revision gap it fetches `GET /api/projects/:id`.
 This same stream carries Mesa updates, so the UI remains correct if the agent,
 Playwright, or an individual network connection disappears.
+
+Timeouts are terminally mapped rather than left as a spinner.  A Mesa
+`timed_out` status is forwarded as `run.updated { status: "timed_out" }`, then
+recorded in `ProjectState` as a terminal failed run with the safe user-facing
+reason "Simulation timed out".  The Results pane must not render success
+metrics or call the successful-results endpoint; it may offer the metadata and
+bounded log available through the service.  An OpenCode prompt timeout instead
+aborts that agent session, emits a terminal `agent.status: error`, and leaves
+the last committed project/run state unchanged.  In both cases a later user
+action may start a new valid turn or run.
 
 ## Playwright is a projection, not a controller of state
 
@@ -217,7 +228,7 @@ permission prompts.
 | Browser to demo backend | forged project, upload, or action | project-scoped server session; server-derived project ID; schema/size/type checks; CSRF/origin policy appropriate to the local app |
 | Demo backend to OpenCode | key/host exposure or unrestricted execution | loopback-only server, random server password, backend proxy only, direct dangerous tools disabled, per-project workspace policy |
 | OpenCode to files | path traversal or reading unrelated files | attachment IDs and resolved paths only; canonical containment check; read previews with byte/row limits |
-| OpenCode to Mesa | arbitrary code execution or forged run result | declarative approved-template model plans; Mesa API validates all plans and is the sole writer of run state |
+| OpenCode to Mesa | arbitrary code execution or forged run result | one approved bundled `model_id`; Mesa materializes the reviewed asset and is the sole writer of run state |
 | Playwright to UI | navigation/DOM injection or false success | fixed local origin, allowlisted intents/locators, expected revisions, backend result is the evidence |
 | Logs/events to browser | secret, private path, or raw model output leakage | typed redaction boundary; no raw OpenCode SSE, env, headers, or workspace absolute paths |
 
@@ -242,13 +253,16 @@ model validation.
 4. **Tool policy:** assert the agent receives no direct bash/network/arbitrary
    file/browser capability; reject an unknown tool and a tool that targets a
    different project; prove each approved tool has schema validation.
-5. **State truth:** a successful `set_parameters` and `run_experiment` update
+5. **State truth:** `select_and_load_model` calls only the documented Mesa `PUT`
+   endpoint, and successful `set_parameters` and `run_experiment` update
    the backend before UI verification; simulate Playwright failure and verify
    the run remains queryable and the UI reports a non-terminal control warning.
 6. **SSE:** replay duplicate/unknown/reordered OpenCode events and a reconnect;
-   verify typed, redacted frontend events and canonical state recovery.
+   verify typed, redacted frontend events and canonical state recovery. Replay a
+   Mesa `timed_out` update and assert a terminal UI failure with no success
+   result fetch.
 7. **Visible E2E:** with a fixed fake/model fixture, upload CSV in the left pane,
-   prepare/load the queue template, use the agent UI intent to show Parameters,
+   select/load `queue-network-v1`, use the agent UI intent to show Parameters,
    set a value, run Mesa, show Results, and confirm the assistant summarises the
    artifact-backed metrics on the same visible page Playwright controls.
 
@@ -266,9 +280,10 @@ model validation.
   Playwright to the visible local workbench tab.  If this is unavailable, the
   UI-control demonstration is explicitly disabled; it is not silently replaced
   with a hidden browser.
-- Mesa service exposes template preparation/load, parameter patch, run status,
-  cancellation, artifact manifest, and result endpoints as described by
-  `mesa-service.md`.
+- Mesa service exposes bundled model materialization through `PUT .../model`,
+  its schema/parameter projections, run status, cancellation, artifact manifest,
+  and result endpoints as described by `mesa-service.md`; it has no arbitrary
+  model-plan endpoint or parameter-patch endpoint.
 
 ## References
 
