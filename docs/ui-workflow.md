@@ -45,14 +45,14 @@ the current project/run phase. It must be usable without the assistant.
 
 | Step | Conversation behavior | Workbench behavior |
 | --- | --- | --- |
-| Initial | Shows an empty-state prompt and enabled attachment/composer controls. | Shows `No model prepared`; parameter and run controls are disabled. |
+| Initial | Shows an empty-state prompt and enabled attachment control. The composer is enabled when agent state is omitted (fixture mode) or is `ready`; an unavailable agent has a safe configuration message. | Shows `No model prepared`; parameter and run controls are disabled. |
 | Attach | File appears immediately as `pending`; once accepted it shows name, type, size, and `ready` or an inline error. The composer remains usable only after all pending uploads settle. | Continues to show no model until a model-ready state arrives. |
 | Request modelling | User sends a prompt with attachment references. Assistant stream is appended as an assistant message and exposes a busy status. | Shows `Preparing model`; stale parameter/results content is cleared when the model identity changes. |
 | Model ready | Assistant message may describe readiness, but it is not the state trigger. | Shows model name/description and renders the schema-driven parameter form. |
 | Configure | The user can continue chatting. | Parameter fields are editable; unsaved edits are visibly marked. `Run experiment` is enabled only when validation passes and no run is active. |
 | Run | A user or agent may narrate the action in the transcript. | On start, parameters become read-only, progress/log tail are displayed, and `Cancel run` replaces the start control. |
 | Complete | Assistant can receive result context and append a summary. | Shows terminal success status, metric cards, one time-series chart, and a results table. |
-| Failure/cancel | Shows a plain-language message and a retry prompt; attachments and prior messages remain. | Shows a terminal error/cancel state and safe diagnostic text. Existing successful results remain labelled with their prior run ID. Parameters unlock after the run reaches a terminal state. |
+| Failure/cancel/timeout | Shows a plain-language message and a retry prompt; attachments and prior messages remain. | Shows a terminal error, cancellation, or timeout state and safe diagnostic text. A timeout is unsuccessful, never a partial success. Existing successful results remain labelled with their prior run ID. Parameters unlock after the run reaches a terminal state. |
 
 The attachment list supports only the service's declared formats and size
 limit. Rejection happens before the attachment can be referenced by a prompt.
@@ -70,12 +70,19 @@ command acknowledgement.
 ```ts
 type ProjectPhase =
   | "idle" | "uploading" | "preparing_model" | "model_ready"
-  | "running" | "succeeded" | "failed" | "cancelled";
+  | "running" | "succeeded" | "failed" | "cancelled" | "timed_out";
 
 type ProjectState = {
   sessionId: string;
   revision: number;
   phase: ProjectPhase;
+  // Omitted by deterministic/Mesa-only fixtures. The backend owns the opaque
+  // OpenCode session ID; it is intentionally not exposed here.
+  agent?: {
+    modelId: string | null;
+    status: "unconfigured" | "ready" | "thinking" | "waiting_for_action" | "error";
+    lastError?: { code: string; message: string };
+  };
   attachments: Array<{
     id: string;
     displayName: string;
@@ -103,7 +110,7 @@ type ProjectState = {
   };
   run: null | {
     id: string;
-    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out";
     progress: { completedSteps: number; totalSteps: number | null };
     logTail: string[];
     error?: { code: string; message: string };
@@ -137,6 +144,15 @@ type ParameterSchema = {
 must not overwrite results from a completed earlier run; if those are shown,
 they are explicitly labelled as previous results.
 
+`agent` is the browser-safe readiness projection of the bridge's `AgentLink`:
+it exposes a configured model ID and status only. The OpenCode session ID stays
+in the server-side project record and is never required by, or exposed to, the
+browser. When present, `unconfigured` and `error` disable message submission
+and render `lastError.message` only after the bridge has redacted it;
+`thinking` and `waiting_for_action` render non-authoritative activity feedback.
+Agent readiness does not change `ProjectPhase`, model readiness, or any Mesa
+run state.
+
 ## UI command and event contract
 
 All client commands include `sessionId` and `baseRevision`. The service returns
@@ -159,6 +175,10 @@ The client listens to:
   order.
 - `conversation.delta` — `{ messageId, textDelta }`; only valid while the
   corresponding assistant message is `streaming`.
+- `agent.status` — optional bridge activity notification with the public
+  `ProjectState.agent.status` value. It may update a transient activity
+  indicator, but the next project snapshot/patch remains the authoritative
+  readiness value.
 - `connection.status` — transport state only (`connected`, `reconnecting`,
   `offline`); it cannot change project phase.
 
@@ -220,23 +240,21 @@ one separate E2E test uses the real service.
 7. Success renders metric list, chart accessible label/data summary, and result
    table all labelled with the same run ID. Starting a second run retains prior
    results until new results arrive and labels them as previous.
-8. Failed and cancelled states render safe error text, unlock controls, keep
-   the transcript/attachments, and do not display a fabricated success result.
+8. Failed, cancelled, and `timed_out` states render safe error text, unlock
+   controls, keep the transcript/attachments, and do not display a fabricated
+   success result. A timeout identifies the run as timed out without exposing a
+   worker PID, raw log, stack trace, or host path.
 9. Out-of-order or duplicate state patches do not regress the displayed phase;
    a revision gap triggers snapshot resynchronization and disables dependent
    controls until complete.
 10. At 1440 x 900 both regions and the workbench status are visible without
     horizontal page scrolling. Capture a visual screenshot for review.
+11. With a public agent state, `unconfigured`/`error` keep the attachment
+    control available but disable message send with a safe explanation;
+    `ready` enables it. The UI never receives or requires an OpenCode session
+    identifier.
 
 ## Interface assumptions requiring reconciliation
 
-1. The Mesa-service contract must confirm the exact supported file formats,
-   upload size limit, parameter scalar types, and result JSON shape used above.
-2. The OpenCode bridge must confirm whether it sends `conversation.delta` and
-   model-preparation state itself or whether the application backend translates
-   OpenCode events into these event names.
-3. The execution owner must define the cancellation acknowledgement semantics:
-   this UI assumes cancellation is requested first and only becomes terminal on
-   a later `ProjectState` revision.
-4. The app owner must select the final frontend stack and event endpoint; the
+1. The app owner must select the final frontend stack and event endpoint; the
    semantic selector and state contracts are stack-independent.
