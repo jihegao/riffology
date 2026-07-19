@@ -10,6 +10,7 @@ import type { WorkbenchIntent, WorkbenchProjector } from "../src/playwright-proj
 
 class ToolMesa implements MesaAdapter {
   loads = 0;
+  getRunIds: string[] = [];
   async loadModel(): Promise<MesaModel> {
     this.loads += 1;
     return {
@@ -20,7 +21,10 @@ class ToolMesa implements MesaAdapter {
     };
   }
   async startRun(): Promise<MesaRun> { throw new Error("not used"); }
-  async getRun(): Promise<MesaRun> { throw new Error("not used"); }
+  async getRun(_projectId: string, runId: string): Promise<MesaRun> {
+    this.getRunIds.push(runId);
+    return { runId, status: "running", progress: { completedSteps: 2, totalSteps: 4 } };
+  }
   async cancelRun(): Promise<MesaRun> { throw new Error("not used"); }
   async getResults(): Promise<MesaResults> { throw new Error("not used"); }
 }
@@ -58,6 +62,18 @@ test("MCP tool calls use a capability-scoped session and reject project injectio
   });
   assert.equal((objectResult as any).result.structuredContent, undefined);
   assert.deepEqual(JSON.parse((objectResult as any).result.content[0].text), { arrival_rate: 8 });
+
+  store.mutate("browser-1", (draft) => {
+    draft.phase = "running";
+    draft.run = { id: "run_current", status: "running", progress: { completedSteps: 1, totalSteps: 4 }, logTail: [] };
+  });
+  const currentRunResult = await server.handle(capability, {
+    jsonrpc: "2.0", id: 33, method: "tools/call",
+    params: { name: "riff_get_run_status", arguments: { runId: "   " } },
+  });
+  assert.equal((currentRunResult as any).result.isError, undefined);
+  assert.deepEqual(mesa.getRunIds, ["run_current"]);
+  assert.equal(JSON.parse((currentRunResult as any).result.content[0].text).runId, "run_current");
 
   const arrayResult = await server.handle(capability, {
     jsonrpc: "2.0", id: 32, method: "tools/call",

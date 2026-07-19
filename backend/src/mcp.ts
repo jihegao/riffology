@@ -111,7 +111,8 @@ const parseAction = (name: string, raw: unknown): RestrictedAction => {
     case "riff_get_run_status":
       assertKeys(input, ["runId"]);
       if (input.runId !== undefined && typeof input.runId !== "string") throw new ApiError(422, "invalid_tool_input", "runId must be text.");
-      return { name: "get_run_status", ...(typeof input.runId === "string" ? { runId: input.runId } : {}) };
+      const runId = typeof input.runId === "string" ? input.runId.trim() : undefined;
+      return { name: "get_run_status", ...(runId ? { runId } : {}) };
     case "riff_read_run_results":
       assertKeys(input, ["runId"]);
       if (typeof input.runId !== "string") throw new ApiError(422, "invalid_tool_input", "runId is required.");

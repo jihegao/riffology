@@ -104,6 +104,7 @@ test("public routes preserve revision, attachment, chat, parameter, and Mesa run
   assert.match(openCode.prompts[0].system, /Use only the Riff MCP tools exposed/);
   assert.match(openCode.prompts[0].system, /Never call python-interpreter tools/);
   assert.match(openCode.prompts[0].system, /Do not call riff_drive_workbench_ui or show_dashboard/);
+  assert.match(openCode.prompts[0].system, /omit runId when the run ID is unknown/);
   state = await getJson(`${base}/snapshot`);
 
   response = await command(`${base}/attachments/${attachmentId}`, { commandId: "remove-in-use", sessionId: "demo", baseRevision: state.revision, payload: { attachmentId } }, "DELETE");

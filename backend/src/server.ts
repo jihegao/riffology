@@ -450,5 +450,6 @@ const restrictedSystemPrompt = (): string => [
   "Never call python-interpreter tools or any non-Riff tool. Do not use shell, local files, generic read/search/edit/write/task, network, browser, skill, or code-generation tools.",
   "Do not call riff_drive_workbench_ui or show_dashboard; they are not part of this assistant surface. If an action is unsupported, explain the limit and ask the user instead.",
   "After riff_select_and_load_model returns model_loaded, use its returned parameter metadata; do not inspect the local runtime to infer the model.",
+  "For riff_get_run_status, omit runId when the run ID is unknown; an empty string is not a run ID and means the current run.",
   "Do not claim an action succeeded until its tool result confirms it.",
 ].join("\n");
