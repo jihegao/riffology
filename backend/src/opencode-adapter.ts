@@ -129,7 +129,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
       `- attachment ${attachment.id}: ${attachment.mediaType}, ${attachment.workspaceRelativePath}`,
     ).join("\n");
     const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
-    await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+    await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
       method: "POST",
       body: JSON.stringify({
         messageID: `msg_${randomUUID()}`,

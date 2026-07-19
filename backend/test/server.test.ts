@@ -174,8 +174,8 @@ test("live chat binds one capability-scoped MCP URL and revokes it when the brow
   assert.equal((denied as any).error.code, -32001);
 });
 
-test("OpenCode adapter discovers the configured model and limits prompt tools", async () => {
-  const calls: Array<{ path: string; body?: any }> = [];
+test("OpenCode adapter discovers the configured model and sends synchronous bounded chat turns", async () => {
+  const calls: Array<{ path: string; method: string; body?: any }> = [];
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "deepseek/v4",
@@ -183,18 +183,20 @@ test("OpenCode adapter discovers the configured model and limits prompt tools", 
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      calls.push({ path, body });
+      calls.push({ path, method: init?.method ?? "GET", body });
       if (path === "/global/health") return Response.json({ healthy: true, version: "1.2.3" });
       if (path === "/config/providers") return Response.json({ providers: [{ id: "deepseek", models: { v4: {} } }] });
       if (path === "/session") return Response.json({ id: "internal-session" });
-      if (path.endsWith("/prompt_async")) return new Response(null, { status: 204 });
+      if (path === "/session/internal-session/message" && init?.method === "POST") return Response.json({ id: "assistant-message" });
       return new Response(null, { status: 404 });
     },
   });
   assert.deepEqual(await adapter.initialize(), { status: "ready", modelId: "deepseek/v4", version: "1.2.3" });
   const sessionId = await adapter.createSession("project-a");
   await adapter.prompt(sessionId, { text: "load model", system: "restricted", attachments: [] });
-  const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
+  const messageCall = calls.find((call) => call.path === "/session/internal-session/message");
+  assert.equal(messageCall?.method, "POST");
+  const prompt = messageCall!.body;
   assert.deepEqual(prompt.tools, {
     bash: false,
     write: false,
