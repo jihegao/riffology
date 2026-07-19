@@ -44,8 +44,11 @@ provided in a chat message.
 
 ## Versioned project layout
 
-All paths are beneath a service-configured local `WORKSPACE_ROOT`; IDs are
-server-generated URL-safe UUIDs and are never treated as filesystem paths.
+`WORKSPACE_ROOT/projects/<project-id>/` is the canonical workspace layout for
+this demo. The demo backend and Mesa service are configured with the same
+`WORKSPACE_ROOT`; other documents must use this layout rather than a separate
+`workspaces/<project-id>` root. IDs are server-generated URL-safe UUIDs and are
+never treated as filesystem paths.
 
 ```text
 WORKSPACE_ROOT/
@@ -67,19 +70,26 @@ WORKSPACE_ROOT/
       run.log                                # worker stdout/stderr, bounded in size
 ```
 
-The runner writes artifacts to `<run-id>.tmp/` and atomically promotes that
-directory to `<run-id>/` only after it has written terminal `metadata.json`.
-Terminal failures and cancellations still produce `request.json`,
-`metadata.json`, and `run.log`; successful runs additionally produce
-`timeseries.csv` and `summary.json`. API responses expose artifact names and
-parsed JSON/CSV-derived data, never arbitrary workspace paths.
+The demo backend owns file upload validation, attachment manifests, persisted
+UI parameter drafts, public browser routes, and all mapping between browser
+state and this service. The `inputs/` directory is therefore written by the
+backend, not by a Mesa endpoint. The runner writes artifacts to
+`<run-id>.tmp/` and atomically promotes that directory to `<run-id>/` only after
+it has written terminal `metadata.json`. Terminal failures, cancellations, and
+timeouts still produce `request.json`, `metadata.json`, and `run.log`;
+successful runs additionally produce `timeseries.csv` and `summary.json`. API
+responses expose artifact names and parsed JSON/CSV-derived data, never
+arbitrary workspace paths.
 
 ## JSON contracts
 
 ### `model_schema.json`
 
-This is the source for the right-pane parameter form. It uses a deliberately
-small JSON-Schema-like subset, rather than accepting arbitrary schema features.
+This is the Mesa service's parameter definition. The demo-backend adapter turns
+it into the UI's labelled field schema and holds persisted UI parameter drafts
+in `ProjectState`; neither the browser nor the Mesa service treats a UI draft as
+a runnable experiment. It uses a deliberately small JSON-Schema-like subset,
+rather than accepting arbitrary schema features.
 
 ```json
 {
@@ -99,15 +109,19 @@ small JSON-Schema-like subset, rather than accepting arbitrary schema features.
 }
 ```
 
-Every parameter is required in a run request after defaults are applied; a
-number must be finite and within its inclusive bounds. Integer parameters
-cannot be supplied as a float. No extra keys are accepted.
+Every parameter is required in a fully normalized run request assembled by the
+demo-backend adapter after it applies the active schema defaults; a number must
+be finite and within its inclusive bounds. Integer parameters cannot be supplied
+as a float. No extra keys are accepted.
 
 ### `experiment_schema.json` and run request
 
 `experiment_schema.json` is the same supported request shape below, with the
-parameter definitions copied from `model_schema.json`. The service records the
-normalized form, so defaults and generated seed are visible in `request.json`.
+parameter definitions copied from `model_schema.json`. Before calling Mesa, the
+demo-backend adapter must resolve the active `model_revision`, all parameter
+values, `steps`, and `seeds`; Mesa receives this fully normalized request and
+records it unchanged in `request.json`. It has no parameter-draft or browser
+command endpoint.
 
 ```json
 {
@@ -128,9 +142,9 @@ Rules:
 - `model_revision` must equal the current project revision; stale revisions are
   rejected with `409 model_revision_not_active`.
 - `steps` is an integer from 1 through the model maximum (500 for the example).
-- `seeds` contains one to five unique signed 32-bit integers. If omitted, the
-  service generates one seed, returns it in the normalized request, and never
-  presents that run as reproducible until the returned seed is retained.
+- `seeds` is required and contains one to five unique signed 32-bit integers.
+  The demo backend generates and persists a seed before submission when a user
+  did not choose one; Mesa does not generate a seed after accepting a run.
 - A seed is a replication. The runner executes seeds serially in one isolated
   process and writes a `seed` column, so the result can be summarized without
   losing its raw series.
@@ -152,7 +166,8 @@ are metadata, not reproducibility inputs.
 
 ## HTTP API
 
-All endpoints are local backend-to-service calls. JSON errors use
+All endpoints are local demo-backend-to-service calls; there is no browser CORS
+or public Mesa route in this contract. JSON errors use
 `{"error":{"code":"...","message":"...","details":{}}}`. Unknown project,
 revision, and run IDs return `404`; invalid JSON or contract violations return
 `422`.
@@ -168,10 +183,12 @@ revision, and run IDs return `404`; invalid JSON or contract violations return
 | `GET /v1/projects/{project_id}/runs/{run_id}/results` | — | `200` normalized summary plus time-series rows | `409 run_not_complete` until `succeeded`; `404` when no successful artifacts exist. |
 | `GET /v1/projects/{project_id}/runs/{run_id}/artifacts/{name}` | `name` in fixed allowlist | `200` downloaded artifact | Only `request.json`, `metadata.json`, `summary.json`, `timeseries.csv`, or `run.log`; log is capped and returned as text. |
 
-The demo backend maps these responses into `ProjectState` and SSE/WebSocket
-updates for both panes. Playwright may invoke the workbench buttons that cause
-those backend calls, but it must not call the Mesa API or infer run state from
-the DOM.
+The demo backend maps these responses into `ProjectState` and its public
+SSE/WebSocket updates for both panes. The backend adapter maps UI `modelId` and
+saved parameter drafts to the active `model_revision`, validated parameter
+object, explicit `steps`, and explicit `seeds` required by `POST .../runs`.
+Playwright may invoke the workbench buttons that cause those public backend
+calls, but it must not call the Mesa API or infer run state from the DOM.
 
 ## Worker lifecycle, isolation, and cancellation
 
@@ -190,6 +207,9 @@ revision directory, normalized request file, and temporary output directory.
   the platform equivalent) to the process group, waits up to five seconds, then
   kills the group. The final externally visible status is `cancelled` unless a
   timeout won first, in which case it is `timed_out`.
+- `timed_out` is a distinct, terminal external run status, not an alias for
+  `failed`. It has no successful results, but its metadata and bounded log
+  remain available through the documented artifact/status endpoints.
 - The worker checks a cancellation marker between ticks and between seed
   replications, writes terminal metadata in a `finally` path, and flushes logs.
 - Only one active worker belongs to a project; different local projects may run
@@ -284,15 +304,19 @@ worker entry point:
 
 ## Interface assumptions for adjacent components
 
-1. The demo backend creates project IDs, owns upload metadata, calls this API,
-   and exposes the normalized service response to the UI. This service does not
-   accept multipart file uploads in MVP.
+1. The demo backend creates project IDs and owns the canonical
+   `WORKSPACE_ROOT/projects/<project-id>/` root, upload metadata, persisted UI
+   parameter drafts, public browser command/event routes, and the adapter that
+   normalizes a run request. This service does not accept multipart uploads,
+   browser commands, or parameter-draft patches in MVP.
 2. The OpenCode bridge may request only `queue-network-v1` and documented
    parameter updates through backend tools. It cannot supply a Python module,
    filesystem path, command line, or result body as an authority.
-3. The right workbench renders `GET .../parameters`, submits the documented run
-   request, and displays `GET .../results`. It handles `409` and terminal error
-   states visibly.
+3. The right workbench receives parameter and result projections only from the
+   demo backend. The backend may call `GET .../parameters` and must convert a
+   saved UI draft into the full Mesa run request (active revision, parameters,
+   steps, and seeds) before calling `POST .../runs`; it handles `409` and all
+   distinct terminal states, including `timed_out`, visibly.
 4. The integration owner supplies a worker entry point and service configuration
    matching this contract, including a test-only slow/blocking worker hook; this
    design does not prescribe the frontend framework or process library.
