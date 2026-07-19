@@ -5,7 +5,6 @@
  * Requires the browser app, backend, Mesa service, MCP bridge, and a configured
  * real OpenCode provider. It intentionally refuses RIFF_SKIP_OPENCODE mode.
  */
-import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -13,26 +12,47 @@ import { resolve } from "node:path";
 const require = createRequire(new URL("../web/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const baseUrl = process.env.RIFF_DEMO_URL ?? "http://127.0.0.1:5173";
+const backendUrl = process.env.RIFF_BACKEND_URL ?? "http://127.0.0.1:8787";
 const timeout = Number(process.env.RIFF_LIVE_TIMEOUT_MS ?? 60_000);
-const sessionId = `live-${randomUUID()}`;
 const screenshotPath = resolve("test-results", "riff-live-e2e.png");
+let stage = "bootstrap";
 
-const chatPath = `/api/sessions/${encodeURIComponent(sessionId)}/chat`;
-const chatResponse = (page) => page.waitForResponse(
-  (response) => response.request().method() === "POST" && new URL(response.url()).pathname === chatPath,
-  { timeout },
-);
+const reportFailure = (error) => {
+  console.error(JSON.stringify({
+    outcome: "failed",
+    stage,
+    error: error instanceof Error ? error.message : String(error),
+  }));
+};
+const markStage = (name) => {
+  stage = name;
+  console.log(JSON.stringify({ outcome: "running", stage }));
+};
 
 const assertAcceptedChat = async (response, label) => {
   if (response.status() !== 202) throw new Error(`${label} chat was not accepted (HTTP ${response.status()}).`);
 };
 
+try {
 await mkdir(resolve("test-results"), { recursive: true });
+markStage("bootstrap-session");
+const bootstrapResponse = await fetch(`${backendUrl}/api/sessions`, { method: "POST" });
+const bootstrap = await bootstrapResponse.json().catch(() => ({}));
+if (!bootstrapResponse.ok || typeof bootstrap.sessionId !== "string" || !bootstrap.sessionId) {
+  throw new Error(`Live OpenCode acceptance could not bootstrap a server session (HTTP ${bootstrapResponse.status}).`);
+}
+const sessionId = bootstrap.sessionId;
+const chatPath = `/api/sessions/${encodeURIComponent(sessionId)}/chat`;
+const chatResponse = (page) => page.waitForResponse(
+  (response) => response.request().method() === "POST" && new URL(response.url()).pathname === chatPath,
+  { timeout },
+);
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 const page = await context.newPage();
 
 try {
+  markStage("open-browser");
   await page.goto(`${baseUrl}?session=${encodeURIComponent(sessionId)}`, { waitUntil: "domcontentloaded" });
   await page.getByRole("main", { name: "Riff simulation demo" }).waitFor({ timeout });
 
@@ -40,9 +60,7 @@ try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/snapshot`);
     return response.json();
   }, sessionId);
-  if (initialState.sessionId !== sessionId) {
-    throw new Error(`Live OpenCode acceptance could not initialize its unique browser session (${initialState.error?.code ?? "unknown_session_error"}).`);
-  }
+  if (initialState.sessionId !== sessionId) throw new Error("Live OpenCode acceptance did not receive its bootstrapped browser session.");
   if (initialState.agent?.modelId === "dev/deterministic") {
     throw new Error("Live OpenCode acceptance requires RIFF_SKIP_OPENCODE=false; deterministic development mode is active.");
   }
@@ -58,6 +76,7 @@ try {
   await page.getByTestId("attachment-list").getByText("arrivals.csv").waitFor({ timeout });
 
   const loadPrompt = "Load the approved queue-network-v1 model from my uploaded CSV, then show its parameters.";
+  markStage("load-model-via-opencode");
   const loadChat = chatResponse(page);
   await page.getByLabel("Message the modelling assistant").fill(loadPrompt);
   await page.getByRole("button", { name: "Send message" }).click();
@@ -71,6 +90,7 @@ try {
   await page.getByText("Parameters saved").waitFor({ timeout });
 
   await page.getByRole("tab", { name: "Run" }).click();
+  markStage("run-mesa-experiment");
   await page.getByRole("button", { name: "Run experiment" }).click();
   await page.getByRole("status", { name: "Simulation status" }).filter({ hasText: /succeeded/i }).waitFor({ timeout });
   await page.getByRole("tab", { name: "Results" }).click();
@@ -82,6 +102,7 @@ try {
   const assistantMessages = page.locator(".message-assistant");
   const assistantCountBeforeSummary = await assistantMessages.count();
   const summaryPrompt = "请基于刚才的仿真结果，用中文总结队列长度、完成任务数和平均等待时间三个指标。";
+  markStage("summarize-results-via-opencode");
   const summaryChat = chatResponse(page);
   await page.getByLabel("Message the modelling assistant").fill(summaryPrompt);
   await page.getByRole("button", { name: "Send message" }).click();
@@ -110,8 +131,13 @@ try {
     throw new Error("Live desktop shell does not fit both panes in the viewport.");
   }
   await page.screenshot({ path: screenshotPath, fullPage: false });
+  stage = "completed";
   console.log(JSON.stringify({ outcome: "passed", screenshotPath, viewport }, null, 2));
 } finally {
   await context.close();
   await browser.close();
+}
+} catch (error) {
+  reportFailure(error);
+  process.exitCode = 1;
 }
