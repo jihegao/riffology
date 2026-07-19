@@ -101,6 +101,7 @@ export class BackendApp {
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
       if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
+      if (request.method === "POST" && parts[0] === "api" && parts[1] === "sessions" && parts.length === 2) return this.#createBrowserSession(request, response);
       if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) throw new ApiError(404, "not_found", "No matching local demo route exists.");
       const sessionId = parts[2];
       if (request.method === "GET" && parts.length === 4 && parts[3] === "snapshot") return json(response, 200, this.store.snapshot(sessionId));
@@ -148,6 +149,14 @@ export class BackendApp {
       return;
     }
     json(response, 200, result);
+  }
+
+  #createBrowserSession(request: IncomingMessage, response: ServerResponse): void {
+    // The route intentionally has no client-controlled creation payload.
+    request.resume();
+    const sessionId = `session_${randomUUID()}`;
+    const state = this.createSession(sessionId);
+    json(response, 201, { sessionId, state });
   }
 
   async #upload(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {

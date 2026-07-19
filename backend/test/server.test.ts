@@ -122,6 +122,33 @@ test("public routes preserve revision, attachment, chat, parameter, and Mesa run
   assert.equal(state.results.runId, "run_1");
 });
 
+test("browser session creation is server-generated and unknown snapshots remain absent", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const app = new BackendApp({ mesa: new FakeMesa(), openCode: new FakeOpenCode(), workspaceRoot: workspace, defaultSessionId: "default-session" });
+  await app.initialize();
+  const { port } = await app.listen();
+  const root = `http://127.0.0.1:${port}/api/sessions`;
+  t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  const created = await fetch(root, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: "client-chosen-session" }),
+  });
+  assert.equal(created.status, 201);
+  const payload = await created.json() as any;
+  assert.match(payload.sessionId, /^session_[0-9a-f-]{36}$/);
+  assert.notEqual(payload.sessionId, "client-chosen-session");
+  assert.equal(payload.state.sessionId, payload.sessionId);
+  assert.deepEqual(payload.state.agent, { modelId: "deepseek/test-v4", status: "ready" });
+  const snapshot = await getJson(`${root}/${payload.sessionId}/snapshot`);
+  assert.deepEqual(snapshot, payload.state);
+
+  const unknown = await fetch(`${root}/does-not-exist/snapshot`);
+  assert.equal(unknown.status, 404);
+  assert.equal((await unknown.json()).error.code, "session_not_found");
+});
+
 test("development OpenCode skip is explicit and only loads the approved deterministic model", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const adapter = new HttpOpenCodeAdapter({ skipLive: true });
