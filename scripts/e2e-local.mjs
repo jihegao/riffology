@@ -40,7 +40,9 @@ try {
 
   await page.getByRole("tab", { name: "Run" }).click();
   await page.getByRole("button", { name: "Run experiment" }).click();
-  await page.getByRole("status", { name: "Simulation status" }).getByText("Succeeded").waitFor({ timeout: 15_000 });
+  // The UI's visible status is "Simulation succeeded"; assert the named live
+  // region and success meaning, not a stale exact child-text implementation.
+  await page.getByRole("status", { name: "Simulation status" }).filter({ hasText: /succeeded/i }).waitFor({ timeout: 15_000 });
   await page.getByRole("tab", { name: "Results" }).click();
   await page.getByRole("region", { name: "Simulation results" }).waitFor();
   await page.getByRole("list", { name: "Result metrics" }).waitFor();
