@@ -146,9 +146,11 @@ scoped to the active `projectId` by the bridge, never by a model-provided ID.
 `select_and_load_model` is deliberately bundled-model-bound.  In the MVP it
 accepts only `queue-network-v1`; it does not submit a model plan, schema, Python
 source, filesystem path, or uploaded file to Mesa.  The Mesa service itself
-copies that reviewed asset into an immutable project revision.  Any later
-"generate Python" phase needs a separate sandbox, a new Mesa API, and a review
-gate.
+copies that reviewed asset into an immutable project revision.  The product
+roadmap replaces this single-model boundary with sandboxed private draft runs
+and progressive, revision-scoped validation. That phase requires a separate
+sandbox and new Mesa APIs, but semantic or scientific review is not a
+precondition for a creator's private draft run. See `product-roadmap.md`.
 
 The assistant can explain, ask for missing supported inputs, and call the tools
 above.  It cannot claim a model was loaded, a parameter changed, or a run

@@ -11,6 +11,14 @@
 
 本地密钥仅放在 `.env`；不得提交或在前端暴露。
 
+## Product direction
+
+当前单模型限制是可信演示的实现边界，不是长期产品边界。后续路线将把
+`queue-network-v1` 改造成通用模型包的首个实例，允许用户和建模 Agent
+自由创建模型、在隔离沙箱中运行未验证 revision，再通过用户测试、Agent
+评审和第三方专家评审逐步积累可信证据。详见
+[`docs/product-roadmap.md`](docs/product-roadmap.md)。
+
 ## Run locally
 
 Prerequisites: Python 3.10+ (the checked local flow uses Python 3.12), `uv`,
