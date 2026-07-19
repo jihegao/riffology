@@ -51,6 +51,7 @@ the current project/run phase. It must be usable without the assistant.
 | Model ready | Assistant message may describe readiness, but it is not the state trigger. | Shows model name/description and renders the schema-driven parameter form. |
 | Configure | The user can continue chatting. | Parameter fields are editable; unsaved edits are visibly marked. `Run experiment` is enabled only when validation passes and no run is active. |
 | Run | A user or agent may narrate the action in the transcript. | On start, parameters become read-only, progress/log tail are displayed, and `Cancel run` replaces the start control. |
+| Agent UI verification warning | The transcript may say that a requested action completed only after the domain action is committed. | If Playwright cannot mirror/verify an agent-triggered action, show a non-blocking, user-safe warning and leave the committed model/run state visible and usable for manual continuation. |
 | Complete | Assistant can receive result context and append a summary. | Shows terminal success status, metric cards, one time-series chart, and a results table. |
 | Failure/cancel/timeout | Shows a plain-language message and a retry prompt; attachments and prior messages remain. | Shows a terminal error, cancellation, or timeout state and safe diagnostic text. A timeout is unsuccessful, never a partial success. Existing successful results remain labelled with their prior run ID. Parameters unlock after the run reaches a terminal state. |
 
@@ -82,6 +83,13 @@ type ProjectState = {
     modelId: string | null;
     status: "unconfigured" | "ready" | "thinking" | "waiting_for_action" | "error";
     lastError?: { code: string; message: string };
+  };
+  // Observation of a Playwright projection only; it is not a domain result.
+  uiControl?: {
+    intent: "open_tab" | "set_parameter" | "start_run" | "open_results";
+    status: "verifying" | "verified" | "failed";
+    expectedRevision: number;
+    message?: string;
   };
   attachments: Array<{
     id: string;
@@ -153,11 +161,24 @@ and render `lastError.message` only after the bridge has redacted it;
 Agent readiness does not change `ProjectPhase`, model readiness, or any Mesa
 run state.
 
-## UI command and event contract
+`uiControl` is optional and records only a browser-control observation after an
+agent-triggered, already-committed domain action. A `failed` observation renders
+a non-modal safe warning (using the existing recoverable-error alert contract),
+does not alter `ProjectPhase`, `run`, parameters, or results, and never rolls
+back a server-confirmed action. Its text must not include a selector, DOM dump,
+host path, or raw Playwright error. A later human action can continue from the
+authoritative project state.
+
+## UI command and canonical event contract
 
 All client commands include `sessionId` and `baseRevision`. The service returns
 an acknowledgement (`accepted: true`) or a typed rejection. An accepted command
 does not itself change rendered state; the following state event does.
+
+The browser communicates only with public demo-backend routes. It never calls
+the Mesa `/v1/...` API, worker/artifact paths, OpenCode, or Playwright directly.
+Route paths and HTTP request schemas are documented separately; the logical
+commands below are the UI contract.
 
 | Browser command | Required payload beyond envelope | UI outcome |
 | --- | --- | --- |
@@ -168,7 +189,7 @@ does not itself change rendered state; the following state event does.
 | `run.start` | `modelId`, `parameters` | Disable edits/start after accepted; await run state. |
 | `run.cancel` | `runId` | Show cancelling feedback; await terminal state. |
 
-The client listens to:
+The complete browser event-name allowlist is:
 
 - `project.snapshot` — full `ProjectState` on first connection or resync.
 - `project.patch` — `{ sessionId, revision, operations }`, applied in revision
@@ -181,6 +202,11 @@ The client listens to:
   readiness value.
 - `connection.status` — transport state only (`connected`, `reconnecting`,
   `offline`); it cannot change project phase.
+
+No bridge-internal event name (for example `assistant.delta`,
+`project.updated`, or `run.updated`) reaches the browser. The backend maps
+those sources into the canonical events above, with project/run/UI-control
+changes carried by ordered `project.snapshot` or `project.patch` state.
 
 For this MVP, SSE is sufficient for the event stream. Reconnection must obtain
 a snapshot before accepting new state-dependent controls.
@@ -253,6 +279,9 @@ one separate E2E test uses the real service.
     control available but disable message send with a safe explanation;
     `ready` enables it. The UI never receives or requires an OpenCode session
     identifier.
+12. A `uiControl.status: "failed"` state shows a safe non-blocking warning
+    while retaining the already-committed parameters/run/results. The test
+    proves a subsequent manual run/result interaction remains available.
 
 ## Interface assumptions requiring reconciliation
 
