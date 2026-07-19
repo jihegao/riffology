@@ -16,21 +16,35 @@ const tools = [
 ];
 
 export class McpToolServer {
-  readonly #grants = new Map<string, string>();
+  readonly #grants = new Map<string, { sessionId: string; expiresAt: number }>();
   private readonly actions: SimulationActions;
+  private readonly capabilityTtlMs: number;
+  private readonly now: () => number;
 
-  constructor(actions: SimulationActions) {
+  constructor(actions: SimulationActions, options: { capabilityTtlMs?: number; now?: () => number } = {}) {
     this.actions = actions;
+    this.capabilityTtlMs = options.capabilityTtlMs ?? 10 * 60_000;
+    this.now = options.now ?? Date.now;
   }
 
   grant(sessionId: string): string {
     const capability = randomUUID();
-    this.#grants.set(capability, sessionId);
+    this.#grants.set(capability, { sessionId, expiresAt: this.now() + this.capabilityTtlMs });
     return capability;
   }
 
   revoke(capability: string): void {
     this.#grants.delete(capability);
+  }
+
+  revokeSession(sessionId: string): void {
+    for (const [capability, grant] of this.#grants) {
+      if (grant.sessionId === sessionId) this.#grants.delete(capability);
+    }
+  }
+
+  revokeAll(): void {
+    this.#grants.clear();
   }
 
   async handle(capability: string | undefined, request: JsonRpcRequest): Promise<JsonRpcResponse | undefined> {
@@ -48,7 +62,9 @@ export class McpToolServer {
         },
       };
     }
-    const sessionId = capability ? this.#grants.get(capability) : undefined;
+    const grant = capability ? this.#grants.get(capability) : undefined;
+    if (grant && grant.expiresAt <= this.now()) this.#grants.delete(capability!);
+    const sessionId = grant && grant.expiresAt > this.now() ? grant.sessionId : undefined;
     if (!sessionId) return rpcError(id, -32001, "Unknown or expired local MCP capability.");
     if (request.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools } };
     if (request.method !== "tools/call") return rpcError(id, -32601, "Unsupported MCP method.");
@@ -113,7 +129,7 @@ const parseIntent = (value: unknown): any => {
   const intent = asObject(value);
   const type = intent.type;
   if (type === "open_tab" && ["files", "parameters", "run", "results"].includes(String(intent.tab))) return { type, tab: intent.tab };
-  if (type === "set_parameter" && typeof intent.label === "string" && ["string", "number", "boolean"].includes(typeof intent.value)) return { type, label: intent.label, value: intent.value };
+  if (type === "set_parameter" && typeof intent.key === "string" && /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(intent.key) && ["string", "number", "boolean"].includes(typeof intent.value)) return { type, key: intent.key, value: intent.value };
   if (type === "start_run") return { type };
   if (type === "open_results" && typeof intent.runId === "string") return { type, runId: intent.runId };
   throw new ApiError(422, "invalid_tool_input", "The workbench intent is not allowed.");

@@ -1,6 +1,6 @@
 export type WorkbenchIntent =
   | { type: "open_tab"; tab: "files" | "parameters" | "run" | "results" }
-  | { type: "set_parameter"; label: string; value: string | number | boolean }
+  | { type: "set_parameter"; key: string; value: string | number | boolean }
   | { type: "start_run" }
   | { type: "open_results"; runId: string };
 
@@ -48,10 +48,12 @@ const enact = async (page: any, intent: WorkbenchIntent): Promise<void> => {
       await page.getByTestId(`workbench-tab-${intent.tab}`).click();
       return;
     case "set_parameter":
-      await page.getByRole("form", { name: "Simulation parameters" }).getByLabel(intent.label).fill(String(intent.value));
+      await page.getByTestId(`parameter-input-${intent.key}`).fill(String(intent.value));
       return;
     case "start_run":
-      await page.getByRole("button", { name: "Run experiment" }).click();
+      // The run already exists in Mesa before projection. Never issue a second
+      // browser click that could become an alternative domain authority.
+      await page.getByRole("status", { name: "Simulation status" }).waitFor();
       return;
     case "open_results":
       await page.getByTestId(`results-run-${intent.runId}`).scrollIntoViewIfNeeded();

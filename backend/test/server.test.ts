@@ -50,6 +50,13 @@ class FakeOpenCode implements OpenCodeAdapter {
   async abort(): Promise<void> {}
 }
 
+class BindAwareOpenCode extends FakeOpenCode {
+  bindings: Array<{ projectId: string; mcpUrl: string }> = [];
+  async bindProject(projectId: string, mcpUrl: string): Promise<void> {
+    this.bindings.push({ projectId, mcpUrl });
+  }
+}
+
 test("public routes preserve revision, attachment, chat, parameter, and Mesa run boundaries", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const mesa = new FakeMesa();
@@ -131,6 +138,40 @@ test("development OpenCode skip is explicit and only loads the approved determin
   const updated = await getJson(`${base}/snapshot`);
   assert.equal(updated.model.id, "queue-network-v1");
   assert.match(updated.conversation.at(-1).text, /Development demo mode loaded/);
+});
+
+test("live chat binds one capability-scoped MCP URL and revokes it when the browser session ends", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const openCode = new BindAwareOpenCode();
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode,
+    workspaceRoot: workspace,
+    defaultSessionId: "live-bind",
+    mcpUrl: "http://127.0.0.1:8787/mcp?instance=local-demo",
+  });
+  await app.initialize();
+  const { port } = await app.listen();
+  const base = `http://127.0.0.1:${port}/api/sessions/live-bind`;
+  t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  const state = await getJson(`${base}/snapshot`);
+  const response = await command(`${base}/chat`, {
+    commandId: "live-bind-chat", sessionId: "live-bind", baseRevision: state.revision,
+    payload: { text: "Inspect the approved model", attachmentIds: [] },
+  });
+  assert.equal(response.status, 202);
+  assert.equal(openCode.bindings.length, 1);
+  const bound = new URL(openCode.bindings[0].mcpUrl);
+  assert.equal(bound.pathname, "/mcp");
+  assert.equal(bound.searchParams.get("instance"), "local-demo");
+  const capability = bound.searchParams.get("cap");
+  assert.match(capability ?? "", /^[0-9a-f-]{36}$/);
+  assert.match(openCode.bindings[0].projectId, /^[0-9a-f-]{36}$/);
+
+  app.closeSession("live-bind");
+  const denied = await app.mcp.handle(capability ?? "", { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  assert.equal((denied as any).error.code, -32001);
 });
 
 test("OpenCode adapter discovers the configured model and limits prompt tools", async () => {

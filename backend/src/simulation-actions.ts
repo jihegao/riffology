@@ -19,6 +19,7 @@ export class SimulationActions {
   readonly store: ProjectStore;
   private readonly mesa: MesaAdapter;
   private readonly projector?: WorkbenchProjector;
+  readonly #projectingSessions = new Set<string>();
 
   constructor(
     store: ProjectStore,
@@ -38,7 +39,7 @@ export class SimulationActions {
       case "run_experiment": return this.startRun(sessionId, action);
       case "get_run_status": return this.syncRun(sessionId, action.runId);
       case "read_run_results": return this.readResults(sessionId, action.runId);
-      case "drive_workbench_ui": return this.project(action.intent);
+      case "drive_workbench_ui": return this.project(sessionId, action.intent);
     }
   }
 
@@ -150,8 +151,83 @@ export class SimulationActions {
     });
   }
 
-  async project(intent: WorkbenchIntent): Promise<{ status: "verified" | "failed"; reason?: string }> {
-    return this.projector?.project(intent) ?? { status: "failed", reason: "Browser projection is disabled." };
+  async project(sessionId: string, intent: WorkbenchIntent): Promise<{ status: "verified" | "failed"; reason?: string }> {
+    if (this.#projectingSessions.has(sessionId)) {
+      throw new ApiError(409, "ui_projection_busy", "A visible workbench observation is already in progress.");
+    }
+    this.#projectingSessions.add(sessionId);
+    try {
+      await this.#commitUiIntent(sessionId, intent);
+      const expectedRevision = this.store.snapshot(sessionId).revision;
+      const target = this.#projectionTarget(sessionId, expectedRevision);
+      const verifying = this.store.mutate(sessionId, (draft) => {
+        draft.uiControl = { intent: intent.type, status: "verifying", expectedRevision };
+      });
+      const observation = await (this.projector?.project(intent) ?? Promise.resolve({ status: "failed" as const, reason: "Browser projection is disabled." }));
+      if (!this.#projectionTargetMatches(sessionId, target, verifying.revision)) {
+        const stale = { status: "failed" as const, reason: "Visible workbench observation was discarded because project state advanced." };
+        this.#recordUiObservation(sessionId, intent, expectedRevision, stale);
+        return stale;
+      }
+      this.#recordUiObservation(sessionId, intent, expectedRevision, observation);
+      return observation;
+    } finally {
+      this.#projectingSessions.delete(sessionId);
+    }
+  }
+
+  #recordUiObservation(
+    sessionId: string,
+    intent: WorkbenchIntent,
+    expectedRevision: number,
+    observation: { status: "verified" | "failed"; reason?: string },
+  ): void {
+    this.store.mutate(sessionId, (draft) => {
+      if (!draft.uiControl || draft.uiControl.intent !== intent.type || draft.uiControl.expectedRevision !== expectedRevision) return;
+      draft.uiControl = {
+        intent: intent.type,
+        status: observation.status,
+        expectedRevision,
+        ...(observation.reason ? { message: observation.reason } : {}),
+      };
+    });
+  }
+
+  #projectionTarget(sessionId: string, expectedRevision: number): { expectedRevision: number; modelRevision?: string; runId?: string } {
+    const state = this.store.snapshot(sessionId);
+    return { expectedRevision, ...(state.model?.modelRevision ? { modelRevision: state.model.modelRevision } : {}), ...(state.run?.id ? { runId: state.run.id } : {}) };
+  }
+
+  #projectionTargetMatches(sessionId: string, target: { expectedRevision: number; modelRevision?: string; runId?: string }, verifyingRevision: number): boolean {
+    const state = this.store.snapshot(sessionId);
+    return state.revision === verifyingRevision
+      && state.model?.modelRevision === target.modelRevision
+      && state.run?.id === target.runId;
+  }
+
+  /** Commits the matching state/Mesa action before any Playwright observation. */
+  async #commitUiIntent(sessionId: string, intent: WorkbenchIntent): Promise<void> {
+    switch (intent.type) {
+      case "open_tab":
+        // Tabs are visual-only. The uiControl state written by project() is the
+        // committed server-side observation; it carries no domain authority.
+        return;
+      case "set_parameter": {
+        const state = this.store.snapshot(sessionId);
+        if (!state.model) throw new ApiError(409, "model_not_ready", "Prepare a model before changing a parameter.");
+        this.saveParameters(sessionId, { ...state.model.parameterValues, [intent.key]: intent.value });
+        return;
+      }
+      case "start_run":
+        await this.startRun(sessionId);
+        return;
+      case "open_results": {
+        const state = this.store.snapshot(sessionId);
+        if (!state.run || state.run.id !== intent.runId) throw new ApiError(404, "run_not_found", "That run does not belong to this local session.");
+        if (!state.results || state.results.runId !== intent.runId) await this.readResults(sessionId, intent.runId);
+        return;
+      }
+    }
   }
 
   #applyRun(sessionId: string, run: MesaRun, fallbackSteps: number): void {

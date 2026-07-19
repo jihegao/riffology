@@ -61,6 +61,16 @@ export type ProjectState = {
     status: AgentStatus;
     lastError?: { code: string; message: string };
   };
+  /**
+   * A browser-control observation only. It never represents a Mesa/domain
+   * result, which is committed before Playwright is asked to mirror it.
+   */
+  uiControl?: {
+    intent: "open_tab" | "set_parameter" | "start_run" | "open_results";
+    status: "verifying" | "verified" | "failed";
+    expectedRevision: number;
+    message?: string;
+  };
   attachments: Attachment[];
   conversation: ConversationMessage[];
   model: null | {

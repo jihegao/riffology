@@ -104,6 +104,20 @@ export class ProjectStore {
     this.#events.emit(sessionId, clone(event));
   }
 
+  /**
+   * Streaming assistant text has one public delivery path: conversation.delta.
+   * The final terminal mutation publishes the canonical conversation patch.
+   */
+  appendConversationDelta(sessionId: string, messageId: string, delta: string): void {
+    const project = this.#get(sessionId);
+    const message = project.state.conversation.find((item) => item.id === messageId);
+    if (!message || message.role !== "assistant" || message.status !== "streaming") {
+      throw new ApiError(409, "assistant_message_not_streaming", "The assistant message is no longer accepting streaming text.");
+    }
+    message.text += delta;
+    this.publish(sessionId, { type: "conversation.delta", data: { messageId, textDelta: delta } });
+  }
+
   subscribe(sessionId: string, listener: (event: BrowserEvent) => void): () => void {
     this.#get(sessionId);
     this.#events.on(sessionId, listener);

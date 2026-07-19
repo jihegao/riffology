@@ -60,6 +60,15 @@ export class BackendApp {
     return snapshot;
   }
 
+  /** Ends a browser session's local control authority without exposing its capability. */
+  closeSession(sessionId: string): void {
+    const capability = this.#mcpCapabilities.get(sessionId);
+    if (capability) this.mcp.revoke(capability);
+    this.mcp.revokeSession(sessionId);
+    this.#mcpCapabilities.delete(sessionId);
+    this.#openCodeEvents.unbindBrowserSession(sessionId);
+  }
+
   async listen(port = 0, host = "127.0.0.1"): Promise<{ port: number; host: string }> {
     if (!this.#server) this.#server = createServer((request, response) => void this.#handle(request, response));
     await new Promise<void>((resolve, reject) => {
@@ -77,6 +86,8 @@ export class BackendApp {
   async close(): Promise<void> {
     this.#unsubscribeOpenCode?.();
     this.#unsubscribeOpenCode = undefined;
+    for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
+    this.mcp.revokeAll();
     if (!this.#server) return;
     this.#server.closeIdleConnections?.();
     this.#server.closeAllConnections?.();
@@ -220,11 +231,8 @@ export class BackendApp {
       );
       if (this.#readiness.modelId === "dev/deterministic") {
         await this.#runDeterministicDevAction(sessionId, command.payload.text);
+        this.store.setAgent(sessionId, { modelId: this.#readiness.modelId, status: "ready" });
       }
-      this.store.mutate(sessionId, (draft) => {
-        draft.agent = { modelId: this.#readiness.modelId, status: "waiting_for_action" };
-      });
-      this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "waiting_for_action" } });
       json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
     } catch (error) {
       const apiError = asApiError(error);
@@ -390,6 +398,20 @@ const sameValues = (left: Record<string, Scalar>, right: Record<string, Scalar>)
   const leftKeys = Object.keys(left).sort();
   const rightKeys = Object.keys(right).sort();
   return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+};
+
+const withCapability = (mcpUrl: string, capability: string): string => {
+  let url: URL;
+  try {
+    url = new URL(mcpUrl);
+  } catch {
+    throw new ApiError(503, "mcp_unconfigured", "RIFF_MCP_URL must be an absolute local MCP URL.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ApiError(503, "mcp_unconfigured", "RIFF_MCP_URL must use HTTP or HTTPS.");
+  }
+  url.searchParams.set("cap", capability);
+  return url.toString();
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, abort: () => Promise<void>): Promise<T> => {

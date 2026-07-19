@@ -7,6 +7,7 @@ import type { ProjectState } from "./types.ts";
 export class OpenCodeEventBridge {
   readonly #sessions = new Map<string, string>();
   readonly #messageIds = new Map<string, string>();
+  readonly #sessionMessages = new Map<string, Set<string>>();
   readonly #seen = new Set<string>();
   private readonly store: ProjectStore;
 
@@ -20,6 +21,13 @@ export class OpenCodeEventBridge {
 
   unbind(openCodeSessionId: string): void {
     this.#sessions.delete(openCodeSessionId);
+    this.#sessionMessages.delete(openCodeSessionId);
+  }
+
+  unbindBrowserSession(browserSessionId: string): void {
+    for (const [openCodeSessionId, mappedBrowserSessionId] of this.#sessions) {
+      if (mappedBrowserSessionId === browserSessionId) this.unbind(openCodeSessionId);
+    }
   }
 
   handle(event: OpenCodeRuntimeEvent): void {
@@ -32,42 +40,36 @@ export class OpenCodeEventBridge {
     if (event.type === "message.part.delta" && properties.field === "text") {
       const messageId = string(properties.messageID);
       const delta = string(properties.delta);
-      if (messageId && delta) this.#appendDelta(browserSessionId, messageId, delta);
+      if (messageId && delta) this.#appendDelta(browserSessionId, openCodeSessionId, messageId, delta);
       return;
     }
     if (event.type === "session.status") {
       const status = string(properties.status);
-      const current = this.store.snapshot(browserSessionId).agent;
-      if (!current) return;
-      const next: ProjectState["agent"] = {
-        modelId: current.modelId,
-        status: status === "busy" ? "thinking" : status === "idle" ? "ready" : current.status,
-        ...(current.lastError ? { lastError: current.lastError } : {}),
-      };
-      this.store.setAgent(browserSessionId, next);
+      if (status === "busy") this.#setAgentStatus(browserSessionId, "thinking");
+      if (status === "idle") {
+        this.#finishStreaming(browserSessionId, openCodeSessionId, "complete");
+        this.#setAgentStatus(browserSessionId, "ready");
+      }
       return;
     }
     if (event.type === "session.next.tool.called") {
       const tool = string(properties.tool);
-      const current = this.store.snapshot(browserSessionId).agent;
-      if (tool?.startsWith("riff_") && current) {
-        this.store.setAgent(browserSessionId, { modelId: current.modelId, status: "waiting_for_action" });
-      }
+      if (tool?.startsWith("riff_")) this.#setAgentStatus(browserSessionId, "waiting_for_action");
       return;
     }
     if (event.type === "session.idle") {
-      const current = this.store.snapshot(browserSessionId).agent;
-      if (current) this.store.setAgent(browserSessionId, { modelId: current.modelId, status: "ready" });
+      this.#finishStreaming(browserSessionId, openCodeSessionId, "complete");
+      this.#setAgentStatus(browserSessionId, "ready");
       return;
     }
     if (event.type === "session.error") {
-      const current = this.store.snapshot(browserSessionId).agent;
-      if (current) this.store.setAgent(browserSessionId, { modelId: current.modelId, status: "error", lastError: { code: "opencode_session_error", message: "The modelling assistant could not complete that turn." } });
+      this.#finishStreaming(browserSessionId, openCodeSessionId, "failed");
+      this.#setAgentStatus(browserSessionId, "error", { code: "opencode_session_error", message: "The modelling assistant could not complete that turn." });
     }
   }
 
-  #appendDelta(browserSessionId: string, openCodeMessageId: string, delta: string): void {
-    const key = `${browserSessionId}:${openCodeMessageId}`;
+  #appendDelta(browserSessionId: string, openCodeSessionId: string, openCodeMessageId: string, delta: string): void {
+    const key = `${browserSessionId}:${openCodeSessionId}:${openCodeMessageId}`;
     let browserMessageId = this.#messageIds.get(key);
     if (!browserMessageId) {
       browserMessageId = `assistant_${randomUUID()}`;
@@ -75,12 +77,35 @@ export class OpenCodeEventBridge {
       this.store.mutate(browserSessionId, (draft) => {
         draft.conversation.push({ id: browserMessageId!, role: "assistant", text: "", status: "streaming", createdAt: new Date().toISOString() });
       });
+      const messages = this.#sessionMessages.get(openCodeSessionId) ?? new Set<string>();
+      messages.add(browserMessageId);
+      this.#sessionMessages.set(openCodeSessionId, messages);
     }
+    const current = this.store.snapshot(browserSessionId).conversation.find((message) => message.id === browserMessageId);
+    if (current?.status !== "streaming") return;
+    this.store.appendConversationDelta(browserSessionId, browserMessageId, redact(delta));
+  }
+
+  #finishStreaming(browserSessionId: string, openCodeSessionId: string, status: "complete" | "failed"): void {
+    const messageIds = this.#sessionMessages.get(openCodeSessionId);
+    if (!messageIds?.size) return;
+    const active = new Set(messageIds);
     this.store.mutate(browserSessionId, (draft) => {
-      const message = draft.conversation.find((item) => item.id === browserMessageId);
-      if (message) message.text += redact(delta);
+      for (const message of draft.conversation) {
+        if (active.has(message.id) && message.status === "streaming") message.status = status;
+      }
     });
-    this.store.publish(browserSessionId, { type: "conversation.delta", data: { messageId: browserMessageId, textDelta: redact(delta) } });
+    this.#sessionMessages.delete(openCodeSessionId);
+  }
+
+  #setAgentStatus(browserSessionId: string, status: NonNullable<ProjectState["agent"]>["status"], lastError?: { code: string; message: string }): void {
+    const current = this.store.snapshot(browserSessionId).agent;
+    if (!current || (current.status === status && JSON.stringify(current.lastError) === JSON.stringify(lastError))) return;
+    this.store.setAgent(browserSessionId, {
+      modelId: current.modelId,
+      status,
+      ...(lastError ? { lastError } : {}),
+    });
   }
 }
 
