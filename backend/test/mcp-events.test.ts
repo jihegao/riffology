@@ -45,6 +45,20 @@ test("MCP tool calls use a capability-scoped session and reject project injectio
   assert.equal(mesa.loads, 1);
   assert.equal(store.snapshot("browser-1").model?.id, "queue-network-v1");
 
+  const objectResult = await server.handle(capability, {
+    jsonrpc: "2.0", id: 31, method: "tools/call",
+    params: { name: "riff_set_parameters", arguments: { values: { arrival_rate: 8 } } },
+  });
+  assert.equal((objectResult as any).result.structuredContent, undefined);
+  assert.deepEqual(JSON.parse((objectResult as any).result.content[0].text), { arrival_rate: 8 });
+
+  const arrayResult = await server.handle(capability, {
+    jsonrpc: "2.0", id: 32, method: "tools/call",
+    params: { name: "riff_inspect_uploaded_files", arguments: {} },
+  });
+  assert.equal((arrayResult as any).result.structuredContent, undefined);
+  assert.deepEqual(JSON.parse((arrayResult as any).result.content[0].text), []);
+
   const injected = await server.handle(capability, {
     jsonrpc: "2.0", id: 4, method: "tools/call",
     params: { name: "riff_select_and_load_model", arguments: { modelId: "queue-network-v1", projectId: "other-project" } },

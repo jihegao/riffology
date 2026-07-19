@@ -152,5 +152,7 @@ const rejectProjectFields = (input: Record<string, unknown>): void => {
 const assertKeys = (input: Record<string, unknown>, allowed: string[]): void => {
   if (Object.keys(input).some((key) => !allowed.includes(key))) throw new ApiError(422, "invalid_tool_input", "Tool input includes unsupported fields.");
 };
-const toolResult = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });
+// OpenCode 1.17 validates structuredContent as a record. Some approved Riff
+// actions intentionally return arrays, so use the portable MCP text content.
+const toolResult = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) ?? "null" }] });
 const rpcError = (id: string | number | null, code: number, message: string): JsonRpcResponse => ({ jsonrpc: "2.0", id, error: { code, message } });
