@@ -200,14 +200,8 @@ test("OpenCode adapter discovers the configured model and limits prompt tools", 
     write: false,
     edit: false,
     webfetch: false,
-    riff_inspect_uploaded_files: true,
-    riff_select_and_load_model: true,
-    riff_set_parameters: true,
-    riff_run_experiment: true,
-    riff_get_run_status: true,
-    riff_read_run_results: true,
-    riff_drive_workbench_ui: true,
   });
+  assert.equal(Object.keys(prompt.tools).some((name) => name.startsWith("riff_")), false);
   assert.deepEqual(prompt.model, { providerID: "deepseek", modelID: "v4" });
 });
 

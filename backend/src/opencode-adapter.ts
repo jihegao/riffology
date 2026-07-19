@@ -137,17 +137,12 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
         system: prompt.system,
         parts,
         tools: {
+          // OpenCode 1.17 treats this object as built-in tool toggles. Riff's
+          // MCP tools are discovered from the registered MCP server instead.
           bash: false,
           write: false,
           edit: false,
           webfetch: false,
-          riff_inspect_uploaded_files: true,
-          riff_select_and_load_model: true,
-          riff_set_parameters: true,
-          riff_run_experiment: true,
-          riff_get_run_status: true,
-          riff_read_run_results: true,
-          riff_drive_workbench_ui: true,
         },
       }),
     });
