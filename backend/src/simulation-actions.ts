@@ -53,7 +53,12 @@ export class SimulationActions {
     }));
   }
 
-  async loadModel(sessionId: string, modelId: string): Promise<void> {
+  async loadModel(sessionId: string, modelId: string): Promise<{
+    action: "model_loaded";
+    modelId: string;
+    modelRevision: string;
+    parameters: Array<{ key: string; label: string; type: string; default: Scalar; minimum?: number; maximum?: number }>;
+  }> {
     if (modelId !== "queue-network-v1") throw new ApiError(422, "unsupported_model", "Only queue-network-v1 is available in this demo.");
     this.store.mutate(sessionId, (draft) => {
       draft.phase = "preparing_model";
@@ -77,6 +82,19 @@ export class SimulationActions {
           modelRevision: model.modelRevision,
         };
       });
+      return {
+        action: "model_loaded",
+        modelId: model.modelId,
+        modelRevision: model.modelRevision,
+        parameters: model.parameterSchema.fields.map((field) => ({
+          key: field.key,
+          label: field.label,
+          type: field.type,
+          default: field.default,
+          ...(field.minimum !== undefined ? { minimum: field.minimum } : {}),
+          ...(field.maximum !== undefined ? { maximum: field.maximum } : {}),
+        })),
+      };
     } catch (error) {
       this.store.mutate(sessionId, (draft) => {
         draft.phase = "failed";

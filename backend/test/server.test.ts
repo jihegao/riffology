@@ -95,6 +95,9 @@ test("public routes preserve revision, attachment, chat, parameter, and Mesa run
   await response.text();
   assert.equal(openCode.prompts.length, 1);
   assert.equal(openCode.prompts[0].attachments[0].workspaceRelativePath.startsWith("inputs/"), true);
+  assert.match(openCode.prompts[0].system, /Use only the Riff MCP tools exposed/);
+  assert.match(openCode.prompts[0].system, /Never call python-interpreter tools/);
+  assert.match(openCode.prompts[0].system, /Do not call riff_drive_workbench_ui or show_dashboard/);
   state = await getJson(`${base}/snapshot`);
 
   response = await command(`${base}/attachments/${attachmentId}`, { commandId: "remove-in-use", sessionId: "demo", baseRevision: state.revision, payload: { attachmentId } }, "DELETE");
@@ -261,10 +264,20 @@ test("OpenCode adapter discovers the configured model and sends synchronous boun
   assert.equal(messageCall?.signal, controller.signal);
   const prompt = messageCall!.body;
   assert.deepEqual(prompt.tools, {
+    invalid: false,
+    question: false,
     bash: false,
+    read: false,
+    glob: false,
+    grep: false,
     write: false,
     edit: false,
+    task: false,
     webfetch: false,
+    todowrite: false,
+    websearch: false,
+    skill: false,
+    apply_patch: false,
   });
   assert.equal(Object.keys(prompt.tools).some((name) => name.startsWith("riff_")), false);
   assert.match(prompt.messageID, /^msg_[0-9a-f-]{36}$/);

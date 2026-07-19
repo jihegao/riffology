@@ -140,10 +140,20 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
         tools: {
           // OpenCode 1.17 treats this object as built-in tool toggles. Riff's
           // MCP tools are discovered from the registered MCP server instead.
+          invalid: false,
+          question: false,
           bash: false,
+          read: false,
+          glob: false,
+          grep: false,
           write: false,
           edit: false,
+          task: false,
           webfetch: false,
+          todowrite: false,
+          websearch: false,
+          skill: false,
+          apply_patch: false,
         },
       }),
     });

@@ -12,7 +12,6 @@ const tools = [
   tool("riff_run_experiment", "Run the active Mesa model with optional documented steps and seeds.", { type: "object", properties: { steps: { type: "integer", minimum: 1 }, seeds: { type: "array", items: { type: "integer" }, minItems: 1, maxItems: 5 } }, additionalProperties: false }),
   tool("riff_get_run_status", "Read status for the active or named project run.", { type: "object", properties: { runId: { type: "string" } }, additionalProperties: false }),
   tool("riff_read_run_results", "Read artifact-backed results for a succeeded run.", { type: "object", properties: { runId: { type: "string" } }, required: ["runId"], additionalProperties: false }),
-  tool("riff_drive_workbench_ui", "Project a committed action to the visible workbench using stable UI locators.", { type: "object", properties: { intent: { type: "object" } }, required: ["intent"], additionalProperties: false }),
 ];
 
 export class McpToolServer {
@@ -117,22 +116,9 @@ const parseAction = (name: string, raw: unknown): RestrictedAction => {
       assertKeys(input, ["runId"]);
       if (typeof input.runId !== "string") throw new ApiError(422, "invalid_tool_input", "runId is required.");
       return { name: "read_run_results", runId: input.runId };
-    case "riff_drive_workbench_ui":
-      assertKeys(input, ["intent"]);
-      return { name: "drive_workbench_ui", intent: parseIntent(input.intent) };
     default:
       throw new ApiError(422, "tool_not_allowed", "That OpenCode tool is not available in this demo.");
   }
-};
-
-const parseIntent = (value: unknown): any => {
-  const intent = asObject(value);
-  const type = intent.type;
-  if (type === "open_tab" && ["files", "parameters", "run", "results"].includes(String(intent.tab))) return { type, tab: intent.tab };
-  if (type === "set_parameter" && typeof intent.key === "string" && /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(intent.key) && ["string", "number", "boolean"].includes(typeof intent.value)) return { type, key: intent.key, value: intent.value };
-  if (type === "start_run") return { type };
-  if (type === "open_results" && typeof intent.runId === "string") return { type, runId: intent.runId };
-  throw new ApiError(422, "invalid_tool_input", "The workbench intent is not allowed.");
 };
 
 const asObject = (value: unknown): Record<string, any> => {

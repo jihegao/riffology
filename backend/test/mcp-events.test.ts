@@ -35,13 +35,20 @@ test("MCP tool calls use a capability-scoped session and reject project injectio
   const initialization = await server.handle(undefined, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
   assert.equal((initialization as any).result.serverInfo.name, "riff-simulation-workbench");
   const listed = await server.handle(capability, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-  assert.equal((listed as any).result.tools.length, 7);
+  assert.equal((listed as any).result.tools.length, 6);
+  assert.equal((listed as any).result.tools.some((tool: any) => tool.name === "riff_drive_workbench_ui"), false);
 
   const result = await server.handle(capability, {
     jsonrpc: "2.0", id: 3, method: "tools/call",
     params: { name: "riff_select_and_load_model", arguments: { modelId: "queue-network-v1" } },
   });
   assert.equal((result as any).result.isError, undefined);
+  assert.deepEqual(JSON.parse((result as any).result.content[0].text), {
+    action: "model_loaded",
+    modelId: "queue-network-v1",
+    modelRevision: "mr_tool",
+    parameters: [{ key: "arrival_rate", label: "Arrival rate", type: "number", default: 6 }],
+  });
   assert.equal(mesa.loads, 1);
   assert.equal(store.snapshot("browser-1").model?.id, "queue-network-v1");
 
@@ -72,7 +79,7 @@ test("MCP tool calls use a capability-scoped session and reject project injectio
     params: { name: "riff_drive_workbench_ui", arguments: { intent: { type: "set_parameter", label: "Arrival rate", value: 8 } } },
   });
   assert.equal((labelBasedIntent as any).result.isError, true);
-  assert.match((labelBasedIntent as any).result.content[0].text, /invalid_tool_input/);
+  assert.match((labelBasedIntent as any).result.content[0].text, /tool_not_allowed/);
 
   const denied = await server.handle("wrong-capability", { jsonrpc: "2.0", id: 6, method: "tools/list", params: {} });
   assert.equal((denied as any).error.code, -32001);
@@ -88,7 +95,7 @@ test("MCP capabilities expire without exposing another session", async () => {
   store.create("browser-expiry", { modelId: "deepseek/v4", status: "ready" });
   const server = new McpToolServer(new SimulationActions(store, new ToolMesa()), { capabilityTtlMs: 10, now: () => now });
   const capability = server.grant("browser-expiry");
-  assert.equal((await server.handle(capability, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) as any).result.tools.length, 7);
+  assert.equal((await server.handle(capability, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) as any).result.tools.length, 6);
   now += 11;
   const expired = await server.handle(capability, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   assert.equal((expired as any).error.code, -32001);
