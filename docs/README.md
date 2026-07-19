@@ -6,5 +6,5 @@ Each implementation stage is gated by the architecture and contracts in this dir
 - `ui-workflow.md`: browser-visible workflow and acceptance checks.
 - `mesa-service.md`: Mesa execution service and artifact contract.
 - `opencode-bridge.md`: OpenCode, file handoff, and browser-control boundary.
+- `backend-api.md`: browser-facing routes, command envelope, state stream, and service adapters.
 - `test-plan.md`: unit, integration, end-to-end, and review requirements.
-

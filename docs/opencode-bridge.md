@@ -53,16 +53,22 @@ allow the frontend origin.
 
 ## Session lifecycle
 
-`ProjectState.agent` stores only the public linkage:
+The bridge keeps an internal server-side linkage. It is **not** the browser's
+`ProjectState.agent` projection:
 
 ```ts
-type AgentLink = {
+type ServerAgentLink = {
   sessionId: string | null;
   modelId: string | null;
   status: "unconfigured" | "ready" | "thinking" | "waiting_for_action" | "error";
   lastError?: { code: string; message: string };
 };
 ```
+
+The opaque `sessionId` above is an OpenCode session ID and must never occur in
+a browser snapshot, patch, command acknowledgement, or SSE event. The browser
+may receive only `{ modelId, status, lastError? }`, as specified in
+`ui-workflow.md`.
 
 The backend creates an OpenCode session lazily for the first accepted message
 for a project and saves the opaque session ID in its server-side project record.
@@ -86,13 +92,14 @@ the HTTP request does not hold a browser connection open.
 
 ## Upload and attachment handoff
 
-The browser sends files to `POST /api/projects/:projectId/uploads` as multipart
-data.  The project service verifies the session/project relationship, extension,
-MIME type, maximum size, and generated destination; it never uses the supplied
-filename as a path.  It stores an immutable upload at:
+The browser uploads only CSV, JSON, or TXT, each no larger than 1 MiB, through
+the public backend upload route defined in `backend-api.md`. The project service
+verifies the browser session/project relationship, extension, MIME type, maximum
+size, and generated destination; it never uses the supplied filename as a path.
+It stores an immutable upload at:
 
 ```text
-workspaces/<projectId>/inputs/<uploadId>-<safe-name>
+WORKSPACE_ROOT/projects/<projectId>/inputs/<uploadId>-<safe-name>
 ```
 
 It returns and records an attachment manifest, not an arbitrary browser path:
@@ -150,41 +157,38 @@ do not mutate the state optimistically.
 ## Event forwarding and browser protocol
 
 The bridge owns one OpenCode SSE connection to `/event` and filters events by
-the current `sessionId`.  It maps only a stable, redacted subset to the browser
-through `GET /api/projects/:projectId/events`:
-
-```ts
-type UiEvent =
-  | { type: "assistant.delta"; turnId: string; text: string }
-  | { type: "assistant.completed"; turnId: string; messageId: string }
-  | { type: "agent.status"; status: AgentLink["status"] }
-  | { type: "agent.tool"; tool: string; phase: "started" | "finished" | "failed" }
-  | { type: "project.updated"; revision: number; state: ProjectState }
-  | { type: "run.updated"; runId: string; status: string; progress?: number }
-  | { type: "error"; code: string; message: string };
-```
+the server-side OpenCode session ID. It maps OpenCode and Mesa changes into the
+canonical browser SSE vocabulary defined in `ui-workflow.md` and
+`backend-api.md` only: `project.snapshot`, `project.patch`,
+`conversation.delta`, `agent.status`, and `connection.status`. There are no
+alternative public `assistant.*`, `agent.tool`, `project.updated`, `run.updated`,
+or raw-error event names. Model/run changes are represented by ordered
+`project.patch` operations; assistant completion is represented by the final
+message patch, not a separate completion event.
 
 The mapping must tolerate reconnects, duplicated source events, unknown event
 types, and a server version whose event payload changes.  It deduplicates by
 source event/message/part ID where available and refetches the canonical session
 or project state after reconnect.  It never relay-forwards raw OpenCode events:
-they can contain paths, prompts, tool arguments, or credentials.  The response
-to a completed prompt is reconciled with session state before sending
-`assistant.completed`.
+they can contain paths, prompts, tool arguments, or credentials. The response
+to a completed prompt is reconciled with session state before its terminal
+conversation/project patch is published.
 
 The browser reconnects to the demo SSE endpoint with a monotonically increasing
-`ProjectState.revision`; on a revision gap it fetches `GET /api/projects/:id`.
+`ProjectState.revision`; on a revision gap it fetches the public session
+snapshot route in `backend-api.md`.
 This same stream carries Mesa updates, so the UI remains correct if the agent,
 Playwright, or an individual network connection disappears.
 
-Timeouts are terminally mapped rather than left as a spinner.  A Mesa
-`timed_out` status is forwarded as `run.updated { status: "timed_out" }`, then
-recorded in `ProjectState` as a terminal failed run with the safe user-facing
-reason "Simulation timed out".  The Results pane must not render success
-metrics or call the successful-results endpoint; it may offer the metadata and
-bounded log available through the service.  An OpenCode prompt timeout instead
-aborts that agent session, emits a terminal `agent.status: error`, and leaves
-the last committed project/run state unchanged.  In both cases a later user
+Timeouts are terminally mapped rather than left as a spinner. A Mesa
+`timed_out` status is represented in a `project.patch` with both the external
+run status and `ProjectPhase` set to `timed_out`, plus the safe user-facing
+reason "Simulation timed out". It is distinct from `failed`, terminal, and
+unsuccessful. The Results pane must not render success metrics or call the
+successful-results endpoint; it may offer the metadata and bounded log available
+through the service. An OpenCode prompt timeout aborts that agent session,
+publishes `agent.status: error` and a terminal conversation/project patch, and
+leaves the last committed model/run state unchanged. In both cases a later user
 action may start a new valid turn or run.
 
 ## Playwright is a projection, not a controller of state
@@ -261,8 +265,8 @@ model validation.
    verify typed, redacted frontend events and canonical state recovery. Replay a
    Mesa `timed_out` update and assert a terminal UI failure with no success
    result fetch.
-7. **Visible E2E:** with a fixed fake/model fixture, upload CSV in the left pane,
-   select/load `queue-network-v1`, use the agent UI intent to show Parameters,
+7. **Visible E2E:** with the live configured OpenCode provider/model, upload CSV
+   in the left pane, select/load `queue-network-v1`, use the agent UI intent to show Parameters,
    set a value, run Mesa, show Results, and confirm the assistant summarises the
    artifact-backed metrics on the same visible page Playwright controls.
 
@@ -273,9 +277,8 @@ model validation.
   and SSE endpoint; the adapter will use the server's `/doc` contract rather
   than copy endpoint shapes from this document.
 - The configured DeepSeek-compatible model supports the tool-calling quality
-  needed for the restricted workbench surface.  If it does not, the demo falls
-  back to a deterministic command parser/fake agent for the E2E fixture rather
-  than widening tools.
+  needed for the restricted workbench surface. Fake agents are permitted only as
+  isolated unit-test fixtures; they are not an E2E or release-gate substitute.
 - The application can launch Chrome/Chromium with remote debugging and attach
   Playwright to the visible local workbench tab.  If this is unavailable, the
   UI-control demonstration is explicitly disabled; it is not silently replaced
@@ -284,6 +287,24 @@ model validation.
   its schema/parameter projections, run status, cancellation, artifact manifest,
   and result endpoints as described by `mesa-service.md`; it has no arbitrary
   model-plan endpoint or parameter-patch endpoint.
+
+## Release gate: live OpenCode proof
+
+Before a build is accepted, the integration owner must run against the locally
+configured OpenCode process and the configured provider credential (not a fake
+agent):
+
+1. live health/version and provider/model discovery, with the selected approved
+   model recorded without secrets;
+2. one bounded chat turn using a disposable project; and
+3. one bounded approved tool call (for example `select_and_load_model` with
+   `queue-network-v1`) whose resulting backend snapshot/patch proves the action
+   was materialized by Mesa.
+
+The test must set hard prompt/tool timeouts, redact recorded output, clean up
+the disposable project, and fail the release gate on discovery, chat, tool-call,
+or redaction failure. A fake agent can test adapter branches but cannot satisfy
+this gate.
 
 ## References
 
