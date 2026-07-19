@@ -132,7 +132,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       method: "POST",
       body: JSON.stringify({
-        messageID: randomUUID(),
+        messageID: `msg_${randomUUID()}`,
         model: modelReference(this.#readiness.modelId),
         system: prompt.system,
         parts,

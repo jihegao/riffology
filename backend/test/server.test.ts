@@ -202,6 +202,7 @@ test("OpenCode adapter discovers the configured model and limits prompt tools", 
     webfetch: false,
   });
   assert.equal(Object.keys(prompt.tools).some((name) => name.startsWith("riff_")), false);
+  assert.match(prompt.messageID, /^msg_[0-9a-f-]{36}$/);
   assert.deepEqual(prompt.model, { providerID: "deepseek", modelID: "v4" });
 });
 
