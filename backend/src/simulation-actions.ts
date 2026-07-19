@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { ApiError } from "./errors.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
@@ -106,10 +107,13 @@ export class SimulationActions {
     if (options.seeds && (!options.seeds.length || options.seeds.length > 5 || new Set(options.seeds).size !== options.seeds.length || options.seeds.some((seed) => !Number.isInteger(seed)))) {
       throw new ApiError(422, "invalid_seeds", "Seeds must be one to five unique integers.");
     }
+    // Mesa records this concrete seed in request.json. The browser may override
+    // it with a validated seed list, but a normal UI run is reproducible too.
+    const seeds = options.seeds ?? [randomInt(0, 2 ** 31)];
     const run = await this.mesa.startRun(this.store.projectId(sessionId), {
       model_revision: state.model.modelRevision,
       steps,
-      ...(options.seeds ? { seeds: options.seeds } : {}),
+      seeds,
       parameters,
     });
     this.#applyRun(sessionId, run, steps);

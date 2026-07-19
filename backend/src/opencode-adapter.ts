@@ -46,9 +46,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
   async initialize(): Promise<OpenCodeReadiness> {
     if (this.config.skipLive) {
       this.#readiness = {
-        status: "error",
-        modelId: null,
-        lastError: { code: "opencode_skipped", message: "Live OpenCode is disabled by RIFF_SKIP_OPENCODE for local development." },
+        status: "ready",
+        modelId: "dev/deterministic",
       };
       return this.#readiness;
     }
@@ -104,6 +103,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     }
     const existing = this.#sessions.get(projectId);
     if (existing) return existing;
+    if (this.config.skipLive) {
+      const sessionId = `dev-${projectId}`;
+      this.#sessions.set(projectId, sessionId);
+      return sessionId;
+    }
     const session = await this.#json("/session", { method: "POST", body: JSON.stringify({ title: `Riff ${projectId.slice(0, 8)}` }) });
     const sessionId = String(session.id ?? session.sessionID ?? "");
     if (!sessionId) throw new ApiError(502, "opencode_invalid_session", "OpenCode did not return a session ID.");
@@ -115,6 +119,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
       throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
     }
+    if (this.config.skipLive) return;
     const attachmentText = prompt.attachments.map((attachment) =>
       `- attachment ${attachment.id}: ${attachment.mediaType}, ${attachment.workspaceRelativePath}`,
     ).join("\n");

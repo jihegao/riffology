@@ -128,6 +128,29 @@ const toMesaRun = (payload: Record<string, any>): MesaRun => ({
 
 const toResults = (payload: Record<string, any>, fallbackRunId: string): MesaResults => {
   if (payload.summary && payload.timeSeries && payload.table) return { ...payload, runId: String(payload.runId ?? payload.run_id ?? fallbackRunId) } as MesaResults;
+  if (payload.summary && Array.isArray(payload.timeseries)) {
+    const summaryPayload = payload.summary as Record<string, any>;
+    const aggregate = summaryPayload.aggregate_final ?? {};
+    const metrics = Array.isArray(summaryPayload.metrics) ? summaryPayload.metrics.map(String) : Object.keys(aggregate);
+    const rows = payload.timeseries.map((raw: Record<string, unknown>) => Object.fromEntries(
+      Object.entries(raw).map(([key, value]) => [key, numericOrText(value)]),
+    )) as Array<Record<string, string | number>>;
+    const firstSeed = rows[0]?.seed;
+    const chartRows = firstSeed === undefined ? rows : rows.filter((row) => row.seed === firstSeed);
+    return {
+      runId: String(payload.run_id ?? payload.runId ?? fallbackRunId),
+      summary: metrics.map((key) => ({ key, label: displayLabel(key), value: Number(aggregate[key]?.mean) })),
+      timeSeries: {
+        xKey: "tick",
+        xLabel: "Tick",
+        series: metrics.map((key) => ({ key, label: displayLabel(key), values: chartRows.map((row) => Number(row[key])) })),
+      },
+      table: {
+        columns: ["seed", "tick", ...metrics].map((key) => ({ key, label: displayLabel(key) })),
+        rows,
+      },
+    };
+  }
   const aggregate = payload.aggregate_final ?? payload.aggregateFinal ?? {};
   return {
     runId: String(payload.run_id ?? payload.runId ?? fallbackRunId),
@@ -136,6 +159,14 @@ const toResults = (payload: Record<string, any>, fallbackRunId: string): MesaRes
     table: { columns: [], rows: [] },
   };
 };
+
+const numericOrText = (value: unknown): number | string => {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  return String(value);
+};
+
+const displayLabel = (key: string): string => key.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 
 const normalizeStatus = (value: unknown): RunStatus => {
   if (["queued", "running", "succeeded", "failed", "cancelled", "timed_out"].includes(String(value))) return value as RunStatus;

@@ -176,6 +176,9 @@ export class BackendApp {
         this.options.promptTimeoutMs ?? 30_000,
         async () => this.options.openCode.abort(openCodeSession),
       );
+      if (this.#readiness.modelId === "dev/deterministic") {
+        await this.#runDeterministicDevAction(sessionId, command.payload.text);
+      }
       this.store.mutate(sessionId, (draft) => {
         draft.agent = { modelId: this.#readiness.modelId, status: "waiting_for_action" };
       });
@@ -189,6 +192,33 @@ export class BackendApp {
       this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "error", lastError: { code: apiError.code, message: apiError.message } } });
       throw apiError;
     }
+  }
+
+  async #runDeterministicDevAction(sessionId: string, text: string): Promise<void> {
+    const normalized = text.toLowerCase();
+    const requestsModel = /\b(load|prepare|build)\b/.test(normalized) && /\b(queue|model|simulation)\b/.test(normalized);
+    if (!requestsModel) {
+      this.store.mutate(sessionId, (draft) => {
+        draft.conversation.push({
+          id: `msg_${randomUUID()}`,
+          role: "assistant",
+          text: "Development demo mode can load the approved queue simulation. Ask me to load the queue model.",
+          status: "complete",
+          createdAt: new Date().toISOString(),
+        });
+      });
+      return;
+    }
+    await this.actions.loadModel(sessionId, "queue-network-v1");
+    this.store.mutate(sessionId, (draft) => {
+      draft.conversation.push({
+        id: `msg_${randomUUID()}`,
+        role: "assistant",
+        text: "Development demo mode loaded the approved queue-network-v1 model. Configure its parameters in the workbench.",
+        status: "complete",
+        createdAt: new Date().toISOString(),
+      });
+    });
   }
 
   async #parameters(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {

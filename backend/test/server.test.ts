@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { HttpOpenCodeAdapter, type OpenCodeAdapter, type OpenCodePrompt, type OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import { BackendApp } from "../src/server.ts";
+import { HttpMesaAdapter } from "../src/mesa-adapter.ts";
 import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
@@ -114,7 +115,7 @@ test("public routes preserve revision, attachment, chat, parameter, and Mesa run
   assert.equal(state.results.runId, "run_1");
 });
 
-test("development OpenCode skip is explicit and does not accept chat", async (t) => {
+test("development OpenCode skip is explicit and only loads the approved deterministic model", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const adapter = new HttpOpenCodeAdapter({ skipLive: true });
   const app = new BackendApp({ mesa: new FakeMesa(), openCode: adapter, workspaceRoot: workspace, defaultSessionId: "skip" });
@@ -123,11 +124,13 @@ test("development OpenCode skip is explicit and does not accept chat", async (t)
   const base = `http://127.0.0.1:${port}/api/sessions/skip`;
   t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
   const state = await getJson(`${base}/snapshot`);
-  assert.equal(state.agent.status, "error");
-  assert.equal(state.agent.lastError.code, "opencode_skipped");
-  const response = await command(`${base}/chat`, { commandId: "skip-chat", sessionId: "skip", baseRevision: state.revision, payload: { text: "hello", attachmentIds: [] } });
-  assert.equal(response.status, 503);
-  assert.equal((await response.json()).error.code, "agent_not_ready");
+  assert.equal(state.agent.status, "ready");
+  assert.equal(state.agent.modelId, "dev/deterministic");
+  const response = await command(`${base}/chat`, { commandId: "skip-chat", sessionId: "skip", baseRevision: state.revision, payload: { text: "Load the queue model", attachmentIds: [] } });
+  assert.equal(response.status, 202);
+  const updated = await getJson(`${base}/snapshot`);
+  assert.equal(updated.model.id, "queue-network-v1");
+  assert.match(updated.conversation.at(-1).text, /Development demo mode loaded/);
 });
 
 test("OpenCode adapter discovers the configured model and limits prompt tools", async () => {
@@ -153,6 +156,28 @@ test("OpenCode adapter discovers the configured model and limits prompt tools", 
   const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
   assert.deepEqual(prompt.tools, { bash: false, write: false, edit: false, webfetch: false });
   assert.equal(prompt.model, "deepseek/v4");
+});
+
+test("Mesa adapter maps the service summary and CSV-derived rows into visible results", async () => {
+  const adapter = new HttpMesaAdapter("http://mesa.test", async () => Response.json({
+    run_id: "run_mesa",
+    summary: {
+      metrics: ["queue_length", "completed_jobs", "mean_wait_time"],
+      aggregate_final: {
+        queue_length: { mean: 3, min: 3, max: 3 },
+        completed_jobs: { mean: 9, min: 9, max: 9 },
+        mean_wait_time: { mean: 1.5, min: 1.5, max: 1.5 },
+      },
+    },
+    timeseries: [
+      { seed: "7", tick: "0", queue_length: "0", completed_jobs: "0", mean_wait_time: "0" },
+      { seed: "7", tick: "1", queue_length: "3", completed_jobs: "9", mean_wait_time: "1.5" },
+    ],
+  }));
+  const results = await adapter.getResults("project", "run_mesa");
+  assert.deepEqual(results.summary.map((item) => [item.key, item.value]), [["queue_length", 3], ["completed_jobs", 9], ["mean_wait_time", 1.5]]);
+  assert.deepEqual(results.timeSeries.series[0].values, [0, 3]);
+  assert.equal(results.table.rows.length, 2);
 });
 
 const getJson = async (url: string): Promise<any> => {
