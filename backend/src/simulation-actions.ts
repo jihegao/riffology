@@ -157,7 +157,13 @@ export class SimulationActions {
     return run;
   }
 
-  async readResults(sessionId: string, runId: string): Promise<void> {
+  async readResults(sessionId: string, runId: string): Promise<{
+    action: "results_loaded";
+    runId: string;
+    metrics: Array<{ key: string; label: string; value: number | string; unit?: string }>;
+    series: { xKey: string; xLabel: string; series: Array<{ key: string; label: string; points: number; finalValue: number | null }> };
+    table: { rowCount: number; columns: string[] };
+  }> {
     const state = this.store.snapshot(sessionId);
     if (!state.run || state.run.id !== runId || state.run.status !== "succeeded") {
       throw new ApiError(409, "run_not_complete", "Results are available only after a successful run.");
@@ -167,6 +173,27 @@ export class SimulationActions {
       draft.results = results;
       draft.phase = "succeeded";
     });
+    return {
+      action: "results_loaded",
+      runId: results.runId,
+      metrics: results.summary.slice(0, 12).map((metric) => ({
+        key: metric.key,
+        label: metric.label,
+        value: metric.value,
+        ...(metric.unit ? { unit: metric.unit } : {}),
+      })),
+      series: {
+        xKey: results.timeSeries.xKey,
+        xLabel: results.timeSeries.xLabel,
+        series: results.timeSeries.series.slice(0, 12).map((series) => ({
+          key: series.key,
+          label: series.label,
+          points: series.values.length,
+          finalValue: series.values.length ? series.values.at(-1)! : null,
+        })),
+      },
+      table: { rowCount: results.table.rows.length, columns: results.table.columns.slice(0, 12).map((column) => column.key) },
+    };
   }
 
   async project(sessionId: string, intent: WorkbenchIntent): Promise<{ status: "verified" | "failed"; reason?: string }> {

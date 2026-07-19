@@ -451,5 +451,6 @@ const restrictedSystemPrompt = (): string => [
   "Do not call riff_drive_workbench_ui or show_dashboard; they are not part of this assistant surface. If an action is unsupported, explain the limit and ask the user instead.",
   "After riff_select_and_load_model returns model_loaded, use its returned parameter metadata; do not inspect the local runtime to infer the model.",
   "For riff_get_run_status, omit runId when the run ID is unknown; an empty string is not a run ID and means the current run.",
+  "After riff_read_run_results returns results_loaded, summarize its metrics and final series values in Chinese; do not reload or rerun a succeeded model unless the user asks.",
   "Do not claim an action succeeded until its tool result confirms it.",
 ].join("\n");

@@ -26,7 +26,26 @@ class ToolMesa implements MesaAdapter {
     return { runId, status: "running", progress: { completedSteps: 2, totalSteps: 4 } };
   }
   async cancelRun(): Promise<MesaRun> { throw new Error("not used"); }
-  async getResults(): Promise<MesaResults> { throw new Error("not used"); }
+  async getResults(_projectId: string, runId: string): Promise<MesaResults> {
+    return {
+      runId,
+      summary: [
+        { key: "queue_length", label: "Queue length", value: 3 },
+        { key: "completed_jobs", label: "Completed jobs", value: 9 },
+        { key: "mean_wait_time", label: "Mean wait time", value: 1.5, unit: "ticks" },
+      ],
+      timeSeries: {
+        xKey: "tick",
+        xLabel: "Tick",
+        series: [
+          { key: "queue_length", label: "Queue length", values: [0, 3] },
+          { key: "completed_jobs", label: "Completed jobs", values: [0, 9] },
+          { key: "mean_wait_time", label: "Mean wait time", values: [0, 1.5] },
+        ],
+      },
+      table: { columns: [{ key: "tick", label: "Tick" }], rows: [{ tick: 0 }, { tick: 1 }] },
+    };
+  }
 }
 
 test("MCP tool calls use a capability-scoped session and reject project injection", async () => {
@@ -74,6 +93,35 @@ test("MCP tool calls use a capability-scoped session and reject project injectio
   assert.equal((currentRunResult as any).result.isError, undefined);
   assert.deepEqual(mesa.getRunIds, ["run_current"]);
   assert.equal(JSON.parse((currentRunResult as any).result.content[0].text).runId, "run_current");
+
+  store.mutate("browser-1", (draft) => {
+    draft.phase = "succeeded";
+    draft.run = { id: "run_current", status: "succeeded", progress: { completedSteps: 4, totalSteps: 4 }, logTail: [] };
+  });
+  const resultsResult = await server.handle(capability, {
+    jsonrpc: "2.0", id: 34, method: "tools/call",
+    params: { name: "riff_read_run_results", arguments: { runId: "run_current" } },
+  });
+  assert.equal((resultsResult as any).result.isError, undefined);
+  assert.deepEqual(JSON.parse((resultsResult as any).result.content[0].text), {
+    action: "results_loaded",
+    runId: "run_current",
+    metrics: [
+      { key: "queue_length", label: "Queue length", value: 3 },
+      { key: "completed_jobs", label: "Completed jobs", value: 9 },
+      { key: "mean_wait_time", label: "Mean wait time", value: 1.5, unit: "ticks" },
+    ],
+    series: {
+      xKey: "tick",
+      xLabel: "Tick",
+      series: [
+        { key: "queue_length", label: "Queue length", points: 2, finalValue: 3 },
+        { key: "completed_jobs", label: "Completed jobs", points: 2, finalValue: 9 },
+        { key: "mean_wait_time", label: "Mean wait time", points: 2, finalValue: 1.5 },
+      ],
+    },
+    table: { rowCount: 2, columns: ["tick"] },
+  });
 
   const arrayResult = await server.handle(capability, {
     jsonrpc: "2.0", id: 32, method: "tools/call",
