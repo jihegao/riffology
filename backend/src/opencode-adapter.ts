@@ -20,7 +20,7 @@ export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Re
 export interface OpenCodeAdapter {
   initialize(): Promise<OpenCodeReadiness>;
   createSession(projectId: string): Promise<string>;
-  prompt(sessionId: string, prompt: OpenCodePrompt): Promise<void>;
+  prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void>;
   abort(sessionId: string): Promise<void>;
   bindProject?(projectId: string, mcpUrl: string): Promise<void>;
   subscribeEvents?(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void>;
@@ -120,7 +120,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     return sessionId;
   }
 
-  async prompt(sessionId: string, prompt: OpenCodePrompt): Promise<void> {
+  async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
     if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
       throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
     }
@@ -131,6 +131,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
     await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
       method: "POST",
+      signal,
       body: JSON.stringify({
         messageID: `msg_${randomUUID()}`,
         model: modelReference(this.#readiness.modelId),

@@ -229,14 +229,18 @@ export class BackendApp {
     const openCodeSession = await this.options.openCode.createSession(projectId);
     this.#openCodeEvents.bind(openCodeSession, sessionId);
     try {
+      const promptAbort = new AbortController();
       await withTimeout(
         this.options.openCode.prompt(openCodeSession, {
           text: command.payload.text.trim(),
           attachments: stored.map((attachment) => ({ id: attachment.id, mediaType: attachment.mediaType, workspaceRelativePath: `inputs/${attachment.id}-${attachment.displayName}` })),
           system: restrictedSystemPrompt(),
-        }),
+        }, promptAbort.signal),
         this.options.promptTimeoutMs ?? 30_000,
-        async () => this.options.openCode.abort(openCodeSession),
+        () => {
+          promptAbort.abort();
+          return this.options.openCode.abort(openCodeSession);
+        },
       );
       if (this.#readiness.modelId === "dev/deterministic") {
         await this.#runDeterministicDevAction(sessionId, command.payload.text);
@@ -433,7 +437,7 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, abort: () 
       }),
     ]);
   } catch (error) {
-    if (error instanceof ApiError && error.code === "agent_timeout") await abort().catch(() => undefined);
+    if (error instanceof ApiError && error.code === "agent_timeout") void abort().catch(() => undefined);
     throw error;
   } finally {
     if (timer) clearTimeout(timer);

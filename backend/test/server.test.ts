@@ -57,6 +57,15 @@ class BindAwareOpenCode extends FakeOpenCode {
   }
 }
 
+class HangingAbortOpenCode extends FakeOpenCode {
+  async prompt(): Promise<void> {
+    return new Promise<void>(() => undefined);
+  }
+  async abort(): Promise<void> {
+    return new Promise<void>(() => undefined);
+  }
+}
+
 test("public routes preserve revision, attachment, chat, parameter, and Mesa run boundaries", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const mesa = new FakeMesa();
@@ -149,6 +158,31 @@ test("browser session creation is server-generated and unknown snapshots remain 
   assert.equal((await unknown.json()).error.code, "session_not_found");
 });
 
+test("agent timeout returns 504 without waiting for a hanging OpenCode abort", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode: new HangingAbortOpenCode(),
+    workspaceRoot: workspace,
+    defaultSessionId: "timeout-session",
+    promptTimeoutMs: 10,
+  });
+  await app.initialize();
+  const { port } = await app.listen();
+  const base = `http://127.0.0.1:${port}/api/sessions/timeout-session`;
+  t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  const state = await getJson(`${base}/snapshot`);
+  const startedAt = Date.now();
+  const response = await command(`${base}/chat`, {
+    commandId: "timeout-chat", sessionId: "timeout-session", baseRevision: state.revision,
+    payload: { text: "Load the queue model", attachmentIds: [] },
+  });
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error.code, "agent_timeout");
+  assert.ok(Date.now() - startedAt < 500, "the response must not wait for OpenCode abort cleanup");
+});
+
 test("development OpenCode skip is explicit and only loads the approved deterministic model", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const adapter = new HttpOpenCodeAdapter({ skipLive: true });
@@ -202,7 +236,7 @@ test("live chat binds one capability-scoped MCP URL and revokes it when the brow
 });
 
 test("OpenCode adapter discovers the configured model and sends synchronous bounded chat turns", async () => {
-  const calls: Array<{ path: string; method: string; body?: any }> = [];
+  const calls: Array<{ path: string; method: string; body?: any; signal?: AbortSignal | null }> = [];
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "deepseek/v4",
@@ -210,7 +244,7 @@ test("OpenCode adapter discovers the configured model and sends synchronous boun
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      calls.push({ path, method: init?.method ?? "GET", body });
+      calls.push({ path, method: init?.method ?? "GET", body, signal: init?.signal });
       if (path === "/global/health") return Response.json({ healthy: true, version: "1.2.3" });
       if (path === "/config/providers") return Response.json({ providers: [{ id: "deepseek", models: { v4: {} } }] });
       if (path === "/session") return Response.json({ id: "internal-session" });
@@ -220,9 +254,11 @@ test("OpenCode adapter discovers the configured model and sends synchronous boun
   });
   assert.deepEqual(await adapter.initialize(), { status: "ready", modelId: "deepseek/v4", version: "1.2.3" });
   const sessionId = await adapter.createSession("project-a");
-  await adapter.prompt(sessionId, { text: "load model", system: "restricted", attachments: [] });
+  const controller = new AbortController();
+  await adapter.prompt(sessionId, { text: "load model", system: "restricted", attachments: [] }, controller.signal);
   const messageCall = calls.find((call) => call.path === "/session/internal-session/message");
   assert.equal(messageCall?.method, "POST");
+  assert.equal(messageCall?.signal, controller.signal);
   const prompt = messageCall!.body;
   assert.deepEqual(prompt.tools, {
     bash: false,
