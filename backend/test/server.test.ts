@@ -52,6 +52,12 @@ class FakeOpenCode implements OpenCodeAdapter {
 
 class BindAwareOpenCode extends FakeOpenCode {
   bindings: Array<{ projectId: string; mcpUrl: string }> = [];
+  sessions: string[] = [];
+  async createSession(): Promise<string> {
+    const sessionId = `open-code-turn-${this.sessions.length + 1}`;
+    this.sessions.push(sessionId);
+    return sessionId;
+  }
   async bindProject(projectId: string, mcpUrl: string): Promise<void> {
     this.bindings.push({ projectId, mcpUrl });
   }
@@ -204,7 +210,7 @@ test("development OpenCode skip is explicit and only loads the approved determin
   assert.match(updated.conversation.at(-1).text, /Development demo mode loaded/);
 });
 
-test("live chat binds one capability-scoped MCP URL and revokes it when the browser session ends", async (t) => {
+test("each live chat creates a fresh OpenCode session, rebinds MCP, and revokes capability on close", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
   const openCode = new BindAwareOpenCode();
   const app = new BackendApp({
@@ -225,7 +231,14 @@ test("live chat binds one capability-scoped MCP URL and revokes it when the brow
     payload: { text: "Inspect the approved model", attachmentIds: [] },
   });
   assert.equal(response.status, 202);
-  assert.equal(openCode.bindings.length, 1);
+  const secondState = await getJson(`${base}/snapshot`);
+  const second = await command(`${base}/chat`, {
+    commandId: "live-bind-chat-2", sessionId: "live-bind", baseRevision: secondState.revision,
+    payload: { text: "Confirm the active model", attachmentIds: [] },
+  });
+  assert.equal(second.status, 202);
+  assert.deepEqual(openCode.sessions, ["open-code-turn-1", "open-code-turn-2"]);
+  assert.equal(openCode.bindings.length, 2);
   const bound = new URL(openCode.bindings[0].mcpUrl);
   assert.equal(bound.pathname, "/mcp");
   assert.equal(bound.searchParams.get("instance"), "local-demo");
@@ -238,8 +251,9 @@ test("live chat binds one capability-scoped MCP URL and revokes it when the brow
   assert.equal((denied as any).error.code, -32001);
 });
 
-test("OpenCode adapter discovers the configured model and sends synchronous bounded chat turns", async () => {
+test("OpenCode adapter creates a fresh session for every synchronous bounded chat turn", async () => {
   const calls: Array<{ path: string; method: string; body?: any; signal?: AbortSignal | null }> = [];
+  let createdSessions = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "deepseek/v4",
@@ -250,16 +264,20 @@ test("OpenCode adapter discovers the configured model and sends synchronous boun
       calls.push({ path, method: init?.method ?? "GET", body, signal: init?.signal });
       if (path === "/global/health") return Response.json({ healthy: true, version: "1.2.3" });
       if (path === "/config/providers") return Response.json({ providers: [{ id: "deepseek", models: { v4: {} } }] });
-      if (path === "/session") return Response.json({ id: "internal-session" });
-      if (path === "/session/internal-session/message" && init?.method === "POST") return Response.json({ id: "assistant-message" });
+      if (path === "/session") return Response.json({ id: `internal-session-${++createdSessions}` });
+      if (path === "/session/internal-session-1/message" && init?.method === "POST") return Response.json({ id: "assistant-message" });
       return new Response(null, { status: 404 });
     },
   });
   assert.deepEqual(await adapter.initialize(), { status: "ready", modelId: "deepseek/v4", version: "1.2.3" });
   const sessionId = await adapter.createSession("project-a");
+  const secondSessionId = await adapter.createSession("project-a");
+  assert.equal(sessionId, "internal-session-1");
+  assert.equal(secondSessionId, "internal-session-2");
+  assert.equal(calls.filter((call) => call.path === "/session" && call.method === "POST").length, 2);
   const controller = new AbortController();
   await adapter.prompt(sessionId, { text: "load model", system: "restricted", attachments: [] }, controller.signal);
-  const messageCall = calls.find((call) => call.path === "/session/internal-session/message");
+  const messageCall = calls.find((call) => call.path === "/session/internal-session-1/message");
   assert.equal(messageCall?.method, "POST");
   assert.equal(messageCall?.signal, controller.signal);
   const prompt = messageCall!.body;

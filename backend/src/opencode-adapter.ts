@@ -37,7 +37,6 @@ type OpenCodeConfig = {
 };
 
 export class HttpOpenCodeAdapter implements OpenCodeAdapter {
-  readonly #sessions = new Map<string, string>();
   readonly #fetch: typeof fetch;
   private readonly config: OpenCodeConfig;
   readonly #mcpProjects = new Map<string, string>();
@@ -106,17 +105,12 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
     if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
       throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
     }
-    const existing = this.#sessions.get(projectId);
-    if (existing) return existing;
     if (this.config.skipLive) {
-      const sessionId = `dev-${projectId}`;
-      this.#sessions.set(projectId, sessionId);
-      return sessionId;
+      return `dev-${projectId}-${randomUUID()}`;
     }
     const session = await this.#json("/session", { method: "POST", body: JSON.stringify({ title: `Riff ${projectId.slice(0, 8)}` }) });
     const sessionId = String(session.id ?? session.sessionID ?? "");
     if (!sessionId) throw new ApiError(502, "opencode_invalid_session", "OpenCode did not return a session ID.");
-    this.#sessions.set(projectId, sessionId);
     return sessionId;
   }
 
