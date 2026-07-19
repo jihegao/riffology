@@ -73,17 +73,19 @@ may receive only `{ modelId, status, lastError? }`, as specified in
 The backend creates an OpenCode session lazily for the first accepted message
 for a project and saves the opaque session ID in its server-side project record.
 Subsequent messages reuse it.  A request is rejected with `409 agent_busy` if
-that project's previous prompt has not reached a terminal session status.  A
-user cancel invokes the OpenCode session-abort endpoint, marks the turn
-cancelled in `ProjectState`, and leaves its prior messages intact.  The UI does
-not receive an OpenCode session ID as an authority token.
+that project's previous prompt has not reached a terminal session status. There
+is no browser chat-cancel command in this MVP. OpenCode session abort is reserved
+for the bridge's defined operational boundaries: configured prompt timeout,
+backend shutdown, and project teardown. The UI does not receive an OpenCode
+session ID as an authority token.
 
 On restart, the bridge restores the session only after checking that it exists
 on the local OpenCode server and still maps to the same project workspace.  If
 not, it starts a new session and supplies a compact project summary plus the
 current artifact manifest.  Deleting a local project first aborts active work,
 deletes its workspace through the project service, then deletes the OpenCode
-session.  No OpenCode share endpoint is used in this MVP.
+session. Project deletion is backend lifecycle/teardown, not a browser API in
+this MVP. No OpenCode share endpoint is used.
 
 Each prompt includes a generated `messageID`, the selected model, an explicit
 system instruction defining the supported Mesa protocol, and only the tools in
@@ -195,8 +197,8 @@ action may start a new valid turn or run.
 
 For the local demonstration, Playwright attaches over CDP to the *same visible
 right-hand workbench page* that the user is viewing.  A separate hidden browser
-is not accepted as proof of user-visible completion.  The controller is limited
-to stable `data-testid` locators and these intents:
+is not accepted as proof of user-visible completion. The controller is limited
+to the stable locators supplied by the UI contract and these intents:
 
 ```text
 open_tab(files|parameters|run|results)
@@ -204,6 +206,17 @@ set_parameter(key, value)
 start_run()
 open_results(runId)
 ```
+
+For `open_tab`, the UI supplies `data-testid="workbench-tab-files"`,
+`workbench-tab-parameters`, `workbench-tab-run`, and
+`workbench-tab-results`; the controller uses no inferred CSS or text selector.
+For `set_parameter`, it scopes to the UI-provided `Simulation parameters` form
+and uses that schema field's stable accessible label (or its explicit stable
+`data-testid` if the UI supplies one). It must not locate a parameter by DOM
+position or model-generated selector text. The controller also uses the named
+Run/Cancel controls and Results region defined in `ui-workflow.md`. Missing or
+ambiguous UI-provided locators produce a controller failure, never a guessed
+click.
 
 For every agent-triggered UI intent, the bridge performs this ordering:
 
@@ -249,7 +262,8 @@ model validation.
    missing configured model, and an unapproved default; verify no prompt is sent
    unless readiness is `ready` and no secret appears in output.
 2. **Session lifecycle:** first prompt creates one session; a follow-up reuses
-   it; busy prompt rejects concurrently; abort changes status; restart handles a
+   it; busy prompt rejects concurrently; a configured prompt timeout performs
+   the operational abort and renders the documented error; restart handles a
    stale session by creating a clean one with a project summary.
 3. **Upload handoff:** valid CSV gets an immutable manifest; `../`, MIME/size
    mismatch, unknown attachment ID, and outside-workspace file references fail

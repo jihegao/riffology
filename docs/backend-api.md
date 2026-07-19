@@ -57,6 +57,7 @@ stack trace.
 | `GET /api/sessions/{sessionId}/snapshot` | — | Returns the canonical browser-safe `ProjectState` at its current revision. | `200 ProjectState` |
 | `GET /api/sessions/{sessionId}/events` | SSE | Opens the canonical SSE stream below; authenticates the local browser session and sends a snapshot first. | `200 text/event-stream` |
 | `POST /api/sessions/{sessionId}/uploads` | multipart `envelope` plus one `file` | Validates and persists an allowed attachment, then updates `ProjectState.attachments`. | `202 CommandAccepted` |
+| `DELETE /api/sessions/{sessionId}/attachments/{attachmentId}` | `UiCommand<{attachmentId: string}>` | Removes one unreferenced attachment and its stored input after route/payload/session/revision validation. | `202 CommandAccepted` |
 | `POST /api/sessions/{sessionId}/chat` | `UiCommand<{text: string; attachmentIds: string[]}>` | Creates/reuses the server-side OpenCode session, submits a bounded prompt, and maps its events/actions into state. | `202 CommandAccepted` |
 | `PUT /api/sessions/{sessionId}/parameters` | `UiCommand<{modelId: string; values: Record<string, string \| number \| boolean>}>` | Validates against the active Mesa schema and saves canonical parameter values in backend state. It does not call an undocumented Mesa parameter endpoint. | `202 CommandAccepted` |
 | `POST /api/sessions/{sessionId}/runs` | `UiCommand<{modelId: string; parameters?: Record<string, string \| number \| boolean>; steps?: number; seeds?: number[]}>` | Validates the active model/state, constructs the Mesa run request from trusted state, and starts one run. | `202 CommandAccepted` |
@@ -76,6 +77,18 @@ WORKSPACE_ROOT/projects/<project-id>/inputs/<upload-id>-<safe-original-name>
 The browser receives attachment metadata only; it never receives a workspace
 path. The OpenCode bridge receives the corresponding manifest as described in
 `opencode-bridge.md`.
+
+For `attachment.remove`, `payload.attachmentId` must exactly equal the route
+`attachmentId`. The command is subject to the normal `baseRevision` and
+`commandId` checks: a stale revision is `409`, an unknown attachment is `404`,
+and a retried `commandId` returns its original acknowledgement without deleting
+twice. An attachment referenced by an accepted or streaming conversation message
+is retained to preserve that message's evidence and is rejected with
+`409 attachment_in_use`; the user may create a new session to discard its
+history. For a removable attachment, the backend atomically removes its manifest
+from `ProjectState` and its input file, then publishes the next
+`project.patch`. The client does not remove it from the rendered list based only
+on the `202` acknowledgement.
 
 ## Backend-to-Mesa adapter rules
 
@@ -128,8 +141,9 @@ resynchronizes on a gap, as specified by `ui-workflow.md`.
 
 Public-route integration tests must cover accepted/rejected envelopes,
 idempotent command retries, 1 MiB/format upload rejection, stale revision
-rejection, active-model/default injection into Mesa run requests, cancellation
-ownership, and `timed_out` as an unsuccessful terminal state.
+rejection, attachment-removal ownership/in-use/retry behavior, active-model/
+default injection into Mesa run requests, cancellation ownership, and
+`timed_out` as an unsuccessful terminal state.
 
 Release requires the live OpenCode gate in `opencode-bridge.md`: real local
 health/provider/model discovery plus one bounded chat and one bounded approved
