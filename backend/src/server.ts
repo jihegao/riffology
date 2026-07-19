@@ -1,0 +1,345 @@
+import { createHash, randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { ApiError, asApiError } from "./errors.ts";
+import type { MesaAdapter } from "./mesa-adapter.ts";
+import type { OpenCodeAdapter, OpenCodeReadiness } from "./opencode-adapter.ts";
+import type { WorkbenchProjector } from "./playwright-projection.ts";
+import { ProjectStore, type StoredAttachment } from "./project-store.ts";
+import { SimulationActions } from "./simulation-actions.ts";
+import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
+
+export type BackendOptions = {
+  mesa: MesaAdapter;
+  openCode: OpenCodeAdapter;
+  workspaceRoot: string;
+  defaultSessionId?: string;
+  projector?: WorkbenchProjector;
+  promptTimeoutMs?: number;
+  store?: ProjectStore;
+};
+
+export class BackendApp {
+  readonly store: ProjectStore;
+  readonly actions: SimulationActions;
+  private readonly options: BackendOptions;
+  #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
+  #server?: Server;
+
+  constructor(options: BackendOptions) {
+    this.options = options;
+    this.store = options.store ?? new ProjectStore();
+    this.actions = new SimulationActions(this.store, options.mesa, options.projector);
+  }
+
+  async initialize(): Promise<ProjectState> {
+    this.#readiness = await this.options.openCode.initialize();
+    return this.createSession(this.options.defaultSessionId ?? "local-demo");
+  }
+
+  createSession(sessionId = randomUUID()): ProjectState {
+    return this.store.create(sessionId, publicAgent(this.#readiness));
+  }
+
+  async listen(port = 0, host = "127.0.0.1"): Promise<{ port: number; host: string }> {
+    if (!this.#server) this.#server = createServer((request, response) => void this.#handle(request, response));
+    await new Promise<void>((resolve, reject) => {
+      this.#server!.once("error", reject);
+      this.#server!.listen(port, host, () => {
+        this.#server!.off("error", reject);
+        resolve();
+      });
+    });
+    const address = this.#server.address();
+    if (!address || typeof address === "string") throw new Error("Backend did not expose a TCP address.");
+    return { port: address.port, host };
+  }
+
+  async close(): Promise<void> {
+    if (!this.#server) return;
+    this.#server.closeIdleConnections?.();
+    this.#server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
+    this.#server = undefined;
+  }
+
+  async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    try {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
+      if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) throw new ApiError(404, "not_found", "No matching local demo route exists.");
+      const sessionId = parts[2];
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "snapshot") return json(response, 200, this.store.snapshot(sessionId));
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "events") return this.#events(sessionId, request, response);
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "uploads") return await this.#upload(sessionId, request, response);
+      if (request.method === "DELETE" && parts.length === 5 && parts[3] === "attachments") return await this.#removeAttachment(sessionId, parts[4], request, response);
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "chat") return await this.#chat(sessionId, request, response);
+      if (request.method === "PUT" && parts.length === 4 && parts[3] === "parameters") return await this.#parameters(sessionId, request, response);
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "runs") return await this.#startRun(sessionId, request, response);
+      if (request.method === "POST" && parts.length === 6 && parts[3] === "runs" && parts[5] === "cancel") return await this.#cancelRun(sessionId, parts[4], request, response);
+      throw new ApiError(404, "not_found", "No matching local demo route exists.");
+    } catch (error) {
+      const apiError = asApiError(error);
+      if (!response.headersSent) json(response, apiError.status, { accepted: false, error: { code: apiError.code, message: apiError.message, ...(apiError.details ? { details: apiError.details } : {}) } });
+      else response.end();
+    }
+  }
+
+  #events(sessionId: string, request: IncomingMessage, response: ServerResponse): void {
+    const snapshot = this.store.snapshot(sessionId);
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    sendEvent(response, { type: "project.snapshot", data: snapshot });
+    sendEvent(response, { type: "connection.status", data: { status: "connected" } });
+    const unsubscribe = this.store.subscribe(sessionId, (event) => sendEvent(response, event));
+    const keepAlive = setInterval(() => response.write(": keepalive\n\n"), 15_000);
+    request.once("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  }
+
+  async #upload(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const { envelope, file } = await multipart(request, 1_200_000);
+    const command = parseCommand<{ clientFileName?: string }>(envelope, sessionId);
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    if (!file) throw new ApiError(422, "missing_file", "Attach one CSV, JSON, or TXT input file.");
+    const declaredName = typeof command.payload.clientFileName === "string" ? command.payload.clientFileName : file.filename;
+    const allowed = attachmentType(declaredName, file.contentType);
+    if (!allowed) throw new ApiError(422, "unsupported_attachment", "Only CSV, JSON, and TXT files up to 1 MiB are supported.");
+    if (file.data.byteLength > 1024 * 1024) throw new ApiError(413, "attachment_too_large", "Attachments are limited to 1 MiB.");
+    const id = `upl_${randomUUID()}`;
+    const projectId = this.store.projectId(sessionId);
+    const displayName = safeFilename(declaredName);
+    const workspacePath = join(this.options.workspaceRoot, "projects", projectId, "inputs", `${id}-${displayName}`);
+    await mkdir(join(this.options.workspaceRoot, "projects", projectId, "inputs"), { recursive: true });
+    await writeFile(workspacePath, file.data, { flag: "wx" });
+    const attachment: StoredAttachment = {
+      id,
+      displayName,
+      originalName: displayName,
+      mediaType: allowed,
+      sizeBytes: file.data.byteLength,
+      status: "ready",
+      workspacePath,
+      sha256: createHash("sha256").update(file.data).digest("hex"),
+    };
+    this.store.addAttachment(sessionId, attachment);
+    json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+  }
+
+  async #removeAttachment(sessionId: string, attachmentId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const command = parseCommand<{ attachmentId: string }>(await bodyText(request), sessionId);
+    if (command.payload.attachmentId !== attachmentId) throw new ApiError(422, "attachment_mismatch", "Attachment payload does not match the route.");
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    const attachment = this.store.attachment(sessionId, attachmentId);
+    const state = this.store.snapshot(sessionId);
+    if (state.conversation.some((message) => message.attachmentIds?.includes(attachmentId))) {
+      throw new ApiError(409, "attachment_in_use", "This attachment is retained because the conversation already references it.");
+    }
+    await rm(attachment.workspacePath, { force: false });
+    this.store.removeAttachment(sessionId, attachmentId);
+    json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+  }
+
+  async #chat(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const command = parseCommand<{ text: string; attachmentIds: string[] }>(await bodyText(request), sessionId);
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    if (!command.payload.text?.trim()) throw new ApiError(422, "empty_message", "Enter a message for the modelling assistant.");
+    const attachments = command.payload.attachmentIds ?? [];
+    const stored = attachments.map((id) => this.store.attachment(sessionId, id));
+    if (stored.some((attachment) => attachment.status !== "ready")) throw new ApiError(409, "attachment_not_ready", "Wait for all selected attachments before sending a message.");
+    if (this.#readiness.status !== "ready" || !this.#readiness.modelId) throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
+    const messageId = `msg_${randomUUID()}`;
+    this.store.mutate(sessionId, (draft) => {
+      draft.conversation.push({ id: messageId, role: "user", text: command.payload.text.trim(), attachmentIds: attachments, status: "complete", createdAt: new Date().toISOString() });
+      draft.agent = { modelId: this.#readiness.modelId, status: "thinking" };
+    });
+    this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "thinking" } });
+    const openCodeSession = await this.options.openCode.createSession(this.store.projectId(sessionId));
+    try {
+      await withTimeout(
+        this.options.openCode.prompt(openCodeSession, {
+          text: command.payload.text.trim(),
+          attachments: stored.map((attachment) => ({ id: attachment.id, mediaType: attachment.mediaType, workspaceRelativePath: `inputs/${attachment.id}-${attachment.displayName}` })),
+          system: restrictedSystemPrompt(),
+        }),
+        this.options.promptTimeoutMs ?? 30_000,
+        async () => this.options.openCode.abort(openCodeSession),
+      );
+      this.store.mutate(sessionId, (draft) => {
+        draft.agent = { modelId: this.#readiness.modelId, status: "waiting_for_action" };
+      });
+      this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "waiting_for_action" } });
+      json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+    } catch (error) {
+      const apiError = asApiError(error);
+      this.store.mutate(sessionId, (draft) => {
+        draft.agent = { modelId: this.#readiness.modelId, status: "error", lastError: { code: apiError.code, message: apiError.message } };
+      });
+      this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "error", lastError: { code: apiError.code, message: apiError.message } } });
+      throw apiError;
+    }
+  }
+
+  async #parameters(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const command = parseCommand<{ modelId: string; values: Record<string, Scalar> }>(await bodyText(request), sessionId);
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    const state = this.store.snapshot(sessionId);
+    if (state.model?.id !== command.payload.modelId) throw new ApiError(409, "model_not_active", "The selected model is no longer active.");
+    this.actions.saveParameters(sessionId, command.payload.values);
+    json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+  }
+
+  async #startRun(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const command = parseCommand<{ modelId: string; parameters?: Record<string, Scalar>; steps?: number; seeds?: number[] }>(await bodyText(request), sessionId);
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    const state = this.store.snapshot(sessionId);
+    if (!state.model || command.payload.modelId !== state.model.id) throw new ApiError(409, "model_not_active", "The selected model is no longer active.");
+    if (command.payload.parameters && !sameValues(command.payload.parameters, state.model.parameterValues)) {
+      throw new ApiError(409, "parameters_not_saved", "Save parameter changes before starting a run.");
+    }
+    await this.actions.startRun(sessionId, { steps: command.payload.steps, seeds: command.payload.seeds });
+    json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+  }
+
+  async #cancelRun(sessionId: string, runId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const command = parseCommand<Record<string, never>>(await bodyText(request), sessionId);
+    const duplicate = this.store.beginCommand(command);
+    if (duplicate) return json(response, 202, duplicate);
+    await this.actions.cancelRun(sessionId, runId);
+    json(response, 202, this.store.acceptCommand(sessionId, command.commandId));
+  }
+}
+
+const publicAgent = (readiness: OpenCodeReadiness): ProjectState["agent"] => ({
+  modelId: readiness.modelId,
+  status: readiness.status,
+  ...(readiness.lastError ? { lastError: readiness.lastError } : {}),
+});
+
+const json = (response: ServerResponse, status: number, payload: unknown): void => {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(JSON.stringify(payload));
+};
+
+const sendEvent = (response: ServerResponse, event: BrowserEvent): void => {
+  response.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+};
+
+const parseCommand = <T>(text: string, routeSessionId: string): UiCommand<T> => {
+  let value: UiCommand<T>;
+  try { value = JSON.parse(text); } catch { throw new ApiError(422, "invalid_json", "Request body must be valid JSON."); }
+  if (!value || typeof value.commandId !== "string" || typeof value.sessionId !== "string" || typeof value.baseRevision !== "number" || value.payload === undefined) {
+    throw new ApiError(422, "invalid_command", "Request does not match the local command envelope.");
+  }
+  if (value.sessionId !== routeSessionId) throw new ApiError(422, "session_mismatch", "Command session does not match the route.");
+  return value;
+};
+
+const bodyText = async (request: IncomingMessage, limit = 1_100_000): Promise<string> => {
+  const chunks: Buffer[] = [];
+  let received = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.from(chunk);
+    received += buffer.length;
+    if (received > limit) throw new ApiError(413, "request_too_large", "The request is too large.");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+};
+
+type MultipartFile = { filename: string; contentType: string; data: Buffer };
+const multipart = async (request: IncomingMessage, limit: number): Promise<{ envelope: string; file?: MultipartFile }> => {
+  const contentType = request.headers["content-type"] ?? "";
+  const match = /boundary=([^;]+)/i.exec(contentType);
+  if (!match) throw new ApiError(422, "invalid_upload", "Use multipart form data for file uploads.");
+  const raw = Buffer.from(await bodyText(request, limit));
+  const boundary = Buffer.from(`--${match[1].replace(/^"|"$/g, "")}`);
+  const pieces = splitBuffer(raw, boundary).slice(1, -1);
+  let envelope = "";
+  let file: MultipartFile | undefined;
+  for (const part of pieces) {
+    const trimmed = part.subarray(0, 2).equals(Buffer.from("\r\n")) ? part.subarray(2) : part;
+    const divider = trimmed.indexOf(Buffer.from("\r\n\r\n"));
+    if (divider < 0) continue;
+    const header = trimmed.subarray(0, divider).toString("utf8");
+    const data = trimmed.subarray(divider + 4, trimmed.length - 2);
+    const name = /name="([^"]+)"/i.exec(header)?.[1];
+    if (name === "envelope") envelope = data.toString("utf8");
+    if (name === "file") file = {
+      filename: /filename="([^"]*)"/i.exec(header)?.[1] ?? "upload",
+      contentType: /content-type:\s*([^\r\n]+)/i.exec(header)?.[1]?.trim().toLowerCase() ?? "application/octet-stream",
+      data,
+    };
+  }
+  if (!envelope) throw new ApiError(422, "missing_command", "The upload command envelope is required.");
+  return { envelope, file };
+};
+
+const splitBuffer = (source: Buffer, separator: Buffer): Buffer[] => {
+  const values: Buffer[] = [];
+  let offset = 0;
+  while (offset <= source.length) {
+    const index = source.indexOf(separator, offset);
+    if (index < 0) { values.push(source.subarray(offset)); break; }
+    values.push(source.subarray(offset, index));
+    offset = index + separator.length;
+  }
+  return values;
+};
+
+const attachmentType = (filename: string, contentType: string): string | undefined => {
+  const extension = basename(filename).toLowerCase().split(".").pop();
+  const expected = extension === "csv" ? "text/csv" : extension === "json" ? "application/json" : extension === "txt" ? "text/plain" : undefined;
+  if (!expected) return undefined;
+  const normalized = contentType.split(";", 1)[0].toLowerCase();
+  return normalized === expected || normalized === "application/octet-stream" ? expected : undefined;
+};
+
+const safeFilename = (filename: string): string => {
+  const safe = basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  if (!safe || safe === "." || safe === "..") throw new ApiError(422, "invalid_filename", "The attachment filename is invalid.");
+  return safe;
+};
+
+const sameValues = (left: Record<string, Scalar>, right: Record<string, Scalar>): boolean => {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+};
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, abort: () => Promise<void>): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new ApiError(504, "agent_timeout", "The modelling assistant timed out.")), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "agent_timeout") await abort().catch(() => undefined);
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const restrictedSystemPrompt = (): string => [
+  "You are the local Riff Mesa modelling assistant.",
+  "Only use the simulation-workbench action surface: inspect_uploaded_files, select_and_load_model(queue-network-v1), set_parameters, run_experiment, get_run_status, read_run_results, and drive_workbench_ui.",
+  "Do not use shell, arbitrary file, network, browser, or code-generation tools.",
+  "Do not claim an action succeeded until its tool result confirms it.",
+].join("\n");
