@@ -154,8 +154,20 @@ test("OpenCode adapter discovers the configured model and limits prompt tools", 
   const sessionId = await adapter.createSession("project-a");
   await adapter.prompt(sessionId, { text: "load model", system: "restricted", attachments: [] });
   const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
-  assert.deepEqual(prompt.tools, { bash: false, write: false, edit: false, webfetch: false });
-  assert.equal(prompt.model, "deepseek/v4");
+  assert.deepEqual(prompt.tools, {
+    bash: false,
+    write: false,
+    edit: false,
+    webfetch: false,
+    riff_inspect_uploaded_files: true,
+    riff_select_and_load_model: true,
+    riff_set_parameters: true,
+    riff_run_experiment: true,
+    riff_get_run_status: true,
+    riff_read_run_results: true,
+    riff_drive_workbench_ui: true,
+  });
+  assert.deepEqual(prompt.model, { providerID: "deepseek", modelID: "v4" });
 });
 
 test("Mesa adapter maps the service summary and CSV-derived rows into visible results", async () => {

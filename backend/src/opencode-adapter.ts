@@ -15,11 +15,15 @@ export type OpenCodePrompt = {
   attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }>;
 };
 
+export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Record<string, unknown> };
+
 export interface OpenCodeAdapter {
   initialize(): Promise<OpenCodeReadiness>;
   createSession(projectId: string): Promise<string>;
   prompt(sessionId: string, prompt: OpenCodePrompt): Promise<void>;
   abort(sessionId: string): Promise<void>;
+  bindProject?(projectId: string, mcpUrl: string): Promise<void>;
+  subscribeEvents?(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void>;
 }
 
 type OpenCodeConfig = {
@@ -36,6 +40,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
   readonly #sessions = new Map<string, string>();
   readonly #fetch: typeof fetch;
   private readonly config: OpenCodeConfig;
+  readonly #mcpProjects = new Map<string, string>();
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
 
   constructor(config: OpenCodeConfig) {
@@ -128,7 +133,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
       method: "POST",
       body: JSON.stringify({
         messageID: randomUUID(),
-        model: this.#readiness.modelId,
+        model: modelReference(this.#readiness.modelId),
         system: prompt.system,
         parts,
         tools: {
@@ -136,6 +141,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
           write: false,
           edit: false,
           webfetch: false,
+          riff_inspect_uploaded_files: true,
+          riff_select_and_load_model: true,
+          riff_set_parameters: true,
+          riff_run_experiment: true,
+          riff_get_run_status: true,
+          riff_read_run_results: true,
+          riff_drive_workbench_ui: true,
         },
       }),
     });
@@ -144,6 +156,29 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter {
   async abort(sessionId: string): Promise<void> {
     if (!this.config.baseUrl) return;
     await this.#json(`/session/${encodeURIComponent(sessionId)}/abort`, { method: "POST" });
+  }
+
+  async bindProject(projectId: string, mcpUrl: string): Promise<void> {
+    if (this.config.skipLive || !this.config.baseUrl) return;
+    if (this.#mcpProjects.get(projectId) === mcpUrl) return;
+    const name = `riff-${projectId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+    await this.#json("/mcp", {
+      method: "POST",
+      body: JSON.stringify({ name, config: { type: "remote", url: mcpUrl, enabled: true, oauth: false, timeout: 10_000 } }),
+    });
+    this.#mcpProjects.set(projectId, mcpUrl);
+  }
+
+  async subscribeEvents(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void> {
+    if (!this.config.baseUrl || this.config.skipLive) return () => undefined;
+    const controller = new AbortController();
+    const response = await this.#fetch(new URL("/event", this.config.baseUrl), {
+      headers: this.#authorization(),
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) throw new ApiError(503, "opencode_event_unavailable", "OpenCode event streaming is unavailable.");
+    void consumeSse(response.body, listener, controller.signal);
+    return () => controller.abort();
   }
 
   async #json(path: string, init: RequestInit = {}): Promise<Record<string, any>> {
@@ -199,4 +234,35 @@ const defaultModel = (payload: Record<string, any>, models: string[]): string | 
     if (typeof value === "string" && models.includes(value)) return value;
   }
   return models[0];
+};
+
+const modelReference = (modelId: string): { providerID: string; modelID: string } => {
+  const slash = modelId.indexOf("/");
+  if (slash <= 0 || slash === modelId.length - 1) throw new ApiError(503, "opencode_invalid_model", "OpenCode returned an invalid provider/model ID.");
+  return { providerID: modelId.slice(0, slash), modelID: modelId.slice(slash + 1) };
+};
+
+const consumeSse = async (stream: ReadableStream<Uint8Array>, listener: (event: OpenCodeRuntimeEvent) => void, signal: AbortSignal): Promise<void> => {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (!signal.aborted) {
+      const next = await reader.read();
+      if (next.done) return;
+      buffer += decoder.decode(next.value, { stream: true });
+      let split: number;
+      while ((split = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+        if (!data) continue;
+        try { listener(JSON.parse(data)); } catch { /* malformed source events are ignored */ }
+      }
+    }
+  } catch {
+    // The bridge will retain canonical state and reconnect on the next startup.
+  } finally {
+    reader.releaseLock();
+  }
 };

@@ -7,15 +7,17 @@ import { BackendApp } from "./server.ts";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)), ".riff-workspaces");
 const mesa = process.env.MESA_SERVICE_URL ? new HttpMesaAdapter(process.env.MESA_SERVICE_URL) : new UnavailableMesaAdapter();
+const port = Number(process.env.PORT ?? 8787);
 const app = new BackendApp({
   mesa,
   openCode: opencodeFromEnvironment(),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
+  mcpUrl: process.env.RIFF_MCP_URL ?? `http://127.0.0.1:${port}/mcp`,
   ...(process.env.RIFF_CDP_URL ? { projector: new PlaywrightCdpProjector(process.env.RIFF_CDP_URL) } : {}),
   promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
 });
 
 await app.initialize();
-const address = await app.listen(Number(process.env.PORT ?? 8787));
+const address = await app.listen(port);
 console.log(`Riff demo backend listening at http://${address.host}:${address.port}`);

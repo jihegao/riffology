@@ -3,8 +3,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { ApiError, asApiError } from "./errors.ts";
+import { McpToolServer } from "./mcp.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeReadiness } from "./opencode-adapter.ts";
+import { OpenCodeEventBridge } from "./opencode-events.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
@@ -17,13 +19,18 @@ export type BackendOptions = {
   defaultSessionId?: string;
   projector?: WorkbenchProjector;
   promptTimeoutMs?: number;
+  mcpUrl?: string;
   store?: ProjectStore;
 };
 
 export class BackendApp {
   readonly store: ProjectStore;
   readonly actions: SimulationActions;
+  readonly mcp: McpToolServer;
   private readonly options: BackendOptions;
+  readonly #openCodeEvents: OpenCodeEventBridge;
+  readonly #mcpCapabilities = new Map<string, string>();
+  #unsubscribeOpenCode?: () => void;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #server?: Server;
 
@@ -31,15 +38,26 @@ export class BackendApp {
     this.options = options;
     this.store = options.store ?? new ProjectStore();
     this.actions = new SimulationActions(this.store, options.mesa, options.projector);
+    this.mcp = new McpToolServer(this.actions);
+    this.#openCodeEvents = new OpenCodeEventBridge(this.store);
   }
 
   async initialize(): Promise<ProjectState> {
     this.#readiness = await this.options.openCode.initialize();
+    if (this.#readiness.status === "ready" && this.options.openCode.subscribeEvents) {
+      try {
+        this.#unsubscribeOpenCode = await this.options.openCode.subscribeEvents((event) => this.#openCodeEvents.handle(event));
+      } catch {
+        this.#readiness = { status: "error", modelId: null, lastError: { code: "opencode_event_unavailable", message: "OpenCode event streaming is unavailable." } };
+      }
+    }
     return this.createSession(this.options.defaultSessionId ?? "local-demo");
   }
 
   createSession(sessionId = randomUUID()): ProjectState {
-    return this.store.create(sessionId, publicAgent(this.#readiness));
+    const snapshot = this.store.create(sessionId, publicAgent(this.#readiness));
+    if (!this.#mcpCapabilities.has(sessionId)) this.#mcpCapabilities.set(sessionId, this.mcp.grant(sessionId));
+    return snapshot;
   }
 
   async listen(port = 0, host = "127.0.0.1"): Promise<{ port: number; host: string }> {
@@ -57,6 +75,8 @@ export class BackendApp {
   }
 
   async close(): Promise<void> {
+    this.#unsubscribeOpenCode?.();
+    this.#unsubscribeOpenCode = undefined;
     if (!this.#server) return;
     this.#server.closeIdleConnections?.();
     this.#server.closeAllConnections?.();
@@ -69,6 +89,7 @@ export class BackendApp {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
       if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
+      if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
       if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) throw new ApiError(404, "not_found", "No matching local demo route exists.");
       const sessionId = parts[2];
       if (request.method === "GET" && parts.length === 4 && parts[3] === "snapshot") return json(response, 200, this.store.snapshot(sessionId));
@@ -103,6 +124,19 @@ export class BackendApp {
       clearInterval(keepAlive);
       unsubscribe();
     });
+  }
+
+  async #mcp(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    let payload: unknown;
+    try { payload = JSON.parse(await bodyText(request, 256_000)); }
+    catch { throw new ApiError(422, "invalid_mcp_request", "MCP requests must contain valid JSON."); }
+    const result = await this.mcp.handle(url.searchParams.get("cap") ?? undefined, payload as any);
+    if (!result) {
+      response.writeHead(202, { "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    json(response, 200, result);
   }
 
   async #upload(sessionId: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -165,7 +199,15 @@ export class BackendApp {
       draft.agent = { modelId: this.#readiness.modelId, status: "thinking" };
     });
     this.store.publish(sessionId, { type: "agent.status", data: { modelId: this.#readiness.modelId, status: "thinking" } });
-    const openCodeSession = await this.options.openCode.createSession(this.store.projectId(sessionId));
+    const projectId = this.store.projectId(sessionId);
+    if (this.#readiness.modelId !== "dev/deterministic" && this.options.openCode.bindProject) {
+      if (!this.options.mcpUrl) throw new ApiError(503, "mcp_unconfigured", "Set RIFF_MCP_URL before using live OpenCode tools.");
+      const capability = this.#mcpCapabilities.get(sessionId);
+      if (!capability) throw new ApiError(500, "mcp_capability_missing", "The local MCP capability is unavailable.");
+      await this.options.openCode.bindProject(projectId, withCapability(this.options.mcpUrl, capability));
+    }
+    const openCodeSession = await this.options.openCode.createSession(projectId);
+    this.#openCodeEvents.bind(openCodeSession, sessionId);
     try {
       await withTimeout(
         this.options.openCode.prompt(openCodeSession, {
