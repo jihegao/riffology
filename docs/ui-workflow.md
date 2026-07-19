@@ -41,6 +41,31 @@ The page has one `main` landmark. Its two children are named regions:
 An always-visible, non-modal live-status element in the workbench announces
 the current project/run phase. It must be usable without the assistant.
 
+### Workbench views
+
+The workbench has one persistent tab list, `Mesa workbench views`, with four
+views. It is shown at desktop width and inside the `Workbench` mobile region.
+The project status remains outside the panels so it stays visible while a user
+or agent changes views.
+
+| Intent/value | Visible tab and panel | MVP content |
+| --- | --- | --- |
+| `files` | `Files` / `Workbench files` | Browser-safe attachment manifest (name, type, size, acceptance state); never a workspace path. |
+| `parameters` | `Parameters` / `Workbench parameters` | Model summary and schema-driven parameter form. |
+| `run` | `Run` / `Workbench run` | Run/cancel controls, progress, and bounded log tail. |
+| `results` | `Results` / `Workbench results` | Result metrics, time series, and table for the named run. |
+
+`Files` is the initial active view. Selecting a workbench view is presentational
+only; it does not mutate the authoritative model/run state. The tab list follows
+the ARIA tabs pattern: each tab has `role="tab"`, `aria-controls` pointing to
+exactly one `role="tabpanel"`, and `aria-selected="true"` only for the active
+tab. The active tab has `tabindex="0"`; inactive tabs have `tabindex="-1"`.
+Inactive panels use the HTML `hidden` attribute (and therefore are not in the
+accessibility tree); the active panel is not `hidden` and has `aria-labelledby`
+pointing to its tab. Keyboard Left/Right (or Up/Down) changes the focused tab,
+and Enter/Space activates it. This behavior applies equally to human and
+Playwright-triggered navigation.
+
 ## User-visible workflow
 
 | Step | Conversation behavior | Workbench behavior |
@@ -229,7 +254,11 @@ elements without a stable semantic role or for scoped assertions.
 | Workbench | `getByRole('region', { name: 'Mesa workbench' })`, `data-testid='mesa-workbench'` |
 | Project status | `getByRole('status', { name: 'Simulation status' })` |
 | Model card | `data-testid='model-summary'` with model name as heading |
+| Workbench tab list | `getByRole('tablist', { name: 'Mesa workbench views' })`, `data-testid='workbench-tablist'` |
+| Workbench tab | `getByRole('tab', { name: '<view label>' })`, where view label is `Files`, `Parameters`, `Run`, or `Results`; respectively `data-testid='workbench-tab-files'`, `workbench-tab-parameters`, `workbench-tab-run`, `workbench-tab-results` |
+| Workbench panel | `getByRole('tabpanel', { name: '<panel label>' })`, where panel label is `Workbench files`, `Workbench parameters`, `Workbench run`, or `Workbench results`; respectively `data-testid='workbench-panel-files'`, `workbench-panel-parameters`, `workbench-panel-run`, `workbench-panel-results`. Inactive panels have `hidden`. |
 | Parameters | `getByRole('form', { name: 'Simulation parameters' })`; every schema field has label equal to `field.label` |
+| Parameter input | The actual control for field key `<key>` retains its `field.label` and has `data-testid='parameter-input-<key>'` (for example `parameter-input-arrival_rate`). The bridge's `set_parameter` intent must use this locator, not a generated DOM path. |
 | Save parameters | `getByRole('button', { name: 'Save parameters' })` |
 | Start run | `getByRole('button', { name: 'Run experiment' })` |
 | Cancel run | `getByRole('button', { name: 'Cancel run' })` |
@@ -282,6 +311,10 @@ one separate E2E test uses the real service.
 12. A `uiControl.status: "failed"` state shows a safe non-blocking warning
     while retaining the already-committed parameters/run/results. The test
     proves a subsequent manual run/result interaction remains available.
+13. The workbench exposes the four named tabs/panels with the declared ARIA
+    selected/controls/hidden behavior. Playwright opens each using its stable
+    tab test ID; `set_parameter` targets `parameter-input-arrival_rate` while
+    retaining its accessible field label.
 
 ## Interface assumptions requiring reconciliation
 
