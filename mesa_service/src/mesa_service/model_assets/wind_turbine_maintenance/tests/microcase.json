@@ -1,0 +1,13 @@
+{
+  "fixture_id": "three-turbine-deterministic-microcase-v1",
+  "uses_production_model": true,
+  "horizon_days": 4,
+  "warmup_days": 0,
+  "seed": 2,
+  "parameters": {"turbine_count": 3, "crew_count": 1, "major_replacement_enabled": false, "crew_speed_km_per_hour": 0.16666666666666666, "repair_cost": 100, "maintenance_cost": 40, "crew_cost_per_day": 10},
+  "positions_km": {"turbine-0001": [1, 0], "turbine-0002": [2, 0], "turbine-0003": [3, 0]},
+  "maintenance_due_times_days": {"turbine-0001": [0], "turbine-0002": [0.1], "turbine-0003": [1.2]},
+  "failure_times_days": {"turbine-0001": [10], "turbine-0002": [0.3, 10], "turbine-0003": [0.2, 10]},
+  "durations_days": {"repair": [0.5, 0.5], "maintenance": [0.25, 0.25, 0.25], "replacement": []},
+  "oracle": {"event_count_excluding_daily_snapshots": 29, "daily_snapshot_count": 5, "operating_turbine_days": 7.75, "crew_occupied_days": 3.25, "work_cost": 320, "crew_cost": 40, "total_maintenance_cost": 360}
+}

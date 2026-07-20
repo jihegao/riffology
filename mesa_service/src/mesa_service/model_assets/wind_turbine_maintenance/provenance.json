@@ -1,0 +1,21 @@
+{
+  "source": {
+    "name": "AnyLogic Field Service example",
+    "relative_case_path": "models/Field Service/Field Service.alp",
+    "sha256": "2153fbf23348ece013f7d72bf0064e5d01ac52273bebf560520bb35047734755",
+    "byte_length": 170957,
+    "package_version": "8.9.0.202404161223",
+    "declared_anylogic_version": "8.4.0.qualifier",
+    "project_format_version": "8.4.5",
+    "time_unit": "day"
+  },
+  "conversion_kind": "independent_behavioral_reproduction",
+  "copied_source_code": false,
+  "excluded_assets": ["java", "images", "logo", "3d_assets"],
+  "source_assets_not_copied": {
+    "3d/lorry.dae": "6620a3301ffa458f1b32df4102cd68e5444e95ea8940c85d4edfb4288c832669",
+    "image1.png": "6363b2c6cc7dfae92b656c3d14a69f383faa08c0e4eb54293dada6ebfee1368e",
+    "AnyLogic model logo dark.png": "c81a7f7934755ecaa5de65441752111e442f0683a1c514713817b523b866e1bb"
+  },
+  "claim_boundary": ["not_runtime_import", "not_numerical_equivalence", "not_calibrated", "not_real_wind_farm_validation"]
+}

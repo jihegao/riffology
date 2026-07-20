@@ -19,11 +19,18 @@ def create_app(
     workspace_root: str | Path | None = None,
     *,
     timeout_seconds: float = 30,
+    wind_timeout_seconds: float = 180,
     worker_limit: int = 2,
     worker_delay_seconds: float = 0,
 ) -> FastAPI:
     root = Path(workspace_root or os.environ.get("WORKSPACE_ROOT", ".riff-workspace"))
-    service = MesaService(root, timeout_seconds=timeout_seconds, worker_limit=worker_limit, worker_delay_seconds=worker_delay_seconds)
+    service = MesaService(
+        root,
+        timeout_seconds=timeout_seconds,
+        wind_timeout_seconds=wind_timeout_seconds,
+        worker_limit=worker_limit,
+        worker_delay_seconds=worker_delay_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -68,6 +75,14 @@ def create_app(
     async def get_parameters(project_id: str) -> dict[str, Any]:
         return service.get_parameters(project_id)
 
+    @app.put("/v1/projects/{project_id}/models/wind-turbine-maintenance")
+    async def load_wind_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return service.load_wind_model(project_id, payload)
+
+    @app.get("/v1/projects/{project_id}/models/active")
+    async def get_active_wind_model(project_id: str) -> dict[str, Any]:
+        return service.get_active_wind_model(project_id)
+
     @app.post("/v1/projects/{project_id}/runs", status_code=202)
     async def start_run(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return service.start_run(project_id, payload)
@@ -83,6 +98,10 @@ def create_app(
     @app.get("/v1/projects/{project_id}/runs/{run_id}/results")
     async def get_results(project_id: str, run_id: str) -> dict[str, Any]:
         return service.get_results(project_id, run_id)
+
+    @app.get("/v1/projects/{project_id}/runs/{run_id}/events")
+    async def get_events(project_id: str, run_id: str, after: int = 0, limit: int = 100) -> dict[str, Any]:
+        return service.get_events(project_id, run_id, after=after, limit=limit)
 
     @app.get("/v1/projects/{project_id}/runs/{run_id}/artifacts/{name}")
     async def get_artifact(project_id: str, run_id: str, name: str) -> FileResponse:

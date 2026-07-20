@@ -1,0 +1,36 @@
+{
+  "source_model": "AnyLogic Field Service",
+  "source_sha256": "2153fbf23348ece013f7d72bf0064e5d01ac52273bebf560520bb35047734755",
+  "equipment_transitions": [
+    {"source_transition": "Failure", "target_rule": "failure_triggered", "disposition": "adapted", "reason": "Creates one corrective order and supersedes queued planned work."},
+    {"source_transition": "SCArrivedForRepair", "target_rule": "crew_arrived_then_corrective_work_selected", "disposition": "adapted", "reason": "The replacement decision is drawn once after crew arrival."},
+    {"source_transition": "FinishRepair", "target_rule": "corrective_repair_completed", "disposition": "adapted", "reason": "Completion may continue overdue maintenance with the same crew."},
+    {"source_transition": "StartReplacement", "target_rule": "corrective_work_selected", "disposition": "adapted", "reason": "Only the unrepairable-failure branch is retained."},
+    {"source_transition": "FinishReplacement", "target_rule": "major_replacement_completed", "disposition": "adapted", "reason": "Replacement resets replacement and maintenance timestamps."},
+    {"source_transition": "FinishMaintenance", "target_rule": "planned_maintenance_completed", "disposition": "adapted", "reason": "Completion reschedules the maintenance due event."},
+    {"source_transition": "SCArrivedForMtce", "target_rule": "crew_arrived_then_planned_maintenance_started", "disposition": "adapted", "reason": "Arrival and operation start remain separately observable events."},
+    {"source_transition": "StartRepair", "target_rule": "corrective_work_selected", "disposition": "combined", "reason": "A corrective work order selects repair or replacement without changing identity."},
+    {"source_transition": "transition", "target_rule": "corrective_repair_completed_direct_operating", "disposition": "combined", "reason": "The direct branch is selected when maintenance is not overdue."},
+    {"source_transition": "MaintenanceDue", "target_rule": "corrective_repair_completed_same_crew_maintenance", "disposition": "combined", "reason": "The overdue branch starts maintenance with the same crew."},
+    {"source_transition": "PlannedReplacement", "target_rule": null, "disposition": "deferred", "reason": "Proactive age replacement is fixed off in Phase 1."},
+    {"source_transition": "StartMaintenance", "target_rule": "planned_maintenance_started", "disposition": "adapted", "reason": "Planned and same-crew maintenance use one rule."}
+  ],
+  "crew_transitions": [
+    {"source_transition": "CheckRequestQueue", "target_rule": "centralized_dispatch", "disposition": "adapted", "reason": "Dispatch is deduplicated once per timestamp."},
+    {"source_transition": "Arrived", "target_rule": "crew_arrived", "disposition": "adapted", "reason": "Arrival selects and starts exactly one operation."},
+    {"source_transition": "Finished", "target_rule": "work_completion_then_dispatch", "disposition": "adapted", "reason": "Completion exposes all same-time triggers before dispatch."},
+    {"source_transition": "ArrivedHome", "target_rule": "crew_returned", "disposition": "adapted", "reason": "Returned crews become depot-idle before later dispatch."},
+    {"source_transition": "RequestsWaiting", "target_rule": "centralized_dispatch_assign", "disposition": "adapted", "reason": "Corrective priority and FIFO queues are explicit."},
+    {"source_transition": "NoRequests", "target_rule": "crew_return_started", "disposition": "adapted", "reason": "Away crews return only when both queues are empty."},
+    {"source_transition": "IAmOK", "target_rule": "configured_population_post_work_dispatch", "disposition": "adapted", "reason": "Crew population is frozen at run start."},
+    {"source_transition": "IAmLaidOff", "target_rule": null, "disposition": "deferred", "reason": "Mid-run workforce resizing is outside Phase 1."},
+    {"source_transition": "CheckIfLaidOff", "target_rule": null, "disposition": "deferred", "reason": "Crew count is immutable in an experiment revision."}
+  ],
+  "simultaneous_event_rule": {
+    "source": "global_lifo",
+    "target": "business_phase_then_lifo",
+    "disposition": "adapted",
+    "reason": "All corrective and planned request triggers at one time are visible before a free crew is assigned, preserving corrective priority."
+  },
+  "excluded_mechanisms": ["proactive_age_replacement", "mid_run_hiring", "mid_run_layoff", "road_gis", "weather_access", "spare_parts", "crew_skills"]
+}

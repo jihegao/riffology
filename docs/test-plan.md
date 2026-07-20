@@ -2,8 +2,10 @@
 
 ## Status
 
-This Gate 0 plan defines acceptance for Gates 1-4. It does not claim those tests
-or features exist in the current queue-bound implementation.
+Gate 1 now has executable model, bundle, API, worker-evidence, verifier, and
+full-baseline tests. Gates 2-4 remain target acceptance only. Gate 1 exercises
+the wind path directly through Mesa; it does not claim backend or browser wind
+integration.
 
 ## Gate 0 document checks
 
@@ -35,7 +37,13 @@ Unit/property tests cover:
 - non-negative finite times, waits, costs, counts, and metric denominators;
 - simultaneous failure/maintenance due and completion/new-request deterministic
   tie-breaks;
+- request triggers, completions, arrivals/returns, then centralized dispatch,
+  with phase-local descending sequence, corrective-first FIFO, and stable crew
+  IDs;
 - exact event-interval KPI integration and warm-up exclusion;
+- origin-event wait cohorts, right-censored outstanding work, and nearest-rank
+  P95;
+- post-time-zero plus post-boundary daily rows, including the 1096-row baseline;
 - same model/experiment/seed canonical event digest stability.
 
 Contract tests fail when code IDs, `model-spec.json`, parameter/metric schema,
@@ -43,9 +51,44 @@ source transition dispositions, traceability, visualization metadata, or
 derived-view digests drift. Run request, metadata, events, metrics, summary,
 replay, and views must share one exact identity set.
 
+API and verifier tests also require admission-time bundle re-verification and
+experiment content-ID recomputation; rejection of symlink ancestors at the
+models, experiments, runs, and artifact layers; no public child success before
+parent verification and atomic promotion; an exact eight-file success set;
+exact event field/type/vocabulary/phase validation; and exact 53-column metric
+schema validation even when an attacker consistently reseals downstream
+digests. Annualized revenue, maintenance expense, and profit must recompute
+from final measurement-window metrics.
+
+Parametrized TOCTOU tests mutate `model.py` or `request.json` after parent
+admission but before `Popen`. The worker must independently reject both through
+its captured bundle, out-of-band request digest, admitted revision IDs, and
+canonical experiment projection. Public status must never expose child
+`succeeded`; results and success artifacts remain unavailable, and the final
+failure directory contains only request, metadata, and log diagnostics.
+
 The fixed baseline executes 100 turbines, 3 crews, 1095 days, 365 warm-up, seed
 2 within finite worker limits. It proves reproducibility and artifact integrity,
 not AnyLogic numerical equivalence, calibration, uncertainty, or staffing merit.
+
+Gate 1 commands are:
+
+```bash
+uv sync --project mesa_service --extra test --frozen
+uv run --project mesa_service pytest -q
+uv run --project mesa_service python -m mesa_service.run_baseline \
+  --preset wind-turbine-maintenance-demo-v1 \
+  --output-dir outputs/gate1-wind-baseline
+uv run --project mesa_service python -m mesa_service.verify_run \
+  outputs/gate1-wind-baseline
+```
+
+The baseline test runs the full experiment twice. It requires different run IDs
+but identical model/experiment/runtime identities, semantic event digest, KPI
+semantic digest, and summary semantic digest. It also checks all 100 turbines,
+3 crews, 1095 days, 365 warm-up days, seed 2, 1096 rows, complete events, finite
+values, and persistent non-claim labels. Limits fail rather than reduce scope or
+truncate events.
 
 ## Gate 2 project state
 

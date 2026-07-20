@@ -1,0 +1,8 @@
+{
+  "fixture_id": "source-transition-disposition-v1",
+  "source_sha256": "2153fbf23348ece013f7d72bf0064e5d01ac52273bebf560520bb35047734755",
+  "equipment_transition_names": ["Failure", "SCArrivedForRepair", "FinishRepair", "StartReplacement", "FinishReplacement", "FinishMaintenance", "SCArrivedForMtce", "StartRepair", "transition", "MaintenanceDue", "PlannedReplacement", "StartMaintenance"],
+  "crew_transition_names": ["CheckRequestQueue", "Arrived", "Finished", "ArrivedHome", "RequestsWaiting", "NoRequests", "IAmOK", "IAmLaidOff", "CheckIfLaidOff"],
+  "required_deferred": ["equipment:PlannedReplacement", "crew:IAmLaidOff", "crew:CheckIfLaidOff"],
+  "simultaneous_event_rule_disposition": "adapted"
+}
