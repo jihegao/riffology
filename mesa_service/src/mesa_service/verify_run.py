@@ -14,6 +14,7 @@ from typing import Any
 
 from .wind_worker import (
     IDENTITY_FIELDS,
+    V2_IDENTITY_FIELDS,
     MODEL_ID,
     REQUIRED_CLAIM_LABELS,
     REQUIRED_SUCCESS_ARTIFACTS,
@@ -24,7 +25,10 @@ from .wind_worker import (
     canonical_json_bytes,
     sha256_bytes,
     sha256_file,
+    validate_request,
+    validate_request_v2,
 )
+from .canonical_v2 import canonical_json_v2_bytes
 from .wind_contracts import load_json_asset
 
 
@@ -55,8 +59,9 @@ def _finite_json(value: object, context: str) -> None:
 
 
 def _identity(document: dict[str, Any]) -> dict[str, Any]:
+    fields = V2_IDENTITY_FIELDS if "workflow_label" in document else IDENTITY_FIELDS
     try:
-        return {key: document[key] for key in IDENTITY_FIELDS}
+        return {key: document[key] for key in fields}
     except KeyError as exc:
         raise RunVerificationError(f"artifact is missing identity field {exc.args[0]}") from exc
 
@@ -79,13 +84,15 @@ def _daily_semantic_digest(
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 raise RunVerificationError("daily-kpis.csv has no header")
-            expected_columns = {*IDENTITY_FIELDS, *metric_schema["properties"]}
+            identity_fields = tuple(expected)
+            expected_columns = {*identity_fields, *metric_schema["properties"]}
             if len(reader.fieldnames) != len(set(reader.fieldnames)) or set(reader.fieldnames) != expected_columns:
                 raise RunVerificationError("daily KPI columns do not exactly match the metric schema")
             for row in reader:
-                if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", row.get("seed", "")):
+                seed_text = row.get("seed", "")
+                if not isinstance(seed_text, str) or not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", seed_text):
                     raise RunVerificationError("daily-kpis.csv seed identity is not an integer")
-                row_identity = {key: int(row[key]) if key == "seed" else row[key] for key in IDENTITY_FIELDS}
+                row_identity = {key: int(row[key]) if key == "seed" else row[key] for key in identity_fields}
                 if row_identity != expected:
                     raise RunVerificationError("daily-kpis.csv row identity does not match request.json")
                 metric_row = {key: row[key] for key in metric_schema["properties"]}
@@ -99,8 +106,15 @@ def _daily_semantic_digest(
                     raise RunVerificationError(str(exc)) from exc
                 if float(last_metrics["sim_time_days"]) != row_count:
                     raise RunVerificationError("daily KPI sim_time_days is not contiguous from day zero")
-                semantic = {key: value for key, value in row.items() if key not in {"project_id", "run_id"}}
-                digest.update(canonical_json_bytes(semantic))
+                excluded = {"project_id", "run_id"}
+                is_v2 = "workflow_label" in expected
+                if is_v2:
+                    excluded |= {
+                        "brief_revision_id", "alignment_revision_id", "visibility", "trust_label", "workflow_label",
+                        "policy_snapshot_digest", "run_admission_digest",
+                    }
+                semantic = {key: value for key, value in row.items() if key not in excluded}
+                digest.update(canonical_json_v2_bytes(semantic) if is_v2 else canonical_json_bytes(semantic))
                 row_count += 1
     except OSError as exc:
         raise RunVerificationError("daily-kpis.csv is unreadable") from exc
@@ -131,7 +145,8 @@ def _event_semantic_digest(
                 count += 1
                 if event.get("sequence") != count:
                     raise RunVerificationError("domain event sequence is not contiguous from one")
-                digest.update(canonical_json_bytes(_semantic_event_projection(event, profile)))
+                projection = _semantic_event_projection(event, profile)
+                digest.update(canonical_json_v2_bytes(projection) if "workflow_label" in expected else canonical_json_bytes(projection))
     except OSError as exc:
         raise RunVerificationError("domain-events.jsonl is unreadable") from exc
     if count == 0:
@@ -165,11 +180,20 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
         raise RunVerificationError("successful run contains a symlink or non-file artifact")
 
     request = _json(root / "request.json")
+    is_v2 = "experiment_document" in request
+    try:
+        validate_request_v2(request) if is_v2 else validate_request(request)
+    except RuntimeError as exc:
+        raise RunVerificationError(f"request.json contract is invalid: {exc}") from exc
+    if is_v2 and (root / "request.json").read_bytes() != canonical_json_v2_bytes(request):
+        raise RunVerificationError("v2 request.json bytes are not exact riff-canonical-json-v2")
     metadata = _json(root / "metadata.json")
     summary = _json(root / "summary.json")
     replay = _json(root / "replay-manifest.json")
     derived = _json(root / "derived-views-manifest.json")
     expected = _identity(request)
+    if is_v2 and (root / "metadata.json").read_bytes() != canonical_json_v2_bytes(metadata):
+        raise RunVerificationError("v2 metadata.json bytes are not exact riff-canonical-json-v2")
     if expected["model_id"] != MODEL_ID:
         raise RunVerificationError("run does not belong to wind-turbine-maintenance")
     for name, document in (
@@ -190,6 +214,13 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
     profile = metadata.get("runtime_profile")
     if not isinstance(profile, dict) or profile != request.get("runtime_profile"):
         raise RunVerificationError("runtime profile identity is inconsistent")
+    if is_v2:
+        for name, document in (("metadata.json", metadata),):
+            for key in ("experiment_sha256", "run_intent_digest"):
+                if document.get(key) != request.get(key):
+                    raise RunVerificationError(f"{name} does not bind request {key}")
+        if request.get("run_admission", {}).get("policy_snapshot_digest") != request.get("policy_snapshot_digest"):
+            raise RunVerificationError("request admission policy binding is inconsistent")
 
     metric_schema = load_json_asset("metric-schema.json")
     metrics = summary.get("metrics")
@@ -229,7 +260,10 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
             raise RunVerificationError(f"summary {key} is unavailable or non-finite")
         if not math.isclose(float(actual), expected_value, rel_tol=1e-12, abs_tol=1e-9):
             raise RunVerificationError(f"summary {key} does not match source metrics")
-    summary_semantic = sha256_bytes(canonical_json_bytes(_semantic_without_run_context(summary)))
+    summary_projection = _semantic_without_run_context(summary)
+    summary_semantic = sha256_bytes(
+        canonical_json_v2_bytes(summary_projection) if is_v2 else canonical_json_bytes(summary_projection)
+    )
     digests = metadata.get("digests")
     if not isinstance(digests, dict):
         raise RunVerificationError("metadata digest map is unavailable")
@@ -247,6 +281,20 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
     for key, value in expected_digests.items():
         if digests.get(key) != value:
             raise RunVerificationError(f"artifact digest mismatch: {key}")
+    if is_v2:
+        artifact_sha256 = digests.get("artifact_sha256")
+        if not isinstance(artifact_sha256, dict) or set(artifact_sha256) != REQUIRED_SUCCESS_ARTIFACTS:
+            raise RunVerificationError("Gate 2 all-artifact digest map is not exact")
+        expected_artifact_sha256 = {
+            name: sha256_file(root / name) for name in REQUIRED_SUCCESS_ARTIFACTS - {"metadata.json"}
+        }
+        metadata_projection = json.loads(json.dumps(metadata))
+        metadata_projection["digests"]["artifact_sha256"]["metadata.json"] = ""
+        expected_artifact_sha256["metadata.json"] = sha256_bytes(canonical_json_v2_bytes(metadata_projection))
+        if artifact_sha256 != expected_artifact_sha256:
+            raise RunVerificationError("Gate 2 all-artifact byte digest map is invalid")
+        if digests.get("run_log_sha256") != expected_artifact_sha256["run.log"]:
+            raise RunVerificationError("run.log digest is invalid")
     if replay.get("canonical_event_sha256") != event_semantic or replay.get("event_count") != event_count:
         raise RunVerificationError("replay manifest does not bind the complete event log")
     inputs = derived.get("inputs")
@@ -254,6 +302,11 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
         raise RunVerificationError("derived views do not bind the canonical event log")
     if inputs.get("daily_kpis_semantic_sha256") != daily_semantic or inputs.get("summary_semantic_sha256") != summary_semantic:
         raise RunVerificationError("derived views do not bind KPI and summary evidence")
+    if is_v2 and any(
+        inputs.get(key) != expected_digests[key]
+        for key in ("domain_events_sha256", "daily_kpis_sha256", "summary_sha256")
+    ):
+        raise RunVerificationError("derived views do not bind exact source artifact bytes")
     for key in ("model_spec_sha256", "traceability_sha256"):
         value = inputs.get(key)
         if not isinstance(value, str) or len(value) != 64:
@@ -276,6 +329,11 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
     total_size = sum((root / name).stat().st_size for name in REQUIRED_SUCCESS_ARTIFACTS)
     if total_size > limits.get("total_success_artifact_bytes", -1):
         raise RunVerificationError("successful artifact set exceeds its recorded limit")
+    if is_v2:
+        artifact_bytes = metadata.get("artifact_bytes")
+        expected_bytes = {name: (root / name).stat().st_size for name in REQUIRED_SUCCESS_ARTIFACTS}
+        if artifact_bytes != expected_bytes:
+            raise RunVerificationError("Gate 2 all-artifact byte sizes are invalid")
     horizon = request.get("horizon_days")
     if not isinstance(horizon, int) or daily_count != horizon + 1:
         raise RunVerificationError("daily KPI row count does not cover day zero through the horizon")

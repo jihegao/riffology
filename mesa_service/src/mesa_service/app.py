@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -22,6 +22,7 @@ def create_app(
     wind_timeout_seconds: float = 180,
     worker_limit: int = 2,
     worker_delay_seconds: float = 0,
+    owner_lease_seconds: float = 10.0,
 ) -> FastAPI:
     root = Path(workspace_root or os.environ.get("WORKSPACE_ROOT", ".riff-workspace"))
     service = MesaService(
@@ -30,6 +31,7 @@ def create_app(
         wind_timeout_seconds=wind_timeout_seconds,
         worker_limit=worker_limit,
         worker_delay_seconds=worker_delay_seconds,
+        owner_lease_seconds=owner_lease_seconds,
     )
 
     @asynccontextmanager
@@ -79,6 +81,10 @@ def create_app(
     async def load_wind_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return service.load_wind_model(project_id, payload)
 
+    @app.put("/v2/projects/{project_id}/models/wind-turbine-maintenance")
+    async def load_wind_model_v2(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return service.load_wind_model_v2(project_id, payload)
+
     @app.get("/v1/projects/{project_id}/models/active")
     async def get_active_wind_model(project_id: str) -> dict[str, Any]:
         return service.get_active_wind_model(project_id)
@@ -87,13 +93,41 @@ def create_app(
     async def start_run(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return service.start_run(project_id, payload)
 
+    @app.post("/v2/projects/{project_id}/runs", status_code=202)
+    async def start_wind_run_v2(
+        project_id: str,
+        payload: dict[str, Any],
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        run_id: str = Header(alias="X-Riff-Run-Id"),
+        request_digest: str = Header(alias="X-Riff-Request-Digest"),
+    ) -> dict[str, Any]:
+        return service.start_wind_run_v2(
+            project_id,
+            payload,
+            downstream_key=idempotency_key,
+            run_id=run_id,
+            downstream_digest=request_digest,
+        )
+
     @app.get("/v1/projects/{project_id}/runs/{run_id}")
     async def get_run(project_id: str, run_id: str) -> dict[str, Any]:
         return service.get_run(project_id, run_id)
 
+    @app.get("/v2/projects/{project_id}/runs/{run_id}")
+    async def get_wind_run_v2(project_id: str, run_id: str) -> dict[str, Any]:
+        return service.get_run(project_id, run_id)
+
+    @app.get("/v2/projects/{project_id}/run-receipts/{downstream_key}")
+    async def get_wind_run_receipt_v2(project_id: str, downstream_key: str) -> dict[str, Any]:
+        return service.get_wind_run_receipt_v2(project_id, downstream_key)
+
     @app.post("/v1/projects/{project_id}/runs/{run_id}/cancel", status_code=202)
     async def cancel_run(project_id: str, run_id: str) -> dict[str, Any]:
         return service.cancel_run(project_id, run_id)
+
+    @app.post("/v2/projects/{project_id}/runs/{run_id}/cancel", status_code=202)
+    async def cancel_wind_run_v2(project_id: str, run_id: str) -> dict[str, Any]:
+        return service.cancel_wind_run_v2(project_id, run_id)
 
     @app.get("/v1/projects/{project_id}/runs/{run_id}/results")
     async def get_results(project_id: str, run_id: str) -> dict[str, Any]:
