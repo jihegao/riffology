@@ -1,12 +1,18 @@
 # Product positioning and roadmap: business-aligned simulation agents
 
+## Gate 0 status
+
+The wind-turbine Phase 1 direction and Gates 1-4 below are approved target
+contracts, not proof that the current queue-bound runtime implements them. The
+current/target cutover is explicit in the delivery phases.
+
 ## Product positioning
 
 Riff is an AI-native simulation Agent work platform for business decisions. It
 helps people turn goals, constraints, operational knowledge, data, and uncertain
 assumptions into executable simulation experiments, then iterate on those
-experiments through computational analysis until the human and the Agent agree on
-what question is being tested and what the results mean.
+experiments through computational analysis until the question, mappings,
+reviews, objections, and result interpretation are explicit and inspectable.
 
 Riff is not primarily a Mesa code generator. Model code is one replaceable
 implementation artifact inside a larger alignment loop:
@@ -37,9 +43,10 @@ product outcomes.
    endangering the host, another project, credentials, data, or service
    availability. Runs must remain attributable and reproducible.
 2. **Business alignment is the core product value.** Riff must help a human and
-   an Agent quickly turn an incomplete business request into a confirmed model,
-   scenario set, and experiment definition. Important assumptions and inferred
-   requirements must be explicit rather than hidden in generated code or chat.
+   an Agent quickly turn an incomplete business request into a structured,
+   inspectable model, scenario set, and experiment definition. Important
+   assumptions and inferred requirements must be explicit rather than hidden in
+   generated code or chat.
 3. **Decision trust is an outcome gate.** Evidence determines whether findings
    from an exact revision are suitable for a named claim, dataset, scenario, and
    operating range. Trust is progressive and scoped; it is not a universal model
@@ -55,8 +62,8 @@ business question.
   model structure, but it must first expose the decision goal, constraints,
   metrics, assumptions, missing information, and non-goals it inferred.
 - **Shared structured state precedes chat memory.** Important requirements,
-  mappings, scenarios, findings, and approvals must exist as project artifacts,
-  not only as prose in a conversation transcript.
+  mappings, scenarios, findings, issues, and attestations must exist as project
+  artifacts, not only as prose in a conversation transcript.
 - **Agent changes are proposals.** A material change to a requirement,
   assumption, model rule, scenario, metric, or conclusion must show its impact
   and be accepted, rejected, or revised by a human before it silently becomes
@@ -74,12 +81,13 @@ business question.
 ## Core alignment artifacts
 
 The exact schemas will evolve, but the platform should converge on revisioned,
-machine-readable artifacts with explicit provenance and human confirmation.
+machine-readable artifacts with explicit provenance, issues, and scoped review
+records.
 
 | Artifact | Purpose |
 | --- | --- |
 | Decision brief | Decision to be made, goals, constraints, non-goals, stakeholders, time horizon, and unresolved questions. |
-| Requirement and assumption map | Business statements, source provenance, Agent inferences, confirmation state, and links to model elements. |
+| Requirement and assumption map | Business statements, source provenance, Agent inferences, issue/attestation references, and links to model elements. |
 | Model specification | Entities, state, rules, events, inputs, outputs, units, and declared simplifications. |
 | Scenario pack | Baseline, alternatives, shocks, controllable decisions, operating ranges, and comparison intent. |
 | Experiment plan | Seeds, sweeps, replications, stopping rules, metrics, and computational analysis to perform. |
@@ -94,6 +102,8 @@ projects/<project-id>/
     decision-brief.json
     requirement-map.json
     decisions/
+  issues/
+  attestations/
   scenarios/
   experiments/
   findings/
@@ -109,16 +119,17 @@ does not change.
 
 ## Product success measures
 
-The initial north-star metric is **Time to Aligned Experiment**: elapsed time from
-a user's business request to human confirmation of a structured, executable
-experiment definition.
+The initial north-star metric is **Time to Aligned Experiment**: elapsed time
+from a user's business request until a structured, executable experiment
+definition satisfies the workspace's explicit endorsement-and-issue policy.
+This is a workflow measure, not a correctness or trust measure.
 
 Supporting measures include:
 
 - percentage of important requirements mapped to model elements, scenarios, and
   metrics;
-- number of unresolved critical assumptions at experiment confirmation;
-- clarification turns required before the first confirmed experiment;
+- number of unresolved critical assumptions when the workflow policy is met;
+- clarification turns required before the first policy-qualified experiment;
 - time from a changed business requirement to updated comparative findings;
 - percentage of Agent-inferred material assumptions explicitly accepted or
   corrected by a human;
@@ -133,8 +144,8 @@ experiment addresses the wrong business question.
 
 - Every run identifies a server-owned `modelId` and an immutable model revision.
   Immutability supplies identity and lineage; it is not by itself a trust gate.
-- Every new revision starts as `draft_unverified`. Evidence is attached to the
-  exact revision that produced it, never to a mutable model name.
+- Every new model revision starts as `draft_unverified`. Evidence is attached
+  to the exact model revision that produced it, never to a mutable model name.
 - Generated model code never runs inside the Mesa API process. Draft execution
   requires an OS/container sandbox with no ambient credentials, no unrestricted
   host filesystem, no network by default, and finite CPU, memory, output, and
@@ -142,9 +153,10 @@ experiment addresses the wrong business question.
 - The platform, not model-generated text or visualization, owns run status and
   artifact identity. Requests, seeds, manifests, logs, raw series, summaries, and
   computational analyses remain auditable.
-- Material business requirements and assumptions carry provenance and a
-  confirmation state. The Agent must not present an inferred requirement as a
-  user-approved fact.
+- Material business requirements and assumptions carry provenance and exact
+  artifact revisions. Human attestations, Agent reviews, issue status, and
+  validation evidence remain separate; the Agent must not present an inference,
+  endorsement count, or absence of issues as proof of correctness.
 - A finding must identify the exact model revision, scenarios, experiments, and
   artifacts that support it. Generated prose cannot silently upgrade either
   alignment or trust.
@@ -156,8 +168,9 @@ experiment addresses the wrong business question.
 
 ## Model package contract
 
-The current bundled queue example becomes the first instance of a generic model
-package rather than a permanent special case:
+The Phase 1 `wind-turbine-maintenance` model is initially a reviewed bundled
+case. Phase 3 extracts it behind the generic model-package contract rather than
+promoting the legacy queue example:
 
 ```text
 models/<model-id>/revisions/<revision-id>/
@@ -174,31 +187,39 @@ models/<model-id>/revisions/<revision-id>/
     properties/
 ```
 
-The model specification is the preferred source for generating class, process,
-swimlane, and data-flow diagrams. When a model begins as code, Riff derives a
-specification and diagrams, then records unresolved differences as findings
-rather than presenting the diagrams as authoritative.
+The model code exports stable entity, state, transition, rule, parameter,
+metric, and event IDs into the model specification. Class/state diagrams are
+generated from that export, process/swimlane views from server-owned domain
+events, and business traceability views from the requirement map. A code/spec
+or mapping/view drift is a failing contract test, not an unresolved cosmetic
+finding.
 
 `traceability.json` should eventually connect both directions: from business
 requirements and assumptions into model rules, and from model rules through
 parameters, tests, metrics, scenarios, and findings.
 
-## Alignment lifecycle
+## Alignment review and workflow policy
 
-Alignment state is separate from model trust. A safe, runnable revision may still
-be misaligned with the user's intended decision.
+Alignment artifacts have immutable revisions; human agreement is not stored as
+a qualitative `confirmed` truth state. An attestation records an actor, actor
+type, exact artifact revision, scope, `endorse | object | abstain` decision,
+rationale, timestamp, and supersession link. Internal issues bind objections or
+questions to exact revisions and retain their blocking flag, status, discussion,
+and resolution.
 
-| State | Meaning |
-| --- | --- |
-| `captured` | Initial business request and source material have been recorded. |
-| `clarifying` | Critical goals, constraints, data mappings, or assumptions remain unresolved. |
-| `proposed` | The Agent has proposed a model and experiment interpretation for review. |
-| `confirmed` | A human has accepted the decision brief and experiment definition for the current scope. |
-| `reopened` | A requirement, assumption, result, or decision change requires renewed alignment. |
+The Phase 1 default progression policy is derived:
 
-Confirmation is scoped to the current brief, model revision, and experiment plan.
-It is not proof that the model is scientifically valid or that its findings are
-suitable for a consequential decision.
+```text
+human project-owner endorsements >= 1
+AND open blocking issues == 0
+```
+
+Zero open issues means only that no unresolved objection has been recorded. An
+Agent review does not count as a human endorsement. Meeting the policy permits
+workflow progression but does not change model trust. Private drafts may run
+before it is met; after an experiment revision meets it, a new run is required
+for results associated with that reviewed experiment. Older draft results are
+never upgraded in place.
 
 ## Trust lifecycle
 
@@ -236,28 +257,34 @@ specific evidence classes to pass.
 
 ## Delivery phases
 
-### Phase 0 — bounded executable demo (current)
+### Phase 0 — bounded executable demo (legacy implementation)
 
-Keep `queue-network-v1` as the implemented end-to-end fixture. Preserve the
-current upload, parameter, seeded run, artifact, timeout, result, OpenCode, and
-visible-browser acceptance contracts. This phase proves platform wiring and
-reproducibility, not business alignment, domain validity, or general model
-creation.
+`queue-network-v1` proved the upload, seeded run, artifact, timeout, result,
+OpenCode, and visible-browser wiring. It is not retained as a regression
+fixture, fallback, or future generic package. The current code remains runnable
+only until Gate 4 replaces the path and then removes all queue source, schemas,
+tests, tools, prompts, documentation, E2E coverage, and precisely identified
+local artifacts. Git history is retained.
 
-### Phase 1 — business alignment loop
+### Phase 1 — wind-turbine business alignment loop
 
-- Add a revisioned decision brief containing the decision goal, constraints,
-  metrics, assumptions, non-goals, source provenance, and unresolved questions.
-- Let the Agent extract and propose business requirements from conversation and
-  uploaded material without silently marking inferences as confirmed.
-- Map confirmed requirements and assumptions to the bundled model's parameters,
-  rules, scenarios, and metrics.
-- Show proposed changes and their impact before applying them to authoritative
-  project state.
+- Independently reproduce the selected AnyLogic Field Service mechanisms as the
+  reviewed bundled `wind-turbine-maintenance` Mesa case.
+- Add revisioned decision briefs, requirement/assumption maps, experiment
+  definitions, internal issues, human attestations, and separate Agent reviews.
+- Let the Agent propose business requirements without silently treating an
+  inference, endorsement, or lack of objections as validation.
+- Map artifact revisions to the model's parameters, rules, scenario, metrics,
+  generated diagrams, run events, and evidence.
+- Allow safe private draft runs before the workflow policy is met; preserve
+  their unreviewed and unverified labels.
 
-**Exit gate:** starting from a business description, a user can review and confirm
-an inspectable experiment definition and explain how its parameters, scenarios,
-and metrics correspond to the intended decision.
+**Exit gate:** starting from an onshore wind-farm staffing description, a user
+can inspect and revise the brief and assumptions, resolve a blocking issue,
+record one project-owner endorsement, inspect the generated views, and execute
+the reviewed 100-turbine, 3-crew, seed-2 baseline. The single-seed synthetic run
+does not recommend a crew count. See
+[`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md).
 
 ### Phase 2 — scenario and computational analysis loop
 
@@ -267,27 +294,28 @@ and metrics correspond to the intended decision.
   and traceability to exact runs.
 - Let the Agent recommend the next experiment and show which requirements,
   assumptions, scenarios, and prior findings would be affected by a change.
-- Reopen alignment when a material result or business change invalidates the
-  confirmed experiment definition.
+- Create a new artifact revision and reevaluate issues/attestations when a
+  material result or business change invalidates the policy-qualified experiment
+  definition.
 
 **Exit gate:** a user can change a business assumption, compare alternatives, and
 receive updated computational findings in one continuous human-Agent workflow.
 
 ### Phase 3 — generic model packages and lineage
 
-- Move queue model constants, schemas, metrics, import logic, and visualization
-  metadata behind the model-package contract.
+- Move the reviewed wind-turbine model constants, schemas, metrics, import
+  logic, and visualization metadata behind the model-package contract.
 - Add model/revision records, provenance, hashes, alignment references, and
   `trustState` to project state and run manifests.
-- Generate design views and traceability from `model-spec.json` and the confirmed
-  requirement map.
+- Generate design views and traceability from `model-spec.json` and the exact
+  reviewed requirement-map revision.
 - Add a second structurally different reviewed model without changing the
   generic runner, backend state machine, alignment workflow, or workbench
   controls.
 
 **Exit gate:** two different business problem structures use the same alignment,
 model, experiment, and run contracts, and every finding resolves to one immutable
-package revision and one confirmed experiment definition.
+package revision and one policy-qualified experiment definition.
 
 ### Phase 4 — creator sandbox and draft execution
 
@@ -310,7 +338,7 @@ and artifact isolation.
 - Allow users to construct and run their own validation suites.
 - Support reproducible evidence export and independent replay.
 
-**Exit gate:** a user can explain how the model represents the confirmed business
+**Exit gate:** a user can explain how the model represents the reviewed business
 brief, trace each important rule to implementation and tests, reproduce every
 evidence run, and promote a revision to `self_tested` without administrator
 intervention.
@@ -345,25 +373,30 @@ universal approval badge.
 
 ## API direction
 
-Future contracts should express the alignment, execution, and trust lifecycle
-instead of widening the current `select_and_load_model` allowlist in place:
+Future browser/backend contracts should use the `/api` namespace to express the
+alignment, execution, and trust lifecycle instead of widening the current
+`select_and_load_model` allowlist in place. Mesa's internal backend-only
+execution API keeps its separate `/v1` namespace:
 
 ```text
-POST /v1/projects/{projectId}/brief                  create or revise a decision brief
-POST /v1/projects/{projectId}/alignment/proposals    propose requirement or mapping changes
-POST /v1/projects/{projectId}/alignment/confirm      confirm an experiment definition
-POST /v1/projects/{projectId}/scenarios              create a scenario pack
-POST /v1/projects/{projectId}/experiments            define and execute an experiment plan
-GET  /v1/projects/{projectId}/findings               inspect artifact-backed findings
-POST /v1/models                                      create a draft model identity
-POST /v1/models/{modelId}/revisions                  create an immutable candidate revision
-POST /v1/projects/{projectId}/model                  select an accessible revision
-POST /v1/projects/{projectId}/runs                   run it under sandbox policy
-POST /v1/revisions/{revisionId}/suites               define or import validation evidence
-POST /v1/revisions/{revisionId}/reviews              request agent or expert review
-GET  /v1/revisions/{revisionId}/evidence
+POST /api/projects/{projectId}/brief/revisions          create an immutable brief revision
+POST /api/projects/{projectId}/alignment/revisions      create an immutable mapping revision
+POST /api/projects/{projectId}/issues                   record a scoped issue
+PATCH /api/projects/{projectId}/issues/{issueId}        resolve or revise an issue
+POST /api/projects/{projectId}/attestations             record a scoped review decision
+POST /api/projects/{projectId}/scenarios                create a scenario pack
+POST /api/projects/{projectId}/experiments/revisions    define an experiment revision
+POST /api/projects/{projectId}/runs                     run an exact experiment revision
+GET  /api/projects/{projectId}/findings                 inspect artifact-backed findings
+POST /api/models                                        create a draft model identity
+POST /api/models/{modelId}/revisions                    create an immutable candidate revision
+POST /api/projects/{projectId}/model                    select an accessible revision
+POST /api/revisions/{revisionId}/suites                 define or import validation evidence
+POST /api/revisions/{revisionId}/reviews                request agent or expert review
+GET  /api/revisions/{revisionId}/evidence
 ```
 
-The existing MVP APIs and `queue-network-v1` restrictions remain authoritative
-until each phase changes the implementation, tests, and active contracts
-together.
+The existing queue-bound APIs remain current implementation facts until Gates
+1–4 change implementation, tests, and active contracts together. They are not
+the approved future boundary and are deleted at Gate 4 rather than widened or
+kept as a fallback.

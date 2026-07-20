@@ -1,92 +1,126 @@
-# Test plan
+# Wind-turbine delivery test plan
 
-## Critical end-to-end scenario
+## Status
 
-1. A user uploads a supported input file through the left pane.
-2. The assistant receives attachment metadata and loads the approved Mesa model.
-3. The right pane presents the model parameters.
-4. A parameter is changed and an experiment is started.
-5. The page reaches a terminal success state and renders metrics plus a time series.
-6. The assistant reads the run artifacts and returns a result summary for that run.
+This Gate 0 plan defines acceptance for Gates 1-4. It does not claim those tests
+or features exist in the current queue-bound implementation.
 
-The browser consumes only the canonical backend event names
-`project.snapshot`, `project.patch`, `conversation.delta`, `agent.status`, and
-`connection.status`. It never calls Mesa directly. A Mesa `timed_out` result is
-a distinct terminal timeout UX: it has no success metrics, does not query the
-successful-results endpoint, and remains distinguishable from `failed` and
-`cancelled`.
+## Gate 0 document checks
 
-## Requirements-to-tests traceability
+- Source path, size, SHA-256, plugin/internal format versions, exclusions, and
+  claim boundary match the local AnyLogic source.
+- Links resolve and all target docs carry a Gate 0 status boundary.
+- Source defaults and Riff synthetic defaults are separate.
+- Terminology scan finds no qualitative human-approval truth state.
+- `queue-network-v1` remains labelled current legacy implementation only, with
+  complete Gate 4 retirement specified.
 
-| Requirement | Primary tests | Evidence / release gate |
-| --- | --- | --- |
-| R1: Attachment is safely accepted/rejected and only metadata is handed to the agent. | Upload unit tests; backend upload integration; UI supported/unsupported fixture test. | Implementation gate: test output and redaction assertions. |
-| R2: Agent readiness is public but credentials/session authority stay server-side. | Bridge startup/config tests; UI `ready`/`unconfigured`/`error` state test. | Implementation gate: no secret/session ID in serialized browser state. |
-| R3: Only the bundled `queue-network-v1` model and documented parameter schema can be selected. | Mesa schema/model-load unit tests; bridge tool-policy test; UI schema-driven form test. | Implementation gate: rejected arbitrary model/code cases. |
-| R4: A valid seeded run is isolated, reproducible, and renders artifact-backed results. | Mesa fixed-seed smoke test; API run/results integration; real-service Playwright E2E. | Integration gate: retained run ID, metrics, series, and screenshot. |
-| R5: `failed`, `cancelled`, and `timed_out` are safe terminal states. | Mesa lifecycle/API tests; UI terminal-state tests. | Integration gate: timeout evidence with no success result retrieval. |
-| R6: The browser follows ordered authoritative state. | Reducer/SSE duplicate, reorder, and revision-gap tests; UI reconnect test. | Implementation gate: canonical event-name assertion and snapshot recovery. |
-| R7: Playwright is a visible projection; a projection failure is visible but cannot roll back domain state. | Bridge ordering test; UI `uiControl.failed` warning test; visible-tab Playwright test. | Integration gate: warning plus manual continuation proof. |
-| R8: The local OpenCode integration starts with an approved configured provider/model and performs a bounded allowed action. | Live startup/provider/model check and bounded chat/tool-call smoke below. | Live-integrated completion gate; skipped only when no key is available, which blocks this gate. |
-| R9: The demo is visually usable at the target desktop viewport. | Playwright viewport assertion and screenshot review at 1440 x 900. | Independent-review gate: screenshot/video reviewed. |
+## Gate 1 model and evidence
 
-## Required test layers
+The three-turbine deterministic micro-case is the hand-checkable oracle for
+event order, queue selection, travel, state duration, availability, overdue
+maintenance, crew occupancy, and cost.
 
-### Unit and component
+Unit/property tests cover:
 
-- Public backend reducers, validation, redaction, and command acknowledgement
-  behavior.
-- Mesa model/schema/artifact/lifecycle tests, including fixed-seed smoke
-  reproducibility.
-- Frontend rendering, form validation, canonical event reducer, terminal
-  timeout UI, and `uiControl` warning/manual-continuation tests.
+- five mutually exclusive turbine states and crew state exclusivity;
+- turbine and crew count conservation;
+- one active work order per turbine/type and one turbine per crew;
+- corrective priority and FIFO within both queues;
+- failure superseding pending planned maintenance;
+- corrective completion continuing overdue maintenance on the same crew;
+- failure time sampled on entry to operating, not daily hazard recomputation;
+- probability-driven major replacement, age replacement disabled, and reset of
+  maintenance/age clocks after replacement;
+- non-negative finite times, waits, costs, counts, and metric denominators;
+- simultaneous failure/maintenance due and completion/new-request deterministic
+  tie-breaks;
+- exact event-interval KPI integration and warm-up exclusion;
+- same model/experiment/seed canonical event digest stability.
 
-### API and service integration
+Contract tests fail when code IDs, `model-spec.json`, parameter/metric schema,
+source transition dispositions, traceability, visualization metadata, or
+derived-view digests drift. Run request, metadata, events, metrics, summary,
+replay, and views must share one exact identity set.
 
-- Upload, approved model load, parameter save, run start, polling, cancellation,
-  timeout, and successful result retrieval through the demo backend contract.
-- Assert the browser-facing backend, not the browser, is the only component
-  calling Mesa.
-- Assert a timeout does not fetch or render success artifacts.
+The fixed baseline executes 100 turbines, 3 crews, 1095 days, 365 warm-up, seed
+2 within finite worker limits. It proves reproducibility and artifact integrity,
+not AnyLogic numerical equivalence, calibration, uncertainty, or staffing merit.
 
-### Browser end-to-end
+## Gate 2 project state
 
-- Run the critical scenario against the real Mesa worker with the fixed seeded
-  fixture.
-- Use the named ARIA/test-id selectors in `ui-workflow.md`; attach to the same
-  visible local workbench tab when exercising agent-driven Playwright control.
-- Assert the assistant summary, rendered result values, and run ID agree with
-  backend artifacts; retain screenshot/video evidence at 1440 x 900.
+Backend contract tests cover:
 
-## Mandatory live OpenCode check
+- durable project reopening and process-restart recovery;
+- atomic snapshot writes and recovery from incomplete temporary writes;
+- distinct snapshot/brief/alignment/model/experiment/run identities;
+- immutable parameter-edit and reset experiment revisions with correct diff;
+- stale-revision rejection and idempotent command retry;
+- revision-scoped issues, append-only discussion/resolution, and required close
+  reason;
+- immutable/superseding attestations and one effective human endorsement per
+  actor/revision;
+- Agent reviews excluded from the human count;
+- zero issues rendered as no recorded objection, not correctness;
+- private draft admission while policy is unmet and no later in-place upgrade;
+- bounded snapshot/SSE projections and paged event/artifact access;
+- traversal, symlink, cross-project ID, extra-key, non-finite, and redaction
+  failures closed.
 
-When a local API key is available, the integration suite must run the following
-bounded live check against the installed local OpenCode server before claiming
-live-integrated completion:
+## Gate 3 UI and generated views
 
-1. Start or health-check the loopback OpenCode server and record its version.
-2. List configured providers/models; assert the configured `OPENCODE_MODEL` is
-   present, approved, and usable. Do not infer a provider/model ID from a
-   display name.
-3. Create a disposable project/session and send one tightly scoped prompt that
-   can use at most one approved tool (for example select/load the bundled
-   `queue-network-v1` model). Apply a finite prompt timeout and verify the
-   emitted browser-facing events are canonical and redacted.
-4. Assert no arbitrary shell, network, filesystem, Mesa-direct, or unrestricted
-   browser tool was exposed; clean up the disposable project/session.
+Component and browser tests verify:
 
-If the required API key is absent, this check may be recorded as
-`skipped: missing local API key`. That is an acceptable local test skip, but it
-blocks the **live-integrated completion** gate: fixture/fake-agent results must
-not be presented as proof that the selected DeepSeek-compatible OpenCode model
-works end to end.
+- two-pane desktop and accessible narrow layout;
+- schema-driven parameter default/current/diff/reset flow;
+- separate alignment and experiment review cards;
+- blocking issue open/resolve and human endorsement count effects;
+- safe draft run remains available while policy is false;
+- entity/state view from model spec, swimlane/replay from events, and
+  traceability from requirement mapping;
+- 2D depot/turbine/crew/queue/KPI projection for 100 turbines;
+- accessible tables/text for every chart and diagram;
+- persistent synthetic/single-seed/behavioural/no-recommendation labels;
+- real backend state, not DOM or assistant text, controls readiness and success.
 
-## Release gates
+## Gate 4 live integration
 
-| Gate | Required decision and evidence | Owner / independence |
-| --- | --- | --- |
-| Design | `architecture.md`, Mesa, bridge, UI, and this test plan agree on the bounded model, state/event names, timeout behavior, and evidence. Open interface conflicts are resolved before code. | Design owners; main controller records approval. |
-| Implementation | Scoped code is implemented with passing unit/component tests for every traceability row that does not require a running integration. Public contracts and selector names are covered. | Component implementers; no self-waiver for a failed contract test. |
-| Integration | Backend, Mesa, UI, and visible-page Playwright scenario pass together; fixed-seed artifact/result identity and timeout/control-warning behavior are retained. Run the live OpenCode check when a key exists. | Integration owner, with evidence attached. |
-| Independent review | A reviewer other than the implementer examines diffs, test evidence, redaction/authority boundaries, and the desktop visual result; findings are resolved or explicitly accepted by the controller. | Independent reviewer. |
-| Live-integrated completion | All integration evidence plus the mandatory live OpenCode startup/provider/model and bounded chat/tool smoke pass. If the key is absent, this gate remains blocked rather than passed. | Main controller records the final state. |
+The release E2E uses the configured local OpenCode provider/model, not fixture
+mode. It performs the complete story: natural-language brief; typed proposal;
+parameter edit and reset; blocking issue; resolution plus project-owner
+endorsement; generated views; 100/3/seed-2 baseline; identity-consistent results
+and non-claim labels. Provider/model health is checked first and unavailable
+configuration fails closed.
+
+Deterministic fixtures remain component-test tools only. A screenshot without
+domain-state assertions is insufficient. The test checks persisted project and
+run artifacts after the browser flow and after a backend restart.
+
+## Queue retirement audit
+
+After replacement E2E passes, Gate 4 scans tracked source, schemas, prompts,
+tools, tests, docs, builds, and browser fixtures for queue model IDs, class
+names, parameter names, and metric fingerprints; expected current-tree hits are
+zero.
+
+Ignored workspace deletion is manifest driven:
+
+1. stop only exact verified target service PIDs;
+2. build the old model-revision set from manifests whose `model_id` is exactly
+   `queue-network-v1`;
+3. remove only those revision directories;
+4. remove run directories only when `request.model_revision` is in that set;
+5. remove active pointers that name a removed revision;
+6. preserve project roots, inputs, ambiguous/unknown artifacts, and unrelated
+   work;
+7. report exact removed targets and verify active/manifest/request hits are
+   zero.
+
+This deletion is irreversible in the local workspace; Git history remains.
+
+## Independent review
+
+Each gate receives an independent contract/diff review. Blocking findings are
+resolved before closure. Review checks for scope creep, identity drift,
+non-reproducible randomness, evidence loss, unsafe provider fallback,
+qualitative approval/trust conflation, and unsupported claims.

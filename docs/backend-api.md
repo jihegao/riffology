@@ -1,151 +1,194 @@
-# Demo backend public API contract
+# Durable project and backend API target
 
-## Scope and identifiers
+## Status
 
-This is the only browser-facing API for the local demo. The browser never calls
-OpenCode or Mesa directly. The backend maps a browser-safe `sessionId` to its
-server-side project record, Mesa project ID, and (when configured) opaque
-OpenCode session ID. The last of those is never present in this API's JSON,
-headers, URLs, logs, snapshots, or SSE events.
+This Gate 0 contract describes the Gate 2 target. The current backend remains a
+queue-bound, in-memory Phase 0 implementation; these routes and records are not
+yet available.
 
-`sessionId` is a server-generated URL-safe local browser-session identifier. It
-is not a filesystem path, authentication credential, Mesa revision, run ID, or
-OpenCode session ID. The local shell establishes it before rendering; session
-creation is outside the MVP workflow contract below.
+The backend is the only browser-facing authority. It owns durable project
+identity, project snapshots, business artifacts, issue/attestation records,
+experiment revisions, command idempotency, OpenCode adaptation, and Mesa
+orchestration. The browser never supplies workspace paths, Mesa project IDs, or
+OpenCode session IDs.
 
-All state objects and event names follow `ui-workflow.md`. The backend must not
-invent parallel public event names for OpenCode or Mesa internals.
+## Identity and mutation envelope
 
-## Command envelope and acknowledgements
+`projectId` is durable. `sessionId` is a temporary browser/OpenCode control
+connection. Reopening a project or restarting the backend preserves project and
+revision identities.
 
-Every browser mutation uses this envelope. The backend checks that `sessionId`
-matches the route, the local browser session, and the current project record;
-it rejects a stale `baseRevision` rather than applying it to a changed model or
-run.
+Every browser mutation includes:
 
 ```ts
-type UiCommand<T> = {
-  commandId: string;       // client UUID for idempotent retry
+type ProjectCommand<T> = {
+  commandId: string;
+  projectId: string;
   sessionId: string;
-  baseRevision: number;
+  baseSnapshotRevision: number;
   payload: T;
 };
+```
 
-type CommandAccepted = { accepted: true; commandId: string };
-type CommandRejected = {
-  accepted: false;
-  commandId?: string;
-  error: { code: string; message: string; details?: Record<string, unknown> };
+`commandId` is idempotent. A stale `baseSnapshotRevision` returns `409`; schema
+failure returns `422`; unknown or cross-project identities return `404`; unsafe
+payload size returns `413`/`429`. Accepted commands publish later authoritative
+snapshot/patch events. A `202` acknowledgement is not itself state.
+
+## Browser-safe project projection
+
+The canonical projection contains bounded data and references:
+
+```ts
+type ProjectState = {
+  projectId: string;
+  snapshotRevision: number;
+  phase: string;
+  actors: DeclaredLocalActor[];
+  attachments: Attachment[];
+  conversation: Message[];
+  current: {
+    decisionBriefRevisionId?: string;
+    alignmentMapRevisionId?: string;
+    modelRevisionId?: string;
+    experimentRevisionId?: string;
+    runId?: string;
+  };
+  model?: ModelProjection;
+  experiment?: ExperimentProjection;
+  workflow: WorkflowProjection;
+  issues: IssueSummary[];
+  attestations: AttestationSummary[];
+  run?: RunSummary;
+  artifacts: ArtifactReference[];
 };
 ```
 
-An accepted command is not a state update. The browser renders the following
-`project.snapshot` or ordered `project.patch`; this prevents a command response
-from racing an agent, Mesa, or another page update. Repeating the same
-`commandId` returns the original acknowledgement and does not create a second
-upload, prompt, parameter save, or run.
+Full domain events, raw model files, complete histories, absolute paths, provider
+credentials, and stack traces are excluded. SSE sends a snapshot first and then
+ordered RFC-6902-style patches. Gaps trigger snapshot reload.
 
-`422` denotes a schema/validation failure, `409` a stale revision or incompatible
-current state, `413` an oversized upload, and `429` a local rate limit. Errors
-are user-safe and must not include keys, absolute paths, raw tool input, or a
-stack trace.
+## Immutable business and experiment revisions
 
-## Browser routes
+The API distinguishes snapshot, brief, alignment, model, experiment, and run
+identities exactly as defined in [`architecture.md`](architecture.md). Creating
+an experiment revision normalizes all values, stores the selected defaults
+preset, default/current diff, horizon, warm-up, seed, and bound upstream
+revisions. Reset is an explicit mutation that copies active defaults into a new
+draft; it never erases history.
 
-| Method and route | Body | Adapter responsibility | Success |
-| --- | --- | --- | --- |
-| `GET /api/sessions/{sessionId}/snapshot` | — | Returns the canonical browser-safe `ProjectState` at its current revision. | `200 ProjectState` |
-| `GET /api/sessions/{sessionId}/events` | SSE | Opens the canonical SSE stream below; authenticates the local browser session and sends a snapshot first. | `200 text/event-stream` |
-| `POST /api/sessions/{sessionId}/uploads` | multipart `envelope` plus one `file` | Validates and persists an allowed attachment, then updates `ProjectState.attachments`. | `202 CommandAccepted` |
-| `DELETE /api/sessions/{sessionId}/attachments/{attachmentId}` | `UiCommand<{attachmentId: string}>` | Removes one unreferenced attachment and its stored input after route/payload/session/revision validation. | `202 CommandAccepted` |
-| `POST /api/sessions/{sessionId}/chat` | `UiCommand<{text: string; attachmentIds: string[]}>` | Creates/reuses the server-side OpenCode session, submits a bounded prompt, and maps its events/actions into state. | `202 CommandAccepted` |
-| `PUT /api/sessions/{sessionId}/parameters` | `UiCommand<{modelId: string; values: Record<string, string \| number \| boolean>}>` | Validates against the active Mesa schema and saves canonical parameter values in backend state. It does not call an undocumented Mesa parameter endpoint. | `202 CommandAccepted` |
-| `POST /api/sessions/{sessionId}/runs` | `UiCommand<{modelId: string; parameters?: Record<string, string \| number \| boolean>; steps?: number; seeds?: number[]}>` | Validates the active model/state, constructs the Mesa run request from trusted state, and starts one run. | `202 CommandAccepted` |
-| `POST /api/sessions/{sessionId}/runs/{runId}/cancel` | `UiCommand<Record<string, never>>` | Checks that `runId` belongs to the current project and forwards cancellation to Mesa. | `202 CommandAccepted` |
+The run route accepts only an `experimentRevisionId`. It does not accept an
+execution label, arbitrary parameters, steps, or seed overrides. The backend
+records a complete identity and policy snapshot, then derives
+`workflow_policy_met | workflow_policy_unmet`; callers cannot choose or
+promote that label.
 
-For upload, `envelope` is a UTF-8 JSON `UiCommand<{clientFileName: string}>`
-multipart field; the file bytes are the separate `file` part. The server derives
-the effective name and media type and does not trust either client-supplied
-value. CSV (`text/csv`), JSON (`application/json`), and plain text (`text/plain`)
-are the only supported uploads. Each file is at most 1 MiB. A successful upload
-is stored under the common Mesa workspace layout:
+## Issues and attestations
 
-```text
-WORKSPACE_ROOT/projects/<project-id>/inputs/<upload-id>-<safe-original-name>
+An issue binds to exact subjects and revisions:
+
+```ts
+type Issue = {
+  issueId: string;
+  subjectRevisionIds: string[];
+  title: string;
+  body: string;
+  severity: "info" | "warning" | "critical";
+  blocking: boolean;
+  status: "open" | "resolved" | "closed";
+  reporterActorId: string;
+  assigneeActorId?: string;
+  createdAt: string;
+  resolution?: { actorId: string; reason: string; at: string };
+};
 ```
 
-The browser receives attachment metadata only; it never receives a workspace
-path. The OpenCode bridge receives the corresponding manifest as described in
-`opencode-bridge.md`.
+Comments and state changes are append-only events with an atomic current
+snapshot. Closing requires a reason. `openBlockingIssueCount === 0` means only
+that no recorded blocking objection remains.
 
-For `attachment.remove`, `payload.attachmentId` must exactly equal the route
-`attachmentId`. The command is subject to the normal `baseRevision` and
-`commandId` checks: a stale revision is `409`, an unknown attachment is `404`,
-and a retried `commandId` returns its original acknowledgement without deleting
-twice. An attachment referenced by an accepted or streaming conversation message
-is retained to preserve that message's evidence and is rejected with
-`409 attachment_in_use`; the user may create a new session to discard its
-history. For a removable attachment, the backend atomically removes its manifest
-from `ProjectState` and its input file, then publishes the next
-`project.patch`. The client does not remove it from the rendered list based only
-on the `202` acknowledgement.
+```ts
+type Attestation = {
+  attestationId: string;
+  actorId: string;
+  actorType: "human" | "agent";
+  declaredRole: string;
+  subjectRevisionIds: string[];
+  scope: string;
+  decision: "endorse" | "object" | "abstain";
+  rationale: string;
+  createdAt: string;
+  supersedesAttestationId?: string;
+};
+```
 
-## Backend-to-Mesa adapter rules
+Records are immutable; later decisions supersede rather than edit. One human
+actor contributes at most one effective endorsement to a given revision.
+Declared local identity is explicitly unauthenticated in Phase 1. Agent review
+is stored and displayed separately and never counts toward human policy.
+`object` should reference an issue.
 
-The backend is the only Mesa client. It maps a server-side project record to the
-Mesa `project_id`; this ID is never supplied by a browser command.
+## Derived workflow policy
 
-- **Model load:** only an approved bridge action can call
-  `PUT /v1/projects/{project_id}/model` with `{"model_id":"queue-network-v1"}`.
-  The returned active revision and schema are copied into canonical state.
-- **Parameter save:** the backend retrieves/uses the active model schema,
-  validates the complete values, and stores the canonical values. It does not
-  forward a parameter patch to Mesa, because Mesa has no such API.
-- **Start run:** the backend rejects a non-active `modelId` and never accepts a
-  browser-supplied model revision. It injects the active Mesa `model_revision`,
-  merges saved canonical parameter values with schema defaults, validates
-  optional `steps`/`seeds`, and creates the documented Mesa request before
-  calling `POST /v1/projects/{project_id}/runs`. If a client includes
-  `parameters`, they must exactly match the saved canonical values or the command
-  is rejected; the client values are not forwarded as an authority.
-- **Cancel/status/results:** the backend verifies project ownership before using
-  Mesa cancellation/status/results endpoints, maps terminal Mesa status into the
-  canonical `ProjectState`, and never serves a successful result for a
-  non-`succeeded` run.
+Alignment-map and experiment revisions are independent review subjects. The
+default policy for each is:
 
-Mesa `timed_out` maps to external `run.status: "timed_out"` and
-`ProjectPhase: "timed_out"`. It remains distinct from `failed`, is terminal, and
-has no success results. A later valid parameter save/run is permitted after the
-terminal update.
+```text
+human project_owner endorsements >= 1
+AND open blocking issues == 0
+```
 
-## Canonical SSE stream
+The projection exposes counts, named subjects, and `policySatisfied`. It never
+calls the artifact trusted, correct, valid, or confirmed. Safe
+policy-unmet private drafts are admitted while the policy is false. A later
+attestation does not mutate or relabel an existing run; a policy-qualified
+experiment requires a new run for correspondingly labelled results.
 
-`GET .../events` first sends `project.snapshot`. Thereafter it can emit only
-these named event types:
+## Target routes
 
-| Event | Data | Meaning |
-| --- | --- | --- |
-| `project.snapshot` | full browser-safe `ProjectState` | Initial connection or resynchronization baseline. |
-| `project.patch` | `{sessionId, revision, operations}` | Monotonic authoritative state change. Model load, parameters, run progress, terminal failure, timeout, and results all use this event. |
-| `conversation.delta` | `{messageId, textDelta}` | Redacted assistant text while that existing message is streaming. Completion is represented by a final patch. |
-| `agent.status` | public `{modelId, status, lastError?}` projection | Non-authoritative activity/readiness notification; the next state patch remains authoritative. |
-| `connection.status` | `{status: "connected" \| "reconnecting" \| "offline"}` | Transport information only; it does not change project phase. |
+All mutation bodies use `ProjectCommand` except binary upload transfer.
 
-The backend never relay-forwards raw OpenCode SSE, raw Mesa logs, raw error
-objects, or tool events. On source reconnect, duplicate, reorder, or unknown
-event, it refetches/reconciles server state and emits a fresh snapshot rather
-than exposing source-specific events. The browser ignores old revisions and
-resynchronizes on a gap, as specified by `ui-workflow.md`.
+| Method and route | Purpose |
+| --- | --- |
+| `GET /api/projects/{projectId}/snapshot` | Current browser-safe state. |
+| `GET /api/projects/{projectId}/events` | Snapshot plus ordered patches. |
+| `POST /api/projects/{projectId}/sessions` | Attach a temporary local session to a durable project. |
+| `POST /api/projects/{projectId}/uploads` | Validate and persist CSV/JSON/TXT input. |
+| `POST /api/projects/{projectId}/chat` | Submit bounded context to configured OpenCode. |
+| `POST /api/projects/{projectId}/brief/revisions` | Create an immutable decision-brief revision. |
+| `POST /api/projects/{projectId}/alignment/revisions` | Create an immutable requirement/mapping revision. |
+| `POST /api/projects/{projectId}/issues` | Open a scoped issue. |
+| `POST /api/projects/{projectId}/issues/{issueId}/comments` | Append discussion. |
+| `PATCH /api/projects/{projectId}/issues/{issueId}` | Resolve/close/reopen with reason. |
+| `POST /api/projects/{projectId}/attestations` | Add a scoped immutable review decision. |
+| `POST /api/projects/{projectId}/experiments/revisions` | Save normalized parameter values or reset result. |
+| `POST /api/projects/{projectId}/runs` | Execute one immutable experiment revision. |
+| `POST /api/projects/{projectId}/runs/{runId}/cancel` | Cancel only a run owned by this project. |
+| `GET /api/projects/{projectId}/runs/{runId}/events` | Page browser-safe domain events. |
+| `GET /api/projects/{projectId}/artifacts/{artifactId}` | Fetch a declared project-owned artifact. |
 
-## Release and test requirements
+## Persistence and safety
 
-Public-route integration tests must cover accepted/rejected envelopes,
-idempotent command retries, 1 MiB/format upload rejection, stale revision
-rejection, attachment-removal ownership/in-use/retry behavior, active-model/
-default injection into Mesa run requests, cancellation ownership, and
-`timed_out` as an unsuccessful terminal state.
+The layout and single-writer rules are defined in
+[`architecture.md`](architecture.md). Backend snapshots use temporary files and
+atomic rename. Revisions and attestations are immutable. Issue history is
+append-only. Startup validates manifests, rejects traversal/symlinks and
+quarantines incomplete temporary writes without inventing success.
 
-Release requires the live OpenCode gate in `opencode-bridge.md`: real local
-health/provider/model discovery plus one bounded chat and one bounded approved
-tool call. Fake agents are allowed only for unit fixtures and cannot replace the
-live API/Playwright end-to-end evidence.
+Uploads remain bounded to declared CSV/JSON/TXT size and media types. Provider
+keys, raw tool input, absolute paths, control characters, and unbounded logs are
+redacted from public errors and state. The service fails closed when its live
+provider/model configuration is unavailable.
+
+## Gate 2 acceptance
+
+- Restart recovers project identity, current revision pointers, issues,
+  attestations, experiment revisions, and run references.
+- Stale writes and idempotent retries behave deterministically.
+- Parameter edit and reset create immutable, correctly diffed experiment
+  revisions.
+- Policy counts are revision-scoped; Agent records never satisfy the human
+  count; zero issues is not rendered as trust.
+- Unendorsed, policy-unmet private drafts run and retain that label.
+- Every run/event/artifact reference resolves to the same project, model,
+  experiment, brief, and alignment identities.
