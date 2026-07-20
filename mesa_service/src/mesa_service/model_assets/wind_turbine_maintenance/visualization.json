@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "model_id": "wind-turbine-maintenance",
+  "entity_state_view": {
+    "source": "model-spec.json",
+    "entity_ids": ["turbine", "crew", "work_order"]
+  },
+  "process_swimlane_view": {
+    "source": "domain-events.jsonl",
+    "lanes": ["turbine", "queue", "crew"],
+    "event_vocabulary_source": "model-spec.json"
+  },
+  "business_traceability_view": {
+    "source": "traceability.json",
+    "links": ["source_transition", "target_rule", "disposition", "reason"]
+  },
+  "replay": {
+    "authoritative_source": "domain-events.jsonl",
+    "frame_sampling_allowed": true,
+    "event_omission_from_source_allowed": false
+  }
+}

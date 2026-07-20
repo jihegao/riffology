@@ -1,0 +1,60 @@
+{
+  "model_id": "wind-turbine-maintenance",
+  "model_class": "WindTurbineMaintenanceModel",
+  "model_protocol_version": "wind-turbine-maintenance-v1",
+  "time_unit": "day",
+  "public_step": "next_natural_day_boundary",
+  "entities": {
+    "turbine": {
+      "class": "WindTurbineAgent",
+      "id_pattern": "turbine-%04d",
+      "states": ["operating", "failed_waiting", "corrective_repair", "planned_maintenance", "major_replacement"]
+    },
+    "crew": {
+      "class": "MaintenanceCrewAgent",
+      "id_pattern": "crew-%03d",
+      "states": ["idle", "driving_to_work", "working", "driving_home"]
+    },
+    "work_order": {
+      "id_pattern": "work-%08d",
+      "request_kinds": ["corrective", "planned"],
+      "operation_kinds": ["repair", "maintenance", "replacement"],
+      "statuses": ["queued", "assigned", "in_progress", "completed", "superseded"]
+    }
+  },
+  "event_ordering": {
+    "heap_key": ["sim_time_days", "phase", "negative_schedule_sequence"],
+    "phase_values": {
+      "request_trigger": 10,
+      "work_completion": 20,
+      "arrival_or_return": 30,
+      "dispatch": 40,
+      "daily_snapshot": 50
+    },
+    "same_phase_tie_break": "lifo",
+    "crew_assignment_tie_break": "ascending_crew_id"
+  },
+  "queue_policy": {
+    "priority": ["corrective", "planned"],
+    "within_priority": "fifo",
+    "dispatch": "centralized_non_preemptive"
+  },
+  "distribution_families": {
+    "failure": "exponential",
+    "repair": "triangular",
+    "maintenance": "triangular",
+    "replacement": "triangular"
+  },
+  "failure_semantics": {
+    "sampling": "once_on_operating_entry",
+    "overdue_factor": "max(1,(now-time_last_maintenance_days)/maintenance_period_days)",
+    "age_factor": "max(1,(now-time_last_replacement_days)/(3*maintenance_period_days))",
+    "rate": "normal_failure_rate_per_day*overdue_factor*age_factor"
+  },
+  "named_random_streams": ["layout", "initial_maintenance", "failure", "repair_duration", "maintenance_duration", "replacement_decision", "replacement_duration"],
+  "proactive_age_replacement": "excluded",
+  "required_domain_events": ["failure_occurred", "maintenance_due", "request_queued", "request_superseded", "request_suppressed", "crew_dispatched", "crew_arrived", "repair_started", "repair_completed", "maintenance_started", "maintenance_completed", "replacement_started", "replacement_completed", "crew_return_started", "crew_returned", "daily_snapshot"],
+  "measurement_window": "half_open_warmup_to_horizon",
+  "p95_method": "nearest_rank",
+  "claim_scope": "synthetic_single_seed_behavioral_reproduction"
+}

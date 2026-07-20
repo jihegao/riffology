@@ -1,10 +1,12 @@
-# Wind-turbine Mesa service target contract
+# Wind-turbine Mesa service contract
 
 ## Status and scope
 
-This is the Gate 0 target for Gate 1 implementation. The current service still
-implements `queue-network-v1`; nothing in this document claims the target model,
-schemas, events, or artifacts already run.
+Gate 1 implements this contract through the direct, backend-only Mesa `/v1`
+surface. The reviewed wind bundle, deterministic model, worker, event paging,
+artifact verification, and baseline runner exist in `mesa_service`. The current
+backend and browser are not yet wind-integrated; their singular legacy queue
+path remains reachable until Gate 4 removes it after the later cutover.
 
 The internal FastAPI service is called only by the Riff backend. It owns the
 reviewed `wind-turbine-maintenance` model bundle and immutable run directories.
@@ -53,15 +55,19 @@ Internal time is a finite float in days; one hour is `1/24` day. The public
 that boundary in chronological order. Events exactly on a boundary are applied
 before that day's snapshot.
 
-The AnyLogic experiment selects simultaneous events LIFO. The baseline either
-preserves LIFO with a stable decreasing sequence key or records a deliberate
-priority rewrite in the source map. Python heap accidents, object addresses,
-unordered collections, and AgentSet iteration are forbidden tie-breakers.
+The AnyLogic experiment selects simultaneous events LIFO. Gate 1 records an
+intentional adaptation: at one timestamp it processes request-producing
+triggers, work completions, arrivals/returns, and then one centralized dispatch
+phase. A strictly increasing schedule sequence is consumed descending within a
+phase. Dispatch selects corrective work first, FIFO within each queue, and
+available crews in stable crew-ID order. Python object identity, unordered
+collections, and AgentSet iteration are forbidden tie-breakers.
 
-All stochastic choices use the request seed through model-owned random streams.
+All stochastic choices use the request seed through named model-owned random streams.
 The worker does not use module-global randomness, wall-clock time, or external
-I/O. Same model revision, experiment revision, and seed must produce the same
-canonical event digest.
+I/O. Same model revision, experiment revision, seed, and locked runtime profile
+must produce the same semantic event digest. That digest excludes project/run
+IDs, event UUIDs, wall-clock values, paths, logs, and worker process identity.
 
 ## Presets and revisions
 
@@ -80,10 +86,13 @@ currency units unless a later source supplies a real currency and provenance.
 Distribution families are fixed in a model revision: exponential failure and
 triangular repair, maintenance, and replacement durations.
 
-An immutable model revision contains code, semantic schema, defaults, metrics,
-spec, traceability, source provenance, and digests. An immutable experiment
-revision binds the model revision and complete parameter values. A run request
-accepts no parameter overrides:
+An immutable full-SHA model revision contains code, runtime profile, semantic
+schema, defaults, metrics, spec, traceability, source provenance, and digests.
+An immutable full-SHA experiment revision binds the model revision and complete
+parameter values. Gate 1 materializes the bundled demo experiment with null
+brief/alignment bindings, `workflow_policy_unmet`, and `draft_unverified`.
+Gate 2 creates a distinct revision rather than mutating this one. A wind run
+request accepts no parameter overrides:
 
 ```json
 {
@@ -121,9 +130,11 @@ digest mismatch fails the Gate 1 contract suite.
 
 ## Run artifacts
 
-The worker writes `<run-id>.tmp/`, fsyncs/validates required files, and atomically
-promotes it to `<run-id>/`. Terminal failures, cancellations, and timeouts still
-retain bounded request, metadata, and log evidence.
+The isolated worker writes `<run-id>.tmp/`. That child directory and any child
+`succeeded` claim remain private: only after the parent observes process exit,
+closes the log, verifies the exact artifact set, and atomically renames the
+directory does `<run-id>/` become public. Terminal failures, cancellations, and
+timeouts retain only bounded request, metadata, and log evidence.
 
 ```text
 runs/<run-id>/
@@ -141,13 +152,14 @@ runs/<run-id>/
 revision IDs, input digests, preset, seed, horizon, warm-up, workflow-policy
 facts, timestamps, worker limits, terminal status, and artifact digests.
 
-Each domain event has at least:
+Each domain event has exactly:
 
 ```text
-event_id, sequence, sim_time_days, event_type,
+event_id, sequence, sim_time_days, event_type, phase,
 turbine_id?, crew_id?, work_order_id?, correlation_id?,
 before_state?, after_state?, payload,
-project_id, model_revision_id, experiment_revision_id, run_id, seed
+project_id, run_id, model_id, model_revision_id,
+experiment_revision_id, preset_id, seed
 ```
 
 Required event families include failure, maintenance due, work-order queued or
@@ -155,11 +167,15 @@ superseded, dispatch, arrival, repair/maintenance/replacement start and finish,
 return start and finish, and daily snapshot. Events are never dropped for UI
 performance. Replay may sample frames, but references the full event log and
 records its derivation.
+The verifier rejects unknown or missing fields, event names outside the model
+specification, and event/phase combinations outside the reviewed phase map.
 
 ## Metrics
 
-Warm-up events are retained. Decision KPIs use `[365, 1095]` days and exact
-event-interval integration, not an average of daily snapshots:
+Warm-up events are retained. Decision KPIs use the half-open interval
+`[365, 1095)` and exact event-interval integration, not an average of daily
+snapshots. The worker writes a post-time-zero row, then a post-boundary row
+through day 1095, for 1096 rows total:
 
 - availability = turbine time in `operating` / total turbine time;
 - corrective response = failure to repair/replacement start;
@@ -169,13 +185,20 @@ event-interval integration, not an average of daily snapshots:
 - annualized revenue, expense, and profit only as source-traceability
   diagnostics.
 
+Wait cohorts are selected by the originating failure/maintenance-due event in
+the measurement window. Starts at or before the horizon complete an
+observation; outstanding requests at the horizon are right-censored and counted
+separately. P95 uses nearest rank. Before the measurement window, explicit zero
+denominators accompany availability `1.0` and utilization `0.0`, preventing an
+empty interval from being mistaken for evidence.
+
 Mean and P95 waits/overdue values are diagnostics. The 95% target is the sole
 Phase 1 hard business constraint. A single fixed seed is not uncertainty
 analysis and supports no crew-count recommendation.
 
 ## APIs and execution limits
 
-Gate 1 may refine schemas without changing these semantics:
+The plural wind routes coexist with the unchanged singular queue routes:
 
 ```text
 PUT    /v1/projects/{project_id}/models/wind-turbine-maintenance
@@ -187,11 +210,40 @@ GET    /v1/projects/{project_id}/runs/{run_id}/events?after=<sequence>&limit=<n>
 GET    /v1/projects/{project_id}/runs/{run_id}/artifacts/{declared_name}
 ```
 
+The wind PUT body is exactly the reviewed preset ID, and its run body is exactly
+one `experiment_revision_id`. `POST /runs` resolves the active model before
+validating that model's disjoint request schema; malformed wind requests never
+fall back to queue execution. Gate 1 proves the wind path directly and makes no
+backend/browser integration claim.
+
+Immediately before creating a run directory, admission re-verifies every file
+in the content-addressed model bundle, validates the experiment document, and
+recomputes its `experiment_revision_id`. Drift under an existing revision ID is
+rejected before a worker can spawn.
+
+The worker does not rely on that parent check alone. The parent passes the
+admitted model/experiment IDs and exact request-file SHA-256 outside the request
+document. At process start the worker independently verifies the complete
+bundle, captures all declared bytes, recomputes the model and experiment
+content IDs, checks the request against the canonical experiment, and executes
+the captured verified `model.py` bytes. Post-admission drift therefore fails
+before model construction or evidence-file creation.
+
 Unknown IDs, extra keys, non-finite values, traversal, symlinks, and unlisted
-artifacts fail closed. One project has at most one active worker. Runs execute in
-separate cancellable processes with finite CPU time, wall time, memory, output,
-event, and log limits. The 1095-day baseline must fit declared finite limits;
-the earlier 500-step queue cap is not reused.
+artifacts fail closed. One project has at most one active worker. Wind runs use
+an isolated process, a 180-second parent timeout, caps of 2,000,000 processed
+and emitted events, 256 MiB for the complete event log, 16 MiB for daily KPIs,
+4 MiB for logs, and 300 MiB total successful output. Reaching a limit fails the
+run; it never truncates evidence. The earlier 500-step queue cap is not reused.
+
+Successful artifacts are fsynced and must be exactly the eight declared regular
+files. Events are checked against the exact field/type/vocabulary/phase
+contract; every KPI column and summary metric is checked against the exact
+53-property metric schema. Identities, digests, sizes, financial derivations,
+and completeness are verified before atomic promotion. Symlinks in any model,
+experiment, run, artifact, or ancestor path fail closed. Failure, cancellation,
+timeout, and resource-limit exits retain only bounded request, metadata, and log
+evidence.
 
 Browser playback density may be lowered. Computational events, requested
 turbine count, and horizon may not be silently reduced. Any such experiment
