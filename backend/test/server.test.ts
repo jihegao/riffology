@@ -6,6 +6,7 @@ import test from "node:test";
 import { HttpOpenCodeAdapter, type OpenCodeAdapter, type OpenCodePrompt, type OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import { BackendApp } from "../src/server.ts";
 import { HttpMesaAdapter } from "../src/mesa-adapter.ts";
+import { ApiError } from "../src/errors.ts";
 import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
@@ -324,6 +325,13 @@ test("Mesa adapter maps the service summary and CSV-derived rows into visible re
   assert.deepEqual(results.summary.map((item) => [item.key, item.value]), [["queue_length", 3], ["completed_jobs", 9], ["mean_wait_time", 1.5]]);
   assert.deepEqual(results.timeSeries.series[0].values, [0, 3]);
   assert.equal(results.table.rows.length, 2);
+});
+
+test("Mesa adapter exposes only stable allowlisted errors and redacts upstream paths", async () => {
+  const unknown = new HttpMesaAdapter("http://mesa.test", async () => Response.json({ error: { code: "internal_trace", message: "failed at /Users/private/secret.py", details: { path: "/tmp/secret" } } }, { status: 500 }));
+  await assert.rejects(() => unknown.getWindRunEvidence!("project", "run"), (error: unknown) => error instanceof ApiError && error.code === "mesa_upstream_failure" && error.message === "Mesa failed while processing the request." && !JSON.stringify(error).includes("secret"));
+  const known = new HttpMesaAdapter("http://mesa.test", async () => Response.json({ error: { code: "receipt_not_found", message: "leak /private/path" } }, { status: 404 }));
+  await assert.rejects(() => known.getWindRunReceipt!("project", "rk"), (error: unknown) => error instanceof ApiError && error.code === "receipt_not_found" && error.message === "The Mesa run receipt was not found." && !error.message.includes("private"));
 });
 
 const getJson = async (url: string): Promise<any> => {

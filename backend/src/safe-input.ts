@@ -17,7 +17,7 @@ export const assertSafeText = (value: unknown, field: string, maximum = 16_384, 
 
 export const assertBoundedCommand = (command: unknown, forbiddenOccurrences: string[] = []): void => {
   let bytes: Buffer;
-  try { bytes = canonicalJsonV2(command); } catch { throw new ApiError(422, "invalid_request", "The command is not valid canonical JSON."); }
+  try { bytes = canonicalJsonV2(command); } catch { throw new ApiError(422, "validation_error", "The command is not valid canonical JSON."); }
   if (bytes.byteLength > MAX_COMMAND_BYTES) throw new ApiError(413, "payload_too_large", "The command is too large.");
   const visit = (value: unknown): void => {
     if (typeof value === "string") { if (UNSAFE_CONTROL.test(value) || CREDENTIAL.test(value) || PRIVATE_KEY.test(value) || ABSOLUTE_PATH.test(value) || forbiddenOccurrences.some((item) => item.length > 0 && value.includes(item))) throw new ApiError(422, "sensitive_text_rejected", "The command contains unsafe or sensitive text."); return; }

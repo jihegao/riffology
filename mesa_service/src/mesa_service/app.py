@@ -117,6 +117,10 @@ def create_app(
     async def get_wind_run_v2(project_id: str, run_id: str) -> dict[str, Any]:
         return service.get_run(project_id, run_id)
 
+    @app.get("/v2/projects/{project_id}/runs/{run_id}/evidence")
+    async def get_wind_run_evidence_v2(project_id: str, run_id: str) -> dict[str, Any]:
+        return service.get_wind_run_evidence_v2(project_id, run_id)
+
     @app.get("/v2/projects/{project_id}/run-receipts/{downstream_key}")
     async def get_wind_run_receipt_v2(project_id: str, downstream_key: str) -> dict[str, Any]:
         return service.get_wind_run_receipt_v2(project_id, downstream_key)

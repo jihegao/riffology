@@ -15,6 +15,7 @@ from typing import Any
 
 CANONICAL_JSON_VERSION_V2 = "riff-canonical-json-v2"
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+DANGEROUS_KEYS = {"__proto__", "prototype", "constructor"}
 
 
 class CanonicalV2Error(ValueError):
@@ -88,6 +89,8 @@ def _serialize(value: Any) -> str:
     if isinstance(value, dict):
         if any(not isinstance(key, str) for key in value):
             raise CanonicalV2Error("canonical JSON object keys must be strings")
+        if any(key in DANGEROUS_KEYS for key in value):
+            raise CanonicalV2Error("dangerous object key is not valid canonical JSON")
         keys = sorted(value, key=_utf16_key)
         return "{" + ",".join(f"{_serialize_string(key)}:{_serialize(value[key])}" for key in keys) + "}"
     raise CanonicalV2Error(f"unsupported canonical JSON type: {type(value).__name__}")
@@ -114,7 +117,7 @@ def strict_json_loads_v2(data: bytes | str) -> Any:
     def pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
-            if key in result:
+            if key in result or key in DANGEROUS_KEYS:
                 raise CanonicalV2Error(f"duplicate JSON key: {key}")
             _validate_unicode(key)
             result[key] = value

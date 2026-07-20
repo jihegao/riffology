@@ -3,6 +3,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { ApiError, asApiError } from "./errors.ts";
+import { parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
+import { DurableProjectStore } from "./durable-project-store.ts";
+import type { ProjectCommand } from "./durable-project-types.ts";
+import { Gate2Runtime } from "./gate2-runtime.ts";
 import { McpToolServer } from "./mcp.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeReadiness } from "./opencode-adapter.ts";
@@ -21,12 +25,14 @@ export type BackendOptions = {
   promptTimeoutMs?: number;
   mcpUrl?: string;
   store?: ProjectStore;
+  durableStore?: DurableProjectStore;
 };
 
 export class BackendApp {
   readonly store: ProjectStore;
   readonly actions: SimulationActions;
   readonly mcp: McpToolServer;
+  readonly gate2: Gate2Runtime;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
@@ -37,12 +43,14 @@ export class BackendApp {
   constructor(options: BackendOptions) {
     this.options = options;
     this.store = options.store ?? new ProjectStore();
+    this.gate2 = new Gate2Runtime(options.workspaceRoot, options.mesa, options.durableStore);
     this.actions = new SimulationActions(this.store, options.mesa, options.projector);
     this.mcp = new McpToolServer(this.actions);
     this.#openCodeEvents = new OpenCodeEventBridge(this.store);
   }
 
   async initialize(): Promise<ProjectState> {
+    this.gate2.start();
     this.#readiness = await this.options.openCode.initialize();
     if (this.#readiness.status === "ready" && this.options.openCode.subscribeEvents) {
       try {
@@ -88,6 +96,7 @@ export class BackendApp {
     this.#unsubscribeOpenCode = undefined;
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
     this.mcp.revokeAll();
+    await this.gate2.close();
     if (!this.#server) return;
     this.#server.closeIdleConnections?.();
     this.#server.closeAllConnections?.();
@@ -101,6 +110,7 @@ export class BackendApp {
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
       if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
+      if (parts[0] === "api" && parts[1] === "projects") return await this.#gate2(request, response, url, parts);
       if (request.method === "POST" && parts[0] === "api" && parts[1] === "sessions" && parts.length === 2) return this.#createBrowserSession(request, response);
       if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) throw new ApiError(404, "not_found", "No matching local demo route exists.");
       const sessionId = parts[2];
@@ -115,9 +125,83 @@ export class BackendApp {
       throw new ApiError(404, "not_found", "No matching local demo route exists.");
     } catch (error) {
       const apiError = asApiError(error);
-      if (!response.headersSent) json(response, apiError.status, { accepted: false, error: { code: apiError.code, message: apiError.message, ...(apiError.details ? { details: apiError.details } : {}) } });
+      if (!response.headersSent) json(response, apiError.status, { accepted: false, error: { code: apiError.code, message: apiError.message, correlation_id: randomUUID(), ...(apiError.details ? { details: apiError.details } : {}) } });
       else response.end();
     }
+  }
+
+  async #gate2(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<void> {
+    if (request.method === "POST" && parts.length === 2) {
+      const payload = await gate2JsonBody(request);
+      const result = this.gate2.store.createProject(payload as any);
+      return json(response, result.status, result.body);
+    }
+    const projectId = parts[2];
+    if (!projectId) throw new ApiError(404, "resource_not_found", "The requested resource was not found.");
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "sessions") {
+      const payload = await gate2JsonBody(request); exactObject(payload, ["actor_id"]);
+      return json(response, 201, this.gate2.store.attachSession(projectId, String(payload.actor_id)));
+    }
+    if (request.method === "GET" && parts.length === 4 && parts[3] === "snapshot") return json(response, 200, this.gate2.store.publicProjection(projectId));
+    if (request.method === "GET" && parts.length === 4 && parts[3] === "events") return this.#gate2ProjectEvents(projectId, request, response, url);
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "actors") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createActor(command as any));
+    if (request.method === "POST" && parts.length === 5 && parts[3] === "wind" && parts[4] === "bootstrap") {
+      const result = await this.gate2.bootstrap(await gate2Command(request, projectId)); return json(response, result.status, result.body);
+    }
+    if (request.method === "POST" && parts.length === 5 && parts[3] === "brief" && parts[4] === "revisions") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createBrief(command as any));
+    if (request.method === "POST" && parts.length === 5 && parts[3] === "alignment" && parts[4] === "revisions") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createAlignment(command as any));
+    if (request.method === "POST" && parts.length === 5 && parts[3] === "experiments" && parts[4] === "revisions") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createExperiment(command));
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "issues") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createIssue(command as any));
+    if (request.method === "GET" && parts.length === 6 && parts[3] === "issues" && parts[5] === "history") return json(response, 200, this.gate2.store.issueHistory(projectId, parts[4]));
+    if (request.method === "POST" && parts.length === 6 && parts[3] === "issues" && parts[5] === "comments") {
+      const command = await gate2Command(request, projectId); if ((command.payload as any).issue_id !== parts[4] || (command.payload as any).event_type !== "commented") throw new ApiError(422, "validation_error", "Issue comment payload does not match its route.");
+      return this.#gate2Mutation(response, command, (value) => this.gate2.store.appendIssueEvent(value as any));
+    }
+    if (request.method === "PATCH" && parts.length === 5 && parts[3] === "issues") {
+      const command = await gate2Command(request, projectId); if ((command.payload as any).issue_id !== parts[4]) throw new ApiError(422, "validation_error", "Issue update payload does not match its route.");
+      return this.#gate2Mutation(response, command, (value) => this.gate2.store.appendIssueEvent(value as any));
+    }
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "attestations") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.store.createAttestations(command as any));
+    if (request.method === "POST" && parts.length === 4 && parts[3] === "runs") return this.#gate2Mutation(response, await gate2Command(request, projectId), (command) => this.gate2.startRun(command as any));
+    if (request.method === "GET" && parts.length === 5 && parts[3] === "runs") return json(response, 200, { run: this.gate2.run(projectId, parts[4]) });
+    if (request.method === "POST" && parts.length === 6 && parts[3] === "runs" && parts[5] === "cancel") {
+      const command = await gate2Command(request, projectId); if ((command.payload as any).run_id !== parts[4]) throw new ApiError(422, "validation_error", "Run cancellation payload does not match its route.");
+      return this.#gate2Mutation(response, command, (value) => this.gate2.cancelRun(value as any));
+    }
+    if (request.method === "GET" && parts.length === 6 && parts[3] === "runs" && parts[5] === "events") {
+      const after = strictQueryInteger(url, "after", 0, 0, Number.MAX_SAFE_INTEGER); const limit = strictQueryInteger(url, "limit", 100, 1, 1000);
+      return json(response, 200, await this.gate2.domainEvents(projectId, parts[4], after, limit));
+    }
+    if (request.method === "GET" && parts.length === 5 && parts[3] === "artifacts") {
+      const artifact = await this.gate2.artifact(projectId, parts[4]);
+      response.writeHead(200, { "content-type": artifact.media_type, "content-length": artifact.bytes.byteLength, "content-disposition": `attachment; filename="${artifact.filename}"`, "cache-control": "private, no-store" }); response.end(artifact.bytes); return;
+    }
+    throw new ApiError(404, "resource_not_found", "The requested resource was not found.");
+  }
+
+  #gate2Mutation(response: ServerResponse, command: ProjectCommand<any>, action: (command: ProjectCommand<any>) => { status: number; body: Record<string, unknown> }): void {
+    const result = action(command); json(response, result.status, result.body);
+  }
+
+  #gate2ProjectEvents(projectId: string, request: IncomingMessage, response: ServerResponse, url: URL): void {
+    if (!String(request.headers.accept ?? "").includes("text/event-stream")) {
+      const after = strictQueryInteger(url, "after", -1, -1, Number.MAX_SAFE_INTEGER); const limit = strictQueryInteger(url, "limit", 100, 1, 100);
+      return json(response, 200, { snapshot: this.gate2.store.publicProjection(projectId), ...this.gate2.store.projectEventPage(projectId, after, limit) });
+    }
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
+    let projection = this.gate2.store.publicProjection(projectId) as any; let revision = projection.snapshot_revision as number;
+    response.write(`id: ${revision}\nevent: project.snapshot\ndata: ${JSON.stringify(projection)}\n\n`);
+    const poll = setInterval(() => {
+      try {
+        const next = this.gate2.store.publicProjection(projectId) as any; const nextRevision = next.snapshot_revision as number;
+        if (nextRevision === revision) return;
+        if (nextRevision !== revision + 1) response.write(`event: project.reload_required\ndata: ${JSON.stringify({ snapshot_revision: nextRevision })}\n\n`);
+        else response.write(`id: ${nextRevision}\nevent: project.patch\ndata: ${JSON.stringify({ snapshot_revision: nextRevision, operations: [{ op: "replace", path: "", value: next }] })}\n\n`);
+        projection = next; revision = nextRevision;
+      } catch { response.end(); }
+    }, 250);
+    const keepAlive = setInterval(() => response.write(": keepalive\n\n"), 15_000);
+    request.once("close", () => { clearInterval(poll); clearInterval(keepAlive); });
   }
 
   #events(sessionId: string, request: IncomingMessage, response: ServerResponse): void {
@@ -338,6 +422,36 @@ const parseCommand = <T>(text: string, routeSessionId: string): UiCommand<T> => 
     throw new ApiError(422, "invalid_command", "Request does not match the local command envelope.");
   }
   if (value.sessionId !== routeSessionId) throw new ApiError(422, "session_mismatch", "Command session does not match the route.");
+  return value;
+};
+
+const exactObject = (value: unknown, keys: string[]): asserts value is Record<string, unknown> => {
+  let plain = false; try { plain = value !== null && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)); } catch { plain = false; } if (!plain) throw new ApiError(422, "validation_error", "Request body must be a plain object.");
+  let actual: string[]; try { actual = Object.keys(value as Record<string, unknown>).sort(); } catch { throw new ApiError(422, "validation_error", "Request body must be a plain object."); } const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new ApiError(422, "validation_error", "The request contains missing or unsupported fields.");
+};
+
+const gate2JsonBody = async (request: IncomingMessage): Promise<Record<string, unknown>> => {
+  const text = await bodyText(request, 256_000);
+  let value: unknown; try { value = parseCanonicalJsonV2(text); } catch { throw new ApiError(422, "validation_error", "Request body must be strict JSON without duplicate or unsafe keys."); }
+  const keys = value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value as Record<string, unknown>) : []; exactObject(value, keys);
+  return value;
+};
+
+const gate2Command = async (request: IncomingMessage, projectId: string): Promise<ProjectCommand<any>> => {
+  const value = await gate2JsonBody(request);
+  exactObject(value, ["command_id", "project_id", "session_id", "base_snapshot_revision", "payload"]);
+  const payload = value.payload;
+  const payloadKeys = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? Object.keys(payload as Record<string, unknown>) : [];
+  exactObject(payload, payloadKeys);
+  if (value.project_id !== projectId) throw new ApiError(404, "resource_not_found", "The requested resource was not found.");
+  return value as ProjectCommand<any>;
+};
+
+const strictQueryInteger = (url: URL, name: string, fallback: number, minimum: number, maximum: number): number => {
+  const raw = url.searchParams.get(name); if (raw === null) return fallback;
+  if (!(minimum < 0 && raw === "-1") && !/^(?:0|[1-9]\d*)$/u.test(raw)) throw new ApiError(422, "invalid_request", `Query parameter ${name} must be an integer.`);
+  const value = Number(raw); if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new ApiError(422, "invalid_request", `Query parameter ${name} is out of range.`);
   return value;
 };
 

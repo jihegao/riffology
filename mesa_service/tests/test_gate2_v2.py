@@ -19,13 +19,27 @@ from mesa_service.canonical_v2 import (
     strict_json_loads_v2,
 )
 from mesa_service.gate2_contracts import defaults_digest, downstream_request_digest
-from mesa_service.service import MesaService
+from mesa_service.service import MesaService, ServiceError
 
 
 PROJECT_ID = "project_" + "1" * 32
 RUN_ID = "run_" + "2" * 32
 ACTOR_ID = "actor_" + "3" * 32
 KEY = "rk_" + "6" * 64
+
+
+def test_canonical_v2_matches_shared_node_python_golden_fixture() -> None:
+    fixture = json.loads((Path(__file__).parents[2] / "contracts" / "canonical-json-v2-golden.json").read_text())
+    assert fixture["schema_version"] == 1
+    assert fixture["canonical_json_version"] == "riff-canonical-json-v2"
+    for item in fixture["accept"]:
+        value = strict_json_loads_v2(item["input"])
+        encoded = canonical_json_v2_bytes(value)
+        assert encoded.hex() == item["canonical_hex"], item["name"]
+        assert hashlib.sha256(encoded).hexdigest() == item["sha256"], item["name"]
+    for item in fixture["reject"]:
+        with pytest.raises(CanonicalV2Error, match="."):
+            strict_json_loads_v2(item["input"])
 
 
 def _write(path: Path, value: dict) -> None:
@@ -672,6 +686,22 @@ def test_v2_exact_admission_receipt_lifecycle_artifacts_and_duplicate(tmp_path: 
         assert terminal_receipt.status_code == 200, terminal_receipt.text
         assert terminal_receipt.json()["latest_lifecycle"]["state"] == "verified_succeeded"
         assert terminal_receipt.json()["lifecycle_records"][-1] == terminal_receipt.json()["latest_lifecycle"]
+        terminal_metadata = terminal_receipt.json()["terminal_metadata"]
+        assert terminal_metadata["terminal_metadata_digest"] == terminal_receipt.json()["latest_lifecycle"]["evidence_digest"]
+        assert terminal_metadata["status"] == "succeeded"
+        assert terminal_metadata["cancel_outcome"] is None
+        assert len(terminal_metadata["artifacts"]) == 8
+        assert {artifact["name"] for artifact in terminal_metadata["artifacts"]} == {
+            "request.json", "metadata.json", "daily-kpis.csv", "domain-events.jsonl", "summary.json",
+            "replay-manifest.json", "derived-views-manifest.json", "run.log",
+        }
+        evidence = client.get(f"/v2/projects/{PROJECT_ID}/runs/{RUN_ID}/evidence")
+        assert evidence.status_code == 200, evidence.text
+        assert evidence.json() == {
+            "receipt": terminal_receipt.json()["receipt"],
+            "lifecycle_records": terminal_receipt.json()["lifecycle_records"],
+            "terminal_metadata": terminal_metadata,
+        }
     project = workspace / "projects" / PROJECT_ID
     receipts = list((project / "mesa-run-receipts").glob("*.json"))
     assert len(receipts) == 1
@@ -791,6 +821,8 @@ def test_v2_cancel_tombstone_before_spawn_never_starts_worker(tmp_path: Path) ->
         assert response.status_code == 202, response.text
         assert response.json()["status"] == "cancelled"
         assert client.get(f"/v2/projects/{PROJECT_ID}/runs/{RUN_ID}").json()["status"] == "cancelled"
+        terminal = client.get(f"/v2/projects/{PROJECT_ID}/run-receipts/{KEY}").json()["terminal_metadata"]
+        assert terminal["cancel_outcome"] == "cancelled_before_dispatch"
     project = workspace / "projects" / PROJECT_ID
     states = [json.loads(path.read_text())["state"] for path in sorted((project / "mesa-run-lifecycle" / RUN_ID / "events").glob("*.json"))]
     assert "worker_started" not in states
@@ -838,6 +870,7 @@ def test_v2_dispatch_in_flight_committed_tombstone_stops_before_model_events(tmp
         raise AssertionError("dispatch-in-flight cancellation did not terminate")
     assert terminal["status"] == "cancelled"
     assert terminal["cancel_outcome"] == "cancelled_by_worker"
+    assert service.get_wind_run_evidence_v2(PROJECT_ID, RUN_ID)["terminal_metadata"]["cancel_outcome"] == "cancelled_by_worker"
     run = workspace / "projects" / PROJECT_ID / "runs" / RUN_ID
     assert {path.name for path in run.iterdir()} == {"request.json", "metadata.json", "run.log"}
     assert not (run / "domain-events.jsonl").exists()
@@ -894,6 +927,38 @@ def test_v2_late_cancel_records_exact_quantitative_outcome(
         raise AssertionError("late-cancel race did not terminate")
     assert metadata["status"] == expected_status
     assert metadata["cancel_outcome"] == expected_outcome
+    assert service.get_wind_run_evidence_v2(PROJECT_ID, RUN_ID)["terminal_metadata"]["cancel_outcome"] == expected_outcome
+
+
+@pytest.mark.parametrize("mode", ["digest", "identity"])
+def test_v2_terminal_cancel_outcome_digest_and_identity_tamper_fail_closed(tmp_path: Path, mode: str) -> None:
+    workspace = tmp_path / "workspace"
+    prepared = _prepare(workspace)
+    _commit_cancel(workspace, prepared)
+    service = MesaService(workspace, wind_timeout_seconds=180)
+    assert service.start_wind_run_v2(
+        PROJECT_ID,
+        {"experiment_revision_id": prepared["experiment"]["experiment_revision_id"]},
+        downstream_key=prepared["key"], run_id=prepared["run_id"],
+        downstream_digest=prepared["request_digest"],
+    )["status"] == "cancelled"
+    project = workspace / "projects" / PROJECT_ID
+    terminal_path = project / "mesa-run-lifecycle" / RUN_ID / "terminal-metadata.json"
+    terminal = json.loads(terminal_path.read_text())
+    terminal["cancel_outcome"] = "cancelled_by_worker"
+    if mode == "identity":
+        terminal["terminal_metadata_digest"] = ""
+        terminal["terminal_metadata_digest"] = prefixed_digest(terminal, field="terminal_metadata_digest", prefix="tm_")
+        event_path = sorted((project / "mesa-run-lifecycle" / RUN_ID / "events").glob("*.json"))[-1]
+        event = json.loads(event_path.read_text())
+        event["evidence_digest"] = terminal["terminal_metadata_digest"]
+        event["mesa_lifecycle_digest"] = ""
+        event["mesa_lifecycle_digest"] = prefixed_digest(event, field="mesa_lifecycle_digest", prefix="mlr_")
+        _write(event_path, event)
+    _write(terminal_path, terminal)
+    with pytest.raises(ServiceError) as raised:
+        service.get_wind_run_evidence_v2(PROJECT_ID, RUN_ID)
+    assert raised.value.code == "mesa_run_corrupt"
 
 
 def test_two_service_instances_duplicate_start_never_double_spawns(tmp_path: Path) -> None:

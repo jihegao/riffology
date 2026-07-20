@@ -1340,9 +1340,12 @@ class MesaService:
                         shutil.rmtree(child_path)
                     else:
                         child_path.unlink(missing_ok=True)
+        terminal = self._gate2_terminal_metadata(
+            project_dir=captured["project_dir"], receipt=receipt, status=status, run_dir=evidence_root,
+        )
         self._append_gate2_lifecycle(
             paths["lifecycle"], receipt, "worker_exited", ownership_epoch=ownership_epoch,
-            evidence_digest="tm_" + hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+            evidence_digest=terminal["terminal_metadata_digest"],
         )
         state = {
             "succeeded": "verified_succeeded", "failed": "terminal_failed",
@@ -1350,7 +1353,7 @@ class MesaService:
         }[status]
         last = self._append_gate2_lifecycle(
             paths["lifecycle"], receipt, state, ownership_epoch=ownership_epoch,
-            evidence_digest="tm_" + hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+            evidence_digest=terminal["terminal_metadata_digest"],
         )
         if not promoted:
             lease = self._read_gate2_owner_lease(paths["lease"], receipt)
@@ -1400,11 +1403,13 @@ class MesaService:
             paths["lifecycle"], receipt, "cancel_requested", ownership_epoch=ownership_epoch,
             evidence_digest=tombstone["cancel_tombstone_digest"],
         )
-        metadata_digest = "tm_" + hashlib.sha256((pending / "metadata.json").read_bytes()).hexdigest()
+        terminal = self._gate2_terminal_metadata(
+            project_dir=captured["project_dir"], receipt=receipt, status="cancelled", run_dir=pending,
+        )
         pending.replace(final)
         last = self._append_gate2_lifecycle(
             paths["lifecycle"], receipt, "terminal_cancelled", ownership_epoch=ownership_epoch,
-            evidence_digest=metadata_digest,
+            evidence_digest=terminal["terminal_metadata_digest"],
         )
         return {
             "run_id": receipt["run_id"], "status": "cancelled",
@@ -1436,11 +1441,13 @@ class MesaService:
             cancel_outcome=None, error={"code": code, "message": message},
         )
         (pending / "run.log").touch(exist_ok=True)
-        metadata_digest = "tm_" + hashlib.sha256((pending / "metadata.json").read_bytes()).hexdigest()
+        terminal = self._gate2_terminal_metadata(
+            project_dir=captured["project_dir"], receipt=receipt, status="failed", run_dir=pending,
+        )
         pending.replace(final)
         last = self._append_gate2_lifecycle(
             paths["lifecycle"], receipt, "terminal_failed", ownership_epoch=ownership_epoch,
-            evidence_digest=metadata_digest,
+            evidence_digest=terminal["terminal_metadata_digest"],
         )
         return {
             "run_id": receipt["run_id"], "status": "failed",
@@ -1724,6 +1731,97 @@ class MesaService:
             "receipt": receipt,
             "lifecycle_records": records,
             "latest_lifecycle": records[-1] if records else None,
+            "terminal_metadata": self._read_gate2_terminal_metadata(project_dir, receipt, records),
+        }
+
+    def _read_gate2_terminal_metadata(
+        self, project_dir: Path, receipt: dict[str, Any], records: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        from .canonical_v2 import prefixed_digest, require_canonical_json_v2_bytes, sha256_v2
+
+        terminal_states = {
+            "verified_succeeded": "succeeded", "terminal_failed": "failed",
+            "terminal_timed_out": "timed_out", "terminal_cancelled": "cancelled",
+        }
+        last = records[-1] if records else None
+        if last is None or last["state"] not in terminal_states:
+            return None
+        path = self._safe_path(project_dir / "mesa-run-lifecycle" / receipt["run_id"] / "terminal-metadata.json")
+        if not path.is_file():
+            raise ServiceError(500, "mesa_run_corrupt", "terminal lifecycle lacks terminal metadata")
+        try:
+            value = require_canonical_json_v2_bytes(path.read_bytes())
+        except Exception as exc:
+            raise ServiceError(500, "mesa_run_corrupt", "terminal metadata bytes are corrupt") from exc
+        expected_keys = {
+            "schema_version", "canonical_json_version", "terminal_metadata_digest", "project_id", "run_id",
+            "status", "cancel_outcome", "receipt_digest", "run_intent_digest", "run_admission_digest", "policy_snapshot_digest",
+            "experiment_revision_id", "experiment_sha256", "artifacts",
+        }
+        allowed_cancel_outcomes = {
+            "succeeded": {None, "completed_before_cancel_effect"},
+            "failed": {None, "failed_before_cancel_effect"},
+            "timed_out": {None, "timed_out_before_cancel_effect"},
+            "cancelled": {"cancelled_before_dispatch", "cancelled_by_worker"},
+        }
+        tombstone_path = self._safe_path(project_dir / "run-intents" / receipt["run_id"] / "cancel-tombstone.json")
+        if (
+            not isinstance(value, dict) or set(value) != expected_keys
+            or value.get("schema_version") != 1 or value.get("canonical_json_version") != "riff-canonical-json-v2"
+            or value.get("terminal_metadata_digest") != prefixed_digest(value, field="terminal_metadata_digest", prefix="tm_")
+            or value.get("terminal_metadata_digest") != last.get("evidence_digest")
+            or value.get("project_id") != receipt["project_id"] or value.get("run_id") != receipt["run_id"]
+            or value.get("status") != terminal_states[last["state"]]
+            or value.get("cancel_outcome") not in allowed_cancel_outcomes[terminal_states[last["state"]]]
+            or (value.get("cancel_outcome") is not None) != tombstone_path.is_file()
+            or (value.get("cancel_outcome") == "cancelled_before_dispatch" and any(record["state"] == "worker_started" for record in records))
+            or (value.get("cancel_outcome") == "cancelled_by_worker" and not any(record["state"] == "worker_started" for record in records))
+            or value.get("receipt_digest") != receipt["mesa_run_receipt_digest"]
+            or value.get("run_intent_digest") != receipt["run_intent_digest"]
+            or value.get("run_admission_digest") != receipt["run_admission_digest"]
+            or value.get("policy_snapshot_digest") != receipt["policy_snapshot_digest"]
+            or value.get("experiment_revision_id") != receipt["experiment_revision_id"]
+            or value.get("experiment_sha256") != receipt["experiment_sha256"]
+        ):
+            raise ServiceError(500, "mesa_run_corrupt", "terminal metadata binding is invalid")
+        artifacts = value.get("artifacts")
+        if not isinstance(artifacts, list) or (value["status"] == "succeeded") != (len(artifacts) == len(WIND_ARTIFACTS)):
+            raise ServiceError(500, "mesa_run_corrupt", "terminal artifact declaration is invalid")
+        if value["status"] != "succeeded" and artifacts:
+            raise ServiceError(500, "mesa_run_corrupt", "non-success terminal metadata declares artifacts")
+        if value["status"] == "succeeded":
+            run_dir = self._safe_path(project_dir / "runs" / receipt["run_id"])
+            if sorted(item.get("name") for item in artifacts if isinstance(item, dict)) != sorted(WIND_ARTIFACTS):
+                raise ServiceError(500, "mesa_run_corrupt", "success terminal artifact names are not exact")
+            for artifact in artifacts:
+                if not isinstance(artifact, dict) or set(artifact) != {"artifact_id", "name", "sha256"}:
+                    raise ServiceError(500, "mesa_run_corrupt", "terminal artifact schema is invalid")
+                artifact_path = self._safe_path(run_dir / artifact["name"])
+                digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest() if artifact_path.is_file() else ""
+                expected_id = "artifact_" + sha256_v2({"run_id": receipt["run_id"], "name": artifact["name"], "sha256": digest})
+                if artifact["sha256"] != digest or artifact["artifact_id"] != expected_id:
+                    raise ServiceError(500, "mesa_run_corrupt", "terminal artifact digest is invalid")
+        return value
+
+    def get_wind_run_evidence_v2(self, project_id: str, run_id: str) -> dict[str, Any]:
+        self.poll()
+        if re.fullmatch(r"project_[0-9a-f]{32}", project_id) is None or re.fullmatch(r"run_[0-9a-f]{32}", run_id) is None:
+            raise ServiceError(404, "run_not_found", "Gate 2 run evidence not found")
+        project_dir = self._project_dir(project_id)
+        receipt_dir = self._safe_path(project_dir / "mesa-run-receipts")
+        if not receipt_dir.is_dir():
+            raise ServiceError(404, "run_not_found", "Gate 2 run evidence not found")
+        receipts = [self._read_gate2_receipt(path) for path in sorted(receipt_dir.iterdir())]
+        receipt = next((item for item in receipts if item is not None and item["run_id"] == run_id), None)
+        if receipt is None:
+            raise ServiceError(404, "run_not_found", "Gate 2 run evidence not found")
+        records = self._read_gate2_lifecycle(
+            self._safe_path(project_dir / "mesa-run-lifecycle" / run_id / "events"), receipt,
+        )
+        return {
+            "receipt": receipt,
+            "lifecycle_records": records,
+            "terminal_metadata": self._read_gate2_terminal_metadata(project_dir, receipt, records),
         }
 
     def _close_log(self, active: ActiveRun) -> None:
@@ -1764,6 +1862,71 @@ class MesaService:
                 else:
                     child.unlink(missing_ok=True)
 
+    def _gate2_terminal_metadata(
+        self,
+        *,
+        project_dir: Path,
+        receipt: dict[str, Any],
+        status: str,
+        run_dir: Path,
+    ) -> dict[str, Any]:
+        """Build and persist the exact verifier-facing terminal contract."""
+
+        from .canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2
+
+        names = sorted(WIND_ARTIFACTS) if status == "succeeded" else []
+        artifacts = []
+        for name in names:
+            path = self._safe_path(run_dir / name)
+            if not path.is_file() or path.parent != run_dir:
+                raise ServiceError(500, "mesa_run_corrupt", "successful terminal evidence lacks an exact declared artifact")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            artifacts.append({
+                "artifact_id": "artifact_" + sha256_v2({"run_id": receipt["run_id"], "name": name, "sha256": digest}),
+                "name": name,
+                "sha256": digest,
+            })
+        metadata = self._read_workspace_json(self._safe_path(run_dir / "metadata.json"))
+        cancel_outcome = metadata.get("cancel_outcome")
+        allowed_cancel_outcomes = {
+            "succeeded": {None, "completed_before_cancel_effect"},
+            "failed": {None, "failed_before_cancel_effect"},
+            "timed_out": {None, "timed_out_before_cancel_effect"},
+            "cancelled": {"cancelled_before_dispatch", "cancelled_by_worker"},
+        }
+        tombstone_path = self._safe_path(project_dir / "run-intents" / receipt["run_id"] / "cancel-tombstone.json")
+        if status not in allowed_cancel_outcomes or cancel_outcome not in allowed_cancel_outcomes[status] or (cancel_outcome is not None) != tombstone_path.is_file():
+            raise ServiceError(500, "mesa_run_corrupt", "terminal cancel outcome is invalid")
+        value = {
+            "schema_version": 1,
+            "canonical_json_version": "riff-canonical-json-v2",
+            "terminal_metadata_digest": "",
+            "project_id": receipt["project_id"],
+            "run_id": receipt["run_id"],
+            "status": status,
+            "cancel_outcome": cancel_outcome,
+            "receipt_digest": receipt["mesa_run_receipt_digest"],
+            "run_intent_digest": receipt["run_intent_digest"],
+            "run_admission_digest": receipt["run_admission_digest"],
+            "policy_snapshot_digest": receipt["policy_snapshot_digest"],
+            "experiment_revision_id": receipt["experiment_revision_id"],
+            "experiment_sha256": receipt["experiment_sha256"],
+            "artifacts": artifacts,
+        }
+        value["terminal_metadata_digest"] = prefixed_digest(value, field="terminal_metadata_digest", prefix="tm_")
+        path = self._safe_path(project_dir / "mesa-run-lifecycle" / receipt["run_id"] / "terminal-metadata.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                existing = require_canonical_json_v2_bytes(path.read_bytes())
+            except Exception as exc:
+                raise ServiceError(500, "mesa_run_corrupt", "terminal metadata bytes are corrupt") from exc
+            if existing != value:
+                raise ServiceError(500, "mesa_run_corrupt", "terminal metadata changed after publication")
+        else:
+            self._write_workspace_bytes(path, canonical_json_v2_bytes(value))
+        return value
+
     def _append_gate2_terminal_for_active(self, active: ActiveRun, status: str) -> None:
         context = active.gate2_context
         if context is None:
@@ -1776,7 +1939,13 @@ class MesaService:
         }[status]
         metadata_root = active.temporary_dir if active.temporary_dir.exists() else active.final_dir
         metadata_path = self._safe_path(metadata_root / "metadata.json")
-        evidence = "tm_" + hashlib.sha256(metadata_path.read_bytes()).hexdigest() if metadata_path.is_file() else None
+        if not metadata_path.is_file():
+            raise ServiceError(500, "mesa_run_corrupt", "terminal run metadata is unavailable")
+        terminal = self._gate2_terminal_metadata(
+            project_dir=context["project_dir"], receipt=context["receipt"], status=status,
+            run_dir=metadata_root,
+        )
+        evidence = terminal["terminal_metadata_digest"]
         records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
         tombstone = self._gate2_cancel_tombstone(context["captured"])
         if tombstone is not None and not any(record["state"] == "cancel_requested" for record in records):
