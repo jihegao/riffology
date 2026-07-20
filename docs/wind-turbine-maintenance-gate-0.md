@@ -426,4 +426,4 @@ targets and state that they are no longer recoverable from the workspace.
 - [x] Complete current-tree retirement and precise workspace-cleanup policy for
       `queue-network-v1` recorded without performing the deletion.
 - [x] Independent review finds no unresolved blocking contract conflict.
-- [ ] Gate 0 checks pass and its draft pull request links the delivery issues.
+- [x] Gate 0 checks pass and its draft pull request links the delivery issues.
