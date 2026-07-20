@@ -121,6 +121,11 @@ def test_full_fixed_baseline_twice_has_stable_canonical_evidence_and_no_reductio
     assert first_metadata["digests"]["canonical_event_sha256"] == second_metadata["digests"]["canonical_event_sha256"]
     assert first_metadata["digests"]["daily_kpis_semantic_sha256"] == second_metadata["digests"]["daily_kpis_semantic_sha256"]
     assert first_metadata["digests"]["summary_semantic_sha256"] == second_metadata["digests"]["summary_semantic_sha256"]
+    assert first_request["model_revision_id"] == "mr_d8a62ba22c547c82286f42460dccf80f31f1d224ac8fbe8367bacd470956eb11"
+    assert first_request["experiment_revision_id"] == "er_9a7667d5e584c6fc88170e17ba7c087b7221ef2de611085e891386506e99a9b7"
+    assert first_metadata["digests"]["canonical_event_sha256"] == "64095d49a5f896714585278dbc03b621cd4854f4f7a957f1c85a6294538095de"
+    assert first_metadata["digests"]["daily_kpis_semantic_sha256"] == "55dd126fed9f574425ccc26b69bf2ce56d80379920bf1f2e9e0c9ff374d97e31"
+    assert first_metadata["digests"]["summary_semantic_sha256"] == "6494f1a854188d51d5fa4ffe705268a3c91479b8217b63e5791f6dbf02f5b5ad"
     assert len(first_metadata["digests"]["canonical_event_sha256"]) == 64
     assert first_metadata["event_truncated"] is False
     assert first_metadata["processed_scheduled_event_count"] <= first_metadata["limits"]["processed_scheduled_events"]

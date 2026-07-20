@@ -13,9 +13,12 @@ import sys
 import time
 import traceback
 import types
+import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
+from .canonical_v2 import canonical_json_v2_bytes
 from .wind_contracts import canonical_json_bytes as _contract_canonical_json_bytes
 from .wind_contracts import load_json_asset
 from .wind_contracts import runtime_profile as _contract_runtime_profile
@@ -38,6 +41,22 @@ IDENTITY_FIELDS = (
     "preset_id",
     "seed",
 )
+V2_IDENTITY_FIELDS = (
+    "project_id",
+    "run_id",
+    "model_id",
+    "model_revision_id",
+    "brief_revision_id",
+    "alignment_revision_id",
+    "experiment_revision_id",
+    "preset_id",
+    "seed",
+    "visibility",
+    "trust_label",
+    "workflow_label",
+    "policy_snapshot_digest",
+    "run_admission_digest",
+)
 LIMITS: dict[str, int] = {
     "parent_wall_timeout_seconds": 180,
     "processed_scheduled_events": 2_000_000,
@@ -58,6 +77,33 @@ REQUIRED_SUCCESS_ARTIFACTS = {
     "derived-views-manifest.json",
     "run.log",
 }
+
+
+def _process_start_token(pid: int) -> str:
+    value = subprocess.check_output(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=2,
+    ).strip()
+    if not value:
+        raise RuntimeError("worker process start token is unavailable")
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _atomic_canonical_v2(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    data = canonical_json_v2_bytes(payload)
+    with temporary.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 RAW_EVENT_FIELDS = {
     "event_id",
     "sequence",
@@ -300,6 +346,26 @@ def initial_metadata(request: dict[str, Any], *, status: str = "queued") -> dict
     }
 
 
+def initial_metadata_v2(request: dict[str, Any], *, status: str = "queued") -> dict[str, Any]:
+    validate_request_v2(request)
+    identity = {key: request[key] for key in V2_IDENTITY_FIELDS}
+    return {
+        **identity,
+        "status": status,
+        "created_at": time.time(),
+        "claim_labels": request["claim_labels"],
+        "experiment_sha256": request["experiment_sha256"],
+        "run_intent_digest": request["run_intent_digest"],
+        "downstream_request_digest": request["downstream_request_digest"],
+        "runtime_profile": request["runtime_profile"],
+        "limits": dict(LIMITS),
+        "event_truncated": False,
+        "processed_scheduled_event_count": 0,
+        "emitted_domain_event_count": 0,
+        "digests": {"request_sha256": sha256_bytes(canonical_json_v2_bytes(request))},
+    }
+
+
 def validate_request(request: object) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise RuntimeError("wind worker request must be an object")
@@ -351,12 +417,77 @@ def validate_request(request: object) -> dict[str, Any]:
     return request
 
 
+def validate_request_v2(request: object) -> dict[str, Any]:
+    from .canonical_v2 import canonical_json_v2_bytes
+    from .gate2_contracts import V2_IDENTITY_FIELDS as CONTRACT_IDENTITY_FIELDS
+    from .gate2_contracts import validate_experiment_v2, validate_run_admission
+    from .wind_contracts import validate_parameters
+
+    if not isinstance(request, dict):
+        raise RuntimeError("v2 wind worker request must be an object")
+    required = {
+        *CONTRACT_IDENTITY_FIELDS,
+        "experiment_sha256", "run_intent_digest", "downstream_request_digest",
+        "experiment_document", "run_admission", "parameters", "horizon_days", "warmup_days",
+        "runtime_profile", "claim_labels",
+    }
+    if set(request) != required:
+        raise RuntimeError("v2 wind worker request keys do not match the exact contract")
+    try:
+        experiment = validate_experiment_v2(request["experiment_document"])
+        admission = validate_run_admission(request["run_admission"])
+        parameters = validate_parameters(request["parameters"])
+    except Exception as exc:
+        raise RuntimeError(f"v2 embedded document is invalid: {exc}") from exc
+    experiment_bytes = canonical_json_v2_bytes(experiment)
+    if sha256_bytes(experiment_bytes) != request["experiment_sha256"]:
+        raise RuntimeError("embedded experiment SHA does not match exact canonical bytes")
+    if parameters != experiment["parameters"]:
+        raise RuntimeError("worker parameters differ from embedded experiment")
+    identity = {key: request[key] for key in V2_IDENTITY_FIELDS}
+    expected_identity = {
+        "project_id": admission["project_id"], "run_id": admission["run_id"], "model_id": admission["model_id"],
+        "model_revision_id": admission["model_revision_id"], "brief_revision_id": admission["brief_revision_id"],
+        "alignment_revision_id": admission["alignment_revision_id"], "experiment_revision_id": admission["experiment_revision_id"],
+        "preset_id": experiment["preset_id"], "seed": experiment["execution_values"]["seed"],
+        "visibility": admission["visibility"], "trust_label": admission["trust_label"],
+        "workflow_label": admission["workflow_label"], "policy_snapshot_digest": admission["policy_snapshot_digest"],
+        "run_admission_digest": admission["run_admission_digest"],
+    }
+    if identity != expected_identity:
+        raise RuntimeError("v2 request identity differs from embedded admission/experiment")
+    if (
+        request["experiment_sha256"] != admission["experiment_sha256"]
+        or request["horizon_days"] != experiment["execution_values"]["horizon_days"]
+        or request["warmup_days"] != experiment["execution_values"]["warmup_days"]
+        or request["runtime_profile"] != experiment["runtime_profile"]
+        or request["runtime_profile"] != runtime_profile()
+        or not isinstance(request["run_intent_digest"], str)
+        or re.fullmatch(r"ri_[0-9a-f]{64}", request["run_intent_digest"]) is None
+        or not isinstance(request["downstream_request_digest"], str)
+        or re.fullmatch(r"rq_[0-9a-f]{64}", request["downstream_request_digest"]) is None
+        or set(request["claim_labels"]) != set(REQUIRED_CLAIM_LABELS)
+    ):
+        raise RuntimeError("v2 request bindings are inconsistent")
+    canonical_json_v2_bytes(request)
+    return request
+
+
 def _validate_request_experiment_binding(
     request: dict[str, Any],
     *,
     expected_model_revision_id: str,
     expected_experiment_revision_id: str,
 ) -> dict[str, Any]:
+    if "experiment_document" in request:
+        experiment = request["experiment_document"]
+        if request["model_revision_id"] != expected_model_revision_id:
+            raise RuntimeError("request model revision does not match the parent-admitted revision")
+        if request["experiment_revision_id"] != expected_experiment_revision_id:
+            raise RuntimeError("request experiment revision does not match the parent-admitted revision")
+        if experiment["model_revision_id"] != expected_model_revision_id or experiment["experiment_revision_id"] != expected_experiment_revision_id:
+            raise RuntimeError("embedded experiment identity differs from parent admission")
+        return experiment
     from .bundle import experiment_revision_id
     from .wind_contracts import build_experiment_document, validate_experiment_document
 
@@ -468,12 +599,17 @@ def _parse_metric_csv_row(
     return parsed
 
 
+def _identity_fields(request: dict[str, Any]) -> tuple[str, ...]:
+    return V2_IDENTITY_FIELDS if "workflow_label" in request else IDENTITY_FIELDS
+
+
 def _identity(request: dict[str, Any]) -> dict[str, Any]:
-    return {key: request[key] for key in IDENTITY_FIELDS}
+    return {key: request[key] for key in _identity_fields(request)}
 
 
 def _validate_domain_event(event: object, expected_identity: dict[str, Any] | None = None) -> dict[str, Any]:
-    if not isinstance(event, dict) or set(event) != EVENT_FIELDS:
+    identity_fields = tuple(expected_identity) if expected_identity is not None else IDENTITY_FIELDS
+    if not isinstance(event, dict) or set(event) != RAW_EVENT_FIELDS | set(identity_fields):
         raise RuntimeError("domain event schema keys are not exact")
     sequence = event["sequence"]
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
@@ -507,7 +643,7 @@ def _validate_domain_event(event: object, expected_identity: dict[str, Any] | No
             raise RuntimeError(f"domain event {key} is outside the reviewed state vocabulary")
     if not isinstance(event["payload"], dict):
         raise RuntimeError("domain event payload must be an object")
-    identity = {key: event[key] for key in IDENTITY_FIELDS}
+    identity = {key: event[key] for key in identity_fields}
     if expected_identity is not None and identity != expected_identity:
         raise RuntimeError("domain event identity does not match the run request")
     canonical_json_bytes(event)
@@ -544,15 +680,23 @@ def _semantic_event_projection(event: dict[str, Any], profile: dict[str, str]) -
 
 
 def _semantic_without_run_context(value: object) -> object:
-    if isinstance(value, list):
-        return [_semantic_without_run_context(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _semantic_without_run_context(item)
-            for key, item in value.items()
-            if key not in {"project_id", "run_id", "created_at", "started_at", "finished_at", "worker_pid", "path"}
+    is_v2 = isinstance(value, dict) and "workflow_label" in value
+    excluded = {"project_id", "run_id", "created_at", "started_at", "finished_at", "worker_pid", "path"}
+    if is_v2:
+        excluded |= {
+            "brief_revision_id", "alignment_revision_id", "visibility", "trust_label", "workflow_label",
+            "policy_snapshot_digest", "run_admission_digest", "run_intent_digest", "downstream_request_digest",
+            "experiment_sha256",
         }
-    return value
+
+    def project(item: object) -> object:
+        if isinstance(item, list):
+            return [project(nested) for nested in item]
+        if isinstance(item, dict):
+            return {key: project(nested) for key, nested in item.items() if key not in excluded}
+        return item
+
+    return project(value)
 
 
 def _write_event_batch(
@@ -577,13 +721,16 @@ def _write_event_batch(
         if emitted_bytes > LIMITS["domain_event_bytes"]:
             raise WorkerLimitError("domain event byte limit reached; output was not truncated")
         event_handle.write(encoded)
-        semantic_event_digest.update(canonical_json_bytes(_semantic_event_projection(event, request["runtime_profile"])))
+        projection = _semantic_event_projection(event, request["runtime_profile"])
+        semantic_event_digest.update(
+            canonical_json_v2_bytes(projection) if "workflow_label" in request else canonical_json_bytes(projection)
+        )
         if event["event_type"] == "daily_snapshot":
             payload = event["payload"]
             snapshot = payload.get("snapshot", payload) if isinstance(payload, dict) else payload
             row = _validate_metric_mapping(snapshot, kpi_state["metric_schema"], context="daily snapshot")
             if kpi_state.get("writer") is None:
-                fieldnames = [*IDENTITY_FIELDS, *row.keys()]
+                fieldnames = [*_identity_fields(request), *row.keys()]
                 if len(fieldnames) != len(set(fieldnames)):
                     raise RuntimeError("snapshot keys collide with run identity fields")
                 writer = csv.DictWriter(kpi_state["handle"], fieldnames=fieldnames)
@@ -628,7 +775,10 @@ def execute(
         request_payload = json.loads(request_bytes)
     except json.JSONDecodeError as exc:
         raise RuntimeError("request bytes are not valid JSON") from exc
-    request = validate_request(request_payload)
+    is_v2 = isinstance(request_payload, dict) and "experiment_document" in request_payload
+    if is_v2 and request_bytes != canonical_json_v2_bytes(request_payload):
+        raise RuntimeError("v2 captured request bytes are not exact riff-canonical-json-v2")
+    request = validate_request_v2(request_payload) if is_v2 else validate_request(request_payload)
     _validate_request_experiment_binding(
         request,
         expected_model_revision_id=expected_model_revision_id,
@@ -643,11 +793,14 @@ def execute(
     _metric_contract(metric_schema)
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"
-    metadata = read_json(metadata_path) if metadata_path.exists() else initial_metadata(request)
+    metadata = read_json(metadata_path) if metadata_path.exists() else (
+        initial_metadata_v2(request) if is_v2 else initial_metadata(request)
+    )
     if _identity(metadata) != _identity(request):
         raise RuntimeError("worker metadata identity does not match the admitted request")
     recorded_request_digest = metadata.get("digests", {}).get("request_sha256")
-    if recorded_request_digest != sha256_bytes(canonical_json_bytes(request)):
+    canonical_request = canonical_json_v2_bytes(request) if is_v2 else canonical_json_bytes(request)
+    if recorded_request_digest != sha256_bytes(canonical_request):
         raise RuntimeError("worker metadata does not bind the admitted request content")
     metadata.update({"status": "running", "started_at": time.time()})
     atomic_json(metadata_path, metadata)
@@ -721,8 +874,6 @@ def execute(
     summary = {
         **_identity(request),
         "claim_labels": request["claim_labels"],
-        "trust_label": request["trust_label"],
-        "workflow_policy": request["workflow_policy"],
         "measurement_window_days": measurement_days,
         "seed_count": 1,
         "minimum_availability_fraction": minimum_availability,
@@ -740,6 +891,9 @@ def execute(
             "no_staffing_recommendation",
         ],
     }
+    if not is_v2:
+        summary["trust_label"] = request["trust_label"]
+        summary["workflow_policy"] = request["workflow_policy"]
     summary_path = output_dir / "summary.json"
     atomic_json(summary_path, summary)
 
@@ -757,15 +911,21 @@ def execute(
     atomic_json(replay_path, replay)
 
     daily_semantic = _daily_semantic_digest(kpis_path)
-    summary_semantic = sha256_bytes(canonical_json_bytes(_semantic_without_run_context(summary)))
+    summary_projection = _semantic_without_run_context(summary)
+    summary_semantic = sha256_bytes(
+        canonical_json_v2_bytes(summary_projection) if is_v2 else canonical_json_bytes(summary_projection)
+    )
     derived = {
         **_identity(request),
         "claim_labels": request["claim_labels"],
-        "generator_version": "gate1-derived-view-contract-v1",
+        "generator_version": "gate2-derived-view-contract-v2" if is_v2 else "gate1-derived-view-contract-v1",
         "rendered": False,
         "inputs": {
             "model_spec_sha256": manifest_files["model-spec.json"]["sha256"],
             "traceability_sha256": manifest_files["traceability.json"]["sha256"],
+            "domain_events_sha256": sha256_file(events_path),
+            "daily_kpis_sha256": sha256_file(kpis_path),
+            "summary_sha256": sha256_file(summary_path),
             "canonical_event_sha256": canonical_event_sha,
             "daily_kpis_semantic_sha256": daily_semantic,
             "summary_semantic_sha256": summary_semantic,
@@ -821,9 +981,17 @@ def execute(
 def _daily_semantic_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            semantic = {key: value for key, value in row.items() if key not in {"project_id", "run_id"}}
-            digest.update(canonical_json_bytes(semantic))
+        reader = csv.DictReader(handle)
+        v2 = bool(reader.fieldnames and "workflow_label" in reader.fieldnames)
+        excluded = {"project_id", "run_id"}
+        if v2:
+            excluded |= {
+                "brief_revision_id", "alignment_revision_id", "visibility", "trust_label", "workflow_label",
+                "policy_snapshot_digest", "run_admission_digest",
+            }
+        for row in reader:
+            semantic = {key: value for key, value in row.items() if key not in excluded}
+            digest.update(canonical_json_v2_bytes(semantic) if v2 else canonical_json_bytes(semantic))
     return digest.hexdigest()
 
 
@@ -850,9 +1018,87 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-request-sha256", required=True)
     parser.add_argument("--expected-model-revision-id", required=True)
     parser.add_argument("--expected-experiment-revision-id", required=True)
+    parser.add_argument("--spawn-nonce")
+    parser.add_argument("--worker-start-barrier", type=Path)
+    parser.add_argument("--worker-handshake", type=Path)
+    parser.add_argument("--receipt-digest")
+    parser.add_argument("--ownership-epoch", type=int)
+    parser.add_argument("--workspace-root", type=Path)
+    parser.add_argument("--cancel-tombstone", type=Path)
     parser.add_argument("--delay-per-day", type=float, default=0.0)
     args = parser.parse_args(argv)
     try:
+        if args.spawn_nonce is not None and re.fullmatch(r"[0-9a-f]{32}", args.spawn_nonce) is None:
+            raise RuntimeError("spawn nonce is invalid")
+        gate2_values = (
+            args.spawn_nonce, args.worker_start_barrier, args.worker_handshake,
+            args.receipt_digest, args.ownership_epoch,
+            args.workspace_root, args.cancel_tombstone,
+        )
+        if any(value is not None for value in gate2_values) and not all(value is not None for value in gate2_values):
+            raise RuntimeError("Gate 2 worker ownership arguments must be supplied together")
+        if args.worker_start_barrier is not None:
+            barrier = _reject_symlink_components(args.worker_start_barrier)
+            handshake_path = _reject_symlink_components(args.worker_handshake)
+            request_document = read_json(args.request)
+            handshake = {
+                "schema_version": 1,
+                "canonical_json_version": "riff-canonical-json-v2",
+                "project_id": request_document["project_id"],
+                "run_id": request_document["run_id"],
+                "receipt_digest": args.receipt_digest,
+                "spawn_ownership_epoch": args.ownership_epoch,
+                "spawn_nonce": args.spawn_nonce,
+                "pid": os.getpid(),
+                "process_start_token": _process_start_token(os.getpid()),
+                "executable_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
+                "request_sha256": args.expected_request_sha256,
+                "model_path": str(args.model.resolve()),
+                "request_path": str(args.request.resolve()),
+                "output_dir": str(args.output_dir.resolve()),
+                "barrier_path": str(barrier.resolve()),
+            }
+            handshake["handshake_sha256"] = hashlib.sha256(canonical_json_v2_bytes(handshake)).hexdigest()
+            _atomic_canonical_v2(handshake_path, handshake)
+            deadline = time.monotonic() + 10
+            while not barrier.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not barrier.is_file() or barrier.is_symlink():
+                raise RuntimeError("parent did not durably publish worker_started")
+            barrier_document = read_json(barrier)
+            expected_barrier = {
+                "schema_version": 1,
+                "canonical_json_version": "riff-canonical-json-v2",
+                "project_id": handshake["project_id"],
+                "run_id": handshake["run_id"],
+                "receipt_digest": args.receipt_digest,
+                "spawn_ownership_epoch": args.ownership_epoch,
+                "grant_ownership_epoch": barrier_document.get("grant_ownership_epoch"),
+                "spawn_nonce": args.spawn_nonce,
+                "captured_request_sha256": args.expected_request_sha256,
+                "handshake_sha256": handshake["handshake_sha256"],
+                "worker_started_lifecycle_digest": barrier_document.get("worker_started_lifecycle_digest"),
+            }
+            if not isinstance(expected_barrier["grant_ownership_epoch"], int) or expected_barrier["grant_ownership_epoch"] < args.ownership_epoch:
+                raise RuntimeError("worker-start barrier ownership epoch is invalid")
+            if barrier.read_bytes() != canonical_json_v2_bytes(barrier_document) or barrier_document != expected_barrier:
+                raise RuntimeError("worker-start barrier is not the exact durable ownership grant")
+            barrier.unlink()
+            handshake_path.unlink()
+            tombstone_path = _reject_symlink_components(args.cancel_tombstone)
+            if tombstone_path.exists():
+                from .canonical_v2 import require_canonical_json_v2_bytes
+                from .gate2_contracts import validate_cancel_tombstone
+                from .gate2_project_evidence import verify_cancel_tombstone_committed
+
+                tombstone = validate_cancel_tombstone(require_canonical_json_v2_bytes(tombstone_path.read_bytes()))
+                if tombstone["project_id"] != handshake["project_id"] or tombstone["run_id"] != handshake["run_id"]:
+                    raise RuntimeError("cancel tombstone does not bind this worker")
+                verify_cancel_tombstone_committed(
+                    _reject_symlink_components(args.workspace_root),
+                    handshake["project_id"], handshake["run_id"], tombstone,
+                )
+                raise CancelledRun("exact committed cancel tombstone observed before model execution")
         execute(
             args.model,
             args.request,
