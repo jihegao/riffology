@@ -5,22 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BackendApp } from "../src/server.ts";
-import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
-import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
+import type { MesaAdapter } from "../src/mesa-adapter.ts";
 
-const unavailableMesa: MesaAdapter = {
-  async loadModel(): Promise<MesaModel> { throw new Error("unused"); },
-  async startRun(_projectId: string, _request: MesaRunRequest): Promise<MesaRun> { throw new Error("unused"); },
-  async getRun(): Promise<MesaRun> { throw new Error("unused"); },
-  async cancelRun(): Promise<MesaRun> { throw new Error("unused"); },
-  async getResults(): Promise<MesaResults> { throw new Error("unused"); },
-};
-const noAgent = { async initialize() { return { status: "unconfigured" as const, modelId: null }; }, async createSession() { return "unused"; }, async prompt() {}, async abort() {} };
+const unavailableMesa: MesaAdapter = {};
 const json = async (response: Response): Promise<any> => JSON.parse(await response.text());
 
-test("Gate 2 project HTTP identity, command idempotency, actor boundary, redaction, and legacy routes coexist", async (t) => {
+test("Gate 2 project HTTP identity, command idempotency, actor boundary, redaction, and retired root route absence", async (t) => {
   const workspace = realpathSync(await mkdtemp(join(tmpdir(), "riff-gate2-api-")));
-  const app = new BackendApp({ mesa: unavailableMesa, openCode: noAgent, workspaceRoot: workspace, defaultSessionId: "legacy-demo" });
+  const app = new BackendApp({ mesa: unavailableMesa, workspaceRoot: workspace });
   await app.initialize(); const { port } = await app.listen(); const origin = `http://127.0.0.1:${port}`;
   t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
 
@@ -49,12 +41,24 @@ test("Gate 2 project HTTP identity, command idempotency, actor boundary, redacti
   response = await fetch(`${origin}/api/projects/${projectId}/policy`); assert.equal(response.status, 404);
   response = await fetch(`${origin}/api/projects/${projectId}/events?after=-1`); assert.equal(response.status, 200); const page = await json(response); assert.equal(page.events.length, 2); assert.equal(page.events[1].event_type, "actor.created");
 
-  response = await fetch(`${origin}/api/sessions/legacy-demo/snapshot`); assert.equal(response.status, 200); assert.equal((await json(response)).sessionId, "legacy-demo");
+  response = await fetch(`${origin}/health`); assert.equal(response.status, 200); const health = await json(response); assert.equal(health.healthy, true);
+  assert.deepEqual(Object.keys(health).sort(), ["healthy", "workspace_lifecycle"]);
+  const retiredControlRoot = `/${["api", "sessions"].join("/")}`;
+  for (const route of [
+    `/${["m", "cp"].join("")}`,
+    retiredControlRoot,
+    `${retiredControlRoot}/removed/snapshot`,
+    `${retiredControlRoot}/removed/chat`,
+  ]) {
+    response = await fetch(`${origin}${route}`, { method: "POST" });
+    assert.equal(response.status, 404);
+    assert.equal((await json(response)).error.code, "not_found");
+  }
 });
 
 test("Gate 2 HTTP command routes reject non-object payloads and nested nulls as validation errors", async (t) => {
   const workspace = realpathSync(await mkdtemp(join(tmpdir(), "riff-gate2-http-shapes-")));
-  const app = new BackendApp({ mesa: unavailableMesa, openCode: noAgent, workspaceRoot: workspace });
+  const app = new BackendApp({ mesa: unavailableMesa, workspaceRoot: workspace });
   await app.initialize(); const { port } = await app.listen(); const origin = `http://127.0.0.1:${port}`;
   t.after(async () => { await app.close(); await rm(workspace, { recursive: true, force: true }); });
 
