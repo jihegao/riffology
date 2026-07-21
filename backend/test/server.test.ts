@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -73,8 +73,10 @@ class HangingAbortOpenCode extends FakeOpenCode {
   }
 }
 
+const canonicalWorkspace = async (): Promise<string> => realpath(await mkdtemp(join(tmpdir(), "riff-backend-")));
+
 test("public routes preserve revision, attachment, chat, parameter, and Mesa run boundaries", async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const workspace = await canonicalWorkspace();
   const mesa = new FakeMesa();
   const openCode = new FakeOpenCode();
   const app = new BackendApp({ mesa, openCode, workspaceRoot: workspace, defaultSessionId: "demo" });
@@ -144,7 +146,7 @@ test("public routes preserve revision, attachment, chat, parameter, and Mesa run
 });
 
 test("browser session creation is server-generated and unknown snapshots remain absent", async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const workspace = await canonicalWorkspace();
   const app = new BackendApp({ mesa: new FakeMesa(), openCode: new FakeOpenCode(), workspaceRoot: workspace, defaultSessionId: "default-session" });
   await app.initialize();
   const { port } = await app.listen();
@@ -171,7 +173,7 @@ test("browser session creation is server-generated and unknown snapshots remain 
 });
 
 test("agent timeout returns 504 without waiting for a hanging OpenCode abort", async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const workspace = await canonicalWorkspace();
   const app = new BackendApp({
     mesa: new FakeMesa(),
     openCode: new HangingAbortOpenCode(),
@@ -196,7 +198,7 @@ test("agent timeout returns 504 without waiting for a hanging OpenCode abort", a
 });
 
 test("development OpenCode skip is explicit and only loads the approved deterministic model", async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const workspace = await canonicalWorkspace();
   const adapter = new HttpOpenCodeAdapter({ skipLive: true });
   const app = new BackendApp({ mesa: new FakeMesa(), openCode: adapter, workspaceRoot: workspace, defaultSessionId: "skip" });
   await app.initialize();
@@ -214,7 +216,7 @@ test("development OpenCode skip is explicit and only loads the approved determin
 });
 
 test("each live chat creates a fresh OpenCode session, rebinds MCP, and revokes capability on close", async (t) => {
-  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-"));
+  const workspace = await canonicalWorkspace();
   const openCode = new BindAwareOpenCode();
   const app = new BackendApp({
     mesa: new FakeMesa(),

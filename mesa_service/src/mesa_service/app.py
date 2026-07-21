@@ -57,6 +57,10 @@ def create_app(
     app = FastAPI(title="Riff Mesa execution service", version="0.1.0", lifespan=lifespan)
     app.state.mesa_service = service
 
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"healthy": True, "workspace_lifecycle": service.workspace_lifecycle_proof()}
+
     def _one_header(request: Request, name: str, expected: str | None = None) -> str:
         values = request.headers.getlist(name)
         if len(values) != 1 or (expected is not None and values[0] != expected):
@@ -258,4 +262,16 @@ def create_app(
     return app
 
 
-app = create_app()
+class _LazyDefaultApplication:
+    """Create the default service at ASGI startup, never as an import side effect."""
+
+    def __init__(self) -> None:
+        self._application: FastAPI | None = None
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if self._application is None:
+            self._application = create_app()
+        await self._application(scope, receive, send)
+
+
+app = _LazyDefaultApplication()

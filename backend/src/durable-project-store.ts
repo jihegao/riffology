@@ -6,6 +6,7 @@ import { ApiError } from "./errors.ts";
 import { CANONICAL_JSON_V2, canonicalDigest, canonicalJsonV2, contentId, parseCanonicalJsonV2, sha256Hex, type CanonicalJsonScalar } from "./canonical-json-v2.ts";
 import type { AlignmentMapRevision, Attestation, AttestationSummary, CancelTombstone, DecisionBriefRevision, DeclaredLocalActor, DurableProjectEvent, DurableProjectSnapshot, ExecutionValues, ExperimentRevision, IssueEvent, IssueSummary, LocalRunTerminalEvidence, PolicySnapshot, ProjectCommand, RecordRef, RunAdmission, RunIntent, RunReference, SourceRef, SubjectPolicy, TerminalRunReference, VerifiedMesaArtifact, VerifiedMesaRunEvidence, WindModelContract } from "./durable-project-types.ts";
 import { assertBoundedCommand, assertSafeText, safeFailure } from "./safe-input.ts";
+import { WorkspaceLifecycle, type WorkspaceLifecycleProof } from "./workspace-lifecycle.ts";
 
 type StoredResponse = { command_digest: string; status: number; body: Record<string, unknown>; project_id: string };
 type BootstrapIntent = { schema_version: 1; canonical_json_version: typeof CANONICAL_JSON_V2; command_id: string; command_digest: string; project_id: string; session_id: string; actor_id: string; base_snapshot_revision: number; created_at: string };
@@ -22,7 +23,7 @@ type RevisionCandidate = Omit<DurableProjectSnapshot, "snapshot_digest" | "previ
 type FramedExperimentMutationAuthority = { contract: WindModelContract; root_experiment_revision_id: string };
 type CommitBuild = { event_type: string; records?: Array<{ relative: string; bytes: Buffer; ref: RecordRef }>; next: RevisionCandidate; response: Record<string, unknown>; status?: number };
 type FaultPoint = "after_records_promoted" | "after_event_committed" | "after_snapshot_committed" | "after_receipt_committed" | "after_workspace_event_committed";
-type StoreOptions = { clock?: Clock; modelContracts?: WindModelContract[]; acquireWriterLock?: boolean; faultInjector?: (point: FaultPoint) => void; mesaEvidenceProvider?: (projectId: string, runId: string) => VerifiedMesaRunEvidence; localRunInspector?: (projectId: string, runId: string) => { mesa_receipt_absent: boolean; dispatch_owner_absent: boolean; failure?: { code: unknown; safe_message: unknown } } };
+type StoreOptions = { clock?: Clock; modelContracts?: WindModelContract[]; modelContractLoader?: (workspaceRoot: string) => WindModelContract[]; acquireWriterLock?: boolean; lifecycleRepositoryRoot?: string; faultInjector?: (point: FaultPoint) => void; mesaEvidenceProvider?: (projectId: string, runId: string) => VerifiedMesaRunEvidence; localRunInspector?: (projectId: string, runId: string) => { mesa_receipt_absent: boolean; dispatch_owner_absent: boolean; failure?: { code: unknown; safe_message: unknown } } };
 
 const UUID_ID = /^[a-z]+_[0-9a-f]{32}$/u;
 const CONTENT_ID = /^(?:dbr|amr|er|mr)_[0-9a-f]{64}$/u;
@@ -60,23 +61,33 @@ export class DurableProjectStore {
   readonly #mesaEvidence?: StoreOptions["mesaEvidenceProvider"];
   readonly #localInspector?: StoreOptions["localRunInspector"];
   readonly #writerInstanceId = randomUUID();
+  readonly #lifecycle: WorkspaceLifecycle;
   #lockFd: number | null = null;
   #runAdmissionGuard?: (projectId: string, modelRevisionId: string) => void;
   #experimentMutationGuard?: (projectId: string, modelRevisionId: string) => FramedExperimentMutationAuthority;
 
   constructor(root: string, options: StoreOptions = {}) {
     this.root = resolve(root);
-    this.#clock = options.clock ?? (() => new Date().toISOString().replace(/\.\d{3}Z$/u, (value) => value));
-    this.#fault = options.faultInjector; this.#mesaEvidence = options.mesaEvidenceProvider; this.#localInspector = options.localRunInspector;
-    for (const contract of options.modelContracts ?? []) this.#contracts.set(contract.model_revision_id, clone(contract));
-    this.#prepareRoot(options.acquireWriterLock !== false);
-    try { this.#recoverWorkspace(); } catch (error) { this.close(); throw error; }
+    this.#lifecycle = WorkspaceLifecycle.acquireShared(this.root, options.lifecycleRepositoryRoot);
+    try {
+      this.#clock = options.clock ?? (() => new Date().toISOString().replace(/\.\d{3}Z$/u, (value) => value));
+      this.#fault = options.faultInjector; this.#mesaEvidence = options.mesaEvidenceProvider; this.#localInspector = options.localRunInspector;
+      this.#lifecycle.withMutation(() => {
+        const contracts = [...(options.modelContracts ?? []), ...(options.modelContractLoader?.(this.root) ?? [])];
+        for (const contract of contracts) this.#contracts.set(contract.model_revision_id, clone(contract));
+        this.#prepareRoot(options.acquireWriterLock !== false);
+        this.#recoverWorkspace();
+      });
+    } catch (error) { this.close(); throw error; }
   }
 
   close(): void {
     if (this.#lockFd !== null) { closeSync(this.#lockFd); this.#lockFd = null; const lockPath = join(this.root, ".backend-writer.lock"); try { const lock = this.#readJson(lockPath) as Record<string, unknown>; if (lock.instance_id === this.#writerInstanceId) unlinkSync(lockPath); } catch { /* never remove an unowned or changed lock */ } }
     this.#sessions.clear();
+    this.#lifecycle.close();
   }
+
+  workspaceLifecycleProof(): WorkspaceLifecycleProof { return this.#lifecycle.proof(); }
 
   createProject(request: { command_id: string; display_name: string; initial_actor: { actor_type: "human"; display_name: string; declared_role: "project_owner" } }): { status: number; body: Record<string, unknown> } {
     ensureCommandId(request.command_id);

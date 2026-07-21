@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { ApiError } from "./errors.ts";
 import { canonicalJsonV2, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import { DurableProjectStore } from "./durable-project-store.ts";
@@ -26,10 +26,9 @@ export class Gate2Runtime {
   #closePromise?: Promise<void>;
 
   constructor(workspaceRoot: string, mesa: MesaAdapter, store?: DurableProjectStore) {
-    this.#workspaceRoot = existsSync(workspaceRoot) ? realpathSync(workspaceRoot) : workspaceRoot; this.#mesa = mesa;
-    const preloaded = store ? { contracts: [] } : this.#preloadWorkspaceEvidence();
+    this.#workspaceRoot = store?.root ?? resolve(workspaceRoot); this.#mesa = mesa;
     this.store = store ?? new DurableProjectStore(this.#workspaceRoot, {
-      modelContracts: preloaded.contracts,
+      modelContractLoader: () => this.#preloadWorkspaceEvidence().contracts,
       mesaEvidenceProvider: (projectId, runId) => {
         const value = this.#evidence.get(key(projectId, runId));
         if (!value) throw new ApiError(503, "provider_unavailable", "Verified Mesa evidence has not been captured.");

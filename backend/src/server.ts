@@ -114,7 +114,7 @@ export class BackendApp {
     try {
       const url = requestUrl;
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-      if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
+      if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness), workspace_lifecycle: this.gate2.store.workspaceLifecycleProof() });
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
       if (parts[0] === "api" && parts[1] === "projects") return await this.#gate2(request, response, url, parts);
       if (request.method === "POST" && parts[0] === "api" && parts[1] === "sessions" && parts.length === 2) return this.#createBrowserSession(request, response);

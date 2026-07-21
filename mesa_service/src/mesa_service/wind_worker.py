@@ -24,6 +24,7 @@ from .canonical_v2 import canonical_json_v2_bytes
 from .wind_contracts import canonical_json_bytes as _contract_canonical_json_bytes
 from .wind_contracts import load_json_asset
 from .wind_contracts import runtime_profile as _contract_runtime_profile
+from .workspace_lifecycle import WorkspaceLifecycle, WorkspaceLifecycleError
 
 
 MODEL_ID = "wind-turbine-maintenance"
@@ -1316,6 +1317,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cancel-tombstone", type=Path)
     parser.add_argument("--delay-per-day", type=float, default=0.0)
     args = parser.parse_args(argv)
+    lifecycle = None
+    if args.workspace_root is not None:
+        try:
+            lifecycle = WorkspaceLifecycle(args.workspace_root)
+        except WorkspaceLifecycleError as exc:
+            print(f"workspace admission failed: {exc.code}", file=sys.stderr, flush=True)
+            return 1
     try:
         if args.spawn_nonce is not None and re.fullmatch(r"[0-9a-f]{32}", args.spawn_nonce) is None:
             raise RuntimeError("spawn nonce is invalid")
@@ -1406,6 +1414,9 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         _record_terminal_error(args.output_dir, "failed", "worker_failed", str(exc))
         return 1
+    finally:
+        if lifecycle is not None:
+            lifecycle.close()
 
 
 if __name__ == "__main__":

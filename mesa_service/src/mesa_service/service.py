@@ -31,6 +31,7 @@ from .wind_worker import (
     build_run_request,
     initial_metadata,
 )
+from .workspace_lifecycle import WorkspaceLifecycle, WorkspaceLifecycleError
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 TERMINAL = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -181,33 +182,39 @@ class MesaService:
         self,
         workspace_root: str | Path,
         *,
+        lifecycle_repository_root: str | Path | None = None,
         timeout_seconds: float = 30,
         wind_timeout_seconds: float = 180,
         worker_limit: int = 2,
         worker_delay_seconds: float = 0,
         owner_lease_seconds: float = 10.0,
     ) -> None:
-        requested_root = _reject_symlink_components(workspace_root)
-        requested_root.mkdir(parents=True, exist_ok=True)
-        _reject_symlink_components(requested_root)
-        self.workspace_root = requested_root.resolve(strict=True)
-        self.projects_root = self.workspace_root / "projects"
-        self.timeout_seconds = timeout_seconds
-        self.wind_timeout_seconds = wind_timeout_seconds
-        self.worker_limit = worker_limit
-        self.worker_delay_seconds = worker_delay_seconds  # test-only hook, not an HTTP input
-        self.owner_lease_seconds = max(0.25, float(owner_lease_seconds))
-        self.owner_instance_id = f"mesa_owner_{uuid.uuid4().hex}"
-        from .gate3_activation import Gate3ActivationStore
-        self.gate3_activation = Gate3ActivationStore(self)
-        self.active_runs: dict[str, ActiveRun] = {}
-        self._poll_lock = threading.Lock()
-        self._run_locks_guard = threading.Lock()
-        self._in_process_run_locks: dict[tuple[str, str], threading.RLock] = {}
-        self.projects_root.mkdir(parents=True, exist_ok=True)
-        self._safe_path(self.projects_root)
-        self.gate3_activation.recover_switches()
-        self._recover_indexed_gate2_receipts()
+        try:
+            self.workspace_lifecycle = WorkspaceLifecycle(workspace_root, lifecycle_repository_root)
+        except WorkspaceLifecycleError as exc:
+            raise ServiceError(503, exc.code, str(exc)) from exc
+        try:
+            self.workspace_root = self.workspace_lifecycle.root
+            self.projects_root = self.workspace_root / "projects"
+            self.timeout_seconds = timeout_seconds
+            self.wind_timeout_seconds = wind_timeout_seconds
+            self.worker_limit = worker_limit
+            self.worker_delay_seconds = worker_delay_seconds  # test-only hook, not an HTTP input
+            self.owner_lease_seconds = max(0.25, float(owner_lease_seconds))
+            self.owner_instance_id = f"mesa_owner_{uuid.uuid4().hex}"
+            from .gate3_activation import Gate3ActivationStore
+            self.gate3_activation = Gate3ActivationStore(self)
+            self.active_runs: dict[str, ActiveRun] = {}
+            self._poll_lock = threading.Lock()
+            self._run_locks_guard = threading.Lock()
+            self._in_process_run_locks: dict[tuple[str, str], threading.RLock] = {}
+            self.projects_root.mkdir(parents=True, exist_ok=True)
+            self._safe_path(self.projects_root)
+            self.gate3_activation.recover_switches()
+            self._recover_indexed_gate2_receipts()
+        except Exception:
+            self.workspace_lifecycle.close()
+            raise
 
     def _gate3_fault_hook(self, _: str) -> None:
         """Monkeypatch-only crash seam for receipt-first active CAS recovery."""
@@ -225,6 +232,9 @@ class MesaService:
             return self.gate3_activation.descriptor(project_id)
         except ActivationProtocolError as exc:
             raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def workspace_lifecycle_proof(self) -> dict[str, str]:
+        return self.workspace_lifecycle.proof()
 
     def gate3_materialize_candidate(self, payload: object, activation_id: str) -> tuple[int, dict[str, Any]]:
         from .gate3_activation import ActivationProtocolError
@@ -2745,8 +2755,11 @@ class MesaService:
         return core
 
     def shutdown(self) -> None:
-        for active in list(self.active_runs.values()):
-            if active.gate2_context is not None and self._gate2_cancel_tombstone(active.gate2_context["captured"]) is None:
-                self._terminate(active, "failed", "service shutdown before terminal evidence")
-            else:
-                self._terminate(active, "cancelled", "service shutdown")
+        try:
+            for active in list(self.active_runs.values()):
+                if active.gate2_context is not None and self._gate2_cancel_tombstone(active.gate2_context["captured"]) is None:
+                    self._terminate(active, "failed", "service shutdown before terminal evidence")
+                else:
+                    self._terminate(active, "cancelled", "service shutdown")
+        finally:
+            self.workspace_lifecycle.close()
