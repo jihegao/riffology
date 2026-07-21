@@ -31,7 +31,7 @@ export type AlignmentMapRevision = {
   known_gaps: Array<{ gap_id: string; statement: string; blocking: boolean }>; created_by_actor_id: string; created_at: string;
 };
 export type RuntimeProfile = Record<string, CanonicalJsonScalar>;
-export type ExperimentRevision = {
+export type LegacyExperimentRevision = {
   schema_version: 2; canonical_json_version: "riff-canonical-json-v2"; experiment_revision_id: string; project_id: string;
   parent_experiment_revision_id: string | null; operation: "create" | "edit" | "reset_defaults";
   model_id: "wind-turbine-maintenance"; model_revision_id: string; brief_revision_id: string; alignment_revision_id: string;
@@ -41,6 +41,19 @@ export type ExperimentRevision = {
   execution_diff: Array<{ field: keyof ExecutionValues; default_value: number; current_value: number }>;
   runtime_profile: RuntimeProfile; created_by_actor_id: string; created_at: string;
 };
+export type FramedExperimentRevision = {
+  schema_id: "riff://evidence-studio/experiment-revision/framed/v1"; schema_version: 1; canonical_json_version: "riff-canonical-json-v2";
+  experiment_revision_id: string; experiment_digest: string; project_id: string; parent_experiment_revision_id: string | null;
+  operation: "create" | "edit" | "reset_defaults"; model_id: "wind-turbine-maintenance"; model_revision_id: string;
+  brief_revision_id: string; alignment_revision_id: string; preset_id: string; defaults_digest: string;
+  parameter_defaults: Record<string, CanonicalJsonScalar>; parameters: Record<string, CanonicalJsonScalar>;
+  parameter_diff: Array<{ parameter_id: string; default_value: CanonicalJsonScalar; current_value: CanonicalJsonScalar }>;
+  execution_defaults: ExecutionValues; execution_values: ExecutionValues;
+  execution_diff: Array<{ field: keyof ExecutionValues; default_value: number; current_value: number }>;
+  runtime_profile: RuntimeProfile; copy_migration_rule: "framed_parameter_copy_revalidate_v1";
+  created_by_actor_id: string; created_at: string;
+};
+export type ExperimentRevision = LegacyExperimentRevision | FramedExperimentRevision;
 export type ExecutionValues = { horizon_days: number; warmup_days: number; seed: number };
 
 export type IssueStatus = "open" | "resolved" | "closed";

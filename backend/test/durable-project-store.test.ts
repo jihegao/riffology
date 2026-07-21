@@ -257,7 +257,7 @@ test("workspace-create commit faults quarantine precommit projects and rebuild c
   }
 });
 
-test("brief, alignment and experiment revisions are immutable, complete, editable and resettable", () => withStore((_root, store) => {
+test("brief, alignment and experiment revisions are immutable, complete, editable and resettable", () => withStore((root, store) => {
   const context = bootstrap(store);
   const briefCommand = command(context, { operation: "create" as const, parent_decision_brief_revision_id: null, question: "How should crews be staffed?", decision_owner: "Maintenance lead", objective: "Measure service outcomes", constraints: [{ id: "c1", statement: "Three crews", source: source }], assumptions: [], non_goals: ["No optimization claim"], sources: [source] });
   const brief = (store.createBrief(briefCommand).body.decision_brief_revision as any); assert.match(brief.decision_brief_revision_id, /^dbr_[0-9a-f]{64}$/);
@@ -266,13 +266,29 @@ test("brief, alignment and experiment revisions are immutable, complete, editabl
   context.base = 3;
   const created = (store.createExperiment(command(context, { operation: "create", parent_experiment_revision_id: null, brief_revision_id: brief.decision_brief_revision_id, alignment_revision_id: alignment.alignment_map_revision_id, model_id: contract.model_id, model_revision_id: contract.model_revision_id, preset_id: contract.preset_id, parameters: contract.parameter_defaults, execution_values: contract.execution_defaults })).body.experiment_revision as any);
   assert.equal(created.parameter_diff.length, 0); assert.equal(created.execution_diff.length, 0); assert.match(created.defaults_digest, /^dd_[0-9a-f]{64}$/);
+  const createdBytes = readFileSync(join(root, "projects", context.projectId, "experiments", "revisions", created.experiment_revision_id, "experiment.json")); assert.equal(createdBytes.equals(canonicalJsonV2(created)), true); assert.notEqual(createdBytes.at(-1), 0x0a); assert.equal(created.schema_id, undefined); assert.equal(created.experiment_digest, undefined);
   context.base = 4;
   const edited = (store.createExperiment(command(context, { operation: "edit", parent_experiment_revision_id: created.experiment_revision_id, parameter_changes: { crew_count: 4 }, execution_changes: { seed: 9 } })).body.experiment_revision as any);
   assert.equal(edited.parameters.crew_count, 4); assert.deepEqual(edited.parameter_diff.map((item: any) => item.parameter_id), ["crew_count"]); assert.deepEqual(edited.execution_diff.map((item: any) => item.field), ["seed"]);
+  assert.equal(readFileSync(join(root, "projects", context.projectId, "experiments", "revisions", edited.experiment_revision_id, "experiment.json")).equals(canonicalJsonV2(edited)), true);
   context.base = 5;
   const reset = (store.createExperiment(command(context, { operation: "reset_defaults", parent_experiment_revision_id: edited.experiment_revision_id })).body.experiment_revision as any);
   assert.deepEqual(reset.parameters, contract.parameter_defaults); assert.deepEqual(reset.execution_values, contract.execution_defaults); assert.deepEqual(reset.parameter_diff, []); assert.deepEqual(reset.execution_diff, []); assert.notEqual(reset.experiment_revision_id, created.experiment_revision_id);
+  assert.equal(readFileSync(join(root, "projects", context.projectId, "experiments", "revisions", reset.experiment_revision_id, "experiment.json")).equals(canonicalJsonV2(reset)), true);
   assert.equal(store.snapshot(context.projectId).phase, "review");
+}));
+
+test("framed experiment mutation requires its create root to equal the ready activation target", () => withStore((_root, store) => {
+  const context = fullyConfigured(store); const snapshot = store.snapshot(context.projectId); const legacy = store.experimentRevision(context.projectId, snapshot.current.experiment_revision_id!);
+  const preimage = { schema_id: "riff://evidence-studio/experiment-revision/framed/v1" as const, schema_version: 1 as const, canonical_json_version: "riff-canonical-json-v2" as const, project_id: context.projectId, parent_experiment_revision_id: null, operation: "create" as const, model_id: contract.model_id, model_revision_id: contract.model_revision_id, brief_revision_id: legacy.brief_revision_id, alignment_revision_id: legacy.alignment_revision_id, preset_id: contract.preset_id, defaults_digest: legacy.defaults_digest, parameter_defaults: legacy.parameter_defaults, parameters: legacy.parameters, parameter_diff: legacy.parameter_diff, execution_defaults: legacy.execution_defaults, execution_values: legacy.execution_values, execution_diff: legacy.execution_diff, runtime_profile: legacy.runtime_profile, copy_migration_rule: "framed_parameter_copy_revalidate_v1" as const, created_by_actor_id: context.actorId, created_at: legacy.created_at };
+  const rootId = `er_${canonicalDigest(preimage)}`; const withId = { ...preimage, experiment_revision_id: rootId }; const root = { ...withId, experiment_digest: `erd_${canonicalDigest(withId)}` };
+  store.gate3SystemTransition({ project_id: context.projectId, command_id: commandId(), command_digest: `cmd_${"a".repeat(64)}`, event_type: "model.activation_committed", records: [{ relative: `experiments/revisions/${rootId}/experiment.json`, value: root, ref: { kind: "experiment_revision", id: rootId, digest: root.experiment_digest } }], phase: "review", current: { ...snapshot.current, experiment_revision_id: rootId }, response: { status: "project_committed" } }); context.base += 1;
+  store.setExperimentMutationGuard(() => ({ contract, root_experiment_revision_id: `er_${"f".repeat(64)}` }));
+  expectApi("immutable_record_corrupt", () => store.createExperiment(command(context, { operation: "edit", parent_experiment_revision_id: rootId, parameter_changes: { crew_count: 4 }, execution_changes: {} })));
+  assert.equal(store.snapshot(context.projectId).snapshot_revision, context.base);
+  store.setExperimentMutationGuard(() => ({ contract, root_experiment_revision_id: rootId }));
+  const edited = store.createExperiment(command(context, { operation: "edit", parent_experiment_revision_id: rootId, parameter_changes: { crew_count: 4 }, execution_changes: {} }));
+  assert.equal((edited.body.experiment_revision as any).parent_experiment_revision_id, rootId);
 }));
 
 test("every live brief, alignment, and experiment subject load recomputes its content identity", () => {
