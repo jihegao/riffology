@@ -21,7 +21,6 @@ from .service import MesaService, ServiceError
 def create_app(
     workspace_root: str | Path | None = None,
     *,
-    timeout_seconds: float = 30,
     wind_timeout_seconds: float = 180,
     worker_limit: int = 2,
     worker_delay_seconds: float = 0,
@@ -30,7 +29,6 @@ def create_app(
     root = Path(workspace_root or os.environ.get("WORKSPACE_ROOT", ".riff-workspace"))
     service = MesaService(
         root,
-        timeout_seconds=timeout_seconds,
         wind_timeout_seconds=wind_timeout_seconds,
         worker_limit=worker_limit,
         worker_delay_seconds=worker_delay_seconds,
@@ -106,33 +104,9 @@ def create_app(
             return Response(status_code=exc.status_code, content=canonical_json_v2_bytes(content), media_type="application/json")
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
-    @app.put("/v1/projects/{project_id}/model")
-    async def load_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return service.load_model(project_id, payload)
-
-    @app.get("/v1/projects/{project_id}/model")
-    async def get_model(project_id: str) -> dict[str, Any]:
-        return service.get_model(project_id)
-
-    @app.get("/v1/projects/{project_id}/parameters")
-    async def get_parameters(project_id: str) -> dict[str, Any]:
-        return service.get_parameters(project_id)
-
-    @app.put("/v1/projects/{project_id}/models/wind-turbine-maintenance")
-    async def load_wind_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return service.load_wind_model(project_id, payload)
-
     @app.put("/v2/projects/{project_id}/models/wind-turbine-maintenance")
-    async def load_wind_model_v2(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return service.load_wind_model_v2(project_id, payload)
-
-    @app.get("/v1/projects/{project_id}/models/active")
-    async def get_active_wind_model(project_id: str) -> dict[str, Any]:
-        return service.get_active_wind_model(project_id)
-
-    @app.post("/v1/projects/{project_id}/runs", status_code=202)
-    async def start_run(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return service.start_run(project_id, payload)
+    async def materialize_wind_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return service.materialize_wind_model(project_id, payload)
 
     @app.post("/v2/projects/{project_id}/runs", status_code=202)
     async def start_wind_run_v2(
@@ -150,14 +124,6 @@ def create_app(
             downstream_digest=request_digest,
         )
 
-    @app.get("/v1/projects/{project_id}/runs/{run_id}")
-    async def get_run(project_id: str, run_id: str) -> dict[str, Any]:
-        return service.get_run(project_id, run_id)
-
-    @app.get("/v2/projects/{project_id}/runs/{run_id}")
-    async def get_wind_run_v2(project_id: str, run_id: str) -> dict[str, Any]:
-        return service.get_run(project_id, run_id)
-
     @app.get("/v2/projects/{project_id}/runs/{run_id}/evidence")
     async def get_wind_run_evidence_v2(project_id: str, run_id: str) -> dict[str, Any]:
         return service.get_wind_run_evidence_v2(project_id, run_id)
@@ -166,17 +132,9 @@ def create_app(
     async def get_wind_run_receipt_v2(project_id: str, downstream_key: str) -> dict[str, Any]:
         return service.get_wind_run_receipt_v2(project_id, downstream_key)
 
-    @app.post("/v1/projects/{project_id}/runs/{run_id}/cancel", status_code=202)
-    async def cancel_run(project_id: str, run_id: str) -> dict[str, Any]:
-        return service.cancel_run(project_id, run_id)
-
     @app.post("/v2/projects/{project_id}/runs/{run_id}/cancel", status_code=202)
     async def cancel_wind_run_v2(project_id: str, run_id: str) -> dict[str, Any]:
         return service.cancel_wind_run_v2(project_id, run_id)
-
-    @app.get("/v1/projects/{project_id}/runs/{run_id}/results")
-    async def get_results(project_id: str, run_id: str) -> dict[str, Any]:
-        return service.get_results(project_id, run_id)
 
     @app.get("/v1/projects/{project_id}/runs/{run_id}/events")
     async def get_events(project_id: str, run_id: str, after: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -194,14 +152,6 @@ def create_app(
         _one_header(request, "accept", "application/json")
         _one_header(request, "x-riff-internal-protocol", "wind-runtime-handshake-v1")
         return Response(content=canonical_json_v2_bytes(service.gate3_runtime_handshake(project_id)), media_type="application/json")
-
-    @app.get("/internal/projects/{project_id}/wind/framed-candidate-descriptor/v1")
-    async def gate3_candidate_descriptor(project_id: str, request: Request) -> Response:
-        if request.url.query or await request.body():
-            raise ServiceError(422, "invalid_activation_protocol", "descriptor accepts no query or body")
-        _one_header(request, "accept", "application/json")
-        _one_header(request, "x-riff-internal-protocol", "wind-runtime-handshake-v1")
-        return Response(content=canonical_json_v2_bytes(service.gate3_candidate_descriptor(project_id)), media_type="application/json")
 
     @app.post("/internal/wind/framed-candidates/materialize")
     async def gate3_materialize_candidate(request: Request) -> Response:

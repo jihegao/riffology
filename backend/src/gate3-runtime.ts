@@ -6,7 +6,7 @@ import { CANONICAL_JSON_V2, canonicalJsonV2, contentId, sha256Hex } from "./cano
 import type { Attestation, ProjectCommand, VerifiedMesaArtifact, WindModelContract } from "./durable-project-types.ts";
 import type { Gate2Runtime } from "./gate2-runtime.ts";
 import type { MesaAdapter, WindArtifact } from "./mesa-adapter.ts";
-import { GATE3_CANONICAL, type BrowserProjectState, type BrowserProjectionResponse, type FramedCandidateDescriptor, type RuntimeCandidateHandshake, type SourceDescriptor } from "./gate3-types.ts";
+import { GATE3_CANONICAL, type BrowserProjectState, type BrowserProjectionResponse, type BrowserRunAdmission, type FramedCandidateDescriptor, type RuntimeCandidateHandshake, type SourceDescriptor } from "./gate3-types.ts";
 import { FRAMED_BUNDLE_FILES, verifyFramedWindBundle } from "./framed-wind-contract.ts";
 
 const HEX = /^[0-9a-f]{64}$/u;
@@ -44,6 +44,34 @@ const safeRecordIdentity = (response: Plain): Record<string, string | number | b
 };
 const safeText = (value: unknown): string => String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "").slice(0, 4_000);
 
+export const activationExperimentLineageMatches = (currentExperimentId: string | null, target: Plain, load: (experimentId: string) => unknown): boolean => {
+  if (!currentExperimentId || typeof target.experiment_revision_id !== "string" || typeof target.model_revision_id !== "string" || typeof target.brief_revision_id !== "string" || typeof target.alignment_revision_id !== "string") return false;
+  const visited = new Set<string>(); let experimentId: string | null = currentExperimentId;
+  try {
+    while (experimentId && !visited.has(experimentId)) {
+      visited.add(experimentId); const experiment = load(experimentId);
+      if (!plain(experiment) || experiment.model_revision_id !== target.model_revision_id || experiment.brief_revision_id !== target.brief_revision_id || experiment.alignment_revision_id !== target.alignment_revision_id) return false;
+      if (experimentId === target.experiment_revision_id) return true;
+      experimentId = typeof experiment.parent_experiment_revision_id === "string" ? experiment.parent_experiment_revision_id : null;
+    }
+  } catch { return false; }
+  return false;
+};
+
+export const evaluateRunAdmission = (activation: unknown, current: { decision_brief_revision_id: string | null; alignment_map_revision_id: string | null; model_revision_id: string | null; experiment_revision_id: string | null }, modelRevisionId: string | null, load: (experimentId: string) => unknown): BrowserRunAdmission => {
+  if (!plain(activation)) return { admissible: false, reason: "activation_missing" };
+  if (activation.status === "failed_fenced") return { admissible: false, reason: "activation_fenced" };
+  if (activation.status !== "ready") return { admissible: false, reason: "activation_not_ready" };
+  if (activation.run_admission_fenced !== false) return { admissible: false, reason: "activation_fenced" };
+  if (!plain(activation.target) || ["model_revision_id", "brief_revision_id", "alignment_revision_id", "experiment_revision_id"].some((key) => typeof (activation.target as Plain)[key] !== "string")) return { admissible: false, reason: "activation_target_invalid" };
+  const target = activation.target;
+  if (target.model_revision_id !== modelRevisionId || current.model_revision_id !== modelRevisionId) return { admissible: false, reason: "model_revision_mismatch" };
+  if (target.brief_revision_id !== current.decision_brief_revision_id) return { admissible: false, reason: "brief_revision_mismatch" };
+  if (target.alignment_revision_id !== current.alignment_map_revision_id) return { admissible: false, reason: "alignment_revision_mismatch" };
+  if (!activationExperimentLineageMatches(current.experiment_revision_id, target, load)) return { admissible: false, reason: "experiment_lineage_invalid" };
+  return { admissible: true, reason: "ready" };
+};
+
 export class Gate3Runtime {
   readonly #gate2: Gate2Runtime;
   readonly #mesa: MesaAdapter;
@@ -80,7 +108,8 @@ export class Gate3Runtime {
     const terminalItems = evidence?.terminal_metadata ? this.#terminalArtifacts(evidence.terminal_metadata) : []; const terminal = terminalItems.map((item) => ({ artifact_id: item.artifact_id, logical_name: item.name, sha256: item.sha256, href: `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(item.artifact_id)}` })).sort((a, b) => a.logical_name.localeCompare(b.logical_name));
     const actors = legacy.actors as any[]; const issues = legacy.issues as any[]; const human = legacy.review_summaries.human; const agent = legacy.review_summaries.agent;
     const activation = this.#activationProjection(projectId); if (activation?.receipt) recent.push({ command_id: String(activation.receipt.command_id), command_digest: String(activation.receipt.command_digest), command_digest_version: "gate3-command-digest-v2", event_type: String(activation.receipt.event_type), committed_snapshot_revision: Number(activation.receipt.committed_snapshot_revision), result_identity: { activation_id: String(activation.receipt.activation_id), terminal_status: String(activation.receipt.terminal_status) } });
-    const unsigned: BrowserProjectState = { schema_id: "riff://evidence-studio/project-state/v1", schema_version: 1, canonical_json_version: GATE3_CANONICAL, project_id: projectId, display_name: snapshot.display_name, snapshot_revision: snapshot.snapshot_revision, projection_digest: "", phase: snapshot.phase, current: structuredClone(snapshot.current), model_activation: activation?.projection ?? null, current_records: { decision_brief: brief, alignment_map: alignment, model_view: modelView, experiment }, actors: actors.map((actor) => ({ actor_id: actor.actor_id, display_name: actor.display_name, actor_type: actor.actor_type, declared_role: actor.declared_role, assurance: "declared_unauthenticated_local" })), issues, review_summaries: { human, agent }, workflow_policy: legacy.workflow_policy, runs: legacy.runs, current_terminal_artifacts: terminal, recent_command_results: recent.slice(-25), projection_truncation: { actors: { count: Number(legacy.actor_count), truncated: Boolean(legacy.actors_truncated) }, issues: { count: Number(legacy.issue_count), truncated: Number(legacy.issue_count) > issues.length }, human_reviews: { count: Number(human.count), truncated: Boolean(human.truncated) }, agent_reviews: { count: Number(agent.count), truncated: Boolean(agent.truncated) }, runs: { count: Number(legacy.run_count), truncated: Number(legacy.run_count) > legacy.runs.length }, command_results: { count: events.filter((event) => event.initiator === "client").length + (activation?.receipt ? 1 : 0), truncated: snapshot.snapshot_revision > events.length } } };
+    const runAdmission = this.#runAdmissionStatus(projectId, snapshot.current.model_revision_id, activation?.projection ?? null, snapshot.current);
+    const unsigned: BrowserProjectState = { schema_id: "riff://evidence-studio/project-state/v1", schema_version: 1, canonical_json_version: GATE3_CANONICAL, project_id: projectId, display_name: snapshot.display_name, snapshot_revision: snapshot.snapshot_revision, projection_digest: "", phase: snapshot.phase, current: structuredClone(snapshot.current), model_activation: activation?.projection ?? null, run_admission: runAdmission, current_records: { decision_brief: brief, alignment_map: alignment, model_view: modelView, experiment }, actors: actors.map((actor) => ({ actor_id: actor.actor_id, display_name: actor.display_name, actor_type: actor.actor_type, declared_role: actor.declared_role, assurance: "declared_unauthenticated_local" })), issues, review_summaries: { human, agent }, workflow_policy: legacy.workflow_policy, runs: legacy.runs, current_terminal_artifacts: terminal, recent_command_results: recent.slice(-25), projection_truncation: { actors: { count: Number(legacy.actor_count), truncated: Boolean(legacy.actors_truncated) }, issues: { count: Number(legacy.issue_count), truncated: Number(legacy.issue_count) > issues.length }, human_reviews: { count: Number(human.count), truncated: Boolean(human.truncated) }, agent_reviews: { count: Number(agent.count), truncated: Boolean(agent.truncated) }, runs: { count: Number(legacy.run_count), truncated: Number(legacy.run_count) > legacy.runs.length }, command_results: { count: events.filter((event) => event.initiator === "client").length + (activation?.receipt ? 1 : 0), truncated: snapshot.snapshot_revision > events.length } } };
     const projectionDigest = digestWithout("pd_", unsigned as unknown as Plain, "projection_digest"); const projection = { ...unsigned, projection_digest: projectionDigest };
     return { schema_id: "riff://evidence-studio/browser-projection-response/v1", schema_version: 1, canonical_json_version: GATE3_CANONICAL, project_id: projectId, snapshot_revision: snapshot.snapshot_revision, projection_digest: projectionDigest, projection };
   }
@@ -353,7 +382,13 @@ export class Gate3Runtime {
     if (failure) { exactKeys(failure, ["schema_id", "schema_version", "canonical_json_version", "activation_id", "project_id", "terminal_status", "code", "message", "correlation_id", "failed_at", "failure_digest"], "immutable_record_corrupt"); const failedEvent = this.#gate2.store.projectEventByCommand(projectId, activationId, "model.activation_failed"); const response = failedEvent?.response_projection as Plain | undefined; if (failure.schema_id !== "riff://evidence-studio/activation-failure/v1" || failure.schema_version !== 1 || failure.canonical_json_version !== GATE3_CANONICAL || failure.activation_id !== activationId || failure.project_id !== projectId || !failedEvent || failure.terminal_status !== failedEvent.response_projection.status || failure.code !== failedEvent.response_projection.safe_error_code || response?.safe_error_message !== undefined && failure.message !== response.safe_error_message || response?.correlation_id !== undefined && failure.correlation_id !== response.correlation_id || response?.failed_at !== undefined && failure.failed_at !== response.failed_at || typeof failure.message !== "string" || typeof failure.correlation_id !== "string" || typeof failure.failed_at !== "string" || !["failed_no_effect", "failed_fenced"].includes(String(failure.terminal_status)) || digestWithout("afail_", failure, "failure_digest") !== failure.failure_digest) throw new ApiError(500, "immutable_record_corrupt", "The activation failure record is corrupt."); }
     if (receipt) { const terminalEvent = receipt.event_type === "model.activation_reconciled" ? reconciled : this.#gate2.store.projectEventByCommand(projectId, activationId, "model.activation_failed"); if (!terminalEvent) throw new ApiError(500, "immutable_record_corrupt", "The activation receipt terminal event is missing."); this.#verifyActivationReceipt(receipt, projectId, activationId, intent, terminalEvent); const expectedBinding = binding?.target_binding_digest ?? null; const expectedReconcile = receipt.terminal_status === "ready" ? reconcile?.reconcile_digest ?? null : null; if (receipt.target_binding_digest !== expectedBinding || receipt.reconcile_digest !== expectedReconcile || failure && receipt.terminal_status !== failure.terminal_status || !failure && receipt.terminal_status !== "ready") throw new ApiError(500, "immutable_record_corrupt", "The activation receipt DAG edges differ from terminal records."); }
   }
-  #assertRunAdmission(projectId: string, modelRevisionId: string): void { const activation = this.#activationProjection(projectId); if (!activation) return; const value = activation.projection; if (value.status !== "ready" || value.run_admission_fenced || value.target.model_revision_id !== modelRevisionId) throw new ApiError(409, "model_activation_fenced", "Run admission is fenced while model activation is unresolved or pointers differ."); }
+  #assertRunAdmission(projectId: string, modelRevisionId: string): void {
+    const activation = this.#activationProjection(projectId); const current = this.#gate2.store.snapshot(projectId).current; const admission = this.#runAdmissionStatus(projectId, modelRevisionId, activation?.projection ?? null, current);
+    if (!admission.admissible) throw new ApiError(409, "model_activation_fenced", "Run admission requires an exact ready technical runtime installation for the current revision tuple.", { run_admission_reason: admission.reason });
+  }
+  #runAdmissionStatus(projectId: string, modelRevisionId: string | null, activation: unknown, current: { decision_brief_revision_id: string | null; alignment_map_revision_id: string | null; model_revision_id: string | null; experiment_revision_id: string | null }): BrowserRunAdmission {
+    return evaluateRunAdmission(activation, current, modelRevisionId, (experimentId) => this.#gate2.store.experimentRevision(projectId, experimentId));
+  }
   #verifiedActiveExperimentContract(projectId: string, modelRevisionId: string): { contract: WindModelContract; root_experiment_revision_id: string } {
     const activation = this.#activationProjection(projectId); const value = activation?.projection;
     if (!value || value.status !== "ready" || value.run_admission_fenced || !plain(value.target) || value.target.model_revision_id !== modelRevisionId) throw new ApiError(409, "model_activation_fenced", "Framed experiment edits require an exact ready activation target.");

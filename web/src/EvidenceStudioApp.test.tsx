@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { BusinessRecordsView, prepareEvidencePresentation, ReplayView } from "./EvidenceStudioApp";
+import { BusinessRecordsView, prepareEvidencePresentation, ReplayView, RunAdmissionControl } from "./EvidenceStudioApp";
 import type { ReplayPage } from "./types";
 
 const source=(logical_name:string)=>({schema_id:"riff://evidence-studio/source-descriptor/v1",schema_version:1,canonical_json_version:"riff-canonical-json-v2",source_kind:"run_artifact",logical_name,sha256:"a".repeat(64),identity:{project_id:"project",model_revision_id:"model",brief_revision_id:"brief",alignment_revision_id:"alignment",experiment_revision_id:"experiment",run_id:"run"},href:`/api/projects/project/${logical_name}`}) as const;
@@ -25,4 +25,10 @@ it("projects real activation brief content and framed alignment mappings without
   expect(screen.getByText("1 mappings · 0 known gaps")).toBeInTheDocument();
   expect(screen.getByText(/"content"/)).toBeInTheDocument();
   expect(screen.getByText(/"mappings"/)).toBeInTheDocument();
+});
+
+it("consumes authoritative runtime admission without recreating activation or lineage policy",()=>{
+  const onStart=vi.fn(); const reasons=["activation_missing","activation_not_ready","activation_fenced","activation_target_invalid","model_revision_mismatch","brief_revision_mismatch","alignment_revision_mismatch","experiment_lineage_invalid"] as const; const view=render(<RunAdmissionControl admission={{admissible:false,reason:reasons[0]}} onStart={onStart}/>); const button=screen.getByRole("button",{name:"Start private draft run"});
+  for(const reason of reasons){view.rerender(<RunAdmissionControl admission={{admissible:false,reason}} onStart={onStart}/>); expect(button).toBeDisabled(); expect(screen.getByText(new RegExp(`Authoritative runtime admission: ${reason}`))).toBeInTheDocument();}
+  expect(screen.getByText(/technical runtime installation requirement, not an endorsement, trust decision, or scientific approval/)).toBeInTheDocument(); view.rerender(<RunAdmissionControl admission={{admissible:true,reason:"ready"}} onStart={onStart}/>); expect(button).toBeEnabled(); expect(screen.getByText("Admission available")).toBeInTheDocument(); button.click(); expect(onStart).toHaveBeenCalledOnce();
 });

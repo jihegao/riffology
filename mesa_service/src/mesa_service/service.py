@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import fcntl
 import hashlib
 import json
@@ -21,22 +20,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .contracts import EXPERIMENT_SCHEMA, MODEL_ID, MODEL_SCHEMA, ContractError, validate_run_request
 from .wind_worker import (
-    IDENTITY_FIELDS,
     LIMITS as WIND_LIMITS,
     MODEL_ID as WIND_MODEL_ID,
     REQUIRED_SUCCESS_ARTIFACTS as WIND_ARTIFACTS,
     V2_IDENTITY_FIELDS,
-    build_run_request,
-    initial_metadata,
 )
 from .workspace_lifecycle import WorkspaceLifecycle, WorkspaceLifecycleError
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 TERMINAL = {"succeeded", "failed", "cancelled", "timed_out"}
 WIND_PRESET_ID = "wind-turbine-maintenance-demo-v1"
-LEGACY_ARTIFACTS = {"request.json", "metadata.json", "summary.json", "timeseries.csv", "run.log"}
 
 
 class ServiceError(RuntimeError):
@@ -51,14 +45,11 @@ class ServiceError(RuntimeError):
 class ActiveRun:
     project_id: str
     run_id: str
-    model_id: str
     process: Any
-    started_monotonic: float
-    timeout_seconds: float
     temporary_dir: Path
     final_dir: Path
     log_handle: Any
-    gate2_context: dict[str, Any] | None = None
+    gate2_context: dict[str, Any]
 
 
 class AdoptedProcess:
@@ -84,7 +75,10 @@ class AdoptedProcess:
                 return None
         if self.returncode is None:
             try:
-                status = json.loads(self._metadata_path.read_text(encoding="utf-8")).get("status")
+                metadata = json.loads(self._metadata_path.read_text(encoding="utf-8"))
+                status = metadata.get("status")
+                if metadata.get("metadata_kind") == "framed_terminal_core":
+                    status = metadata.get("metadata_core_projection", {}).get("terminal_status")
             except Exception:
                 status = "failed"
             self.returncode = 0 if status == "succeeded" else 1
@@ -97,10 +91,6 @@ class AdoptedProcess:
                 raise subprocess.TimeoutExpired(str(self.pid), timeout)
             time.sleep(0.01)
         return int(self.returncode)
-
-
-def _json_digest(payload: Any) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def _fsync(file_descriptor: int) -> None:
@@ -183,7 +173,6 @@ class MesaService:
         workspace_root: str | Path,
         *,
         lifecycle_repository_root: str | Path | None = None,
-        timeout_seconds: float = 30,
         wind_timeout_seconds: float = 180,
         worker_limit: int = 2,
         worker_delay_seconds: float = 0,
@@ -196,7 +185,6 @@ class MesaService:
         try:
             self.workspace_root = self.workspace_lifecycle.root
             self.projects_root = self.workspace_root / "projects"
-            self.timeout_seconds = timeout_seconds
             self.wind_timeout_seconds = wind_timeout_seconds
             self.worker_limit = worker_limit
             self.worker_delay_seconds = worker_delay_seconds  # test-only hook, not an HTTP input
@@ -223,13 +211,6 @@ class MesaService:
         from .gate3_activation import ActivationProtocolError
         try:
             return self.gate3_activation.handshake(project_id)
-        except ActivationProtocolError as exc:
-            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
-
-    def gate3_candidate_descriptor(self, project_id: str) -> dict[str, Any]:
-        from .gate3_activation import ActivationProtocolError
-        try:
-            return self.gate3_activation.descriptor(project_id)
         except ActivationProtocolError as exc:
             raise ServiceError(exc.status_code, exc.code, exc.message) from exc
 
@@ -384,26 +365,6 @@ class MesaService:
     def _wind_active_path(self, project_dir: Path) -> Path:
         return project_dir / "models" / "active.json"
 
-    def _legacy_active_path(self, project_dir: Path) -> Path:
-        return project_dir / "model" / "active.json"
-
-    def _active_revision(self, project_id: str) -> tuple[Path, dict[str, Any]]:
-        """Resolve only the legacy singular queue model contract."""
-        project_dir = self._project_dir(project_id)
-        wind_active_path = self._safe_path(self._wind_active_path(project_dir))
-        if wind_active_path.exists():
-            raise ServiceError(409, "legacy_model_not_active", "the wind model is active; use the plural model API")
-        active_path = self._legacy_active_path(project_dir)
-        self._safe_path(active_path)
-        if not active_path.exists():
-            raise ServiceError(404, "model_not_loaded", "no model has been loaded")
-        active = self._read_workspace_json(active_path)
-        revision = active["model_revision"]
-        revision_dir = self._safe_path(project_dir / "model" / "revisions" / revision)
-        if not revision_dir.exists() or not revision_dir.is_dir():
-            raise ServiceError(404, "model_revision_not_found", "active model revision not found")
-        return revision_dir, active
-
     def _active_wind(self, project_id: str) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
         project_dir = self._project_dir(project_id)
         active_path = self._wind_active_path(project_dir)
@@ -442,6 +403,8 @@ class MesaService:
             raise ServiceError(500, "corrupt_run", "run metadata is unavailable")
         value = self._read_workspace_json(path)
         if value.get("metadata_kind") == "framed_terminal_core":
+            if value.get("status") in {"failed", "timed_out", "cancelled"}:
+                return value
             core = value.get("metadata_core_projection")
             if not isinstance(core, dict) or core.get("terminal_status") != "succeeded":
                 raise ServiceError(500, "corrupt_run", "framed run metadata core is invalid")
@@ -455,43 +418,14 @@ class MesaService:
         self._write_workspace_json(path, metadata)
         return metadata
 
-    # Legacy singular queue path. It remains unchanged for backend/web callers
-    # until Gate 4 removes it after the integrated wind cutover.
-    def load_model(self, project_id: str, payload: object) -> dict[str, Any]:
+    def materialize_wind_model(self, project_id: str, payload: object) -> dict[str, Any]:
         self.poll()
-        if not isinstance(payload, dict) or set(payload) != {"model_id"} or payload.get("model_id") != MODEL_ID:
-            raise ServiceError(422, "unsupported_model", "only queue-network-v1 is supported by the legacy route")
-        if any(run.project_id == project_id for run in self.active_runs.values()):
-            raise ServiceError(409, "run_already_active", "cannot replace model while a run is active")
-        project_dir = self._project_dir(project_id, create=True)
-        wind_pointer = self._wind_active_path(project_dir)
-        self._safe_path(wind_pointer)
-        if wind_pointer.exists():
-            wind_pointer.unlink()
-        revision = f"mr_{uuid.uuid4().hex}"
-        revision_dir = self._safe_path(project_dir / "model" / "revisions" / revision)
-        revision_dir.mkdir(parents=True)
-        source_model = Path(__file__).with_name("models") / "queue_network.py"
-        destination_model = revision_dir / "model.py"
-        shutil.copy2(source_model, destination_model)
-        self._write_workspace_json(revision_dir / "model_schema.json", MODEL_SCHEMA)
-        self._write_workspace_json(revision_dir / "experiment_schema.json", EXPERIMENT_SCHEMA)
-        manifest = {
-            "model_id": MODEL_ID,
-            "model_class": MODEL_SCHEMA["model_class"],
-            "protocol_version": MODEL_SCHEMA["protocol_version"],
-            "sha256": hashlib.sha256(destination_model.read_bytes()).hexdigest(),
-        }
-        self._write_workspace_json(revision_dir / "manifest.json", manifest)
-        active = {"model_revision": revision, "model_id": MODEL_ID, "manifest_sha256": _json_digest(manifest)}
-        active_path = self._legacy_active_path(project_dir)
-        self._safe_path(active_path)
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_workspace_json(active_path, active)
-        return {"model_revision": revision, "model_schema": MODEL_SCHEMA, "manifest": manifest}
+        try:
+            from .gate2_project_evidence import verify_indexed_project
 
-    def load_wind_model(self, project_id: str, payload: object) -> dict[str, Any]:
-        self.poll()
+            verify_indexed_project(self.workspace_root, project_id)
+        except Exception as exc:
+            raise ServiceError(422, "project_not_indexed", "Gate 2 bootstrap requires a committed indexed project") from exc
         if not isinstance(payload, dict) or set(payload) != {"preset_id"} or payload.get("preset_id") != WIND_PRESET_ID:
             raise ServiceError(422, "invalid_wind_preset", "the reviewed wind demo preset is required")
         if any(run.project_id == project_id for run in self.active_runs.values()):
@@ -513,69 +447,11 @@ class MesaService:
             "metric_schema": self._read_workspace_json(Path(materialized["bundle_dir"]) / "metric-schema.json"),
             "claim_labels": materialized["experiment"]["claim_labels"],
         }
-        legacy_pointer = self._legacy_active_path(project_dir)
-        self._safe_path(legacy_pointer)
-        if legacy_pointer.exists():
-            legacy_pointer.unlink()
         active_path = self._wind_active_path(project_dir)
         self._safe_path(active_path)
         active_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_workspace_json(active_path, public)
         return public
-
-    def load_wind_model_v2(self, project_id: str, payload: object) -> dict[str, Any]:
-        try:
-            from .gate2_project_evidence import verify_indexed_project
-
-            verify_indexed_project(self.workspace_root, project_id)
-        except Exception as exc:
-            raise ServiceError(422, "project_not_indexed", "Gate 2 bootstrap requires a committed indexed project") from exc
-        return self.load_wind_model(project_id, payload)
-
-    def get_active_wind_model(self, project_id: str) -> dict[str, Any]:
-        _, _, active, _ = self._active_wind(project_id)
-        return active
-
-    def get_model(self, project_id: str) -> dict[str, Any]:
-        revision_dir, active = self._active_revision(project_id)
-        return {
-            "model_revision": active["model_revision"],
-            "model_schema": self._read_workspace_json(revision_dir / "model_schema.json"),
-            "manifest": self._read_workspace_json(revision_dir / "manifest.json"),
-        }
-
-    def get_parameters(self, project_id: str) -> dict[str, Any]:
-        model = self.get_model(project_id)
-        schema = model["model_schema"]
-        return {
-            "model_revision": model["model_revision"],
-            "parameters": schema["parameters"],
-            "default_steps": schema["default_steps"],
-            "maximum_steps": schema["maximum_steps"],
-        }
-
-    def start_run(self, project_id: str, raw_request: object) -> dict[str, Any]:
-        self.poll()
-        if any(run.project_id == project_id for run in self.active_runs.values()):
-            raise ServiceError(409, "run_already_active", "a run is already active for this project")
-        if len(self.active_runs) >= self.worker_limit:
-            raise ServiceError(409, "worker_limit_reached", "the service worker limit has been reached")
-        project_dir = self._project_dir(project_id)
-        wind_active = self._safe_path(self._wind_active_path(project_dir))
-        if wind_active.exists():
-            return self._start_wind_run(project_id, raw_request)
-        return self._start_legacy_run(project_id, raw_request)
-
-    def _new_run_dirs(self, project_id: str) -> tuple[str, Path, Path]:
-        run_id = f"run_{uuid.uuid4().hex}"
-        project_dir = self._project_dir(project_id)
-        runs_dir = self._safe_path(project_dir / "runs")
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        self._safe_path(runs_dir)
-        temporary_dir = self._safe_path(runs_dir / f"{run_id}.tmp")
-        final_dir = self._safe_path(runs_dir / run_id)
-        temporary_dir.mkdir()
-        return run_id, temporary_dir, final_dir
 
     def _worker_environment(self) -> dict[str, str]:
         package_src = str(Path(__file__).resolve().parents[1])
@@ -594,12 +470,10 @@ class MesaService:
         *,
         project_id: str,
         run_id: str,
-        model_id: str,
         command: list[str],
         temporary_dir: Path,
         final_dir: Path,
-        timeout_seconds: float,
-        gate2_context: dict[str, Any] | None = None,
+        gate2_context: dict[str, Any],
     ) -> ActiveRun:
         temporary_dir = self._safe_path(temporary_dir)
         final_dir = self._safe_path(final_dir)
@@ -621,10 +495,7 @@ class MesaService:
         active = ActiveRun(
             project_id,
             run_id,
-            model_id,
             process,
-            time.monotonic(),
-            timeout_seconds,
             temporary_dir,
             final_dir,
             log_handle,
@@ -633,137 +504,6 @@ class MesaService:
         self.active_runs[run_id] = active
         self._write_metadata(temporary_dir, status="running", started_at=time.time())
         return active
-
-    def _start_legacy_run(self, project_id: str, raw_request: object) -> dict[str, Any]:
-        revision_dir, active_model = self._active_revision(project_id)
-        try:
-            request = validate_run_request(raw_request, active_model["model_revision"])
-        except ContractError as exc:
-            code = "model_revision_not_active" if "revision" in str(exc) else "invalid_run_request"
-            status = 409 if code == "model_revision_not_active" else 422
-            raise ServiceError(status, code, str(exc)) from exc
-        run_id, temporary_dir, final_dir = self._new_run_dirs(project_id)
-        self._write_workspace_json(temporary_dir / "request.json", request)
-        manifest = self._read_workspace_json(revision_dir / "manifest.json")
-        metadata = {
-            "run_id": run_id,
-            "model_id": MODEL_ID,
-            "status": "queued",
-            "created_at": time.time(),
-            "timeout_seconds": self.timeout_seconds,
-            "request_digest": _json_digest(request),
-            "model_manifest_digest": _json_digest(manifest),
-        }
-        self._write_workspace_json(temporary_dir / "metadata.json", metadata)
-        command = [
-            sys.executable,
-            "-m",
-            "mesa_service.worker",
-            "--model",
-            str(revision_dir / "model.py"),
-            "--request",
-            str(temporary_dir / "request.json"),
-            "--output-dir",
-            str(temporary_dir),
-            "--delay-per-step",
-            str(self.worker_delay_seconds),
-        ]
-        self._spawn(
-            project_id=project_id,
-            run_id=run_id,
-            model_id=MODEL_ID,
-            command=command,
-            temporary_dir=temporary_dir,
-            final_dir=final_dir,
-            timeout_seconds=self.timeout_seconds,
-        )
-        return {"run_id": run_id, "status": "queued", "model_revision": active_model["model_revision"]}
-
-    def _start_wind_run(self, project_id: str, raw_request: object) -> dict[str, Any]:
-        if not isinstance(raw_request, dict) or set(raw_request) != {"experiment_revision_id"}:
-            raise ServiceError(422, "invalid_run_request", "wind run request accepts exactly experiment_revision_id")
-        bundle_dir, experiment_path, active_model, experiment = self._active_wind(project_id)
-        requested_revision = raw_request.get("experiment_revision_id")
-        if not isinstance(requested_revision, str) or not re.fullmatch(r"er_[0-9a-f]{64}", requested_revision):
-            raise ServiceError(422, "invalid_run_request", "experiment_revision_id is invalid")
-        if requested_revision != active_model["experiment_revision_id"]:
-            raise ServiceError(409, "experiment_revision_not_active", "experiment revision is not active")
-
-        # Admission re-establishes both content-addressed identities immediately
-        # before spawning. Loading a revision earlier is not durable proof that
-        # its bytes are still the reviewed bytes now.
-        try:
-            from .bundle import experiment_revision_id as compute_experiment_revision_id
-            from .verify_bundle import verify_bundle
-            from .wind_contracts import validate_experiment_document
-
-            self._safe_tree(bundle_dir)
-            verified_bundle = verify_bundle(bundle_dir)
-            validated_experiment = validate_experiment_document(experiment)
-            computed_experiment_revision = compute_experiment_revision_id(validated_experiment)
-        except Exception as exc:
-            raise ServiceError(
-                500,
-                "reviewed_input_verification_failed",
-                f"reviewed wind inputs failed admission verification: {exc}",
-            ) from exc
-        if verified_bundle.get("model_revision_id") != active_model["model_revision_id"]:
-            raise ServiceError(500, "model_revision_identity_mismatch", "active model revision no longer matches its bytes")
-        if validated_experiment.get("model_revision_id") != active_model["model_revision_id"]:
-            raise ServiceError(500, "experiment_model_identity_mismatch", "experiment does not bind the active model")
-        if computed_experiment_revision != requested_revision or experiment_path.parent.name != requested_revision:
-            raise ServiceError(
-                409,
-                "experiment_revision_identity_mismatch",
-                "experiment revision no longer matches its content",
-            )
-        run_id, temporary_dir, final_dir = self._new_run_dirs(project_id)
-        request = build_run_request(
-            project_id=project_id,
-            run_id=run_id,
-            model_revision_id=active_model["model_revision_id"],
-            experiment_revision_id=active_model["experiment_revision_id"],
-            experiment=validated_experiment,
-        )
-        self._write_workspace_json(temporary_dir / "request.json", request)
-        expected_request_sha256 = hashlib.sha256((temporary_dir / "request.json").read_bytes()).hexdigest()
-        metadata = initial_metadata(request)
-        metadata["limits"]["parent_wall_timeout_seconds"] = int(self.wind_timeout_seconds)
-        self._write_workspace_json(temporary_dir / "metadata.json", metadata)
-        command = [
-            sys.executable,
-            "-m",
-            "mesa_service.wind_worker",
-            "--model",
-            str(bundle_dir / "model.py"),
-            "--request",
-            str(temporary_dir / "request.json"),
-            "--output-dir",
-            str(temporary_dir),
-            "--expected-request-sha256",
-            expected_request_sha256,
-            "--expected-model-revision-id",
-            active_model["model_revision_id"],
-            "--expected-experiment-revision-id",
-            active_model["experiment_revision_id"],
-            "--delay-per-day",
-            str(self.worker_delay_seconds),
-        ]
-        self._spawn(
-            project_id=project_id,
-            run_id=run_id,
-            model_id=WIND_MODEL_ID,
-            command=command,
-            temporary_dir=temporary_dir,
-            final_dir=final_dir,
-            timeout_seconds=self.wind_timeout_seconds,
-        )
-        return {
-            "run_id": run_id,
-            "status": "queued",
-            "model_revision_id": active_model["model_revision_id"],
-            "experiment_revision_id": active_model["experiment_revision_id"],
-        }
 
     def _gate2_fault_hook(self, _: str) -> None:
         """Monkeypatch-only crash hook used to prove durable ordering."""
@@ -777,7 +517,13 @@ class MesaService:
             "final": self._safe_path(project_dir / "runs" / run_id),
         }
 
-    def _read_gate2_owner_lease(self, path: Path, receipt: dict[str, Any]) -> dict[str, Any] | None:
+    def _read_gate2_owner_lease(
+        self,
+        path: Path,
+        receipt: dict[str, Any],
+        *,
+        expected_deadline_at_unix_ms: int | None = None,
+    ) -> dict[str, Any] | None:
         from .canonical_v2 import prefixed_digest, require_canonical_json_v2_bytes
 
         if not path.exists():
@@ -809,6 +555,11 @@ class MesaService:
             or lease["original_started_at_unix_ms"] > lease["renewed_at_unix_ms"]
             or lease["renewed_at_unix_ms"] >= lease["expires_at_unix_ms"]
             or lease["original_started_at_unix_ms"] >= lease["deadline_at_unix_ms"]
+            or lease["expires_at_unix_ms"] > lease["deadline_at_unix_ms"]
+            or (
+                expected_deadline_at_unix_ms is not None
+                and lease["deadline_at_unix_ms"] != expected_deadline_at_unix_ms
+            )
         ):
             raise ServiceError(500, "mesa_run_corrupt", "owner lease schema or binding is invalid")
         return lease
@@ -821,12 +572,26 @@ class MesaService:
         ownership_epoch: int,
         prior: dict[str, Any] | None,
         lease_seconds: float | None = None,
+        authoritative_deadline_at_unix_ms: int | None = None,
     ) -> dict[str, Any]:
         from .canonical_v2 import canonical_json_v2_bytes, prefixed_digest
 
         now = int(time.time() * 1000)
         started = prior["original_started_at_unix_ms"] if prior else now
-        deadline = prior["deadline_at_unix_ms"] if prior else now + int(self.wind_timeout_seconds * 1000)
+        deadline = (
+            prior["deadline_at_unix_ms"]
+            if prior is not None
+            else authoritative_deadline_at_unix_ms or now + int(self.wind_timeout_seconds * 1000)
+        )
+        if (
+            authoritative_deadline_at_unix_ms is not None
+            and deadline != authoritative_deadline_at_unix_ms
+        ):
+            raise ServiceError(500, "mesa_run_corrupt", "owner lease deadline drifted from run authority")
+        requested_lease_ms = max(1, int((lease_seconds or self.owner_lease_seconds) * 1000))
+        expires = min(now + requested_lease_ms, deadline)
+        if deadline <= started or expires <= now:
+            raise ServiceError(409, "mesa_run_timed_out", "run deadline passed before a valid owner lease could be written")
         lease = {
             "schema_version": 1,
             "canonical_json_version": "riff-canonical-json-v2",
@@ -839,7 +604,7 @@ class MesaService:
             "original_started_at_unix_ms": started,
             "deadline_at_unix_ms": deadline,
             "renewed_at_unix_ms": now,
-            "expires_at_unix_ms": now + int((lease_seconds or self.owner_lease_seconds) * 1000),
+            "expires_at_unix_ms": expires,
         }
         lease["owner_lease_digest"] = prefixed_digest(lease, field="owner_lease_digest", prefix="mol_")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -862,17 +627,28 @@ class MesaService:
             paths["lease"], receipt, ownership_epoch=ownership_epoch, prior=prior,
         )
 
-    def _assert_gate2_owner_lease(self, active: ActiveRun, *, require_live_child: bool) -> dict[str, Any]:
+    def _assert_gate2_owner_lease(
+        self,
+        active: ActiveRun,
+        *,
+        require_live_child: bool,
+        allow_expired_at_deadline: bool = False,
+    ) -> dict[str, Any]:
         context = active.gate2_context
-        if context is None:
-            return {}
         lease_path = self._safe_path(context["project_dir"] / "mesa-run-lifecycle" / active.run_id / "owner-lease.json")
-        lease = self._read_gate2_owner_lease(lease_path, context["receipt"])
+        lease = self._read_gate2_owner_lease(
+            lease_path,
+            context["receipt"],
+            expected_deadline_at_unix_ms=context["deadline_at_unix_ms"],
+        )
         now = int(time.time() * 1000)
         if (
             lease is None or lease["owner_instance_id"] != self.owner_instance_id
             or lease["ownership_epoch"] != context["ownership_epoch"]
-            or lease["expires_at_unix_ms"] <= now
+            or (
+                lease["expires_at_unix_ms"] <= now
+                and not (allow_expired_at_deadline and now >= lease["deadline_at_unix_ms"])
+            )
         ):
             raise ServiceError(409, "mesa_owner_fenced", "Mesa owner lease is absent, expired, or fenced")
         records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
@@ -905,27 +681,38 @@ class MesaService:
 
     def _renew_gate2_owner_lease(self, active: ActiveRun) -> bool:
         context = active.gate2_context
-        if context is None:
-            return True
         with self._run_lock(context["project_dir"], active.run_id):
             lease_path = self._safe_path(context["project_dir"] / "mesa-run-lifecycle" / active.run_id / "owner-lease.json")
-            lease = self._read_gate2_owner_lease(lease_path, context["receipt"])
+            lease = self._read_gate2_owner_lease(
+                lease_path,
+                context["receipt"],
+                expected_deadline_at_unix_ms=context["deadline_at_unix_ms"],
+            )
             now = int(time.time() * 1000)
             if lease is None or (lease["owner_instance_id"] != self.owner_instance_id and lease["expires_at_unix_ms"] > now):
                 self._close_log(active)
                 self.active_runs.pop(active.run_id, None)
                 return False
+            renewed = None
             if lease["expires_at_unix_ms"] <= now or lease["ownership_epoch"] != context["ownership_epoch"]:
                 records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
                 epoch = records[-1]["ownership_epoch"] + 1
+                renewed = self._write_gate2_owner_lease(
+                    lease_path,
+                    context["receipt"], ownership_epoch=epoch, prior=lease,
+                    authoritative_deadline_at_unix_ms=context["deadline_at_unix_ms"],
+                )
+                self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
                 self._append_gate2_lifecycle(
                     context["lifecycle"], context["receipt"], "ownership_acquired", ownership_epoch=epoch,
                 )
                 context["ownership_epoch"] = epoch
-            renewed = self._write_gate2_owner_lease(
-                lease_path,
-                context["receipt"], ownership_epoch=context["ownership_epoch"], prior=lease,
-            )
+            if renewed is None:
+                renewed = self._write_gate2_owner_lease(
+                    lease_path,
+                    context["receipt"], ownership_epoch=context["ownership_epoch"], prior=lease,
+                    authoritative_deadline_at_unix_ms=context["deadline_at_unix_ms"],
+                )
             context["deadline_at_unix_ms"] = renewed["deadline_at_unix_ms"]
             return True
 
@@ -1030,12 +817,18 @@ class MesaService:
         model_revision_id = active_model.get("model_revision_id")
         if verified_bundle.get("model_revision_id") != model_revision_id:
             raise ServiceError(500, "active_model_revision_drift", "active model pointer does not match bundle bytes")
+        if verified_bundle.get("bundle_branch") != "framed":
+            raise ServiceError(
+                422,
+                "run_admission_mismatch",
+                "wind execution requires the exact ready framed model bundle",
+            )
 
         experiment_path = self._safe_path(
             project_dir / "experiments" / "revisions" / experiment_revision_id / "experiment.json"
         )
         intent_dir = self._safe_path(project_dir / "run-intents" / run_id)
-        framed_activation = verified_bundle.get("bundle_branch") == "framed"
+        framed_activation = True
         experiment, experiment_bytes = self._read_gate2_canonical(
             experiment_path,
             validate_experiment_for_run,
@@ -1046,6 +839,8 @@ class MesaService:
         intent, intent_bytes = self._read_gate2_canonical(intent_dir / "intent.json", validate_run_intent, "run intent")
         policy, policy_bytes = self._read_gate2_canonical(intent_dir / "policy-snapshot.json", validate_policy_snapshot, "policy snapshot")
         experiment_sha256 = hashlib.sha256(experiment_bytes).hexdigest()
+        if experiment.get("schema_id") != "riff://evidence-studio/experiment-revision/framed/v1":
+            raise ServiceError(422, "run_admission_mismatch", "wind execution requires a framed experiment revision")
         if experiment.get("schema_id") == "riff://evidence-studio/experiment-revision/framed/v1":
             from .gate2_contracts import validate_framed_experiment_transition
 
@@ -1469,9 +1264,9 @@ class MesaService:
             log_handle.close()
             raise ServiceError(500, "mesa_run_corrupt", "adopted worker argv is unavailable") from exc
         self.active_runs[receipt["run_id"]] = ActiveRun(
-            receipt["project_id"], receipt["run_id"], WIND_MODEL_ID,
+            receipt["project_id"], receipt["run_id"],
             AdoptedProcess(child["pid"], child["process_start_token"], paths["pending"] / "metadata.json", adopted_args),
-            time.monotonic(), self.wind_timeout_seconds, paths["pending"], paths["final"], log_handle,
+            paths["pending"], paths["final"], log_handle,
             {
                 "receipt": receipt, "lifecycle": paths["lifecycle"], "ownership_epoch": ownership_epoch,
                 "project_dir": captured["project_dir"], "captured": captured,
@@ -1529,9 +1324,29 @@ class MesaService:
         if not promoted and (not pending.is_dir() or final.exists()):
             raise ServiceError(500, "mesa_run_corrupt", "dead worker output location is invalid")
         evidence_root = final if promoted else pending
+        lease = self._read_gate2_owner_lease(paths["lease"], receipt)
+        if (
+            lease is None
+            or lease["owner_instance_id"] != self.owner_instance_id
+            or lease["ownership_epoch"] != ownership_epoch
+        ):
+            raise ServiceError(409, "mesa_owner_fenced", "dead-worker recovery requires the active owner lease")
+        remaining_seconds = max(
+            0.001,
+            (lease["deadline_at_unix_ms"] - int(time.time() * 1000)) / 1000,
+        )
+        self._write_gate2_owner_lease(
+            paths["lease"], receipt,
+            ownership_epoch=ownership_epoch,
+            prior=lease,
+            lease_seconds=min(max(60.0, self.owner_lease_seconds), remaining_seconds),
+        )
         metadata_path = self._safe_path(evidence_root / "metadata.json")
         metadata = self._read_workspace_json(metadata_path)
         status = metadata.get("status")
+        framed = metadata.get("metadata_kind") == "framed_terminal_core"
+        if framed:
+            status = metadata.get("metadata_core_projection", {}).get("terminal_status")
         if status == "succeeded":
             try:
                 from .gate2_project_evidence import derive_policy_from_committed_events
@@ -1542,7 +1357,8 @@ class MesaService:
                     run_intent_digest=captured["intent"]["run_intent_digest"],
                     run_admission_digest=captured["admission"]["run_admission_digest"],
                 )
-                self._finalize_gate2_success_metadata(evidence_root)
+                if not framed:
+                    self._finalize_gate2_success_metadata(evidence_root)
                 verify_run(evidence_root)
             except Exception as exc:
                 status = "failed"
@@ -1759,26 +1575,33 @@ class MesaService:
                         "mesa_run_receipt_digest": receipt["mesa_run_receipt_digest"],
                         "mesa_lifecycle_digest": records[-1]["mesa_lifecycle_digest"],
                     }
-                if records and records[-1]["state"] == "worker_started":
-                    child = records[-1]["child_identity"]
-                    if self._gate2_child_is_active(child, captured, records):
+                worker_record = next(
+                    (record for record in reversed(records) if record["state"] == "worker_started"),
+                    None,
+                )
+                if worker_record is not None:
+                    child = worker_record["child_identity"]
+                    worker_exited = any(
+                        record["state"] == "worker_exited"
+                        and record["sequence"] > worker_record["sequence"]
+                        for record in records
+                    )
+                    if not worker_exited and self._gate2_child_is_active(child, captured, records):
                         epoch = max(record["ownership_epoch"] for record in records) + 1
+                        if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=epoch) is None:
+                            raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                        self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
                         last = self._append_gate2_lifecycle(
                             paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=epoch,
                         )
-                        if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=epoch) is None:
-                            raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
                         protocol = self._read_gate2_worker_handshake(
                             captured, receipt, child["spawn_nonce"], wait_seconds=0,
                         )
                         if protocol is not None:
                             handshake, _ = protocol
-                            worker_started = next(
-                                record for record in reversed(records) if record["state"] == "worker_started"
-                            )
                             self._publish_gate2_worker_barrier(
                                 captured, receipt, handshake, grant_epoch=epoch,
-                                worker_started_digest=worker_started["mesa_lifecycle_digest"],
+                                worker_started_digest=worker_record["mesa_lifecycle_digest"],
                             )
                         self._adopt_gate2_worker(captured, paths, receipt, child, epoch)
                         return {
@@ -1789,6 +1612,7 @@ class MesaService:
                     epoch = max(record["ownership_epoch"] for record in records) + 1
                     if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=epoch) is None:
                         raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                    self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
                     self._append_gate2_lifecycle(
                         paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=epoch,
                     )
@@ -1803,11 +1627,12 @@ class MesaService:
                         if not self._gate2_child_is_active(child, captured, records):
                             raise ServiceError(500, "mesa_run_corrupt", "durable worker handshake does not identify a live worker")
                         ownership_epoch = max(record["ownership_epoch"] for record in records) + 1
+                        if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=ownership_epoch) is None:
+                            raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                        self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
                         self._append_gate2_lifecycle(
                             paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=ownership_epoch,
                         )
-                        if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=ownership_epoch) is None:
-                            raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
                         last = self._append_gate2_lifecycle(
                             paths["lifecycle"], receipt, "worker_started", ownership_epoch=ownership_epoch,
                             child_identity=child,
@@ -1823,9 +1648,10 @@ class MesaService:
                             "mesa_lifecycle_digest": last["mesa_lifecycle_digest"],
                         }
                 ownership_epoch = max((record["ownership_epoch"] for record in records), default=0) + 1
-                self._append_gate2_lifecycle(paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=ownership_epoch)
                 if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=ownership_epoch) is None:
                     raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
+                self._append_gate2_lifecycle(paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=ownership_epoch)
             else:
                 receipt = {
                     "schema_version": 1,
@@ -1852,9 +1678,10 @@ class MesaService:
                 self._gate2_fault_hook("after_receipt")
                 ownership_epoch = 1
                 self._append_gate2_lifecycle(paths["lifecycle"], receipt, "receipt_committed", ownership_epoch=1)
-                self._append_gate2_lifecycle(paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=1)
                 if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=1) is None:
                     raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                self._gate2_fault_hook("after_owner_lease_claim_before_lifecycle")
+                self._append_gate2_lifecycle(paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=1)
 
             if len(self.active_runs) >= self.worker_limit:
                 records = self._read_gate2_lifecycle(paths["lifecycle"], receipt)
@@ -1924,8 +1751,8 @@ class MesaService:
                 "--delay-per-day", str(self.worker_delay_seconds),
             ]
             active = self._spawn(
-                project_id=project_id, run_id=run_id, model_id=WIND_MODEL_ID, command=command,
-                temporary_dir=pending, final_dir=final, timeout_seconds=self.wind_timeout_seconds,
+                project_id=project_id, run_id=run_id, command=command,
+                temporary_dir=pending, final_dir=final,
                 gate2_context={
                     "receipt": receipt, "lifecycle": paths["lifecycle"], "ownership_epoch": ownership_epoch,
                     "project_dir": captured["project_dir"], "captured": captured,
@@ -1967,12 +1794,31 @@ class MesaService:
             raise ServiceError(404, "receipt_not_found", "Mesa receipt not found")
         events_dir = self._safe_path(project_dir / "mesa-run-lifecycle" / receipt["run_id"] / "events")
         records = self._read_gate2_lifecycle(events_dir, receipt)
+        terminal_metadata = self._read_gate2_terminal_metadata(project_dir, receipt, records)
         return {
             "receipt": receipt,
             "lifecycle_records": records,
             "latest_lifecycle": records[-1] if records else None,
-            "terminal_metadata": self._read_gate2_terminal_metadata(project_dir, receipt, records),
+            "terminal_metadata": terminal_metadata,
+            "cancel_outcome": self._gate2_cancel_outcome_projection(records),
         }
+
+    @staticmethod
+    def _gate2_cancel_outcome_projection(records: list[dict[str, Any]]) -> str | None:
+        """Derive the quantitative cancel result from the validated durable lifecycle."""
+
+        if not records or not any(record["state"] == "cancel_requested" for record in records):
+            return None
+        return {
+            "verified_succeeded": "completed_before_cancel_effect",
+            "terminal_failed": "failed_before_cancel_effect",
+            "terminal_timed_out": "timed_out_before_cancel_effect",
+            "terminal_cancelled": (
+                "cancelled_by_worker"
+                if any(record["state"] == "worker_started" for record in records)
+                else "cancelled_before_dispatch"
+            ),
+        }.get(records[-1]["state"])
 
     def _read_gate2_terminal_metadata(
         self, project_dir: Path, receipt: dict[str, Any], records: list[dict[str, Any]],
@@ -2096,6 +1942,7 @@ class MesaService:
             "receipt": receipt,
             "lifecycle_records": records,
             "terminal_metadata": self._read_gate2_terminal_metadata(project_dir, receipt, records),
+            "cancel_outcome": self._gate2_cancel_outcome_projection(records),
         }
 
     def _close_log(self, active: ActiveRun) -> None:
@@ -2104,9 +1951,12 @@ class MesaService:
             _fsync(active.log_handle.fileno())
             active.log_handle.close()
 
-    def _promote(self, active: ActiveRun) -> None:
-        if active.gate2_context is not None:
-            self._assert_gate2_owner_lease(active, require_live_child=False)
+    def _promote(self, active: ActiveRun, *, allow_expired_at_deadline: bool = False) -> None:
+        self._assert_gate2_owner_lease(
+            active,
+            require_live_child=False,
+            allow_expired_at_deadline=allow_expired_at_deadline,
+        )
         self._close_log(active)
         temporary_dir = self._safe_path(active.temporary_dir)
         final_dir = self._safe_path(active.final_dir)
@@ -2150,7 +2000,6 @@ class MesaService:
 
         metadata = self._read_workspace_json(self._safe_path(run_dir / "metadata.json"))
         if status == "succeeded" and metadata.get("metadata_kind") == "framed_terminal_core":
-            from .canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2
             artifacts: dict[str, Any] = {}
             for name in sorted(WIND_ARTIFACTS):
                 path = self._safe_path(run_dir / name)
@@ -2248,8 +2097,6 @@ class MesaService:
 
     def _append_gate2_terminal_for_active(self, active: ActiveRun, status: str) -> None:
         context = active.gate2_context
-        if context is None:
-            return
         state = {
             "succeeded": "verified_succeeded",
             "failed": "terminal_failed",
@@ -2289,16 +2136,19 @@ class MesaService:
         )
 
     def _terminate(self, active: ActiveRun, status: str, message: str, *, gate2_lock_held: bool = False) -> None:
-        if active.gate2_context is not None and not gate2_lock_held:
+        if not gate2_lock_held:
             with self._run_lock(active.gate2_context["project_dir"], active.run_id):
                 self._terminate(active, status, message, gate2_lock_held=True)
             return
-        if active.gate2_context is not None and not active.temporary_dir.exists() and active.final_dir.is_dir():
+        if not active.temporary_dir.exists() and active.final_dir.is_dir():
             self._close_log(active)
             self.active_runs.pop(active.run_id, None)
             return
-        if active.gate2_context is not None:
-            self._assert_gate2_owner_lease(active, require_live_child=active.process.poll() is None)
+        self._assert_gate2_owner_lease(
+            active,
+            require_live_child=active.process.poll() is None,
+            allow_expired_at_deadline=status == "timed_out",
+        )
         marker = self._safe_path(active.temporary_dir / "cancel_requested")
         marker.touch(exist_ok=True)
         if active.process.poll() is None:
@@ -2317,35 +2167,28 @@ class MesaService:
             "worker_exit_code": active.process.returncode,
             "error": {"code": status, "message": message},
         }
-        if active.gate2_context is not None:
-            tombstone = self._gate2_cancel_tombstone(active.gate2_context["captured"])
-            if tombstone is not None and status == "cancelled":
-                updates["cancel_outcome"] = "cancelled_by_worker"
-            elif tombstone is not None and status == "timed_out":
-                updates["cancel_outcome"] = "timed_out_before_cancel_effect"
+        tombstone = self._gate2_cancel_tombstone(active.gate2_context["captured"])
+        if tombstone is not None and status == "cancelled":
+            updates["cancel_outcome"] = "cancelled_by_worker"
+        elif tombstone is not None and status == "timed_out":
+            updates["cancel_outcome"] = "timed_out_before_cancel_effect"
         self._write_metadata(
             active.temporary_dir,
             **updates,
         )
-        if active.model_id == WIND_MODEL_ID:
-            self._retain_failure_evidence(active)
-        if active.gate2_context is not None:
-            self._promote(active)
-            self._append_gate2_terminal_for_active(active, status)
-        else:
-            self._append_gate2_terminal_for_active(active, status)
-            self._promote(active)
+        self._retain_failure_evidence(active)
+        self._promote(active, allow_expired_at_deadline=status == "timed_out")
+        self._append_gate2_terminal_for_active(active, status)
 
     def _wind_success_is_valid(self, active: ActiveRun) -> bool:
         try:
             from .verify_run import verify_run
 
-            if active.gate2_context is not None:
-                self._replay_gate2_frozen_admission(active)
-                self._apply_gate2_cancel_outcome(active, "succeeded")
-                metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
-                if metadata.get("metadata_kind") != "framed_terminal_core":
-                    self._finalize_gate2_success_metadata(active.temporary_dir)
+            self._replay_gate2_frozen_admission(active)
+            self._apply_gate2_cancel_outcome(active, "succeeded")
+            metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
+            if metadata.get("metadata_kind") != "framed_terminal_core":
+                self._finalize_gate2_success_metadata(active.temporary_dir)
             verify_run(active.temporary_dir)
             return True
         except Exception as exc:
@@ -2362,8 +2205,6 @@ class MesaService:
 
     def _replay_gate2_frozen_admission(self, active: ActiveRun) -> None:
         context = active.gate2_context
-        if context is None:
-            return
         captured = context["captured"]
         try:
             from .gate2_project_evidence import derive_policy_from_committed_events
@@ -2383,7 +2224,7 @@ class MesaService:
 
     def _apply_gate2_cancel_outcome(self, active: ActiveRun, status: str) -> None:
         context = active.gate2_context
-        if context is None or self._gate2_cancel_tombstone(context["captured"]) is None:
+        if self._gate2_cancel_tombstone(context["captured"]) is None:
             return
         metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
         if metadata.get("metadata_kind") == "framed_terminal_core":
@@ -2444,7 +2285,7 @@ class MesaService:
         """Project one verified durable cancel tombstone into the live worker sandbox."""
 
         context = active.gate2_context
-        if context is None or context.get("projected_cancel_tombstone_digest") is not None:
+        if context.get("projected_cancel_tombstone_digest") is not None:
             return
         try:
             tombstone = self._gate2_cancel_tombstone(context["captured"])
@@ -2470,19 +2311,15 @@ class MesaService:
 
     def _poll_unlocked(self) -> None:
         for active in list(self.active_runs.values()):
-            if active.gate2_context is not None and not self._renew_gate2_owner_lease(active):
-                continue
-            if active.gate2_context is not None and active.process.poll() is None:
-                self._project_gate2_cancel_tombstone(active)
-            timed_out = (
-                int(time.time() * 1000) >= active.gate2_context["deadline_at_unix_ms"]
-                if active.gate2_context is not None
-                else time.monotonic() - active.started_monotonic > active.timeout_seconds
-            )
-            if active.process.poll() is None and timed_out:
+            timed_out = int(time.time() * 1000) >= active.gate2_context["deadline_at_unix_ms"]
+            if timed_out:
                 self._terminate(active, "timed_out", "simulation exceeded the configured timeout")
                 continue
-            if active.model_id == WIND_MODEL_ID and active.process.poll() is None:
+            if not self._renew_gate2_owner_lease(active):
+                continue
+            if active.process.poll() is None:
+                self._project_gate2_cancel_tombstone(active)
+            if active.process.poll() is None:
                 log_path = self._safe_path(active.temporary_dir / "run.log")
                 if log_path.exists() and log_path.stat().st_size > WIND_LIMITS["run_log_bytes"]:
                     self._terminate(active, "failed", "wind worker exceeded the run log limit")
@@ -2490,105 +2327,45 @@ class MesaService:
             return_code = active.process.poll()
             if return_code is None:
                 continue
-            if active.gate2_context is not None:
-                context = active.gate2_context
-                with self._run_lock(context["project_dir"], active.run_id):
-                    lease = self._assert_gate2_owner_lease(active, require_live_child=False)
-                    self._write_gate2_owner_lease(
-                        self._safe_path(context["project_dir"] / "mesa-run-lifecycle" / active.run_id / "owner-lease.json"),
-                        context["receipt"], ownership_epoch=context["ownership_epoch"], prior=lease,
-                        lease_seconds=max(60.0, self.owner_lease_seconds),
-                    )
+            context = active.gate2_context
+            with self._run_lock(context["project_dir"], active.run_id):
+                lease = self._assert_gate2_owner_lease(active, require_live_child=False)
+                self._write_gate2_owner_lease(
+                    self._safe_path(context["project_dir"] / "mesa-run-lifecycle" / active.run_id / "owner-lease.json"),
+                    context["receipt"], ownership_epoch=context["ownership_epoch"], prior=lease,
+                    lease_seconds=max(60.0, self.owner_lease_seconds),
+                    authoritative_deadline_at_unix_ms=context["deadline_at_unix_ms"],
+                )
             self._close_log(active)
             metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
             status = metadata.get("status")
             if metadata.get("metadata_kind") == "framed_terminal_core":
                 status = metadata.get("metadata_core_projection", {}).get("terminal_status")
-            if active.model_id == WIND_MODEL_ID:
-                success = return_code == 0 and status == "succeeded"
-                if success and self._wind_success_is_valid(active):
-                    if active.gate2_context is not None:
-                        with self._run_lock(active.gate2_context["project_dir"], active.run_id):
-                            self._promote(active)
-                            self._append_gate2_terminal_for_active(active, "succeeded")
-                    else:
-                        self._append_gate2_terminal_for_active(active, "succeeded")
-                        self._promote(active)
-                    continue
-                status = self._read_workspace_json(active.temporary_dir / "metadata.json").get("status")
-                if status not in TERMINAL or status == "succeeded":
-                    self._write_metadata(
-                        active.temporary_dir,
-                        status="failed",
-                        finished_at=time.time(),
-                        worker_exit_code=return_code,
-                        error={"code": "worker_failed", "message": "wind worker exited without verified artifacts"},
-                    )
-                terminal_status = self._read_workspace_json(active.temporary_dir / "metadata.json").get("status")
-                if terminal_status not in {"failed", "timed_out", "cancelled"}:
-                    terminal_status = "failed"
-                if active.gate2_context is not None:
-                    self._apply_gate2_cancel_outcome(active, terminal_status)
-                self._retain_failure_evidence(active)
-                if active.gate2_context is not None:
-                    with self._run_lock(active.gate2_context["project_dir"], active.run_id):
-                        self._promote(active)
-                        self._append_gate2_terminal_for_active(active, terminal_status)
-                else:
-                    self._append_gate2_terminal_for_active(active, terminal_status)
+            success = return_code == 0 and status == "succeeded"
+            if success and self._wind_success_is_valid(active):
+                with self._run_lock(active.gate2_context["project_dir"], active.run_id):
                     self._promote(active)
+                    self._append_gate2_terminal_for_active(active, "succeeded")
                 continue
-            success_files = (active.temporary_dir / "timeseries.csv").exists() and (active.temporary_dir / "summary.json").exists()
-            if return_code == 0 and status == "succeeded" and success_files:
-                self._promote(active)
-                continue
+            status = self._read_workspace_json(active.temporary_dir / "metadata.json").get("status")
             if status not in TERMINAL or status == "succeeded":
                 self._write_metadata(
                     active.temporary_dir,
                     status="failed",
                     finished_at=time.time(),
                     worker_exit_code=return_code,
-                    error={"code": "worker_failed", "message": "worker exited without successful artifacts"},
+                    error={"code": "worker_failed", "message": "wind worker exited without verified artifacts"},
                 )
-            self._promote(active)
+            terminal_status = self._read_workspace_json(active.temporary_dir / "metadata.json").get("status")
+            if terminal_status not in {"failed", "timed_out", "cancelled"}:
+                terminal_status = "failed"
+            self._apply_gate2_cancel_outcome(active, terminal_status)
+            self._retain_failure_evidence(active)
+            with self._run_lock(active.gate2_context["project_dir"], active.run_id):
+                self._promote(active)
+                self._append_gate2_terminal_for_active(active, terminal_status)
 
-    def get_run(self, project_id: str, run_id: str) -> dict[str, Any]:
-        self.poll()
-        self._validate_id(run_id, "run")
-        active = self.active_runs.get(run_id)
-        if active is not None and active.project_id == project_id:
-            metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
-            # Worker terminal claims are private child state until the parent
-            # has observed exit, verified evidence, and atomically promoted.
-            if metadata.get("status") not in {"queued", "running"}:
-                metadata = {**metadata, "status": "running"}
-            return metadata
-        project_dir = self._project_dir(project_id)
-        final = self._safe_path(project_dir / "runs" / run_id)
-        if not final.exists():
-            receipt_dir = self._safe_path(project_dir / "mesa-run-receipts")
-            if receipt_dir.is_dir():
-                receipt = next(
-                    (
-                        item for item in (self._read_gate2_receipt(path) for path in sorted(receipt_dir.iterdir()))
-                        if item is not None and item["run_id"] == run_id
-                    ),
-                    None,
-                )
-                if receipt is not None:
-                    self.start_wind_run_v2(
-                        project_id, {"experiment_revision_id": receipt["experiment_revision_id"]},
-                        downstream_key=receipt["downstream_idempotency_key"], run_id=run_id,
-                        downstream_digest=receipt["downstream_request_digest"],
-                    )
-                    active = self.active_runs.get(run_id)
-                    pending = self._safe_path(project_dir / ".pending" / run_id / "metadata.json")
-                    if active is not None or pending.is_file():
-                        metadata = self._read_workspace_json(active.temporary_dir / "metadata.json" if active else pending)
-                        return {**metadata, "status": "running"}
-        return self._metadata(project_id, run_id)
-
-    def cancel_run(self, project_id: str, run_id: str) -> dict[str, Any]:
+    def _cancel_active_wind_run(self, project_id: str, run_id: str) -> dict[str, Any]:
         self.poll()
         self._validate_id(run_id, "run")
         active = self.active_runs.get(run_id)
@@ -2597,33 +2374,27 @@ class MesaService:
             if metadata["status"] in TERMINAL:
                 return metadata
             raise ServiceError(409, "run_not_active", "run is no longer active")
-        if active.gate2_context is not None:
-            context = active.gate2_context
-            with self._run_lock(context["project_dir"], run_id):
-                tombstone = self._gate2_cancel_tombstone(context["captured"])
-                if tombstone is None:
-                    raise ServiceError(409, "cancel_tombstone_required", "a committed backend cancel tombstone is required")
+        context = active.gate2_context
+        with self._run_lock(context["project_dir"], run_id):
+            tombstone = self._gate2_cancel_tombstone(context["captured"])
+            if tombstone is None:
+                raise ServiceError(409, "cancel_tombstone_required", "a committed backend cancel tombstone is required")
+            records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
+            if records[-1]["ownership_epoch"] != context["ownership_epoch"] or records[-1]["owner_instance_id"] != self.owner_instance_id:
+                context["ownership_epoch"] = records[-1]["ownership_epoch"] + 1
+                self._append_gate2_lifecycle(
+                    context["lifecycle"], context["receipt"], "ownership_acquired",
+                    ownership_epoch=context["ownership_epoch"],
+                )
                 records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
-                if records[-1]["ownership_epoch"] != context["ownership_epoch"] or records[-1]["owner_instance_id"] != self.owner_instance_id:
-                    context["ownership_epoch"] = records[-1]["ownership_epoch"] + 1
-                    self._append_gate2_lifecycle(
-                        context["lifecycle"], context["receipt"], "ownership_acquired",
-                        ownership_epoch=context["ownership_epoch"],
-                    )
-                    records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
-                if not any(record["state"] == "cancel_requested" for record in records):
-                    self._append_gate2_lifecycle(
-                        context["lifecycle"], context["receipt"], "cancel_requested",
-                        ownership_epoch=context["ownership_epoch"],
-                        evidence_digest=tombstone["cancel_tombstone_digest"],
-                    )
-                if active.process.poll() is not None:
-                    # A natural terminal outcome wins a cancellation race.
-                    pass
-                else:
-                    self._terminate(active, "cancelled", "simulation cancelled", gate2_lock_held=True)
-        else:
-            self._terminate(active, "cancelled", "simulation cancelled")
+            if not any(record["state"] == "cancel_requested" for record in records):
+                self._append_gate2_lifecycle(
+                    context["lifecycle"], context["receipt"], "cancel_requested",
+                    ownership_epoch=context["ownership_epoch"],
+                    evidence_digest=tombstone["cancel_tombstone_digest"],
+                )
+            if active.process.poll() is None:
+                self._terminate(active, "cancelled", "simulation cancelled", gate2_lock_held=True)
         self.poll()
         return self._metadata(project_id, run_id)
 
@@ -2659,23 +2430,7 @@ class MesaService:
             )
             if run_id not in self.active_runs:
                 return self._metadata(project_id, run_id)
-        return self.cancel_run(project_id, run_id)
-
-    def get_results(self, project_id: str, run_id: str) -> dict[str, Any]:
-        self.poll()
-        run_dir = self._run_dir(project_id, run_id)
-        metadata = self._read_workspace_json(run_dir / "metadata.json")
-        if metadata["status"] not in TERMINAL:
-            raise ServiceError(409, "run_not_complete", "run is not complete")
-        if metadata["status"] != "succeeded":
-            raise ServiceError(404, "successful_results_not_found", "successful results do not exist for this run")
-        filename = "daily-kpis.csv" if metadata.get("model_id") == WIND_MODEL_ID else "timeseries.csv"
-        data_path = self._safe_path(run_dir / filename)
-        if not data_path.is_file():
-            raise ServiceError(500, "corrupt_run", "run result artifact is unavailable")
-        with data_path.open(newline="", encoding="utf-8") as handle:
-            rows = list(csv.DictReader(handle))
-        return {"run_id": run_id, "summary": self._read_workspace_json(run_dir / "summary.json"), "timeseries": rows}
+        return self._cancel_active_wind_run(project_id, run_id)
 
     def get_events(self, project_id: str, run_id: str, *, after: int, limit: int) -> dict[str, Any]:
         self.poll()
@@ -2707,8 +2462,7 @@ class MesaService:
         run_dir = self._run_dir(project_id, run_id)
         metadata = self._read_workspace_json(run_dir / "metadata.json")
         core = self._artifact_metadata_core(metadata)
-        allowed = WIND_ARTIFACTS if core.get("model_id") == WIND_MODEL_ID else LEGACY_ARTIFACTS
-        if name not in allowed:
+        if core.get("model_id") != WIND_MODEL_ID or name not in WIND_ARTIFACTS:
             raise ServiceError(404, "artifact_not_found", "artifact not found")
         try:
             path = self._safe_path(run_dir / name)
@@ -2716,7 +2470,7 @@ class MesaService:
             raise ServiceError(404, "artifact_not_found", "artifact not found") from exc
         if not path.is_file() or path.parent != run_dir:
             raise ServiceError(404, "artifact_not_found", "artifact not found")
-        media_type = "text/plain" if name in {"run.log", "timeseries.csv", "daily-kpis.csv", "domain-events.jsonl"} else "application/json"
+        media_type = "text/plain" if name in {"run.log", "daily-kpis.csv", "domain-events.jsonl"} else "application/json"
         return path, media_type
 
     @staticmethod
@@ -2757,7 +2511,7 @@ class MesaService:
     def shutdown(self) -> None:
         try:
             for active in list(self.active_runs.values()):
-                if active.gate2_context is not None and self._gate2_cancel_tombstone(active.gate2_context["captured"]) is None:
+                if self._gate2_cancel_tombstone(active.gate2_context["captured"]) is None:
                     self._terminate(active, "failed", "service shutdown before terminal evidence")
                 else:
                     self._terminate(active, "cancelled", "service shutdown")

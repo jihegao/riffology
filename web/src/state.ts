@@ -7,6 +7,13 @@ const pendingRunKeys = [...runIdentityKeys, "reference_kind", "status"];
 const terminalRunKeys = [...runIdentityKeys, "reference_kind", "status", "terminal_evidence_source", "terminal_metadata_digest", "verified_success", "cancel_outcome"];
 const succeededRunKeys = [...terminalRunKeys, "artifact_ids"];
 const id = (value: unknown, prefix: string, size: number) => typeof value === "string" && new RegExp(`^${prefix}[0-9a-f]{${size}}$`).test(value);
+const runAdmissionReasons = new Set(["ready", "activation_missing", "activation_not_ready", "activation_fenced", "activation_target_invalid", "model_revision_mismatch", "brief_revision_mismatch", "alignment_revision_mismatch", "experiment_lineage_invalid"]);
+
+const validateRunAdmission = (value: unknown): void => {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, ["admissible", "reason"])) throw new Error("Run admission projection has an unsupported keyset.");
+  const admission = value as Record<string, unknown>;
+  if (typeof admission.admissible !== "boolean" || !runAdmissionReasons.has(String(admission.reason)) || admission.admissible !== (admission.reason === "ready")) throw new Error("Run admission projection is inconsistent.");
+};
 
 export function validateRunReference(value: unknown, projectId: string): RunReference {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Run reference must be an exact object.");
@@ -78,7 +85,8 @@ export async function verifyProjectionResponse(response: BrowserProjectionRespon
   const projection = response.projection;
   if (!exactKeys(response, ["schema_id", "schema_version", "canonical_json_version", "project_id", "snapshot_revision", "projection_digest", "projection", ...( "event_type" in response ? ["event_type"] : [])])) throw new Error("Browser projection envelope has an unsupported keyset.");
   if (response.schema_id !== "riff://evidence-studio/browser-projection-response/v1" || response.schema_version !== 1 || response.canonical_json_version !== "riff-canonical-json-v2" || "event_type" in response && response.event_type !== "browser.project.snapshot.v1") throw new Error("Unsupported browser projection schema.");
-  if (!exactKeys(projection, ["schema_id", "schema_version", "canonical_json_version", "project_id", "display_name", "snapshot_revision", "projection_digest", "phase", "current", "model_activation", "current_records", "actors", "issues", "review_summaries", "workflow_policy", "runs", "current_terminal_artifacts", "recent_command_results", "projection_truncation"]) || projection.schema_id !== "riff://evidence-studio/project-state/v1" || projection.schema_version !== 1 || projection.canonical_json_version !== "riff-canonical-json-v2") throw new Error("Browser project state has an unsupported root schema/keyset.");
+  if (!exactKeys(projection, ["schema_id", "schema_version", "canonical_json_version", "project_id", "display_name", "snapshot_revision", "projection_digest", "phase", "current", "model_activation", "run_admission", "current_records", "actors", "issues", "review_summaries", "workflow_policy", "runs", "current_terminal_artifacts", "recent_command_results", "projection_truncation"]) || projection.schema_id !== "riff://evidence-studio/project-state/v1" || projection.schema_version !== 1 || projection.canonical_json_version !== "riff-canonical-json-v2") throw new Error("Browser project state has an unsupported root schema/keyset.");
+  validateRunAdmission(projection.run_admission);
   validateProjectionRuns(projection);
   if (response.project_id !== projection.project_id || response.snapshot_revision !== projection.snapshot_revision || response.projection_digest !== projection.projection_digest) throw new Error("Browser projection envelope identity mismatch.");
   if (await projectionDigest(projection) !== response.projection_digest) throw new Error("Browser projection digest mismatch.");

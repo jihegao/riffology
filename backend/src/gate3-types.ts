@@ -18,12 +18,18 @@ export type BrowserModelActivation = {
   switch_receipt_digest: string | null; reconcile_digest: string | null;
 };
 
+export type BrowserRunAdmission = {
+  admissible: boolean;
+  reason: "ready" | "activation_missing" | "activation_not_ready" | "activation_fenced" | "activation_target_invalid" | "model_revision_mismatch" | "brief_revision_mismatch" | "alignment_revision_mismatch" | "experiment_lineage_invalid";
+};
+
 export type BrowserProjectState = {
   schema_id: "riff://evidence-studio/project-state/v1"; schema_version: 1; canonical_json_version: typeof GATE3_CANONICAL;
   project_id: string; display_name: string; snapshot_revision: number; projection_digest: string;
   phase: "brief" | "align" | "configure" | "review" | "run" | "inspect";
   current: { decision_brief_revision_id: string | null; alignment_map_revision_id: string | null; model_revision_id: string | null; experiment_revision_id: string | null; run_id: string | null };
   model_activation: BrowserModelActivation | null;
+  run_admission: BrowserRunAdmission;
   current_records: {
     decision_brief: DecisionBriefRevision | null; alignment_map: AlignmentMapRevision | null;
     model_view: null | { model_id: "wind-turbine-maintenance"; model_revision_id: string; view_sources_href: string; source_set_digest: string };

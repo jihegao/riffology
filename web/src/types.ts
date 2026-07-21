@@ -152,6 +152,11 @@ export type BrowserModelActivation = {
   reconcile_digest: string | null;
 };
 
+export type BrowserRunAdmission = {
+  admissible: boolean;
+  reason: "ready" | "activation_missing" | "activation_not_ready" | "activation_fenced" | "activation_target_invalid" | "model_revision_mismatch" | "brief_revision_mismatch" | "alignment_revision_mismatch" | "experiment_lineage_invalid";
+};
+
 export type RevisionTuple = { model_revision_id: string; brief_revision_id: string; alignment_revision_id: string; experiment_revision_id: string };
 
 export type BusinessSourceRef = { source_id:string; kind:"user_declared"|"bundled_reference"|"uploaded_file"; label:string; attachment_id?:string };
@@ -180,6 +185,7 @@ export type BrowserProjectState = {
     run_id: string | null;
   };
   model_activation: BrowserModelActivation | null;
+  run_admission: BrowserRunAdmission;
   current_records: {
     decision_brief: LegacyDecisionBriefRecord | ActivationDecisionBriefRecord | null;
     alignment_map: LegacyAlignmentMapRecord | FramedAlignmentMapRecord | null;

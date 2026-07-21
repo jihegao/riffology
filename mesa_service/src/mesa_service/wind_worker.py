@@ -263,15 +263,15 @@ def import_model(model_path: Path, *, source_bytes: bytes | None = None) -> type
 def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tuple[dict[str, Any], dict[str, bytes]]:
     """Capture one verified immutable bundle snapshot for actual execution."""
 
-    from .bundle import EXPECTED_FILES, model_revision_id
     from .gate3_bundle import FRAMED_FILES, framed_revision_id
     from .verify_bundle import verify_bundle
 
     verified = verify_bundle(bundle_dir)
     if verified.get("model_revision_id") != expected_revision_id:
         raise RuntimeError("worker bundle verification returned the wrong model revision")
-    branch = verified.get("bundle_branch", "legacy")
-    expected_bundle_files = FRAMED_FILES if branch == "framed" else EXPECTED_FILES
+    if verified.get("bundle_branch") != "framed":
+        raise RuntimeError("wind worker accepts only the exact framed reviewed bundle")
+    expected_bundle_files = FRAMED_FILES
     expected_paths = {"manifest.json", *expected_bundle_files}
     actual_paths = {
         path.relative_to(bundle_dir).as_posix()
@@ -290,11 +290,9 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
         manifest = json.loads(captured["manifest.json"])
     except json.JSONDecodeError as exc:
         raise RuntimeError("worker captured an invalid bundle manifest") from exc
-    expected_manifest_keys = (
-        {"schema_version", "bundle_protocol", "model_id", "model_revision_id", "runtime_profile", "files"}
-        if branch == "framed"
-        else {"schema_version", "model_id", "model_revision_id", "runtime_profile", "files"}
-    )
+    expected_manifest_keys = {
+        "schema_version", "bundle_protocol", "model_id", "model_revision_id", "runtime_profile", "files"
+    }
     if not isinstance(manifest, dict) or set(manifest) != expected_manifest_keys:
         raise RuntimeError("worker captured a non-canonical bundle manifest contract")
     files = manifest["files"]
@@ -309,7 +307,7 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
             or declaration.get("byte_length") != len(data)
         ):
             raise RuntimeError(f"worker bundle input drifted during capture: {relative}")
-    computed_revision = framed_revision_id(files) if branch == "framed" else model_revision_id(files, manifest["runtime_profile"])
+    computed_revision = framed_revision_id(files)
     if (
         manifest.get("model_id") != MODEL_ID
         or manifest.get("model_revision_id") != expected_revision_id
@@ -318,56 +316,6 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
     ):
         raise RuntimeError("worker captured bundle bytes do not match the expected model revision")
     return manifest, captured
-
-
-def build_run_request(
-    *,
-    project_id: str,
-    run_id: str,
-    model_revision_id: str,
-    experiment_revision_id: str,
-    experiment: dict[str, Any],
-) -> dict[str, Any]:
-    request = {
-        "project_id": project_id,
-        "run_id": run_id,
-        "model_id": MODEL_ID,
-        "model_revision_id": model_revision_id,
-        "experiment_revision_id": experiment_revision_id,
-        "preset_id": experiment["preset_id"],
-        "seed": experiment["seed"],
-        "parameters": experiment["parameters"],
-        "horizon_days": experiment["horizon_days"],
-        "warmup_days": experiment["warmup_days"],
-        "claim_labels": experiment["claim_labels"],
-        "brief_revision_id": experiment.get("brief_revision_id"),
-        "alignment_revision_id": experiment.get("alignment_revision_id"),
-        "workflow_policy": experiment.get("workflow_policy", "workflow_policy_unmet"),
-        "trust_label": experiment.get("trust_label", "draft_unverified"),
-        "runtime_profile": experiment.get("runtime_profile", runtime_profile()),
-    }
-    validate_request(request)
-    return request
-
-
-def initial_metadata(request: dict[str, Any], *, status: str = "queued") -> dict[str, Any]:
-    identity = {key: request[key] for key in IDENTITY_FIELDS}
-    return {
-        **identity,
-        "status": status,
-        "created_at": time.time(),
-        "claim_labels": request["claim_labels"],
-        "brief_revision_id": request.get("brief_revision_id"),
-        "alignment_revision_id": request.get("alignment_revision_id"),
-        "workflow_policy": request["workflow_policy"],
-        "trust_label": request["trust_label"],
-        "runtime_profile": request["runtime_profile"],
-        "limits": dict(LIMITS),
-        "event_truncated": False,
-        "processed_scheduled_event_count": 0,
-        "emitted_domain_event_count": 0,
-        "digests": {"request_sha256": sha256_bytes(canonical_json_bytes(request))},
-    }
 
 
 def initial_metadata_v2(request: dict[str, Any], *, status: str = "queued") -> dict[str, Any]:
@@ -382,7 +330,7 @@ def initial_metadata_v2(request: dict[str, Any], *, status: str = "queued") -> d
         "run_intent_digest": request["run_intent_digest"],
         "downstream_request_digest": request["downstream_request_digest"],
         "runtime_profile": request["runtime_profile"],
-        "limits": dict(FRAMED_LIMITS if request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay" else LIMITS),
+        "limits": dict(FRAMED_LIMITS),
         "event_truncated": False,
         "processed_scheduled_event_count": 0,
         "emitted_domain_event_count": 0,
@@ -494,8 +442,8 @@ def validate_request_v2(request: object) -> dict[str, Any]:
     ):
         raise RuntimeError("v2 request bindings are inconsistent")
     framed_protocol = request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay"
-    if framed_schema is not framed_protocol:
-        raise RuntimeError("v2 request mixes legacy and framed experiment/runtime branches")
+    if not framed_schema or not framed_protocol:
+        raise RuntimeError("v2 wind worker accepts only framed experiment/runtime evidence")
     canonical_json_v2_bytes(request)
     return request
 
@@ -506,45 +454,18 @@ def _validate_request_experiment_binding(
     expected_model_revision_id: str,
     expected_experiment_revision_id: str,
 ) -> dict[str, Any]:
-    if "experiment_document" in request:
-        experiment = request["experiment_document"]
-        if request["model_revision_id"] != expected_model_revision_id:
-            raise RuntimeError("request model revision does not match the parent-admitted revision")
-        if request["experiment_revision_id"] != expected_experiment_revision_id:
-            raise RuntimeError("request experiment revision does not match the parent-admitted revision")
-        if experiment["model_revision_id"] != expected_model_revision_id or experiment["experiment_revision_id"] != expected_experiment_revision_id:
-            raise RuntimeError("embedded experiment identity differs from parent admission")
-        return experiment
-    from .bundle import experiment_revision_id
-    from .wind_contracts import build_experiment_document, validate_experiment_document
-
-    experiment = validate_experiment_document(build_experiment_document(expected_model_revision_id))
-    computed_experiment_revision_id = experiment_revision_id(experiment)
-    if computed_experiment_revision_id != expected_experiment_revision_id:
-        raise RuntimeError("canonical experiment content does not match the expected experiment digest")
+    if "experiment_document" not in request:
+        raise RuntimeError("worker request lacks the framed experiment document")
+    experiment = request["experiment_document"]
     if request["model_revision_id"] != expected_model_revision_id:
         raise RuntimeError("request model revision does not match the parent-admitted revision")
     if request["experiment_revision_id"] != expected_experiment_revision_id:
         raise RuntimeError("request experiment revision does not match the parent-admitted revision")
-    projection = {
-        "model_id": experiment["model_id"],
-        "model_revision_id": experiment["model_revision_id"],
-        "experiment_revision_id": computed_experiment_revision_id,
-        "preset_id": experiment["preset_id"],
-        "seed": experiment["seed"],
-        "parameters": experiment["parameters"],
-        "horizon_days": experiment["horizon_days"],
-        "warmup_days": experiment["warmup_days"],
-        "claim_labels": experiment["claim_labels"],
-        "brief_revision_id": experiment["brief_revision_id"],
-        "alignment_revision_id": experiment["alignment_revision_id"],
-        "workflow_policy": experiment["workflow_policy"],
-        "trust_label": experiment["trust_label"],
-        "runtime_profile": experiment["runtime_profile"],
-    }
-    for key, expected_value in projection.items():
-        if request.get(key) != expected_value:
-            raise RuntimeError(f"request field {key} drifted from canonical experiment content")
+    if (
+        experiment["model_revision_id"] != expected_model_revision_id
+        or experiment["experiment_revision_id"] != expected_experiment_revision_id
+    ):
+        raise RuntimeError("embedded experiment identity differs from parent admission")
     return experiment
 
 
@@ -887,10 +808,11 @@ def execute(
         request_payload = json.loads(request_bytes)
     except json.JSONDecodeError as exc:
         raise RuntimeError("request bytes are not valid JSON") from exc
-    is_v2 = isinstance(request_payload, dict) and "experiment_document" in request_payload
-    if is_v2 and request_bytes != canonical_json_v2_bytes(request_payload):
-        raise RuntimeError("v2 captured request bytes are not exact riff-canonical-json-v2")
-    request = validate_request_v2(request_payload) if is_v2 else validate_request(request_payload)
+    if not isinstance(request_payload, dict) or "experiment_document" not in request_payload:
+        raise RuntimeError("wind worker accepts only a framed v2 request")
+    if request_bytes != canonical_json_v2_bytes(request_payload):
+        raise RuntimeError("captured request bytes are not exact riff-canonical-json-v2")
+    request = validate_request_v2(request_payload)
     _validate_request_experiment_binding(
         request,
         expected_model_revision_id=expected_model_revision_id,
@@ -903,20 +825,15 @@ def execute(
         raise RuntimeError("reviewed model manifest file declarations are unavailable")
     metric_schema = json.loads(captured_bundle["metric-schema.json"])
     _metric_contract(metric_schema)
-    is_framed = manifest.get("bundle_protocol") == "wind-turbine-maintenance-bundle-v2-framed"
-    if is_framed and request["runtime_profile"].get("model_protocol_version") != "wind-turbine-maintenance-v2-framed-replay":
+    if request["runtime_profile"].get("model_protocol_version") != "wind-turbine-maintenance-v2-framed-replay":
         raise RuntimeError("framed bundle requires the exact framed runtime profile")
-    if not is_framed and request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay":
-        raise RuntimeError("legacy bundle cannot execute a framed experiment")
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"
-    metadata = read_json(metadata_path) if metadata_path.exists() else (
-        initial_metadata_v2(request) if is_v2 else initial_metadata(request)
-    )
+    metadata = read_json(metadata_path) if metadata_path.exists() else initial_metadata_v2(request)
     if _identity(metadata) != _identity(request):
         raise RuntimeError("worker metadata identity does not match the admitted request")
     recorded_request_digest = metadata.get("digests", {}).get("request_sha256")
-    canonical_request = canonical_json_v2_bytes(request) if is_v2 else canonical_json_bytes(request)
+    canonical_request = canonical_json_v2_bytes(request)
     if recorded_request_digest != sha256_bytes(canonical_request):
         raise RuntimeError("worker metadata does not bind the admitted request content")
     started_at_text = _iso_now()
@@ -955,7 +872,7 @@ def execute(
         model_class = import_model(model_path, source_bytes=captured_bundle["model.py"])
         replay_frames: list[dict[str, Any]] = []
         framed_sample_days: list[int] = []
-        if is_framed and int(request["parameters"]["turbine_count"]) <= 100 and int(request["parameters"]["crew_count"]) <= 50:
+        if int(request["parameters"]["turbine_count"]) <= 100 and int(request["parameters"]["crew_count"]) <= 50:
             from .gate3_contracts import sample_days
             framed_sample_days = sample_days(request["horizon_days"], request["warmup_days"])
             worst_case = len(framed_sample_days) * (
@@ -977,16 +894,15 @@ def execute(
             "seed": request["seed"],
             "event_sink": stream_event,
         }
-        if is_framed:
-            model_kwargs.update({
-                "replay_sample_days": set(framed_sample_days),
-                "replay_sink": capture_replay if framed_sample_days else None,
-                "replay_identity": {
-                    "model_revision_id": request["model_revision_id"],
-                    "experiment_revision_id": request["experiment_revision_id"],
-                    "preset_id": request["preset_id"],
-                },
-            })
+        model_kwargs.update({
+            "replay_sample_days": set(framed_sample_days),
+            "replay_sink": capture_replay if framed_sample_days else None,
+            "replay_identity": {
+                "model_revision_id": request["model_revision_id"],
+                "experiment_revision_id": request["experiment_revision_id"],
+                "preset_id": request["preset_id"],
+            },
+        })
         model = model_class(
             **model_kwargs,
         )
@@ -1039,14 +955,11 @@ def execute(
             "no_staffing_recommendation",
         ],
     }
-    if not is_v2:
-        summary["trust_label"] = request["trust_label"]
-        summary["workflow_policy"] = request["workflow_policy"]
     summary_path = output_dir / "summary.json"
-    (_atomic_canonical_v2_lf if is_framed else atomic_json)(summary_path, summary)
+    _atomic_canonical_v2_lf(summary_path, summary)
 
     canonical_event_sha = semantic_event_digest.hexdigest()
-    if is_framed:
+    if manifest.get("bundle_protocol") == "wind-turbine-maintenance-bundle-v2-framed":
         from .gate3_contracts import CLAIM_LABELS, EMPTY_ARRAY_SHA256, NON_CLAIMS, sample_days_sha256
         replay_identity = {key: request[key] for key in V2_IDENTITY_FIELDS}
         event_source = {
@@ -1104,43 +1017,11 @@ def execute(
                 "claim_labels": CLAIM_LABELS,
                 "non_claims": NON_CLAIMS,
             }
-    else:
-        replay = {
-            **_identity(request),
-            "claim_labels": request["claim_labels"],
-            "source_artifact": "domain-events.jsonl",
-            "source_sha256": sha256_file(events_path),
-            "canonical_event_sha256": canonical_event_sha,
-            "event_count": emitted_count,
-            "frame_policy": {"kind": "daily_projection", "full_event_log_retained": True},
-        }
     replay_path = output_dir / "replay-manifest.json"
-    (_atomic_canonical_v2_lf if is_framed else atomic_json)(replay_path, replay)
+    _atomic_canonical_v2_lf(replay_path, replay)
 
-    daily_semantic = _daily_semantic_digest(kpis_path)
-    summary_projection = _semantic_without_run_context(summary)
-    summary_semantic = sha256_bytes(
-        canonical_json_v2_bytes(summary_projection) if is_v2 else canonical_json_bytes(summary_projection)
-    )
-    derived = {
-        **_identity(request),
-        "claim_labels": request["claim_labels"],
-        "generator_version": "gate2-derived-view-contract-v2" if is_v2 else "gate1-derived-view-contract-v1",
-        "rendered": False,
-        "inputs": {
-            "model_spec_sha256": manifest_files["model-spec.json"]["sha256"],
-            "traceability_sha256": manifest_files["traceability.json"]["sha256"],
-            "domain_events_sha256": sha256_file(events_path),
-            "daily_kpis_sha256": sha256_file(kpis_path),
-            "summary_sha256": sha256_file(summary_path),
-            "canonical_event_sha256": canonical_event_sha,
-            "daily_kpis_semantic_sha256": daily_semantic,
-            "summary_semantic_sha256": summary_semantic,
-        },
-        "views": ["entity_state", "process_swimlane", "business_traceability", "two_dimensional_replay"],
-    }
     derived_path = output_dir / "derived-views-manifest.json"
-    if is_framed:
+    if manifest.get("bundle_protocol") == "wind-turbine-maintenance-bundle-v2-framed":
         from .canonical_v2 import sha256_v2
         from .gate3_contracts import CLAIM_LABELS, NON_CLAIMS, metadata_core_digest
         completed_at_text = _iso_now()
@@ -1217,21 +1098,6 @@ def execute(
             },
         }
         _atomic_canonical_v2_lf(derived_path, derived)
-    else:
-        atomic_json(derived_path, derived)
-
-    processed_count = int(final_snapshot.get("processed_scheduled_event_count", emitted_count))
-    digests = {
-        "request_sha256": sha256_file(request_path),
-        "domain_events_sha256": sha256_file(events_path),
-        "canonical_event_sha256": canonical_event_sha,
-        "daily_kpis_sha256": sha256_file(kpis_path),
-        "daily_kpis_semantic_sha256": daily_semantic,
-        "summary_sha256": sha256_file(summary_path),
-        "summary_semantic_sha256": summary_semantic,
-        "replay_manifest_sha256": sha256_file(replay_path),
-        "derived_views_manifest_sha256": sha256_file(derived_path),
-    }
     entries = list(output_dir.iterdir())
     entry_names = {path.name for path in entries}
     if entry_names != REQUIRED_SUCCESS_ARTIFACTS or len(entries) != len(REQUIRED_SUCCESS_ARTIFACTS):
@@ -1243,28 +1109,10 @@ def execute(
     if any(path.is_symlink() or not path.is_file() for path in entries):
         raise RuntimeError("successful worker artifact set contains an unsafe entry")
     total_size = sum((output_dir / name).stat().st_size for name in REQUIRED_SUCCESS_ARTIFACTS)
-    active_limits = FRAMED_LIMITS if is_framed else LIMITS
-    if replay_path.stat().st_size > active_limits.get("replay_manifest_bytes", 2**63 - 1):
+    if replay_path.stat().st_size > FRAMED_LIMITS["replay_manifest_bytes"]:
         raise WorkerLimitError("replay manifest byte limit reached")
-    if total_size > active_limits["total_success_artifact_bytes"]:
+    if total_size > FRAMED_LIMITS["total_success_artifact_bytes"]:
         raise WorkerLimitError("total successful artifact byte limit reached")
-    if is_framed:
-        return summary
-    metadata = read_json(metadata_path)
-    metadata.update(
-        {
-            "status": "succeeded",
-            "finished_at": time.time(),
-            "worker_exit_code": 0,
-            "processed_scheduled_event_count": processed_count,
-            "emitted_domain_event_count": emitted_count,
-            "event_truncated": False,
-            "artifact_bytes": {name: (output_dir / name).stat().st_size for name in REQUIRED_SUCCESS_ARTIFACTS},
-            "digests": digests,
-            "model_manifest_sha256": sha256_bytes(captured_bundle["manifest.json"]),
-        }
-    )
-    atomic_json(metadata_path, metadata)
     return summary
 
 

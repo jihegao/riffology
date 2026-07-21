@@ -7,10 +7,40 @@ import test from "node:test";
 import { canonicalJsonV2, sha256Hex } from "../src/canonical-json-v2.ts";
 import { BackendApp } from "../src/server.ts";
 import type { MesaAdapter } from "../src/mesa-adapter.ts";
+import { activationExperimentLineageMatches, evaluateRunAdmission } from "../src/gate3-runtime.ts";
 
 const unavailableMesa: MesaAdapter = {};
 const body = async (response: Response): Promise<any> => JSON.parse(await response.text());
 const sseEvent = async (reader: ReadableStreamDefaultReader<Uint8Array>, name: string, timeout = 3_000): Promise<any> => { let buffered = ""; const deadline = Date.now() + timeout; while (Date.now() < deadline) { const remaining = deadline - Date.now(); let timer: NodeJS.Timeout | undefined; const read = await Promise.race([reader.read(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`SSE timeout waiting for ${name}`)), remaining); timer.unref(); })]).finally(() => { if (timer) clearTimeout(timer); }); if (read.done) throw new Error(`SSE closed before ${name}`); buffered += Buffer.from(read.value).toString("utf8"); const blocks = buffered.split("\n\n"); buffered = blocks.pop() ?? ""; for (const block of blocks) { const lines = block.split("\n"); if (lines.find((line) => line === `event: ${name}`)) { const data = lines.find((line) => line.startsWith("data: ")); if (!data) throw new Error("SSE data is missing"); return JSON.parse(data.slice(6)); } } } throw new Error(`SSE timeout waiting for ${name}`); };
+
+test("Gate 3 run admission accepts only the activation experiment root or a same-binding durable descendant", () => {
+  const target = { model_revision_id: "model", brief_revision_id: "brief", alignment_revision_id: "alignment", experiment_revision_id: "root" };
+  const record = (parent_experiment_revision_id: string | null, overrides: Record<string, unknown> = {}) => ({ model_revision_id: "model", brief_revision_id: "brief", alignment_revision_id: "alignment", parent_experiment_revision_id, ...overrides });
+  const valid = new Map<string, unknown>([["root", record(null)], ["child", record("root")], ["grandchild", record("child")]]); const loadValid = (id: string) => { if (!valid.has(id)) throw new Error("missing"); return valid.get(id); };
+  assert.equal(activationExperimentLineageMatches("root", target, loadValid), true);
+  assert.equal(activationExperimentLineageMatches("child", target, loadValid), true);
+  assert.equal(activationExperimentLineageMatches("grandchild", target, loadValid), true);
+  assert.equal(activationExperimentLineageMatches("wrong-parent", target, (id) => id === "wrong-parent" ? record("other") : (() => { throw new Error("missing"); })()), false);
+  assert.equal(activationExperimentLineageMatches("cross-binding", target, () => record("root", { brief_revision_id: "other" })), false);
+  assert.equal(activationExperimentLineageMatches("missing", target, () => { throw new Error("missing"); }), false);
+  const cycle = new Map<string, unknown>([["a", record("b")], ["b", record("a")]]); assert.equal(activationExperimentLineageMatches("a", target, (id) => cycle.get(id)), false);
+  const current = { decision_brief_revision_id: "brief", alignment_map_revision_id: "alignment", model_revision_id: "model", experiment_revision_id: "root" }; const ready = { status: "ready", run_admission_fenced: false, target }; const evaluate = (activation: unknown, changed = current, load = loadValid) => evaluateRunAdmission(activation, changed, changed.model_revision_id, load);
+  assert.deepEqual(evaluate(null), { admissible: false, reason: "activation_missing" });
+  assert.deepEqual(evaluate({ ...ready, status: "authorizing", run_admission_fenced: true }), { admissible: false, reason: "activation_not_ready" });
+  assert.deepEqual(evaluate({ ...ready, status: "failed_fenced", run_admission_fenced: true }), { admissible: false, reason: "activation_fenced" });
+  assert.deepEqual(evaluate({ status: "ready", target }), { admissible: false, reason: "activation_fenced" });
+  assert.deepEqual(evaluate({ ...ready, target: null }), { admissible: false, reason: "activation_target_invalid" });
+  assert.deepEqual(evaluate(ready, { ...current, model_revision_id: "other" }), { admissible: false, reason: "model_revision_mismatch" });
+  assert.deepEqual(evaluate(ready, { ...current, decision_brief_revision_id: "other" }), { admissible: false, reason: "brief_revision_mismatch" });
+  assert.deepEqual(evaluate(ready, { ...current, alignment_map_revision_id: "other" }), { admissible: false, reason: "alignment_revision_mismatch" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "missing" }), { admissible: false, reason: "experiment_lineage_invalid" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "wrong-parent" }, (id) => id === "wrong-parent" ? record("other") : (() => { throw new Error("missing"); })()), { admissible: false, reason: "experiment_lineage_invalid" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "cross-binding" }, () => record("root", { alignment_revision_id: "other" })), { admissible: false, reason: "experiment_lineage_invalid" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "a" }, (id) => cycle.get(id)), { admissible: false, reason: "experiment_lineage_invalid" });
+  assert.deepEqual(evaluate(ready), { admissible: true, reason: "ready" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "child" }), { admissible: true, reason: "ready" });
+  assert.deepEqual(evaluate(ready, { ...current, experiment_revision_id: "grandchild" }), { admissible: true, reason: "ready" });
+});
 
 test("Gate 3 default discovery and browser authority are separate, digest-bound projections", async (t) => {
   const workspace = realpathSync(await mkdtemp(join(tmpdir(), "riff-gate3-api-"))); const app = new BackendApp({ mesa: unavailableMesa, workspaceRoot: workspace }); await app.initialize(); const { port } = await app.listen(); const origin = `http://127.0.0.1:${port}`;
@@ -18,7 +48,7 @@ test("Gate 3 default discovery and browser authority are separate, digest-bound 
   let response = await fetch(`${origin}/api/projects/default`); assert.equal(response.status, 404); const missing = await body(response); assert.equal(missing.schema_id, "riff://evidence-studio/error/v1"); assert.equal(missing.schema_version, 1); assert.equal(missing.canonical_json_version, "riff-canonical-json-v2"); assert.equal(missing.error.code, "no_default_project");
   response = await fetch(`${origin}/api/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command_id: crypto.randomUUID(), display_name: "Wind evidence", initial_actor: { actor_type: "human", display_name: "Owner", declared_role: "project_owner" } }) }); const created = await body(response); const projectId = created.project.project_id;
   response = await fetch(`${origin}/api/projects/default`); assert.equal(response.status, 200); const discovery = await body(response); assert.equal(discovery.project_id, projectId); assert.equal(discovery.actors.length, 1); assert.deepEqual(Object.keys(discovery.actors[0]).sort(), ["actor_id", "actor_type", "assurance", "declared_role", "display_name"]);
-  const durableBefore = await fetch(`${origin}/api/projects/${projectId}/snapshot`).then(body); response = await fetch(`${origin}/api/projects/${projectId}/browser-projection/v1`); assert.equal(response.status, 200); const projection = await body(response); assert.equal(projection.schema_id, "riff://evidence-studio/browser-projection-response/v1"); assert.equal(projection.projection.schema_id, "riff://evidence-studio/project-state/v1"); assert.equal(projection.projection.project_id, projectId); assert.equal(projection.projection.current_records.decision_brief, null); assert.equal(projection.projection.model_activation, null); const unsigned = { ...projection.projection }; delete unsigned.projection_digest; assert.equal(projection.projection_digest, `pd_${sha256Hex(canonicalJsonV2(unsigned))}`); assert.equal(projection.projection.projection_digest, projection.projection_digest);
+  const durableBefore = await fetch(`${origin}/api/projects/${projectId}/snapshot`).then(body); response = await fetch(`${origin}/api/projects/${projectId}/browser-projection/v1`); assert.equal(response.status, 200); const projection = await body(response); assert.equal(projection.schema_id, "riff://evidence-studio/browser-projection-response/v1"); assert.equal(projection.projection.schema_id, "riff://evidence-studio/project-state/v1"); assert.equal(projection.projection.project_id, projectId); assert.equal(projection.projection.current_records.decision_brief, null); assert.equal(projection.projection.model_activation, null); assert.deepEqual(projection.projection.run_admission, { admissible: false, reason: "activation_missing" }); const unsigned = { ...projection.projection }; delete unsigned.projection_digest; assert.equal(projection.projection_digest, `pd_${sha256Hex(canonicalJsonV2(unsigned))}`); assert.equal(projection.projection.projection_digest, projection.projection_digest);
   const durableAfter = await fetch(`${origin}/api/projects/${projectId}/snapshot`).then(body); assert.deepEqual(durableAfter, durableBefore);
 });
 

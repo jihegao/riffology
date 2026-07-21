@@ -17,7 +17,7 @@ from mesa_service.app import create_app
 from mesa_service.canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2, strict_json_loads_v2
 from mesa_service.gate2_contracts import build_v2_worker_request, defaults_digest, downstream_request_digest, validate_experiment_for_run, validate_framed_experiment_transition
 from mesa_service.gate3_bundle import FRAMED_FILES, framed_manifest, framed_revision_id, framed_runtime_profile, framed_source_bytes, materialize_framed_bundle
-from mesa_service.bundle import manifest_entries, model_revision_id
+from mesa_service.bundle import manifest_entries, materialize_reviewed_bundle, model_revision_id
 from mesa_service.wind_contracts import MODEL_ID, canonical_json_bytes, runtime_profile
 from mesa_service.gate3_contracts import sample_days, sample_days_sha256, validate_framed_parameter_sources
 from mesa_service.gate3_activation import RUNTIME_FACT_KEYS
@@ -33,6 +33,26 @@ PROJECT = "project_" + "1" * 32
 ACTOR = "actor_" + "2" * 32
 BRIEF = "dbr_" + "3" * 64
 ALIGNMENT = "amr_" + "4" * 64
+
+
+def _materialize_wind_fixture(service: MesaService, project_id: str) -> dict:
+    project_dir = service._project_dir(project_id, create=True)
+    materialized = materialize_reviewed_bundle(project_dir)
+    active = {
+        "model_id": MODEL_ID,
+        "model_revision_id": materialized["model_revision_id"],
+        "experiment_revision_id": materialized["experiment_revision_id"],
+        "preset_id": "wind-turbine-maintenance-demo-v1",
+        "parameter_schema": service._read_workspace_json(
+            Path(materialized["bundle_dir"]) / "parameter-schema.json"
+        ),
+        "metric_schema": service._read_workspace_json(
+            Path(materialized["bundle_dir"]) / "metric-schema.json"
+        ),
+        "claim_labels": materialized["experiment"]["claim_labels"],
+    }
+    service._write_workspace_json(service._wind_active_path(project_dir), active)
+    return active
 
 
 def _subject(subject: str) -> dict:
@@ -427,10 +447,10 @@ def test_framed_http_reads_exact_artifact_set_and_events_from_metadata_projectio
 
 def test_internal_byte_capture_is_bounded_exact_and_idempotent(tmp_path: Path) -> None:
     project = "capture_project"
-    with TestClient(create_app(tmp_path / "workspace")) as client:
-        active = client.put(f"/v1/projects/{project}/models/wind-turbine-maintenance", json={"preset_id": "wind-turbine-maintenance-demo-v1"}).json()
-        handshake_headers = {"Accept": "application/json", "X-Riff-Internal-Protocol": "wind-runtime-handshake-v1"}
-        descriptor = client.get(f"/internal/projects/{project}/wind/framed-candidate-descriptor/v1", headers=handshake_headers).json()
+    app = create_app(tmp_path / "workspace")
+    with TestClient(app) as client:
+        active = _materialize_wind_fixture(app.state.mesa_service, project)
+        descriptor = app.state.mesa_service.gate3_activation.descriptor(project)
         activation_id = str(uuid.uuid4())
         request = {"schema_id": "riff://mesa-wind/materialize-candidate-request/v1", "schema_version": 1, "canonical_json_version": "riff-canonical-json-v2", "activation_id": activation_id, "project_id": project, "expected_old_model_revision_id": active["model_revision_id"], "candidate_descriptor_digest": descriptor["descriptor_digest"], "intent_digest": "aint_" + "a" * 64}
         headers = {"Content-Type": "application/json", "X-Riff-Internal-Protocol": "wind-activation-v1", "Idempotency-Key": activation_id}
@@ -461,10 +481,10 @@ def test_internal_byte_capture_is_bounded_exact_and_idempotent(tmp_path: Path) -
 
 def test_internal_protocol_failure_matrix_and_materialize_idempotency(tmp_path: Path) -> None:
     project = "failure_matrix"
-    with TestClient(create_app(tmp_path / "workspace")) as client:
-        active = client.put(f"/v1/projects/{project}/models/wind-turbine-maintenance", json={"preset_id": "wind-turbine-maintenance-demo-v1"}).json()
-        hh = {"Accept": "application/json", "X-Riff-Internal-Protocol": "wind-runtime-handshake-v1"}
-        descriptor = client.get(f"/internal/projects/{project}/wind/framed-candidate-descriptor/v1", headers=hh).json()
+    app = create_app(tmp_path / "workspace")
+    with TestClient(app) as client:
+        active = _materialize_wind_fixture(app.state.mesa_service, project)
+        descriptor = app.state.mesa_service.gate3_activation.descriptor(project)
         assert not (tmp_path / "workspace" / "projects" / project / "wind" / "candidates").exists()
         activation_id = str(uuid.uuid4())
         request = {"schema_id": "riff://mesa-wind/materialize-candidate-request/v1", "schema_version": 1, "canonical_json_version": "riff-canonical-json-v2", "activation_id": activation_id, "project_id": project, "expected_old_model_revision_id": active["model_revision_id"], "candidate_descriptor_digest": descriptor["descriptor_digest"], "intent_digest": "aint_" + "b" * 64}
@@ -496,19 +516,10 @@ def test_internal_protocol_failure_matrix_and_materialize_idempotency(tmp_path: 
 def test_resealed_candidate_records_cannot_replace_actual_framed_source_facts(tmp_path: Path) -> None:
     project = "resealed_candidate"
     workspace = tmp_path / "workspace"
-    with TestClient(create_app(workspace)) as client:
-        active = client.put(
-            f"/v1/projects/{project}/models/wind-turbine-maintenance",
-            json={"preset_id": "wind-turbine-maintenance-demo-v1"},
-        ).json()
-        handshake_headers = {
-            "Accept": "application/json",
-            "X-Riff-Internal-Protocol": "wind-runtime-handshake-v1",
-        }
-        descriptor = client.get(
-            f"/internal/projects/{project}/wind/framed-candidate-descriptor/v1",
-            headers=handshake_headers,
-        ).json()
+    app = create_app(workspace)
+    with TestClient(app) as client:
+        active = _materialize_wind_fixture(app.state.mesa_service, project)
+        descriptor = app.state.mesa_service.gate3_activation.descriptor(project)
         activation_id = str(uuid.uuid4())
         request = {
             "schema_id": "riff://mesa-wind/materialize-candidate-request/v1",
@@ -879,10 +890,7 @@ def test_framed_activation_records_require_one_lf_while_legacy_requires_none(tmp
     legacy_workspace = tmp_path / "legacy-workspace"
     legacy_app = create_app(legacy_workspace)
     with TestClient(legacy_app) as client:
-        active = client.put(
-            "/v1/projects/legacy_encoding/models/wind-turbine-maintenance",
-            json={"preset_id": "wind-turbine-maintenance-demo-v1"},
-        ).json()
+        active = _materialize_wind_fixture(legacy_app.state.mesa_service, "legacy_encoding")
     legacy = copy.deepcopy(framed_experiment)
     legacy.pop("schema_id")
     legacy.pop("copy_migration_rule")
@@ -914,9 +922,8 @@ def test_receipt_first_cas_recovers_in_instance_and_restart_rejects_old_candidat
     project = "cas_recovery"
     app = create_app(workspace)
     with TestClient(app) as client:
-        active = client.put(f"/v1/projects/{project}/models/wind-turbine-maintenance", json={"preset_id": "wind-turbine-maintenance-demo-v1"}).json()
-        hh = {"Accept": "application/json", "X-Riff-Internal-Protocol": "wind-runtime-handshake-v1"}
-        descriptor = client.get(f"/internal/projects/{project}/wind/framed-candidate-descriptor/v1", headers=hh).json()
+        active = _materialize_wind_fixture(app.state.mesa_service, project)
+        descriptor = app.state.mesa_service.gate3_activation.descriptor(project)
         activation_id = str(uuid.uuid4())
         materialize_request = {"schema_id": "riff://mesa-wind/materialize-candidate-request/v1", "schema_version": 1, "canonical_json_version": "riff-canonical-json-v2", "activation_id": activation_id, "project_id": project, "expected_old_model_revision_id": active["model_revision_id"], "candidate_descriptor_digest": descriptor["descriptor_digest"], "intent_digest": "aint_" + "d" * 64}
         _, receipt = app.state.mesa_service.gate3_activation.materialize(materialize_request, activation_id)

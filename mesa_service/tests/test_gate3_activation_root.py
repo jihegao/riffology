@@ -12,7 +12,8 @@ import pytest
 from mesa_service.canonical_v2 import canonical_json_v2_bytes, prefixed_digest, sha256_v2
 from mesa_service.gate2_contracts import defaults_digest
 from mesa_service.gate2_project_evidence import ProjectEvidenceError, verify_framed_activation_root
-from mesa_service.gate3_bundle import framed_manifest, framed_runtime_profile
+from mesa_service.gate3_activation import build_candidate_descriptor, candidate_bytes_digest
+from mesa_service.gate3_bundle import BUNDLE_PROTOCOL, framed_manifest, framed_runtime_profile, materialize_framed_bundle
 from mesa_service.wind_contracts import load_json_asset
 
 
@@ -28,7 +29,7 @@ def _write(path: Path, value: dict, *, lf: bool = False) -> None:
     path.write_bytes(canonical_json_v2_bytes(value) + (b"\n" if lf else b""))
 
 
-def _root(*, digit: str = "1") -> dict:
+def _root(*, digit: str = "1", brief_id: str = BRIEF, alignment_id: str = ALIGNMENT) -> dict:
     preset = load_json_asset("defaults/wind-turbine-maintenance-demo-v1.json")
     defaults = copy.deepcopy(preset["parameters"])
     execution_defaults = {"horizon_days": 1095, "warmup_days": 365, "seed": 2}
@@ -41,8 +42,8 @@ def _root(*, digit: str = "1") -> dict:
         "operation": "create",
         "model_id": "wind-turbine-maintenance",
         "model_revision_id": MODEL,
-        "brief_revision_id": BRIEF,
-        "alignment_revision_id": ALIGNMENT,
+        "brief_revision_id": brief_id,
+        "alignment_revision_id": alignment_id,
         "preset_id": "wind-turbine-maintenance-demo-v1",
         "defaults_digest": defaults_digest("wind-turbine-maintenance-demo-v1", defaults, execution_defaults),
         "parameter_defaults": defaults,
@@ -119,7 +120,6 @@ def _event(
 def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True) -> tuple[Path, dict, str]:
     workspace = tmp_path / "workspace"
     project = workspace / "projects" / PROJECT
-    root = _root(digit="1")
     activation_id = str(uuid.uuid4())
     actor = {
         "schema_version": 1, "canonical_json_version": "riff-canonical-json-v2", "actor_id": ACTOR,
@@ -127,16 +127,93 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
         "identity_assurance": "declared_unauthenticated_local", "created_at": "2026-07-21T00:00:00.000Z",
     }
     actor_digest = "adr_" + sha256_v2(actor)
+    brief = {
+        "schema_id": "riff://evidence-studio/decision-brief/activation-v1",
+        "schema_version": 1,
+        "canonical_json_version": "riff-canonical-json-v2",
+        "project_id": PROJECT,
+        "parent_brief_revision_id": None,
+        "source_brief_revision_id": "dbr_" + "1" * 64,
+        "operation": "activation_copy",
+        "copy_rule": "exact_content_activation_copy_v1",
+        "content": {"question": "Synthetic maintenance question"},
+        "created_by_actor_id": ACTOR,
+        "created_at": "2026-07-21T00:00:01.000Z",
+        "decision_brief_revision_id": "",
+        "decision_brief_digest": "",
+    }
+    brief["decision_brief_revision_id"] = "dbr_" + sha256_v2({
+        key: value for key, value in brief.items()
+        if key not in {"decision_brief_revision_id", "decision_brief_digest"}
+    })
+    brief["decision_brief_digest"] = "dbrd_" + sha256_v2({
+        key: value for key, value in brief.items() if key != "decision_brief_digest"
+    })
+    alignment = {
+        "schema_id": "riff://evidence-studio/alignment-map/framed/v1",
+        "schema_version": 1,
+        "canonical_json_version": "riff-canonical-json-v2",
+        "project_id": PROJECT,
+        "parent_alignment_revision_id": None,
+        "brief_revision_id": brief["decision_brief_revision_id"],
+        "model_revision_id": MODEL,
+        "migration_rule": "framed_alignment_rebind_v1",
+        "mappings": [],
+        "gaps": [],
+        "source_refs": [],
+        "created_by_actor_id": ACTOR,
+        "created_at": "2026-07-21T00:00:01.000Z",
+        "alignment_revision_id": "",
+        "alignment_digest": "",
+    }
+    alignment["alignment_revision_id"] = "amr_" + sha256_v2({
+        key: value for key, value in alignment.items()
+        if key not in {"alignment_revision_id", "alignment_digest"}
+    })
+    alignment["alignment_digest"] = "amd_" + sha256_v2({
+        key: value for key, value in alignment.items() if key != "alignment_digest"
+    })
+    root = _root(
+        digit="1",
+        brief_id=brief["decision_brief_revision_id"],
+        alignment_id=alignment["alignment_revision_id"],
+    )
+    old_model_revision = "mr_" + "7" * 64
+    descriptor = build_candidate_descriptor(PROJECT, old_model_revision, "rh_" + "4" * 64)
+    candidate_bundle = project / "wind" / "candidates" / activation_id / MODEL
+    materialize_framed_bundle(candidate_bundle)
+    candidate_receipt = {
+        "schema_id": "riff://mesa-wind/candidate-receipt/v1",
+        "schema_version": 1,
+        "canonical_json_version": "riff-canonical-json-v2",
+        "activation_id": activation_id,
+        "project_id": PROJECT,
+        "intent_digest": "aint_" + "8" * 64,
+        "expected_old_model_revision_id": old_model_revision,
+        "candidate_descriptor_digest": descriptor["descriptor_digest"],
+        "target_model_revision_id": MODEL,
+        "bundle_protocol": BUNDLE_PROTOCOL,
+        "manifest_sha256": descriptor["manifest_sha256"],
+        "files": framed_manifest()["files"],
+        "file_map_sha256": descriptor["file_map_sha256"],
+        "candidate_bytes_digest": candidate_bytes_digest(candidate_bundle),
+        "created_at": "2026-07-21T00:00:01.000Z",
+        "candidate_receipt_digest": "",
+    }
+    candidate_receipt["candidate_receipt_digest"] = prefixed_digest(
+        candidate_receipt, field="candidate_receipt_digest", prefix="acand_"
+    )
     empty_current = {
         "decision_brief_revision_id": None, "alignment_map_revision_id": None,
         "model_revision_id": None, "experiment_revision_id": None, "run_id": None,
     }
     target = {
-        "model_revision_id": MODEL, "brief_revision_id": BRIEF,
-        "alignment_revision_id": ALIGNMENT, "experiment_revision_id": root["experiment_revision_id"],
+        "model_revision_id": MODEL, "brief_revision_id": brief["decision_brief_revision_id"],
+        "alignment_revision_id": alignment["alignment_revision_id"], "experiment_revision_id": root["experiment_revision_id"],
     }
     target_current = {
-        "decision_brief_revision_id": BRIEF, "alignment_map_revision_id": ALIGNMENT,
+        "decision_brief_revision_id": brief["decision_brief_revision_id"],
+        "alignment_map_revision_id": alignment["alignment_revision_id"],
         "model_revision_id": MODEL, "experiment_revision_id": root["experiment_revision_id"], "run_id": None,
     }
     creation_response = {
@@ -150,12 +227,24 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
         response=creation_response,
     )
     _write(project / "actors" / f"{ACTOR}.json", actor)
+    _write(
+        project / "alignment" / "decision-brief" / "revisions" / brief["decision_brief_revision_id"] / "revision.json",
+        brief,
+        lf=True,
+    )
+    _write(
+        project / "alignment" / "requirement-map" / "revisions" / alignment["alignment_revision_id"] / "revision.json",
+        alignment,
+        lf=True,
+    )
     _write(project / "experiments" / "revisions" / root["experiment_revision_id"] / "experiment.json", root, lf=True)
 
+    brief_bytes = canonical_json_v2_bytes(brief) + b"\n"
+    alignment_bytes = canonical_json_v2_bytes(alignment) + b"\n"
     root_bytes = canonical_json_v2_bytes(root) + b"\n"
     staged = {
-        "brief": {"project_id": PROJECT, "record_id": BRIEF, "record_digest": "dbrd_" + "5" * 64, "canonical_bytes_sha256": "5" * 64, "byte_length": 1, "created_at": root["created_at"], "created_by_actor_id": ACTOR, "record_kind": "decision_brief", "record_schema_id": "riff://evidence-studio/decision-brief/activation-v1", "record_schema_version": 1},
-        "alignment": {"project_id": PROJECT, "record_id": ALIGNMENT, "record_digest": "amd_" + "6" * 64, "canonical_bytes_sha256": "6" * 64, "byte_length": 1, "created_at": root["created_at"], "created_by_actor_id": ACTOR, "record_kind": "alignment_map", "record_schema_id": "riff://evidence-studio/alignment-map/framed/v1", "record_schema_version": 1},
+        "brief": {"project_id": PROJECT, "record_id": brief["decision_brief_revision_id"], "record_digest": brief["decision_brief_digest"], "canonical_bytes_sha256": hashlib.sha256(brief_bytes).hexdigest(), "byte_length": len(brief_bytes), "created_at": brief["created_at"], "created_by_actor_id": ACTOR, "record_kind": "decision_brief", "record_schema_id": brief["schema_id"], "record_schema_version": 1},
+        "alignment": {"project_id": PROJECT, "record_id": alignment["alignment_revision_id"], "record_digest": alignment["alignment_digest"], "canonical_bytes_sha256": hashlib.sha256(alignment_bytes).hexdigest(), "byte_length": len(alignment_bytes), "created_at": alignment["created_at"], "created_by_actor_id": ACTOR, "record_kind": "alignment_map", "record_schema_id": alignment["schema_id"], "record_schema_version": 1},
         "experiment": {"project_id": PROJECT, "record_id": root["experiment_revision_id"], "record_digest": root["experiment_digest"], "canonical_bytes_sha256": hashlib.sha256(root_bytes).hexdigest(), "byte_length": len(root_bytes), "created_at": root["created_at"], "created_by_actor_id": ACTOR, "record_kind": "experiment_revision", "record_schema_id": root["schema_id"], "record_schema_version": 1},
     }
     if mutation == "ref_id": staged["experiment"]["record_id"] = "er_" + "a" * 64
@@ -165,10 +254,10 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
     binding = {
         "schema_id": "riff://evidence-studio/activation-target-binding/v1", "schema_version": 1,
         "canonical_json_version": "riff-canonical-json-v2", "activation_id": activation_id,
-        "project_id": PROJECT, "source": {**target, "model_revision_id": "mr_" + "7" * 64},
+        "project_id": PROJECT, "source": {**target, "model_revision_id": old_model_revision},
         "target": target, "base_snapshot_revision": 0, "base_project_event_digest": event0["event_digest"],
         "intent_digest": "aint_" + "8" * 64, "staging_manifest_digest": "astage_" + "9" * 64,
-        "staged_record_refs": staged, "candidate_receipt_digest": "acand_" + "a" * 64,
+        "staged_record_refs": staged, "candidate_receipt_digest": candidate_receipt["candidate_receipt_digest"],
         "captured_candidate_bytes_digest": "b" * 64, "target_binding_digest": "",
     }
     if mutation == "cross_project": binding["project_id"] = "project_" + "f" * 32
@@ -177,8 +266,8 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
     binding["target_binding_digest"] = prefixed_digest(binding, field="target_binding_digest", prefix="atb_")
     expected_refs = [
         {"kind": "activation_target_binding", "id": activation_id, "digest": binding["target_binding_digest"]},
-        {"kind": "decision_brief_revision", "id": BRIEF, "digest": staged["brief"]["record_digest"]},
-        {"kind": "alignment_map_revision", "id": ALIGNMENT, "digest": staged["alignment"]["record_digest"]},
+        {"kind": "decision_brief_revision", "id": brief["decision_brief_revision_id"], "digest": staged["brief"]["record_digest"]},
+        {"kind": "alignment_map_revision", "id": alignment["alignment_revision_id"], "digest": staged["alignment"]["record_digest"]},
         {"kind": "experiment_revision", "id": root["experiment_revision_id"], "digest": staged["experiment"]["record_digest"]},
     ]
     commit_refs = list(reversed(expected_refs)) if mutation == "commit_refs" else expected_refs
@@ -193,7 +282,11 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
         "schema_id": "riff://mesa-wind/active-cas-request/v1", "schema_version": 1,
         "canonical_json_version": "riff-canonical-json-v2", "activation_id": activation_id, "project_id": PROJECT,
         "expected_old_model_revision_id": binding["source"]["model_revision_id"], "target_model_revision_id": MODEL,
-        "candidate_receipt_digest": "acand_" + ("d" if mutation == "switch" else "a") * 64,
+        "candidate_receipt_digest": (
+            "acand_" + "d" * 64
+            if mutation == "switch"
+            else candidate_receipt["candidate_receipt_digest"]
+        ),
         "project_event_digest": commit["event_digest"],
     }
     switch = {
@@ -238,7 +331,15 @@ def _fixture(tmp_path: Path, *, mutation: str | None = None, ready: bool = True)
         _write(project / "activations" / activation_id / "reconcile.json", marker, lf=True)
     _write(project / "wind" / "switch-receipts" / f"{activation_id}.request.json", cas, lf=True)
     _write(project / "wind" / "switch-receipts" / f"{activation_id}.json", switch, lf=True)
-    _write(project / "models" / "active.json", {"model_id": "wind-turbine-maintenance", "model_revision_id": MODEL, "experiment_revision_id": "er_" + "f" * 64})
+    _write(project / "wind" / "candidates" / activation_id / "candidate-receipt.json", candidate_receipt, lf=True)
+    bundle_dir = project / "models" / "wind-turbine-maintenance" / "revisions" / MODEL
+    materialize_framed_bundle(bundle_dir)
+    _write(project / "models" / "active.json", {
+        "model_id": "wind-turbine-maintenance",
+        "model_revision_id": MODEL,
+        "experiment_revision_id": root["experiment_revision_id"],
+        "preset_id": "wind-turbine-maintenance-demo-v1",
+    })
     return workspace, root, activation_id
 
 
