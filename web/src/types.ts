@@ -154,6 +154,15 @@ export type BrowserModelActivation = {
 
 export type RevisionTuple = { model_revision_id: string; brief_revision_id: string; alignment_revision_id: string; experiment_revision_id: string };
 
+export type BusinessSourceRef = { source_id:string; kind:"user_declared"|"bundled_reference"|"uploaded_file"; label:string; attachment_id?:string };
+export type BriefContent = { question:string; decision_owner:string; objective:string; constraints:Array<{id:string;statement:string;source:BusinessSourceRef}>; assumptions:Array<{id:string;statement:string;source:BusinessSourceRef}>; non_goals:string[]; sources:BusinessSourceRef[] };
+export type LegacyDecisionBriefRecord = BriefContent & { schema_version:1; canonical_json_version:"riff-canonical-json-v2"; decision_brief_revision_id:string; project_id:string; parent_decision_brief_revision_id:string|null; operation:"create"|"revise"; created_by_actor_id:string; created_at:string };
+export type ActivationDecisionBriefRecord = { schema_id:"riff://evidence-studio/decision-brief/activation-v1"; schema_version:1; canonical_json_version:"riff-canonical-json-v2"; project_id:string; parent_brief_revision_id:string|null; source_brief_revision_id:string; operation:"activation_copy"; copy_rule:"exact_content_activation_copy_v1"; content:BriefContent; created_by_actor_id:string; created_at:string; decision_brief_revision_id:string; decision_brief_digest:string };
+export type AlignmentMapping = { mapping_id:string; business_ref:string; mapping_kind:"requirement"|"assumption"|"constraint"|"non_goal"; model_refs:string[]; rationale:string; source:BusinessSourceRef };
+export type AlignmentGap = { gap_id:string; statement:string; blocking:boolean };
+export type LegacyAlignmentMapRecord = { schema_version:1; canonical_json_version:"riff-canonical-json-v2"; alignment_map_revision_id:string; project_id:string; parent_alignment_map_revision_id:string|null; operation:"create"|"revise"; decision_brief_revision_id:string; model_id:"wind-turbine-maintenance"; model_revision_id:string; entries:AlignmentMapping[]; known_gaps:AlignmentGap[]; created_by_actor_id:string; created_at:string };
+export type FramedAlignmentMapRecord = { schema_id:"riff://evidence-studio/alignment-map/framed/v1"; schema_version:1; canonical_json_version:"riff-canonical-json-v2"; project_id:string; parent_alignment_revision_id:string|null; brief_revision_id:string; model_revision_id:string; migration_rule:"framed_alignment_rebind_v1"; mappings:AlignmentMapping[]; gaps:AlignmentGap[]; source_refs:BusinessSourceRef[]; created_by_actor_id:string; created_at:string; alignment_revision_id:string; alignment_digest:string };
+
 export type BrowserProjectState = {
   schema_id: "riff://evidence-studio/project-state/v1";
   schema_version: 1;
@@ -172,8 +181,8 @@ export type BrowserProjectState = {
   };
   model_activation: BrowserModelActivation | null;
   current_records: {
-    decision_brief: (JsonObject & { decision_brief_revision_id: string }) | null;
-    alignment_map: (JsonObject & { alignment_map_revision_id: string; entries?: JsonObject[]; known_gaps?: JsonObject[] }) | null;
+    decision_brief: LegacyDecisionBriefRecord | ActivationDecisionBriefRecord | null;
+    alignment_map: LegacyAlignmentMapRecord | FramedAlignmentMapRecord | null;
     model_view: null | { model_id: "wind-turbine-maintenance"; model_revision_id: string; view_sources_href: string; source_set_digest: string };
     experiment: ExperimentRevision | null;
   };
