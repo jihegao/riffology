@@ -1037,6 +1037,44 @@ class MesaService:
         policy, policy_bytes = self._read_gate2_canonical(intent_dir / "policy-snapshot.json", validate_policy_snapshot, "policy snapshot")
         experiment_sha256 = hashlib.sha256(experiment_bytes).hexdigest()
         if experiment.get("schema_id") == "riff://evidence-studio/experiment-revision/framed/v1":
+            from .gate2_contracts import validate_framed_experiment_transition
+
+            child = experiment
+            visited: set[str] = set()
+            while True:
+                child_id = child["experiment_revision_id"]
+                if child_id in visited:
+                    raise ServiceError(422, "run_admission_mismatch", "framed experiment parent lineage contains a cycle")
+                visited.add(child_id)
+                parent_id = child["parent_experiment_revision_id"]
+                if parent_id is None:
+                    try:
+                        validate_framed_experiment_transition(child, None)
+                    except Gate2ContractError as exc:
+                        raise ServiceError(422, "run_admission_mismatch", f"framed experiment lineage is invalid: {exc}") from exc
+                    break
+                parent_path = self._safe_path(
+                    project_dir / "experiments" / "revisions" / parent_id / "experiment.json"
+                )
+                parent, _ = self._read_gate2_canonical(
+                    parent_path,
+                    validate_experiment_for_run,
+                    "framed parent experiment revision",
+                    framed_final_lf=True,
+                )
+                if parent.get("experiment_revision_id") != parent_id:
+                    raise ServiceError(422, "run_admission_mismatch", "framed parent experiment path identity is invalid")
+                try:
+                    validate_framed_experiment_transition(child, parent)
+                except Gate2ContractError as exc:
+                    raise ServiceError(422, "run_admission_mismatch", f"framed experiment lineage is invalid: {exc}") from exc
+                child = parent
+            try:
+                from .gate2_project_evidence import verify_framed_activation_root
+
+                verify_framed_activation_root(self.workspace_root, project_id, child)
+            except Exception as exc:
+                raise ServiceError(422, "run_admission_mismatch", f"framed activation root evidence is invalid: {exc}") from exc
             brief_id = experiment["brief_revision_id"]
             alignment_id = experiment["alignment_revision_id"]
             brief = self._read_framed_activation_lineage(

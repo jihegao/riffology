@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,25 @@ FRAMED_REVISION_SCHEMAS = {
     "riff://evidence-studio/alignment-map/framed/v1",
     "riff://evidence-studio/experiment-revision/framed/v1",
 }
+ACTIVATION_TARGET_KEYS = {
+    "model_revision_id", "brief_revision_id", "alignment_revision_id", "experiment_revision_id",
+}
+STAGED_RECORD_REF_KEYS = {
+    "project_id", "record_id", "record_digest", "canonical_bytes_sha256", "byte_length",
+    "created_at", "created_by_actor_id", "record_kind", "record_schema_id", "record_schema_version",
+}
+ACTIVATION_TARGET_BINDING_KEYS = {
+    "schema_id", "schema_version", "canonical_json_version", "activation_id", "project_id", "source",
+    "target", "base_snapshot_revision", "base_project_event_digest", "intent_digest",
+    "staging_manifest_digest", "staged_record_refs", "candidate_receipt_digest",
+    "captured_candidate_bytes_digest", "target_binding_digest",
+}
+ACTIVATION_RECONCILE_KEYS = {
+    "schema_id", "schema_version", "canonical_json_version", "activation_id", "project_id",
+    "target_binding_digest", "base_project_event_digest", "base_snapshot_revision",
+    "switch_receipt_digest", "verified_project_target_model_revision_id",
+    "verified_mesa_active_model_revision_id", "reconciled_at", "reconcile_digest",
+}
 
 
 class ProjectEvidenceError(Gate2ContractError):
@@ -61,6 +81,210 @@ class ProjectEvidenceError(Gate2ContractError):
 
 def verify_indexed_project(workspace_root: Path, project_id: str) -> None:
     _verify_workspace_index(workspace_root, project_id)
+
+
+def verify_framed_activation_root(
+    workspace_root: Path,
+    project_id: str,
+    create_root: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove that one framed create root is the exact target of a ready activation DAG."""
+
+    _verify_workspace_index(workspace_root, project_id)
+    project_dir = workspace_root / "projects" / project_id
+    events = _project_events(project_dir)
+    if any(event.get("project_id") != project_id for event in events):
+        raise ProjectEvidenceError("activation project event belongs to a different project")
+
+    root_id = create_root.get("experiment_revision_id")
+    if (
+        create_root.get("schema_id") != "riff://evidence-studio/experiment-revision/framed/v1"
+        or create_root.get("schema_version") != 1
+        or create_root.get("canonical_json_version") != "riff-canonical-json-v2"
+        or create_root.get("project_id") != project_id
+        or create_root.get("operation") != "create"
+        or create_root.get("parent_experiment_revision_id") is not None
+        or re.fullmatch(r"er_[0-9a-f]{64}", str(root_id)) is None
+    ):
+        raise ProjectEvidenceError("framed activation root identity is invalid")
+    committed_root_path = project_dir / "experiments" / "revisions" / str(root_id) / "experiment.json"
+    committed_root = _read_revision(committed_root_path)
+    if committed_root != create_root:
+        raise ProjectEvidenceError("framed activation root differs from its committed revision")
+    root_bytes = canonical_json_v2_bytes(committed_root) + b"\n"
+    target = {
+        "model_revision_id": committed_root.get("model_revision_id"),
+        "brief_revision_id": committed_root.get("brief_revision_id"),
+        "alignment_revision_id": committed_root.get("alignment_revision_id"),
+        "experiment_revision_id": root_id,
+    }
+    if any(not isinstance(value, str) for value in target.values()):
+        raise ProjectEvidenceError("framed activation root target tuple is invalid")
+
+    activations_dir = project_dir / "activations"
+    if activations_dir.is_symlink() or not activations_dir.is_dir():
+        raise ProjectEvidenceError("framed activation evidence is unavailable")
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for directory in sorted(activations_dir.iterdir()):
+        if directory.is_symlink() or not directory.is_dir():
+            raise ProjectEvidenceError("framed activation directory is unsafe")
+        binding_path = directory / "target-binding.json"
+        if not binding_path.exists():
+            continue
+        binding = _read_activation_record(binding_path)
+        if binding.get("target") == target:
+            matches.append((directory.name, binding))
+    if len(matches) != 1:
+        raise ProjectEvidenceError("framed create root lacks one exact activation target binding")
+    activation_id, binding = matches[0]
+    _exact(binding, ACTIVATION_TARGET_BINDING_KEYS, "activation target binding")
+    _exact(binding.get("source"), ACTIVATION_TARGET_KEYS, "activation source tuple")
+    _exact(binding.get("target"), ACTIVATION_TARGET_KEYS, "activation target tuple")
+    staged_refs = binding.get("staged_record_refs")
+    _exact(staged_refs, {"brief", "alignment", "experiment"}, "activation staged refs")
+    for name in ("brief", "alignment", "experiment"):
+        _exact(staged_refs.get(name), STAGED_RECORD_REF_KEYS, f"activation staged {name} ref")
+    brief_ref = staged_refs["brief"]
+    alignment_ref = staged_refs["alignment"]
+    experiment_ref = staged_refs["experiment"]
+    if (
+        re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", activation_id) is None
+        or binding.get("schema_id") != "riff://evidence-studio/activation-target-binding/v1"
+        or binding.get("schema_version") != 1
+        or binding.get("canonical_json_version") != "riff-canonical-json-v2"
+        or binding.get("activation_id") != activation_id
+        or binding.get("project_id") != project_id
+        or binding.get("target") != target
+        or re.fullmatch(r"aint_[0-9a-f]{64}", str(binding.get("intent_digest"))) is None
+        or re.fullmatch(r"astage_[0-9a-f]{64}", str(binding.get("staging_manifest_digest"))) is None
+        or re.fullmatch(r"acand_[0-9a-f]{64}", str(binding.get("candidate_receipt_digest"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(binding.get("captured_candidate_bytes_digest"))) is None
+        or binding.get("target_binding_digest") != prefixed_digest(binding, field="target_binding_digest", prefix="atb_")
+        or any(ref.get("project_id") != project_id for ref in (brief_ref, alignment_ref, experiment_ref))
+        or brief_ref.get("record_id") != target["brief_revision_id"]
+        or brief_ref.get("record_kind") != "decision_brief"
+        or brief_ref.get("record_schema_id") != "riff://evidence-studio/decision-brief/activation-v1"
+        or brief_ref.get("record_schema_version") != 1
+        or re.fullmatch(r"dbrd_[0-9a-f]{64}", str(brief_ref.get("record_digest"))) is None
+        or alignment_ref.get("record_id") != target["alignment_revision_id"]
+        or alignment_ref.get("record_kind") != "alignment_map"
+        or alignment_ref.get("record_schema_id") != "riff://evidence-studio/alignment-map/framed/v1"
+        or alignment_ref.get("record_schema_version") != 1
+        or re.fullmatch(r"amd_[0-9a-f]{64}", str(alignment_ref.get("record_digest"))) is None
+        or experiment_ref.get("project_id") != project_id
+        or experiment_ref.get("record_id") != root_id
+        or experiment_ref.get("record_digest") != committed_root.get("experiment_digest")
+        or experiment_ref.get("canonical_bytes_sha256") != hashlib.sha256(root_bytes).hexdigest()
+        or experiment_ref.get("byte_length") != len(root_bytes)
+        or experiment_ref.get("created_at") != committed_root.get("created_at")
+        or experiment_ref.get("created_by_actor_id") != committed_root.get("created_by_actor_id")
+        or experiment_ref.get("record_kind") != "experiment_revision"
+        or experiment_ref.get("record_schema_id") != committed_root.get("schema_id")
+        or experiment_ref.get("record_schema_version") != committed_root.get("schema_version")
+    ):
+        raise ProjectEvidenceError("activation target binding does not bind the exact framed create root")
+
+    commits = [
+        event for event in events
+        if event.get("event_type") == "model.activation_committed"
+        and event.get("command_id") == activation_id
+    ]
+    if len(commits) != 1:
+        raise ProjectEvidenceError("activation target binding lacks one committed model activation event")
+    commit = commits[0]
+    expected_refs = [
+        {"kind": "activation_target_binding", "id": activation_id, "digest": binding["target_binding_digest"]},
+        {"kind": "decision_brief_revision", "id": staged_refs["brief"]["record_id"], "digest": staged_refs["brief"]["record_digest"]},
+        {"kind": "alignment_map_revision", "id": staged_refs["alignment"]["record_id"], "digest": staged_refs["alignment"]["record_digest"]},
+        {"kind": "experiment_revision", "id": root_id, "digest": experiment_ref["record_digest"]},
+    ]
+    commit_state = _snapshot_from_event(commit)
+    target_current = {
+        "decision_brief_revision_id": target["brief_revision_id"],
+        "alignment_map_revision_id": target["alignment_revision_id"],
+        "model_revision_id": target["model_revision_id"],
+        "experiment_revision_id": target["experiment_revision_id"],
+        "run_id": None,
+    }
+    if (
+        binding.get("base_snapshot_revision") != commit.get("previous_snapshot_revision")
+        or binding.get("base_project_event_digest") != commit.get("previous_event_digest")
+        or commit.get("record_refs") != expected_refs
+        or commit.get("initiator") != "system"
+        or commit.get("system_component") != "backend_model_reconciler"
+        or commit.get("response_status") != 200
+        or commit.get("response_projection") != {"activation_id": activation_id, "status": "mesa_switch_pending"}
+        or commit_state.get("phase") != "review"
+        or commit_state.get("current") != target_current
+    ):
+        raise ProjectEvidenceError("committed model activation does not bind the exact target state and ordered refs")
+
+    from .gate3_activation import _validate_cas_record, _validate_switch_receipt
+
+    switch_dir = project_dir / "wind" / "switch-receipts"
+    try:
+        cas = _validate_cas_record(
+            _read_activation_record(switch_dir / f"{activation_id}.request.json"),
+            project_id=project_id,
+            activation_id=activation_id,
+        )
+        switch = _validate_switch_receipt(_read_activation_record(switch_dir / f"{activation_id}.json"), request=cas)
+    except ProjectEvidenceError:
+        raise
+    except Exception as exc:
+        raise ProjectEvidenceError("Mesa switch request or receipt is invalid") from exc
+    if (
+        cas.get("expected_old_model_revision_id") != binding["source"]["model_revision_id"]
+        or cas.get("target_model_revision_id") != target["model_revision_id"]
+        or cas.get("candidate_receipt_digest") != binding.get("candidate_receipt_digest")
+        or cas.get("project_event_digest") != commit.get("event_digest")
+        or switch.get("active_model_revision_id") != target["model_revision_id"]
+    ):
+        raise ProjectEvidenceError("Mesa switch request or receipt differs from the committed activation")
+    active = _read(project_dir / "models" / "active.json")
+    if active.get("model_id") != "wind-turbine-maintenance" or active.get("model_revision_id") != target["model_revision_id"]:
+        raise ProjectEvidenceError("Mesa active model differs from the committed activation target")
+
+    marker = _read_activation_record(project_dir / "activations" / activation_id / "reconcile.json")
+    _exact(marker, ACTIVATION_RECONCILE_KEYS, "activation reconcile marker")
+    if (
+        marker.get("schema_id") != "riff://evidence-studio/activation-reconcile-marker/v1"
+        or marker.get("schema_version") != 1
+        or marker.get("canonical_json_version") != "riff-canonical-json-v2"
+        or marker.get("activation_id") != activation_id
+        or marker.get("project_id") != project_id
+        or marker.get("target_binding_digest") != binding["target_binding_digest"]
+        or marker.get("base_project_event_digest") != commit["event_digest"]
+        or marker.get("base_snapshot_revision") != commit["snapshot_revision"]
+        or marker.get("switch_receipt_digest") != switch["switch_receipt_digest"]
+        or marker.get("verified_project_target_model_revision_id") != target["model_revision_id"]
+        or marker.get("verified_mesa_active_model_revision_id") != target["model_revision_id"]
+        or not isinstance(marker.get("reconciled_at"), str) or not marker["reconciled_at"]
+        or marker.get("reconcile_digest") != prefixed_digest(marker, field="reconcile_digest", prefix="arec_")
+    ):
+        raise ProjectEvidenceError("activation reconcile marker does not close the exact switch DAG")
+    reconciled = [
+        event for event in events
+        if event.get("event_type") == "model.activation_reconciled"
+        and event.get("command_id") == activation_id
+    ]
+    if len(reconciled) != 1:
+        raise ProjectEvidenceError("activation target lacks one ready reconcile event")
+    ready = reconciled[0]
+    ready_state = _snapshot_from_event(ready)
+    if (
+        ready.get("snapshot_revision") <= commit.get("snapshot_revision")
+        or ready.get("command_digest") != commit.get("command_digest")
+        or ready.get("record_refs") != [{"kind": "activation_reconcile_marker", "id": activation_id, "digest": marker["reconcile_digest"]}]
+        or ready.get("initiator") != "system"
+        or ready.get("system_component") != "backend_model_reconciler"
+        or ready.get("response_status") != 200
+        or ready.get("response_projection") != {"activation_id": activation_id, "status": "ready"}
+        or ready_state.get("current") != target_current
+        or any(event.get("event_type") == "model.activation_failed" and event.get("command_id") == activation_id for event in events)
+    ):
+        raise ProjectEvidenceError("ready activation event does not reconcile the exact target and switch")
+    return {"activation_id": activation_id, "target": target, "target_binding_digest": binding["target_binding_digest"], "reconcile_digest": marker["reconcile_digest"]}
 
 
 def verify_cancel_tombstone_committed(
@@ -113,6 +337,23 @@ def _read(path: Path) -> dict[str, Any]:
     return value
 
 
+def _read_activation_record(path: Path) -> dict[str, Any]:
+    """Read backend/Mesa activation evidence encoded as canonical-v2 plus one LF."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ProjectEvidenceError(f"activation evidence is unavailable: {path.name}")
+    try:
+        data = path.read_bytes()
+        if not data.endswith(b"\n") or data[:-1].endswith(b"\n"):
+            raise ValueError("activation record must have exactly one LF")
+        value = require_canonical_json_v2_bytes(data[:-1])
+    except Exception as exc:
+        raise ProjectEvidenceError(f"activation evidence is not exact canonical bytes: {path.name}") from exc
+    if not isinstance(value, dict):
+        raise ProjectEvidenceError(f"activation evidence must be an object: {path.name}")
+    return value
+
+
 def _read_revision(path: Path) -> dict[str, Any]:
     """Read a revision using its exact legacy/framed byte-level discriminator."""
 
@@ -135,8 +376,8 @@ def _read_revision(path: Path) -> dict[str, Any]:
     return value
 
 
-def _exact(value: dict[str, Any], keys: set[str], name: str) -> None:
-    if set(value) != keys:
+def _exact(value: Any, keys: set[str], name: str) -> None:
+    if not isinstance(value, dict) or set(value) != keys:
         raise ProjectEvidenceError(f"{name} schema is not exact")
 
 

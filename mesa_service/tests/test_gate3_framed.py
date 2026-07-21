@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from mesa_service.app import create_app
 from mesa_service.canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2, strict_json_loads_v2
-from mesa_service.gate2_contracts import build_v2_worker_request, defaults_digest, downstream_request_digest, validate_experiment_for_run
+from mesa_service.gate2_contracts import build_v2_worker_request, defaults_digest, downstream_request_digest, validate_experiment_for_run, validate_framed_experiment_transition
 from mesa_service.gate3_bundle import FRAMED_FILES, framed_manifest, framed_revision_id, framed_runtime_profile, framed_source_bytes, materialize_framed_bundle
 from mesa_service.bundle import manifest_entries, model_revision_id
 from mesa_service.wind_contracts import MODEL_ID, canonical_json_bytes, runtime_profile
@@ -127,6 +127,109 @@ def _request(*, turbine_count: int, crew_count: int, horizon: int, warmup: int, 
     }
     intent["run_intent_digest"] = prefixed_digest(intent, field="run_intent_digest", prefix="ri_")
     return build_v2_worker_request(experiment=experiment, admission=admission, intent=intent)
+
+
+def _reseal_framed_experiment(value: dict) -> dict:
+    result = copy.deepcopy(value)
+    result.pop("experiment_revision_id", None)
+    result.pop("experiment_digest", None)
+    result["experiment_revision_id"] = "er_" + sha256_v2(result)
+    result["experiment_digest"] = "erd_" + sha256_v2(result)
+    return result
+
+
+def _framed_successor(
+    parent: dict,
+    operation: str,
+    *,
+    parameter_changes: dict | None = None,
+    execution_changes: dict | None = None,
+) -> dict:
+    value = copy.deepcopy(parent)
+    value["parent_experiment_revision_id"] = parent["experiment_revision_id"]
+    value["operation"] = operation
+    value["created_at"] = "2026-07-21T00:00:03.000Z" if operation == "edit" else "2026-07-21T00:00:04.000Z"
+    if operation == "reset_defaults":
+        value["parameters"] = copy.deepcopy(value["parameter_defaults"])
+        value["execution_values"] = copy.deepcopy(value["execution_defaults"])
+    else:
+        value["parameters"].update(parameter_changes or {})
+        value["execution_values"].update(execution_changes or {})
+    value["parameter_diff"] = [
+        {"parameter_id": key, "default_value": value["parameter_defaults"][key], "current_value": value["parameters"][key]}
+        for key in sorted(value["parameter_defaults"])
+        if canonical_json_v2_bytes(value["parameter_defaults"][key]) != canonical_json_v2_bytes(value["parameters"][key])
+    ]
+    value["execution_diff"] = [
+        {"field": key, "default_value": value["execution_defaults"][key], "current_value": value["execution_values"][key]}
+        for key in ("horizon_days", "warmup_days", "seed")
+        if value["execution_defaults"][key] != value["execution_values"][key]
+    ]
+    return _reseal_framed_experiment(value)
+
+
+def test_framed_experiment_create_edit_reset_union_and_parent_edges() -> None:
+    created = _request(turbine_count=3, crew_count=1, horizon=5, warmup=1)["experiment_document"]
+    edited = _framed_successor(created, "edit", parameter_changes={"crew_count": 2}, execution_changes={"seed": 9})
+    reset = _framed_successor(edited, "reset_defaults")
+    assert validate_framed_experiment_transition(created, None) == created
+    assert validate_framed_experiment_transition(edited, created) == edited
+    assert validate_framed_experiment_transition(reset, edited) == reset
+    assert reset["parameters"] == reset["parameter_defaults"]
+    assert reset["execution_values"] == reset["execution_defaults"]
+    assert reset["parameter_diff"] == reset["execution_diff"] == []
+
+
+def test_framed_experiment_union_rejects_tampered_semantics_even_when_resealed() -> None:
+    created = _request(turbine_count=3, crew_count=1, horizon=5, warmup=1)["experiment_document"]
+    edited = _framed_successor(created, "edit", parameter_changes={"crew_count": 2})
+
+    bad_create = copy.deepcopy(created)
+    bad_create["parent_experiment_revision_id"] = created["experiment_revision_id"]
+    with pytest.raises(ValueError, match="create must not declare"):
+        validate_experiment_for_run(_reseal_framed_experiment(bad_create))
+
+    bad_edit = copy.deepcopy(edited)
+    bad_edit["parent_experiment_revision_id"] = None
+    with pytest.raises(ValueError, match="parent_experiment_revision_id"):
+        validate_experiment_for_run(_reseal_framed_experiment(bad_edit))
+
+    bad_rule = copy.deepcopy(edited)
+    bad_rule["copy_migration_rule"] = "invented_copy_rule"
+    with pytest.raises(ValueError, match="unsupported framed"):
+        validate_experiment_for_run(_reseal_framed_experiment(bad_rule))
+
+    bad_defaults = copy.deepcopy(created)
+    bad_defaults["parameter_defaults"]["crew_count"] = 4
+    bad_defaults["parameters"]["crew_count"] = 4
+    bad_defaults["defaults_digest"] = defaults_digest(
+        bad_defaults["preset_id"], bad_defaults["parameter_defaults"], bad_defaults["execution_defaults"],
+    )
+    bad_defaults["parameter_diff"] = [
+        item for item in bad_defaults["parameter_diff"] if item["parameter_id"] != "crew_count"
+    ]
+    with pytest.raises(ValueError, match="verified preset"):
+        validate_experiment_for_run(_reseal_framed_experiment(bad_defaults))
+
+    bad_reset = _framed_successor(edited, "reset_defaults")
+    bad_reset["parameters"]["crew_count"] = 2
+    bad_reset["parameter_diff"] = [{"parameter_id": "crew_count", "default_value": 3, "current_value": 2}]
+    with pytest.raises(ValueError, match="reset must restore"):
+        validate_experiment_for_run(_reseal_framed_experiment(bad_reset))
+
+    no_op_edit = _framed_successor(created, "edit")
+    with pytest.raises(ValueError, match="no effective change"):
+        validate_framed_experiment_transition(no_op_edit, created)
+
+    wrong_parent = copy.deepcopy(edited)
+    wrong_parent["parent_experiment_revision_id"] = "er_" + "f" * 64
+    with pytest.raises(ValueError, match="exact parent"):
+        validate_framed_experiment_transition(_reseal_framed_experiment(wrong_parent), created)
+
+    changed_tuple = copy.deepcopy(edited)
+    changed_tuple["brief_revision_id"] = "dbr_" + "e" * 64
+    with pytest.raises(ValueError, match="inherited activation tuple"):
+        validate_framed_experiment_transition(_reseal_framed_experiment(changed_tuple), created)
 
 
 def _run(tmp_path: Path, request: dict) -> Path:
