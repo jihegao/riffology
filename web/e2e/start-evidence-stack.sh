@@ -16,10 +16,10 @@ trap cleanup EXIT INT TERM
 for _ in $(seq 1 120); do curl --noproxy '*' -fsS http://127.0.0.1:8091/openapi.json >/dev/null 2>&1 && break; sleep 0.25; done
 (
   cd ../backend
-  WORKSPACE_ROOT="$WEB_E2E_ROOT" MESA_SERVICE_URL=http://127.0.0.1:8091 RIFF_SKIP_OPENCODE=true PORT=8787 npm start
+  WORKSPACE_ROOT="$WEB_E2E_ROOT" MESA_SERVICE_URL=http://127.0.0.1:8091 PORT=8787 npm start
 ) & PIDS+=("$!")
 for _ in $(seq 1 120); do curl --noproxy '*' -fsS http://127.0.0.1:8787/health >/dev/null 2>&1 && break; sleep 0.25; done
 curl --noproxy '*' -fsS -X POST http://127.0.0.1:8787/api/projects -H 'content-type: application/json' --data '{"command_id":"11111111-1111-4111-8111-111111111111","display_name":"Playwright Wind Evidence","initial_actor":{"actor_type":"human","display_name":"E2E Owner","declared_role":"project_owner"}}' >/dev/null
-node e2e/bootstrap-live.mjs
+node e2e/bootstrap-evidence.mjs
 npm run dev -- --host 127.0.0.1 --port 5173 & WEB_PID="$!"; PIDS+=("$WEB_PID")
 wait "$WEB_PID"

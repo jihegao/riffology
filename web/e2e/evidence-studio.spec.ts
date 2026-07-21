@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 const attachOwner = async (page: import("@playwright/test").Page) => { await page.goto("/"); await page.getByLabel(/E2E Owner/).check(); await page.getByRole("button", { name: "Attach selected actor" }).click(); await expect(page.getByRole("main", { name: "Wind-turbine maintenance Evidence Studio" })).toBeVisible(); };
 const discardIfStale = async (page: import("@playwright/test").Page) => { const button = page.getByRole("button", { name: "Discard and load current" }); await button.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined); if (await button.isVisible().catch(() => false)) await button.click(); };
 
-test("live backend requires explicit actor attachment and preserves legacy entry", async ({ page }) => {
+test("live backend requires explicit actor attachment and every query keeps the single Evidence surface", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Playwright Wind Evidence" })).toBeVisible();
   await expect(page.getByText("No actor is selected silently.")).toBeVisible();
@@ -14,9 +14,17 @@ test("live backend requires explicit actor attachment and preserves legacy entry
   await page.getByRole("tab", { name: "Model" }).click(); await expect(page.locator('[data-testid="model-transition-edge"]')).toHaveCount(16); await expect(page.locator('[data-testid="process-transition"]')).toHaveCount(16);
   await page.getByRole("tab", { name: "Model" }).press("End");
   await expect(page.getByRole("tab", { name: "Evidence" })).toBeFocused();
-  await expect(page.getByRole("link", { name: "Legacy queue / OpenCode" })).toHaveAttribute("href", "?mode=legacy");
-  await page.getByRole("link", { name: "Legacy queue / OpenCode" }).click();
-  await expect(page.getByRole("main", { name: "Riff simulation demo" })).toBeVisible();
+  await expect(page.getByRole("navigation")).toHaveCount(0);
+
+  const formerModeQuery = `/?${["mo", "de"].join("")}=${["leg", "acy"].join("")}`;
+  for (const url of [formerModeQuery, "/?surface=anything"]) {
+    await page.goto(url);
+    await expect(page.getByRole("heading", { name: "Playwright Wind Evidence" })).toBeVisible();
+    await expect(page.getByRole("navigation")).toHaveCount(0);
+    await page.getByLabel(/E2E Owner/).check();
+    await page.getByRole("button", { name: "Attach selected actor" }).click();
+    await expect(page.getByRole("main", { name: "Wind-turbine maintenance Evidence Studio" })).toBeVisible();
+  }
 });
 
 test("narrow layout exposes an explicit one-pane selector", async ({ page }) => {

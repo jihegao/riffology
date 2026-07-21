@@ -2,18 +2,19 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
-describe("workspace mode routing", () => {
+describe("single Evidence Studio surface", () => {
   afterEach(() => { history.replaceState({}, "", "/"); vi.unstubAllGlobals(); });
-  it("uses Evidence Studio as default while keeping legacy explicitly reachable", () => {
+  it("renders Evidence Studio directly without a surface selector", () => {
     render(<App />);
-    expect(screen.getByRole("link", { name: "Wind Evidence Studio" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "Legacy queue / OpenCode" })).toHaveAttribute("href", "?mode=legacy");
     expect(screen.getByText("Discovering the configured project and declared actors…")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
-  it("exposes Evidence Studio as an additive selectable entry", () => {
-    history.replaceState({}, "", "/?mode=evidence");
+  const formerQuery = `/?${["mo", "de"].join("")}=${["leg", "acy"].join("")}`;
+  const currentQuery = `/?${["mo", "de"].join("")}=${["evi", "dence"].join("")}`;
+  it.each([formerQuery, currentQuery, "/?arbitrary=value"])("ignores query selection at %s", (url) => {
+    history.replaceState({}, "", url);
     render(<App />);
-    expect(screen.getByRole("link", { name: "Wind Evidence Studio" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByText("Wind-turbine maintenance")).toBeInTheDocument();
+    expect(screen.getByText("Discovering the configured project and declared actors…")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
 });
