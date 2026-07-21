@@ -1,99 +1,77 @@
-# Wind-turbine alignment architecture target
+# Wind Evidence Studio architecture
 
-## Status
+## System boundary
 
-This is the approved Gate 0 target, not an implementation claim. The current
-checkout still runs the in-memory, queue-bound Phase 0 path. Gates 1-4 replace
-that path before Gate 4 removes it.
+当前系统只有一个产品表面和一个模型族：浏览器中的 Wind Evidence Studio 与
+`wind-turbine-maintenance`。三个本地进程职责固定：
 
-## Objective and boundaries
+```text
+Browser :5173
+    -> Backend :8787
+        -> Mesa service :8091
+            -> WORKSPACE_ROOT
+```
 
-Riff will support one local, durable project in which an operations lead and an
-Agent can shape an onshore wind-turbine maintenance experiment, inspect its
-mapping to a reviewed Mesa model, record issues and human attestations, execute
-safe drafts, and inspect artifact-backed results.
+浏览器只调用后端。后端是项目、命令、工作流和浏览器安全投影的权威；Mesa 是模型包、
+运行生命周期和不可变结果工件的权威。浏览器 DOM、图表和说明文字不创建领域事实。
 
-The browser never receives provider credentials and never calls OpenCode or
-Mesa directly. The backend owns project state and policy derivation. Mesa owns
-model bundles and immutable run artifacts. OpenCode proposes typed changes; chat
-text, DOM state, Playwright, diagrams, and generated prose are projections only.
+## Identity graph
 
-Phase 1 excludes arbitrary model creation, remote deployment, authenticated
-multi-user editing, a database, real wind-farm calibration, scientific
-validation, and staffing recommendations.
-
-## Identities and revision graph
-
-The word `revision` is never overloaded:
+以下身份不可互换：
 
 | Identity | Meaning |
 | --- | --- |
-| `snapshotRevision` | Mutable project-snapshot concurrency sequence. |
-| `decisionBriefRevisionId` | Immutable business question, constraint, assumption, source, and non-goal revision. |
-| `alignmentMapRevisionId` | Immutable mapping from business artifacts to model rules, parameters, and metrics. |
-| `modelRevisionId` | Immutable code/spec/schema/defaults/traceability bundle. |
-| `experimentRevisionId` | Immutable complete parameter values, preset, horizon, warm-up, seed, and bound upstream revisions. |
-| `runId` | One execution bound to all preceding identities and content digests. |
+| `project_id` | 持久项目容器。 |
+| `snapshot_revision` | 当前项目投影的并发序号。 |
+| `brief_revision_id` | 不可变业务问题修订。 |
+| `alignment_revision_id` | 不可变需求到模型映射修订。 |
+| `model_revision_id` | 内容寻址的模型代码、schema、默认值和追溯包。 |
+| `experiment_revision_id` | 完整参数、horizon、warm-up、seed 与上游身份绑定。 |
+| `run_id` | 一次执行及其请求、策略事实和工件集合。 |
 
-Parameter value changes create an experiment revision. Rule, meaning, unit,
-range/schema, distribution family, state transition, or metric-formula changes
-create a model revision. A run accepts an experiment revision, not free
-unversioned parameter overrides.
+参数值改变会创建新的 experiment revision；规则、单位、范围、分布或指标公式改变会创建
+新的 model revision。运行只接受已保存的 experiment revision，不接受临时覆盖值。
 
-## Durable local layout and ownership
-
-```text
-WORKSPACE_ROOT/projects/<project-id>/
-  project.json                                  # backend atomic snapshot
-  inputs/                                       # backend
-  alignment/decision-brief/revisions/           # backend, immutable
-  alignment/requirement-map/revisions/          # backend, immutable
-  issues/                                       # backend append events + current snapshot
-  attestations/                                 # backend, immutable/superseding
-  experiments/revisions/                        # backend, immutable
-  models/wind-turbine-maintenance/revisions/    # Mesa/model package
-  runs/                                         # Mesa execution artifacts
-```
-
-Each file family has one writer. Atomic temporary-file promotion protects
-mutable snapshots; immutable IDs are content-bound. A browser `sessionId` is a
-temporary control connection and never creates or substitutes for a durable
-`projectId`. Restart recovery restores current pointers and does not mint fake
-model revisions.
-
-Large event streams and replay artifacts remain paged files. `ProjectState`
-contains bounded summaries, counts, identities, and artifact references rather
-than complete event logs.
-
-## Workflow and trust separation
-
-Two independent review subjects are required: the alignment-map revision and
-the experiment revision. The default progression policy for each is at least
-one human `project_owner` endorsement and zero open blocking issues. One action
-may cover both only by naming both revisions explicitly.
-
-This policy is a computed workflow fact. Zero issues means no recorded
-objection; it does not imply endorsement or correctness. Agent reviews do not
-count as human endorsements. Safe private drafts may run while the policy is
-unmet, and their results are never promoted in place after later review.
-
-Scientific trust remains separate, progressive, claim-scoped, and evidence
-backed. Gate 0 creates no new scientific evidence.
-
-## Generated-view data flow
+## Durable ownership
 
 ```text
-model code -> model-spec.json -> entity/state diagram
-domain-events.jsonl           -> swimlane/replay/2D projection
-requirement map + spec + experiment revision -> traceability diagram
+WORKSPACE_ROOT/
+  projects/<project_id>/
+    project.json
+    inputs/
+    alignment/
+    issues/
+    attestations/
+    experiments/
+    models/wind-turbine-maintenance/
+    runs/
+    activations/
 ```
 
-Every derived view records its input digest and generator version. Contract
-tests fail on code/spec, mapping/view, or revision/run identity drift.
+每类记录只有一个写入方。可变指针使用原子写入；不可变内容以 ID 和摘要绑定。项目事件和
+运行工件在重启后恢复，浏览器连接不替代项目身份。
 
-## Delivery dependency
+每个工作区根有 lifecycle 与 mutation lock；服务访问根目录前还会检查固定全局 gate 和
+根 fence。无法验证锁、gate、fence 或根身份时启动和写入均 fail closed。
 
-Gate 1 implements the model and evidence; Gate 2 implements durable project
-state; Gate 3 implements the two-pane workbench and generated views; Gate 4
-proves the real OpenCode browser story and removes the queue path. A later gate
-cannot close while an earlier dependency remains open.
+## Execution and review
+
+模型激活是技术过程：校验 framed bundle、schema、默认实验、runtime profile 和候选身份，
+然后以 compare-and-swap 更新活动修订。它不表达人工认可、可信度、科学批准或决策适用性。
+
+alignment revision 与 experiment revision 分别计算工作流条件。默认条件是每个主题至少一条
+`project_owner` 人工认可且没有未解决的 blocking issue。认可数、issue 数和派生条件都是
+定量记录；零 issue 仅表示没有已记录的未解决异议。
+
+技术 activation 就绪后，即使工作流条件未满足，也可安全执行 `private_draft`。运行冻结当时
+的条件事实，并标记 `draft_unverified`；之后的认可不会原地升级旧运行。
+
+## Evidence generation
+
+模型视图来自模型包中的 spec、schema、traceability 和 visualization metadata。KPI、事件、
+回放、swimlane、摘要和下载链接来自选中运行的摘要绑定工件。视图不维护手写的第二份数据，
+所以新 model revision 或新 run 被选中后会自动反映对应源数据。
+
+当前证据边界是 synthetic、single seed、behavioral reproduction、no recommendation。
+详见 [`gate-1-wind-turbine-model-design.md`](gate-1-wind-turbine-model-design.md) 和
+[`gate-3-evidence-studio-design.md`](gate-3-evidence-studio-design.md)。

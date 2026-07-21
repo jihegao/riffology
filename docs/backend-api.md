@@ -1,194 +1,76 @@
-# Durable project and backend API target
+# Backend project API
 
-## Status
+后端监听 `127.0.0.1:8787`，是浏览器唯一调用的服务。除 `GET /health` 外，业务路由均位于
+`/api/projects`。未知资源、方法和路径不会选择隐含模型。
 
-This Gate 0 contract describes the Gate 2 target. The current backend remains a
-queue-bound, in-memory Phase 0 implementation; these routes and records are not
-yet available.
+## Commands and concurrency
 
-The backend is the only browser-facing authority. It owns durable project
-identity, project snapshots, business artifacts, issue/attestation records,
-experiment revisions, command idempotency, OpenCode adaptation, and Mesa
-orchestration. The browser never supplies workspace paths, Mesa project IDs, or
-OpenCode session IDs.
+除项目创建和 session attachment 外，变更命令使用同一 envelope：
 
-## Identity and mutation envelope
-
-`projectId` is durable. `sessionId` is a temporary browser/OpenCode control
-connection. Reopening a project or restarting the backend preserves project and
-revision identities.
-
-Every browser mutation includes:
-
-```ts
-type ProjectCommand<T> = {
-  commandId: string;
-  projectId: string;
-  sessionId: string;
-  baseSnapshotRevision: number;
-  payload: T;
-};
+```json
+{
+  "command_id": "UUID",
+  "project_id": "project_...",
+  "session_id": "session_...",
+  "base_snapshot_revision": 12,
+  "payload": {}
+}
 ```
 
-`commandId` is idempotent. A stale `baseSnapshotRevision` returns `409`; schema
-failure returns `422`; unknown or cross-project identities return `404`; unsafe
-payload size returns `413`/`429`. Accepted commands publish later authoritative
-snapshot/patch events. A `202` acknowledgement is not itself state.
+`command_id` 提供幂等性；`base_snapshot_revision` 防止覆盖并发更新。schema 错误返回 `422`，
+过期修订返回 `409`，未知或跨项目身份返回 `404`。`202` 仅表示命令已接收，不表示运行成功。
 
-## Browser-safe project projection
+## Project and workflow routes
 
-The canonical projection contains bounded data and references:
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | 进程与 workspace lifecycle proof。 |
+| `GET` | `/api/projects/default` | 当前默认项目的 Evidence Studio 引导投影。 |
+| `POST` | `/api/projects` | 创建项目和初始本地参与者。 |
+| `POST` | `/api/projects/{project_id}/sessions` | 将显式选择的参与者附加到临时浏览器 session。 |
+| `GET` | `/api/projects/{project_id}/snapshot` | 有界公开项目投影。 |
+| `GET` | `/api/projects/{project_id}/events` | 项目事件页或 SSE snapshot/patch 流。 |
+| `POST` | `/api/projects/{project_id}/actors` | 创建声明式本地参与者。 |
+| `POST` | `/api/projects/{project_id}/wind/bootstrap` | 绑定经审核的风机模型和初始业务/实验修订。 |
+| `POST` | `/api/projects/{project_id}/brief/revisions` | 创建业务简报修订。 |
+| `POST` | `/api/projects/{project_id}/alignment/revisions` | 创建对齐映射修订。 |
+| `POST` | `/api/projects/{project_id}/experiments/revisions` | 保存参数或 reset 后的新实验修订。 |
+| `POST` | `/api/projects/{project_id}/issues` | 创建修订范围内的 issue。 |
+| `GET` | `/api/projects/{project_id}/issues/{issue_id}/history` | 读取 issue 完整事件历史。 |
+| `POST` | `/api/projects/{project_id}/issues/{issue_id}/comments` | 添加 issue 评论。 |
+| `PATCH` | `/api/projects/{project_id}/issues/{issue_id}` | 记录解决或重新打开事件。 |
+| `GET` | `/api/projects/{project_id}/attestations` | 按主题分页读取认可记录。 |
+| `POST` | `/api/projects/{project_id}/attestations` | 创建不可变或 superseding 认可。 |
 
-```ts
-type ProjectState = {
-  projectId: string;
-  snapshotRevision: number;
-  phase: string;
-  actors: DeclaredLocalActor[];
-  attachments: Attachment[];
-  conversation: Message[];
-  current: {
-    decisionBriefRevisionId?: string;
-    alignmentMapRevisionId?: string;
-    modelRevisionId?: string;
-    experimentRevisionId?: string;
-    runId?: string;
-  };
-  model?: ModelProjection;
-  experiment?: ExperimentProjection;
-  workflow: WorkflowProjection;
-  issues: IssueSummary[];
-  attestations: AttestationSummary[];
-  run?: RunSummary;
-  artifacts: ArtifactReference[];
-};
-```
+本地参与者身份是 `declared_unauthenticated_local`。人工认可与 Agent 记录分组计数；只有明确
+主题、角色和 scope 的有效人工记录参与默认工作流条件。
 
-Full domain events, raw model files, complete histories, absolute paths, provider
-credentials, and stack traces are excluded. SSE sends a snapshot first and then
-ordered RFC-6902-style patches. Gaps trigger snapshot reload.
+## Run and evidence routes
 
-## Immutable business and experiment revisions
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/projects/{project_id}/runs` | 以已保存实验修订启动 private draft；成功接收返回 `202`。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}` | 读取运行状态。 |
+| `POST` | `/api/projects/{project_id}/runs/{run_id}/cancel` | 幂等取消。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}/events` | 分页读取权威领域事件。 |
+| `GET` | `/api/projects/{project_id}/artifacts/{artifact_id}` | 下载摘要绑定工件。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}/evidence` | 读取 Evidence Studio 证据索引。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}/event-projection/v1` | 按 day、event、turbine、crew 或 work order 过滤事件投影。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}/kpis` | 按 `after_day` 和 `limit` 分页读取 KPI。 |
+| `GET` | `/api/projects/{project_id}/runs/{run_id}/replay` | 按 `after_frame` 和 `limit` 分页读取回放。 |
 
-The API distinguishes snapshot, brief, alignment, model, experiment, and run
-identities exactly as defined in [`architecture.md`](architecture.md). Creating
-an experiment revision normalizes all values, stores the selected defaults
-preset, default/current diff, horizon, warm-up, seed, and bound upstream
-revisions. Reset is an explicit mutation that copies active defaults into a new
-draft; it never erases history.
+## Model and browser projections
 
-The run route accepts only an `experimentRevisionId`. It does not accept an
-execution label, arbitrary parameters, steps, or seed overrides. The backend
-records a complete identity and policy snapshot, then derives
-`workflow_policy_met | workflow_policy_unmet`; callers cannot choose or
-promote that label.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/projects/{project_id}/browser-projection/v1` | Evidence Studio 的有界聚合投影。 |
+| `GET` | `/api/projects/{project_id}/events/browser-v1` | 浏览器 snapshot/patch/reload-required SSE。 |
+| `GET` | `/api/projects/{project_id}/wind/framed-candidate` | 当前技术候选状态。 |
+| `POST` | `/api/projects/{project_id}/wind/framed-evidence/activate` | 技术 framed activation。 |
+| `GET` | `/api/projects/{project_id}/brief/revisions/{revision_id}` | 摘要绑定业务简报。 |
+| `GET` | `/api/projects/{project_id}/alignment/revisions/{revision_id}` | 摘要绑定对齐映射。 |
+| `GET` | `/api/projects/{project_id}/models/{model_revision_id}/view-sources` | 模型视图源集合。 |
+| `GET` | `/api/projects/{project_id}/models/{model_revision_id}/view-sources/{name}` | 单个模型视图源。 |
 
-## Issues and attestations
-
-An issue binds to exact subjects and revisions:
-
-```ts
-type Issue = {
-  issueId: string;
-  subjectRevisionIds: string[];
-  title: string;
-  body: string;
-  severity: "info" | "warning" | "critical";
-  blocking: boolean;
-  status: "open" | "resolved" | "closed";
-  reporterActorId: string;
-  assigneeActorId?: string;
-  createdAt: string;
-  resolution?: { actorId: string; reason: string; at: string };
-};
-```
-
-Comments and state changes are append-only events with an atomic current
-snapshot. Closing requires a reason. `openBlockingIssueCount === 0` means only
-that no recorded blocking objection remains.
-
-```ts
-type Attestation = {
-  attestationId: string;
-  actorId: string;
-  actorType: "human" | "agent";
-  declaredRole: string;
-  subjectRevisionIds: string[];
-  scope: string;
-  decision: "endorse" | "object" | "abstain";
-  rationale: string;
-  createdAt: string;
-  supersedesAttestationId?: string;
-};
-```
-
-Records are immutable; later decisions supersede rather than edit. One human
-actor contributes at most one effective endorsement to a given revision.
-Declared local identity is explicitly unauthenticated in Phase 1. Agent review
-is stored and displayed separately and never counts toward human policy.
-`object` should reference an issue.
-
-## Derived workflow policy
-
-Alignment-map and experiment revisions are independent review subjects. The
-default policy for each is:
-
-```text
-human project_owner endorsements >= 1
-AND open blocking issues == 0
-```
-
-The projection exposes counts, named subjects, and `policySatisfied`. It never
-calls the artifact trusted, correct, valid, or confirmed. Safe
-policy-unmet private drafts are admitted while the policy is false. A later
-attestation does not mutate or relabel an existing run; a policy-qualified
-experiment requires a new run for correspondingly labelled results.
-
-## Target routes
-
-All mutation bodies use `ProjectCommand` except binary upload transfer.
-
-| Method and route | Purpose |
-| --- | --- |
-| `GET /api/projects/{projectId}/snapshot` | Current browser-safe state. |
-| `GET /api/projects/{projectId}/events` | Snapshot plus ordered patches. |
-| `POST /api/projects/{projectId}/sessions` | Attach a temporary local session to a durable project. |
-| `POST /api/projects/{projectId}/uploads` | Validate and persist CSV/JSON/TXT input. |
-| `POST /api/projects/{projectId}/chat` | Submit bounded context to configured OpenCode. |
-| `POST /api/projects/{projectId}/brief/revisions` | Create an immutable decision-brief revision. |
-| `POST /api/projects/{projectId}/alignment/revisions` | Create an immutable requirement/mapping revision. |
-| `POST /api/projects/{projectId}/issues` | Open a scoped issue. |
-| `POST /api/projects/{projectId}/issues/{issueId}/comments` | Append discussion. |
-| `PATCH /api/projects/{projectId}/issues/{issueId}` | Resolve/close/reopen with reason. |
-| `POST /api/projects/{projectId}/attestations` | Add a scoped immutable review decision. |
-| `POST /api/projects/{projectId}/experiments/revisions` | Save normalized parameter values or reset result. |
-| `POST /api/projects/{projectId}/runs` | Execute one immutable experiment revision. |
-| `POST /api/projects/{projectId}/runs/{runId}/cancel` | Cancel only a run owned by this project. |
-| `GET /api/projects/{projectId}/runs/{runId}/events` | Page browser-safe domain events. |
-| `GET /api/projects/{projectId}/artifacts/{artifactId}` | Fetch a declared project-owned artifact. |
-
-## Persistence and safety
-
-The layout and single-writer rules are defined in
-[`architecture.md`](architecture.md). Backend snapshots use temporary files and
-atomic rename. Revisions and attestations are immutable. Issue history is
-append-only. Startup validates manifests, rejects traversal/symlinks and
-quarantines incomplete temporary writes without inventing success.
-
-Uploads remain bounded to declared CSV/JSON/TXT size and media types. Provider
-keys, raw tool input, absolute paths, control characters, and unbounded logs are
-redacted from public errors and state. The service fails closed when its live
-provider/model configuration is unavailable.
-
-## Gate 2 acceptance
-
-- Restart recovers project identity, current revision pointers, issues,
-  attestations, experiment revisions, and run references.
-- Stale writes and idempotent retries behave deterministically.
-- Parameter edit and reset create immutable, correctly diffed experiment
-  revisions.
-- Policy counts are revision-scoped; Agent records never satisfy the human
-  count; zero issues is not rendered as trust.
-- Unendorsed, policy-unmet private drafts run and retain that label.
-- Every run/event/artifact reference resolves to the same project, model,
-  experiment, brief, and alignment identities.
+投影只返回允许公开的字段和可下载引用，不返回绝对路径、原始内部日志或完整历史。完整 Mesa
+内部路由见 [`mesa-service.md`](mesa-service.md)。
