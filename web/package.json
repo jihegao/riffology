@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:retirement": "vite build && node ../scripts/test-gate4-runtime-absence.mjs && node --test e2e/supervise-evidence-backend.test.mjs",
     "test:watch": "vitest",
     "test:e2e": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost playwright test"
   },
