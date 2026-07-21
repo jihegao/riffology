@@ -54,6 +54,26 @@ only committed lifecycle status and the cancel control. Adding a separately
 labelled unverified preview channel would require a later explicit contract;
 Gate 3 does not add one.
 
+Cancellation remains anchored in the Gate 2 project event chain. Mesa reads
+only the exact project/run `cancel-tombstone.json`, validates its canonical
+bytes and identity, and proves the tombstone digest is referenced by the
+committed `cancellation_requested` ProjectEvent before signalling a worker or
+projecting `cancel_requested`. During the short committed-tombstone-before-
+lifecycle window an ongoing run may have zero cancel lifecycle records; once a
+`cancel_requested` record exists, its evidence digest must equal that exact
+committed tombstone. Duplicate cancel records are always corruption. At any
+terminal state, no tombstone requires exactly zero cancel records, while a
+committed tombstone requires exactly one. Error mapping depends on the
+verification stage. During run admission/cancel-source capture, malformed
+canonical bytes or a tombstone bound to the wrong project/run return
+`422 run_admission_mismatch`; a structurally valid tombstone without its one
+exact committed cancellation event returns
+`409 cancel_tombstone_uncommitted` (and an absent tombstone when cancellation
+is required remains `cancel_tombstone_required`). Only receipt/lifecycle and
+terminal-evidence verification maps a wrong, missing, duplicated, or
+mismatched cancel linkage to `500 mesa_run_corrupt`. Cancel acknowledgement is
+quantitative evidence, not a scientific trust label.
+
 ## Information architecture
 
 ### Desktop shell
@@ -163,6 +183,15 @@ backend produces these fields only on the new Gate 3 routes.
 operation, a gap, duplicate, or schema/digest mismatch triggers a reload from
 `/browser-projection/v1`. It
 never merges a durable root with the legacy in-memory `ProjectState` shape.
+The SSE connection always begins with a freshly verified snapshot. A next
+revision is emitted as one root-replacement patch; a revision gap emits
+`reload-required` instead of manufacturing intermediate state. If a projection
+digest changes at the same snapshot revision while a client was disconnected,
+the server emits `projection_changed_while_disconnected`. Reconnect again
+starts with a full snapshot. If authoritative projection construction or
+verification fails, the stream closes rather than emitting a partial snapshot,
+patch, or cached prior projection. Browser caches are keyed by project,
+snapshot revision, and projection digest, never revision alone.
 
 Backend-owned state includes:
 
@@ -432,17 +461,35 @@ and disabled. The user must explicitly discard/reload and create a newly bound
 draft with a new command ID. Ambiguous transport failure is never presented as
 rejection or silently rebound.
 
-Client command receipts are immutable historical outcomes, not aliases for
-current project state. In particular, an activation command receipt ending
-`failed_fenced` is never rewritten, replaced, or projected as `ready` if a
-later system reconciliation event brings `model_activation.status` to `ready`.
-`recent_command_results` shows that historical failed receipt separately from
-the current `model_activation` projection and its system reconcile digest. A
-pending command first reconciles against its exact receipt ID/digest/version/
-outcome; after confirming and clearing that pending command, the client reads
-the current browser projection. It may display both `activation command failed
-fenced` and `system reconciliation later reached ready`, but never treats the
-latter as mutation of the former.
+Client command receipts are immutable terminal outcomes, not aliases for a
+different activation or for an inferred pointer state. An activation may have
+exactly one terminal ProjectEvent: `model.activation_reconciled` or
+`model.activation_failed`. A `failed_fenced` receipt is never rewritten,
+replaced, or projected as `ready`; the current authoritative activation remains
+`failed_fenced` and Start run remains fenced. Simultaneous failed and reconciled
+terminal events for one activation are immutable corruption. A pending command
+first reconciles against its exact reservation or terminal receipt ID/digest/
+version/outcome, then reloads the current browser projection; Gate 3 does not
+offer a later automatic failed-to-ready reconciliation path.
+
+Activation transport replay uses three distinct immutable records: the
+pre-terminal `command-reservation.json`, terminal
+`command-receipt.json`, and `client-outcome.json`. The outcome stores the exact
+HTTP status/body and the exact command-receipt digest; it is never accepted as
+an oracle by itself. Before either terminal ProjectEvent exists, an exact retry
+verifies and returns the durable reservation's exact `202` pending body; it
+does not manufacture a receipt or outcome. Once a terminal event exists, retry
+loads and verifies the intent, reservation, terminal event, complete acyclic
+activation DAG, and all already written leaf records, recomputes the expected
+success or safe-error body, and may complete only the missing post-terminal
+leaf sequence. For ready, the reconcile marker and
+`model.activation_reconciled` event are one atomic project transition, followed
+by ready receipt then ready outcome. For failure, the already committed
+`model.activation_failed` event authorizes recovery of failure record, receipt,
+then outcome. Missing authoritative DAG nodes, extra/conflicting terminal
+nodes, resealed-but-mislinked records, or cross-command nodes are immutable
+corruption. Already written nodes are verified and never rewritten with a new
+timestamp, correlation ID, status, or digest.
 
 ### Safe local discovery and project session reattachment
 
@@ -822,36 +869,39 @@ examined, even when `events` is empty; `next_after` always equals it, so an
 exclusive-cursor client makes progress through a sparse filter. `has_more`
 means unscanned source sequences remain, not that another match is known.
 
-The backend builds a disposable digest-keyed sparse index in one streaming pass
-after verifying the artifact. Every 512th event records sequence, byte offset,
-simulation day, and safe filter keys. The index has exact schema/version,
-source SHA, event count, artifact byte length, and index digest; it is written
-atomically under a derived-cache namespace, never exposed as a run artifact or
-project fact. A request seeks to the greatest indexed sequence not exceeding
-`after` and parses only the bounded scan window. Index/source drift deletes the
-cache and performs one streaming rebuild before serving the page. If the index
-cannot be built or atomically read, the route returns a safe retryable error;
-it never falls back to rereading/parsing the full ~26 MiB artifact per page.
+The backend builds a disposable digest-keyed sparse index after verifying the
+complete artifact. Every 512th event records sequence, byte offset, simulation
+day, and the safe filter keys. The exact index record is canonical-v2 JSON plus
+one final LF and binds `event-index-v1`, source SHA, source byte length, event
+count, semantic SHA, ordered entries, and its own `eidx_` digest. It is written
+through a mode-0600 temporary file, file-fsynced, and atomically renamed under
+`derived-cache/event-index/<source-sha>.json`; it is never a run artifact or a
+project fact. An existing index is accepted only after exact-key, canonical
+byte, final-LF, digest, source-length, 512-sequence, and monotone-offset checks.
+Any failure deletes only that disposable index and triggers one full verified
+parse/rebuild before serving the page. A write or unsafe cache-root failure is
+the retryable `503 derived_cache_unavailable` error.
 
-The sparse index sits on a digest-keyed immutable artifact adapter. After
-same-project authorization and terminal-metadata verification, the adapter
-streams the declared artifact once into a temporary cache file, verifies exact
-byte length and SHA-256, fsyncs, and atomically promotes it under
-`artifact-cache/<sha256>`. Readers receive only a bounded random-access
-`read(offset,length)` handle to that immutable file; no page owns the whole
-artifact buffer. The adapter permits at most 1 MiB per read, 8 MiB aggregate
-memory buffers, 64 MiB per cached source file (matching the existing artifact
-response bound), and 512 MiB total derived-cache disk with closed-handle LRU
-eviction. Cache/index files are not evidence or project state.
+The source-byte cache is likewise disposable and content-addressed at
+`derived-cache/artifact-cache/<sha256>`. After same-project authorization and
+terminal-metadata verification, a cache hit must be a regular non-symlink file
+whose complete bytes match the declared byte length (when present) and SHA-256.
+An invalid entry is deleted and refetched from the authoritative artifact
+route; fetched bytes are independently checked against terminal metadata,
+written through a mode-0600 exclusive temporary file, file-fsynced, atomically
+renamed, and followed by a directory fsync. Unsafe cache roots or promotion
+failures return `503 derived_cache_unavailable`. There is no separate cache
+record, digest lock, byte-range handle, or LRU contract in Gate 3.
 
-The cache record binds schema/version, project/run/artifact ID, logical name,
-terminal metadata digest, source byte length/SHA, and cache-file SHA. Any new
-terminal declaration, source SHA/size mismatch, partial file, symlink, or
-index/source mismatch invalidates both file and index before use. Concurrent
-builders share a digest lock and verify the winner. Restart may reuse only a
-fully verified cache record; otherwise it rebuilds once. Thus filtered pages
-seek and stream bounded byte ranges, while duplicate query rejection remains
-deterministic and occurs before adapter/cache access.
+The backend currently materializes each verified artifact as one in-memory
+buffer. With a valid persisted index, a filtered request chooses the greatest
+512-event anchor not exceeding `after + 1` and parses only the bounded scan
+window from that buffer; the process-local event-cache key is exact source SHA,
+source byte length, and `event-index-v1`. Without a valid index, the backend
+verifies and parses the complete event source once, computes its semantic SHA,
+persists the index, and then serves the page. Cache and index bytes may be
+reused after restart only through these checks and remain non-authoritative;
+duplicate query rejection remains deterministic before cache access.
 
 ### Shared source descriptor
 
@@ -975,9 +1025,6 @@ type ParameterProvenance = {
 };
 
 type FramedParameterPropertyBase = {
-  type: "integer" | "number";
-  minimum: number;
-  maximum: number;
   display_name: string;
   section_id: string;
   display_order: number;
@@ -985,11 +1032,27 @@ type FramedParameterPropertyBase = {
   provenance: ParameterProvenance;
 };
 
-type FramedParameterProperty = FramedParameterPropertyBase & (
-  { distribution_group_id: null; distribution_family: null; distribution_role: null } |
+type FramedNumericParameterProperty = FramedParameterPropertyBase & {
+  type: "integer" | "number";
+  minimum: number;
+  maximum: number;
+} & (
+  { distribution_group_id: null; distribution_family: null;
+    distribution_role: null } |
   { distribution_group_id: string; distribution_family: "triangular";
     distribution_role: "low" | "mode" | "high" }
 );
+
+type FramedBooleanParameterProperty = FramedParameterPropertyBase & {
+  type: "boolean";
+  distribution_group_id: null;
+  distribution_family: null;
+  distribution_role: null;
+};
+
+type FramedParameterProperty =
+  | FramedNumericParameterProperty
+  | FramedBooleanParameterProperty;
 
 type FramedParameterSchemaView = {
   schema_id: "riff://wind-turbine-maintenance/parameters/v2";
@@ -1009,6 +1072,11 @@ exactly one of each role and satisfies low <= mode <= high. Every scalar field
 carries null for all three distribution metadata fields. Omission, a partly
 declared group, duplicate role, unit/provenance drift, or schema/preset value
 outside the declared range fails before rendering or persistence.
+The property validator dispatches only on the declared `type` union. It does
+not infer boolean, integer, number, grouping, or range semantics from a
+parameter name, suffix, or a hard-coded parameter allowlist. Boolean defaults
+must be literal JSON booleans and boolean properties cannot carry numeric
+`minimum`/`maximum` keys.
 
 Node and Python independently load and compare the literal parameter schema,
 default preset, and provenance bytes, recompute their bundle file hashes and
@@ -1104,6 +1172,17 @@ with `schema_version=2` and
 `files` object contains exactly the eleven paths above plus
 `execution-field-schema.json`; every file descriptor again has exactly
 `{sha256,byte_length,media_type}`.
+
+For the framed branch, each of the eleven `.json` payload files is materialized
+as its complete `riff-canonical-json-v2` encoding followed by exactly one LF;
+the LF participates in that file's SHA-256 and byte length. `model.py` retains
+its reviewed Python-source byte contract and is not JSON-normalized. The
+framed verifier checks the JSON encoding rule independently of manifest hashes,
+so a pretty-printed or otherwise re-encoded JSON file is rejected even if an
+attacker consistently reseals its file descriptor, manifest, and revision ID.
+This does not rewrite the historical payload files: the legacy branch keeps
+its delivered source bytes, hashes, legacy canonicalizer, manifest and model
+revision exactly as reviewed.
 
 The framed revision preimage has exactly
 `{schema_version,bundle_protocol,model_id,runtime_profile,files}`. It omits
@@ -2378,6 +2457,14 @@ All objects below have `additionalProperties:false`. Each top-level persisted
 record whose last field is its own prefixed digest hashes canonical-v2 bytes of
 the complete object excluding only that named digest field; helper/nested
 objects do not invent a self-digest. Persisted JSON is canonical-v2 plus one LF.
+That final-LF rule is the strict framed/Gate 3 durable-record branch, including
+activation revisions, activation protocol evidence, framed experiment records,
+and framed terminal records. Delivered legacy Gate 2 revision/admission/
+lifecycle records retain their existing canonical-v2-without-final-LF byte
+contract wherever that contract was already shipped; the legacy bundle
+manifest remains its separately specified one-LF exception. Readers select the
+branch from the exact schema/discriminator and never trim, add, or tolerate an
+LF to make bytes fit the other branch.
 
 ```ts
 type ActivationTuple = {
@@ -2497,6 +2584,50 @@ type ActivationIntent = {
   intent_digest: string;          // aint_
 };
 
+type MesaRuntimeInstanceEvidence = {
+  schema_id: "riff://mesa-wind/runtime-instance-evidence/v1";
+  schema_version: 1;
+  canonical_json_version: "riff-canonical-json-v2";
+  project_id: string;
+  runtime_instance_id: string;
+  actual_python_implementation: string;
+  actual_python_major_minor: string;
+  actual_mesa_version: string;
+  model_protocol_version: string;
+  candidate_source_revision: string;
+  candidate_bundle_protocol: string;
+  candidate_manifest_sha256: string;
+  candidate_file_map_sha256: string;
+  candidate_source_descriptor_digest: string;
+  recorded_at: string;
+  runtime_instance_evidence_digest: string; // rie_
+};
+
+type MesaMaterializeAuthoritativeHandshake = {
+  schema_id: "riff://mesa-wind/materialize-authoritative-handshake/v1";
+  schema_version: 1;
+  canonical_json_version: "riff-canonical-json-v2";
+  activation_id: string;
+  project_id: string;
+  materialize_request_sha256: string;
+  candidate_descriptor_digest: string;
+  runtime_instance_id: string;
+  runtime_instance_evidence_digest: string;
+  runtime_handshake_digest: string;
+  active_model_revision_id: string;
+  actual_python_implementation: string;
+  actual_python_major_minor: string;
+  actual_mesa_version: string;
+  model_protocol_version: string;
+  candidate_source_revision: string;
+  candidate_bundle_protocol: string;
+  candidate_manifest_sha256: string;
+  candidate_file_map_sha256: string;
+  candidate_source_descriptor_digest: string;
+  captured_at: string;
+  authoritative_handshake_digest: string; // ahe_
+};
+
 type CandidateReceipt = {
   schema_id: "riff://mesa-wind/candidate-receipt/v1";
   schema_version: 1;
@@ -2613,7 +2744,12 @@ append-only project events, plus the verified immutable byte capture under
 `projects/{project_id}/activations/{activation_id}/captured-candidate/
 {model_revision_id}/`. Mesa owns
 `wind/candidates/{activation_id}/{model_revision_id}/` bundle bytes,
+`wind/candidates/{activation_id}/materialize-request.json`,
+`wind/candidates/{activation_id}/authoritative-handshake.json`,
+`wind/candidates/{activation_id}/candidate-descriptor.json`,
 `wind/candidates/{activation_id}/candidate-receipt.json`,
+project-bound runtime evidence under
+`wind/runtime-instances/{runtime_instance_id}.json`,
 `wind/switch-receipts/{activation_id}.json`, and its atomic
 `wind/active.json` pointer. These are logical adapter namespaces, never browser or
 caller filesystem paths. `activation_id` is a backend-minted canonical UUID
@@ -2671,6 +2807,35 @@ path bytes, unsigned big-endian 64-bit content-byte length, then exact content
 bytes. No separators, newline normalization, archive metadata, path aliases, or
 filesystem order participate. Backend and Mesa compute it independently.
 
+Materialization persists the exact canonical-v2 request plus its required LF
+before treating a candidate as observable and binds it through one
+authoritative chain. `materialize_request_sha256` hashes the canonical-v2 JSON
+content bytes excluding that record-transport LF:
+
+```text
+materialize-request exact persisted bytes and canonical-content SHA
+  -> project runtime-instance evidence (rie_)
+  -> materialize authoritative handshake (ahe_, exact rh_ and active pointer)
+  -> candidate descriptor (cand_)
+  -> candidate receipt (acand_)
+  -> manifest/file map/revision and exact captured bundle bytes
+```
+
+Every status, metadata capture, byte capture, idempotent materialize retry,
+CAS, and recovery read recomputes this chain from stored canonical records and
+the current reviewed source/bundle facts. The descriptor's own `rh_` is a link,
+not an oracle. The stored authoritative `runtime_instance_id` must equal the
+current live Mesa service `runtime_instance_id`, in addition to all runtime and
+source facts matching. Consequently a candidate created by a prior Mesa
+instance is not `candidate_ready` and cannot be retried, captured, or switched
+by a new instance. A completed active pointer may be loaded after restart, but
+the old inactive-candidate authority does not silently transfer to that new
+instance. The stale inactive receipt also causes a different materialization
+attempt to fail `409 concurrent_activation`; Gate 3 does not automatically
+delete, supersede, or rematerialize it. The activation/replacement path remains
+fail-closed at an explicit manual cleanup boundary for the stale Mesa-owned
+candidate state before any newly discovered descriptor/activation can proceed.
+
 ### Internal Mesa protocol
 
 Only the backend's local Mesa adapter may call these endpoints. Every request
@@ -2694,9 +2859,51 @@ keys, or body keys fail `422 invalid_activation_protocol`.
    candidate_descriptor,candidate_receipt,candidate_bytes_digest}` with
    metadata values `riff://mesa-wind/candidate-capture-response/v1`, 1, and
    `riff-canonical-json-v2`, after recomputing the stored byte-map digest. It never returns a caller path and
-   the backend captures bytes only through bounded adapter reads keyed by the
-   receipt.
-3. `POST /internal/wind/active/cas` additionally requires exact header
+   is a metadata observation only: it does not contain bundle blobs and is not
+   by itself independent byte capture.
+3. `GET /internal/projects/{project_id}/wind/framed-candidates/
+   {activation_id}/byte-capture/v1` requires `Accept: application/json`, the
+   activation protocol and idempotency headers, and exact
+   `If-Match: "{candidate_receipt_digest}"`. It accepts no query or body and
+   returns this exact canonical-v2 response (without a transport LF):
+
+   ```ts
+   type CandidateByteBlob = {
+     sha256: string;
+     byte_length: number;
+     media_type: "application/json" | "text/x-python";
+     content_encoding: "base64-rfc4648";
+     content_base64: string;
+   };
+   type CandidateByteCapture = {
+     schema_id: "riff://mesa-wind/candidate-byte-capture/v1";
+     schema_version: 1;
+     canonical_json_version: "riff-canonical-json-v2";
+     project_id: string;
+     activation_id: string;
+     target_model_revision_id: string;
+     candidate_descriptor_digest: string;
+     candidate_receipt_digest: string;
+     manifest_sha256: string;
+     manifest: CandidateByteBlob;
+     files: Record<keyof FramedCandidateFileMap, CandidateByteBlob>;
+     file_map_sha256: string;
+     candidate_bytes_digest: string;
+     capture_digest: string;      // cap_
+   };
+   ```
+
+   The file set is exactly the twelve candidate files, each decoded blob is at
+   most 512 KiB, aggregate raw manifest-plus-file bytes are at most 4 MiB, and
+   the complete response is at most 6 MiB. Base64 must be canonical RFC 4648.
+   The backend independently verifies every blob SHA/length/media type, the
+   manifest, file map, revision preimage, framed candidate-byte digest, and the
+   eleven JSON payloads' canonical-v2-plus-exact-one-LF rule before persisting
+   captured bytes. Wrong project/activation is `404 activation_not_found`, a
+   stale `If-Match` is `409 candidate_receipt_mismatch`, byte drift or a bound
+   violation is `409 candidate_bytes_changed`, and malformed stored authority
+   is safe `500 mesa_adapter_failure`; no partial blob set is successful.
+4. `POST /internal/wind/active/cas` additionally requires exact header
    `If-Match: "{expected_old_model_revision_id}"` and body
    `{schema_id,schema_version,canonical_json_version,activation_id,project_id,
    expected_old_model_revision_id,target_model_revision_id,
@@ -2705,7 +2912,7 @@ keys, or body keys fail `422 invalid_activation_protocol`.
    `riff-canonical-json-v2`. It atomically switches and
    returns the exact `MesaSwitchReceipt`; exact already-switched replay returns
    `200` with the original receipt and no new switch.
-4. `GET /internal/wind/activations/{activation_id}/status` returns exactly
+5. `GET /internal/wind/activations/{activation_id}/status` returns exactly
    `{schema_id,schema_version,canonical_json_version,activation_id,status,
    active_model_revision_id,candidate_receipt_digest,switch_receipt}` where
    metadata values are `riff://mesa-wind/activation-status/v1`, 1, and
@@ -2716,7 +2923,8 @@ keys, or body keys fail `422 invalid_activation_protocol`.
 All internal JSON uses canonical-v2. Stable failures are `409
 incompatible_framed_runtime`, `409 active_model_mismatch`, `409
 candidate_descriptor_mismatch`, `409 candidate_bytes_changed`, `409
-idempotency_conflict`, `409 concurrent_activation`, `422
+candidate_receipt_mismatch`, `409 idempotency_conflict`, `409
+concurrent_activation`, `422
 invalid_activation_protocol`, and safe `500 mesa_adapter_failure`. No 409 is
 treated as success except an exact idempotent lookup whose request digest and
 stored receipt match. Before project commit the backend re-GETs the candidate,
@@ -2756,7 +2964,11 @@ from the descriptor, bundled source templates, or project data.
    state-changing/materialization Mesa endpoint be called. Browser status is
    `authorizing`.
 3. **Materialize/capture.** Invoke the internal materialize and GET endpoints,
-   verify exact bytes and `CandidateReceipt`, then expose `candidate_ready`.
+   persist and verify the materialize request, current-instance authoritative
+   handshake/runtime evidence, descriptor, exact `CandidateReceipt`, metadata
+   observation, and bounded canonical byte capture, then expose
+   `candidate_ready`. Exposure is valid only while the stored and live Mesa
+   `runtime_instance_id` values are equal.
 4. **Bind then commit project truth.** Persist `ActivationTargetBinding` from
    the prior snapshot/event, intent, staged refs, candidate receipt, and captured
    bytes; it contains no future event digest. One atomic project transaction
@@ -2769,27 +2981,28 @@ from the descriptor, bundled source templates, or project data.
    `mesa_switch_pending`; the fence remains.
 5. **Switch.** Invoke exact Mesa CAS with the committed project-event digest;
    independently verify the returned `MesaSwitchReceipt` and status endpoint.
-6. **Mark then reconcile.** Persist `ReconcileMarker` referencing only the
-   activation-commit event as its base and the switch receipt; it contains no
-   future reconciliation-event digest. Append `model.activation_reconciled`
-   with exactly one `record_ref` to that marker. Only afterward write a `ready`
-   command receipt referencing that terminal event digest if the original
-   client command has no terminal receipt. If it already has immutable
-   `failed_fenced`, system reconciliation writes no replacement client receipt
-   and updates only authoritative activation state. Exact target
-   agreement among project tuple, staged bytes, target binding, captured
-   candidate, commit event, switch receipt, marker, and Mesa active pointer
-   produces `ready` and lifts the fence.
+6. **Atomically mark and reconcile.** Commit `ReconcileMarker` and
+   `model.activation_reconciled` in one project transaction. The marker
+   references only the activation-commit event as its base and the switch
+   receipt, contains no future reconciliation-event digest, and is the event's
+   exact single `record_ref`. Only after this atomic ready terminal transition
+   may recovery write a missing ready command receipt and then client outcome.
+   Exact target agreement among project tuple, staged bytes, target binding,
+   captured candidate, commit event, switch receipt, marker, and Mesa active
+   pointer produces `ready` and lifts the fence. If
+   `model.activation_failed` already exists, reconciliation is forbidden rather
+   than converted into a second terminal outcome.
 
 The normative digest graph is acyclic and one-way:
 
 ```text
 staged brief/alignment/experiment bytes
   -> staging manifest -> activation intent -> authorization ProjectEvent
-  -> candidate receipt/capture
+  -> materialize request -> authoritative runtime handshake/evidence
+  -> candidate descriptor -> candidate receipt -> exact byte capture
   -> activation target binding -> activation-commit ProjectEvent
   -> Mesa switch receipt -> reconcile marker -> reconciliation ProjectEvent
-  -> activation command receipt/browser projection
+  -> activation command receipt -> client outcome/browser projection
 ```
 
 The authorization event `record_refs` are exactly
@@ -2812,14 +3025,18 @@ event digest, and prove exact `record_refs` ordering.
 If any copied value is invalid under the new schemas, any source/current tuple
 is stale, or any target digest differs, the entire command has no durable
 project-pointer effect before the project-commit transaction. Exact retries
-return the stored result. For a deterministic failure before project commit,
-recovery records one immutable
-failed command receipt. It may return to the pre-activation null projection and
-lift the fence only after independently proving both durable and Mesa pointers
-still equal the expected old model, recording `failed_no_effect`; otherwise it
-records and projects `failed_fenced`. A
-failure at or after project commit cannot roll back pointers or new revisions;
-it remains `failed_fenced` until exact reconciliation succeeds.
+return the durable `202` reservation until a terminal event exists, then the
+verified stored terminal result. For a deterministic failure before project
+commit, recovery records one immutable failed command receipt. It may return
+to the pre-activation null projection and lift the fence only after
+independently proving both durable and Mesa pointers still equal the expected
+old model, recording `failed_no_effect`; otherwise it records and projects
+`failed_fenced`. A failure at or after project commit cannot roll back pointers
+or new revisions;
+`failed_fenced` is terminal, remains fenced, and is never followed by an
+automatic ready reconciliation for the same activation. Recovery may complete
+only its missing failure record/receipt/outcome leaves; simultaneous failed and
+reconciled terminal events fail as `immutable_record_corrupt`.
 Old brief, model, alignment, experiment, attestations, issues, runs, and
 artifacts remain immutable and
 addressable. Because policy is revision-scoped, old attestations/issues do not
@@ -2828,17 +3045,33 @@ with their quantitatively derived current policy. The UI explicitly shows the
 new subject IDs and requires new review actions. No old run is relabelled or
 given generated frames.
 
-Startup recovery loads the staging manifest/bytes, activation intent, target
-binding, candidate receipt, project-event
-chain, switch receipt, and both pointers before serving run admission. It
-idempotently resumes the first missing stage. A crash before the atomic
+Startup recovery loads the staging manifest/bytes, activation intent,
+materialize request/authority, target binding, candidate receipt and captured
+bytes, project-event chain, switch receipt, reconcile/failure record, command
+receipt, client outcome, and both pointers before serving run admission. It
+verifies every already persisted DAG edge. Before a terminal event it may
+idempotently resume the first missing protocol stage; after a terminal event it
+may complete only the post-terminal leaves described above. The ready marker
+and event are never independently resumed because their project transition is
+atomic. A crash before the atomic
 stage/intent/authorization promotion leaves no authorized activation and its
 temp bytes are quarantined; after that atomic point, recovery uses only the
 frozen bytes. Crashes before/after authorization,
 candidate receipt, byte capture, project-event rename, snapshot replace, Mesa
-compare-and-swap, switch receipt, and reconciliation event are fault-injected.
-Every case yields one activation intent, one candidate, one project activation
-event, one Mesa switch, and one reconciled terminal state after retry/restart.
+compare-and-swap, switch receipt, the atomic reconcile-marker/event transition,
+failure terminal event/record, command receipt, and client outcome are
+fault-injected. The backend-restart
+matrix keeps the same live Mesa runtime instance and yields one activation
+intent, one candidate, one project activation event, one Mesa switch, and one
+verified terminal outcome. A Mesa service restart is a different boundary: an
+already completed active pointer/bundle may load normally, but a candidate
+whose authoritative runtime instance is old is not recoverable as
+`candidate_ready` and cannot be captured/retried/switched. Its inactive receipt
+currently also blocks a replacement materialization with
+`concurrent_activation`; the system stays fail-closed until explicit manual
+cleanup of that stale Mesa candidate. Gate 3 has no automatic replacement or
+cleanup path and never transfers candidate authority merely because all stored
+digests are internally consistent.
 
 If Mesa appears switched while the browser snapshot or durable pointer appears
 old (for example, crash after project-event commit but before cache rebuild),
@@ -2919,7 +3152,7 @@ provider evidence.
 | Save diff | edit one value, preview exact diff, save, see new `er_` and parent | immutable revision, backend diff, snapshot event, restart recovery all agree |
 | Reset | preview every changed field; confirm; see new `er_` and empty diffs | reset reloads model defaults, restores execution defaults, preserves history |
 | All-draft freshness | unrelated comment/actor event stales experiment/reset/issue/attestation drafts; reconnect/409 preserves bytes and requires explicit discard | original base and subject/head IDs remain visible; stale command has no durable effect and no silent rebase |
-| Pending-command races | reducer fixtures reconcile transport races and show immutable `failed_fenced` receipt separately from later current `ready` activation | Gate 2 v1 retains literal `:issue`/`:run`; Gate 3 v2 binds version/actual route; receipt outcome is never rewritten by later system reconciliation |
+| Pending-command races | before a terminal event, exact retry replays durable `202`; afterward it replays the one immutable ready or failed outcome | Gate 2 v1 retains literal `:issue`/`:run`; Gate 3 v2 binds version/actual route; terminal receipt/outcome bind the one terminal event, and failed plus reconciled events fail closed |
 | SSE contract | browser-v1 snapshot installs; next root replacement installs; gap/digest mismatch reloads the browser-v1 projection | exact new response/snapshot/patch/reload schemas verify while delivered Gate 2 `/snapshot` and `/events` bytes/tests remain unchanged |
 | Review separation | alignment and experiment cards show separate IDs/counts | projections equal independently derived subject policies |
 | Agent review | Agent endorsement visible only in Agent list | human project-owner count unchanged |
@@ -2935,7 +3168,7 @@ provider evidence.
 | Framed runtime handshake | compatible candidate is visible only after the project-bound read-only handshake; incompatible state leaves legacy usable | path/response project, runtime instance/protocol/source/pointer/descriptors/digest verify; unknown/cross-project are uniform, and restart/pointer/runtime/source TOCTOU before activation yields stale/incompatible with zero writes/materialization |
 | Traceability | every business row and known gap has a visible mapping/table row | brief/alignment/model/experiment tuple and refs verify exactly |
 | Swimlane/events | filtered work order sequence and accessible event rows agree | new event-projection/v1 pages retain order, identities, and complete source artifact; legacy unfiltered route remains unchanged at limit 1,000 |
-| Sparse event projection | zero-match page advances cursor and preserves source/digest; duplicate queries fail consistently | versioned projection route stops at limit match/5,000/EOF, discards no scanned match, preserves `scanned_through_sequence==next_after`, and alone uses the immutable byte-range cache plus atomic 512-event index |
+| Sparse event projection | zero-match page advances cursor and preserves source/digest; duplicate queries fail consistently | versioned projection route stops at limit match/5,000/EOF, discards no scanned match, preserves `scanned_through_sequence==next_after`, and alone uses the verified content-addressed source cache plus atomic 512-event index |
 | 100-turbine replay | depot, 100 actual-position turbines, 3 actual-position crews, queues, sampled day/phase/KPIs usable | <=120 embedded frames and every event-range digest, entity state, coordinate, aggregate, identity, and final sequence verify before success |
 | Replay sampling golden | sampled-day control starts at frame 0, includes 365 and 1095, and exposes list digest | exact v1 formula yields the documented 120-day list/digest and capture follows matching phase-50 event |
 | Replay binary binding | frame source-range details and frame-state digest are inspectable | complete line-aligned ranges are non-empty and partition the event bytes; raw/semantic SHA, final newline/whole SHA, sequence and state/KPI equality pass |
@@ -2953,7 +3186,7 @@ provider evidence.
 | Restart | reconnect uses a new session and browser-v1 routes to restore the same project/revisions/run | durable replay and artifact verification succeed without minted identities; Gate 2 routes stay byte-identical |
 | Current declarations | refreshed Brief/Model/Experiment/Run/Evidence and activation fence render without chat inference | browser-v1 projection carries bounded current records, exact `model_activation`, and eight terminal artifact declarations without altering Gate 2 projection |
 | Framed activation | owner activates from a target-free candidate digest, sees exact staged target tuple/fence until ready, then new brief/model/alignment/experiment subjects | immutable staged bytes→intent→target binding→commit event→CAS receipt→marker→reconcile event→command receipt verify with exact one-way refs; no record contains its referencing event digest |
-| Activation crash matrix | a projected `failed_fenced` state disables Start run; if system reconciliation later reaches ready, both historical failure and current readiness are visible | tests cover fresh-handshake→first-write boundary, restart/pointer/source and multi-project TOCTOU, staging/orphan quarantine, immutable receipts, and later CAS/reconcile without split brain |
+| Activation crash matrix | pre-terminal retry returns durable `202`; atomic marker/reconcile reaches ready, while terminal `failed_fenced` permanently disables Start run | tests cover fresh-handshake→first-write boundary, restart/pointer/source and multi-project TOCTOU, staging/orphan quarantine, atomic marker/event, recoverable post-terminal receipt/outcome leaves, conflicting terminal-event rejection, and same-instance CAS/reconcile without split brain |
 | Strict replay union | legacy run remains inspectable with playback-unavailable explanation | legacy frameless v1/v2 parse only exact old branches without `non_claims`; framed complete/unavailable and derived replay/label SHA parse only the exact new branch |
 | Corruption | stale visual is cleared and safe error shown | modified source/artifact/digest fails closed |
 | Accessibility | full workflow keyboard-operable; equivalent tables/text present | visual and accessible components receive the same normalized object |
@@ -2983,10 +3216,10 @@ for storage/protocol correctness:
   digests, cursor/query fixtures, and legacy golden regressions.
 - Client reducer tests own pending-command HTTP/SSE/reconnect/lost-response
   races, route-specific Gate 2 v1/Gate 3 v2 command-digest goldens,
-  immutable failed receipt versus later ready current projection, browser-v1
-  projection gap replacement,
-  draft staleness, and projection clearing. They use immutable action fixtures,
-  not a real browser.
+  durable pre-terminal `202`, exact terminal receipt/outcome replay, permanent
+  failed fencing, conflicting-terminal rejection, browser-v1 projection gap
+  replacement, draft staleness, and projection clearing. They use immutable
+  action fixtures, not a real browser.
 - Playwright is intentionally limited to: activation happy path plus backend
   restart; a visibly fenced activation failure; edit/reset/policy interaction;
   one verified 100-turbine/3-crew replay; and keyboard, reduced-motion,
@@ -3025,7 +3258,8 @@ independent review at each boundary:
    event-projection route while preserving Gate 2 events, the exact
    metadata-core→derived→final-terminal DAG, source-set digests,
    strict legacy/framed unions, corruption tests, and
-   bounded digest-keyed immutable byte-range/index caches.
+   the verified content-addressed source cache plus canonical 512-event sparse
+   index and bounded per-page parse window.
 4. **Add durable-project client/state.** Implement safe default discovery,
    explicit actor selection/project session attachment, authoritative
    `model_activation`, exact `/browser-projection/v1` and `/events/browser-v1`
