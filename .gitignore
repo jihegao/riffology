@@ -13,3 +13,4 @@ __pycache__/
 outputs/
 workspaces/
 .riff-workspaces/
+.riff-control/
