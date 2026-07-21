@@ -48,6 +48,11 @@ PROJECT_CANDIDATE_KEYS = {
     "phase", "current", "actor_ids", "issue_index", "attestation_index", "run_index",
     "created_at", "updated_at",
 }
+FRAMED_REVISION_SCHEMAS = {
+    "riff://evidence-studio/decision-brief/activation-v1",
+    "riff://evidence-studio/alignment-map/framed/v1",
+    "riff://evidence-studio/experiment-revision/framed/v1",
+}
 
 
 class ProjectEvidenceError(Gate2ContractError):
@@ -105,6 +110,28 @@ def _read(path: Path) -> dict[str, Any]:
         raise ProjectEvidenceError(f"committed evidence is not exact canonical bytes: {path.name}") from exc
     if not isinstance(value, dict):
         raise ProjectEvidenceError(f"committed evidence must be an object: {path.name}")
+    return value
+
+
+def _read_revision(path: Path) -> dict[str, Any]:
+    """Read a revision using its exact legacy/framed byte-level discriminator."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ProjectEvidenceError(f"committed evidence is unavailable: {path.name}")
+    data = path.read_bytes()
+    framed_bytes = data.endswith(b"\n")
+    if framed_bytes and data[:-1].endswith(b"\n"):
+        raise ProjectEvidenceError(f"committed revision has more than one final LF: {path.name}")
+    try:
+        value = require_canonical_json_v2_bytes(data[:-1] if framed_bytes else data)
+    except Exception as exc:
+        raise ProjectEvidenceError(f"committed evidence is not exact canonical bytes: {path.name}") from exc
+    if not isinstance(value, dict):
+        raise ProjectEvidenceError(f"committed evidence must be an object: {path.name}")
+    schema = value.get("schema_id")
+    if (schema in FRAMED_REVISION_SCHEMAS) is not framed_bytes:
+        branch = "framed" if schema in FRAMED_REVISION_SCHEMAS else "legacy"
+        raise ProjectEvidenceError(f"{branch} committed revision encoding is invalid: {path.name}")
     return value
 
 
@@ -425,15 +452,77 @@ def derive_policy_from_committed_events(
         superseded_by[prior_id] = record["attestation_id"]
 
     subjects = (expected_policy["alignment"]["subject_revision_id"], expected_policy["experiment"]["subject_revision_id"])
-    # Exact upstream revision records must themselves be committed at the base.
-    for subject, kind, relative, field, prefix in (
-        (subjects[0], "alignment_map_revision", Path("alignment/requirement-map/revisions") / subjects[0] / "revision.json", "alignment_map_revision_id", "amr_"),
-        (subjects[1], "experiment_revision", Path("experiments/revisions") / subjects[1] / "experiment.json", "experiment_revision_id", "er_"),
-    ):
-        record = _read(project_dir / relative)
-        computed = prefix + sha256_v2({key: value for key, value in record.items() if key != field})
-        if record.get("project_id") != project_id or record.get(field) != subject or computed != subject or (kind, subject, subject) not in refs:
-            raise ProjectEvidenceError("policy subject revision is not exact committed project evidence")
+    alignment_record = _read_revision(project_dir / "alignment" / "requirement-map" / "revisions" / subjects[0] / "revision.json")
+    experiment_record = _read_revision(project_dir / "experiments" / "revisions" / subjects[1] / "experiment.json")
+
+    def exact_revision(
+        record: dict[str, Any], *, subject: str, kind: str, id_field: str, id_prefix: str,
+        framed_schema: str, framed_keys: set[str], digest_field: str, digest_prefix: str,
+        legacy_id_field: str | None = None,
+    ) -> bool:
+        if record.get("schema_id") != framed_schema:
+            field = legacy_id_field or id_field
+            computed = id_prefix + sha256_v2({key: value for key, value in record.items() if key != field})
+            if record.get("project_id") != project_id or record.get(field) != subject or computed != subject or (kind, subject, subject) not in refs:
+                raise ProjectEvidenceError("legacy policy subject revision is not exact committed project evidence")
+            return False
+        _exact(record, framed_keys, f"framed {kind}")
+        id_preimage = {key: value for key, value in record.items() if key not in {id_field, digest_field}}
+        digest_preimage = {key: value for key, value in record.items() if key != digest_field}
+        digest = digest_prefix + sha256_v2(digest_preimage)
+        if (
+            record.get("schema_version") != 1
+            or record.get("canonical_json_version") != "riff-canonical-json-v2"
+            or record.get("project_id") != project_id
+            or record.get(id_field) != subject
+            or id_prefix + sha256_v2(id_preimage) != subject
+            or record.get(digest_field) != digest
+            or (kind, subject, digest) not in refs
+        ):
+            raise ProjectEvidenceError("framed policy subject revision is not exact committed project evidence")
+        return True
+
+    alignment_framed = exact_revision(
+        alignment_record, subject=subjects[0], kind="alignment_map_revision",
+        id_field="alignment_revision_id", id_prefix="amr_",
+        framed_schema="riff://evidence-studio/alignment-map/framed/v1",
+        framed_keys={"schema_id", "schema_version", "canonical_json_version", "project_id", "alignment_revision_id", "alignment_digest", "parent_alignment_revision_id", "brief_revision_id", "model_revision_id", "migration_rule", "mappings", "gaps", "source_refs", "created_by_actor_id", "created_at"},
+        digest_field="alignment_digest", digest_prefix="amd_",
+        legacy_id_field="alignment_map_revision_id",
+    )
+    experiment_framed = exact_revision(
+        experiment_record, subject=subjects[1], kind="experiment_revision",
+        id_field="experiment_revision_id", id_prefix="er_",
+        framed_schema="riff://evidence-studio/experiment-revision/framed/v1",
+        framed_keys={"schema_id", "schema_version", "canonical_json_version", "project_id", "parent_experiment_revision_id", "operation", "model_id", "model_revision_id", "brief_revision_id", "alignment_revision_id", "preset_id", "defaults_digest", "parameter_defaults", "parameters", "parameter_diff", "execution_defaults", "execution_values", "execution_diff", "runtime_profile", "copy_migration_rule", "created_by_actor_id", "created_at", "experiment_revision_id", "experiment_digest"},
+        digest_field="experiment_digest", digest_prefix="erd_",
+    )
+    if alignment_framed is not experiment_framed:
+        raise ProjectEvidenceError("policy subjects mix legacy and framed revision branches")
+    if alignment_framed:
+        brief_id = experiment_record.get("brief_revision_id")
+        if not isinstance(brief_id, str):
+            raise ProjectEvidenceError("framed experiment brief identity is invalid")
+        brief_record = _read_revision(project_dir / "alignment" / "decision-brief" / "revisions" / brief_id / "revision.json")
+        exact_revision(
+            brief_record, subject=brief_id, kind="decision_brief_revision",
+            id_field="decision_brief_revision_id", id_prefix="dbr_",
+            framed_schema="riff://evidence-studio/decision-brief/activation-v1",
+            framed_keys={"schema_id", "schema_version", "canonical_json_version", "project_id", "decision_brief_revision_id", "decision_brief_digest", "parent_brief_revision_id", "source_brief_revision_id", "operation", "copy_rule", "content", "created_by_actor_id", "created_at"},
+            digest_field="decision_brief_digest", digest_prefix="dbrd_",
+        )
+        from .gate2_contracts import validate_experiment_framed
+
+        validate_experiment_framed(experiment_record)
+        if (
+            current.get("decision_brief_revision_id") != brief_id
+            or current.get("model_revision_id") != experiment_record.get("model_revision_id")
+            or alignment_record.get("brief_revision_id") != brief_id
+            or alignment_record.get("model_revision_id") != current.get("model_revision_id")
+            or alignment_record.get("migration_rule") != "framed_alignment_rebind_v1"
+            or experiment_record.get("alignment_revision_id") != subjects[0]
+        ):
+            raise ProjectEvidenceError("framed policy subject lineage is inconsistent")
 
     def subject_policy(subject: str) -> dict[str, Any]:
         effective = [record for record in attestations if record["subject_revision_id"] == subject and record["attestation_id"] not in superseded_by]

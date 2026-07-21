@@ -13,8 +13,10 @@ import sys
 import time
 import traceback
 import types
+import uuid
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -67,6 +69,11 @@ LIMITS: dict[str, int] = {
     "run_log_bytes": 4 * 1024 * 1024,
     "total_success_artifact_bytes": 300 * 1024 * 1024,
 }
+FRAMED_LIMITS: dict[str, int] = {
+    **LIMITS,
+    "replay_manifest_bytes": 4 * 1024 * 1024,
+    "total_success_artifact_bytes": 304 * 1024 * 1024,
+}
 REQUIRED_SUCCESS_ARTIFACTS = {
     "request.json",
     "metadata.json",
@@ -104,6 +111,16 @@ def _atomic_canonical_v2(path: Path, payload: dict[str, Any]) -> None:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def _atomic_canonical_v2_lf(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    data = canonical_json_v2_bytes(payload) + b"\n"
+    with temporary.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
 RAW_EVENT_FIELDS = {
     "event_id",
     "sequence",
@@ -219,10 +236,11 @@ def _reject_symlink_components(path: str | Path) -> Path:
 def import_model(model_path: Path, *, source_bytes: bytes | None = None) -> type[Any]:
     if model_path.name != "model.py" or model_path.is_symlink() or not model_path.is_file():
         raise RuntimeError("reviewed wind bundle model.py is unavailable")
-    module_name = "riff_wind_turbine_reviewed_model"
+    module_name = f"riff_wind_turbine_reviewed_model_{uuid.uuid4().hex}"
     module = types.ModuleType(module_name)
     module.__file__ = str(model_path)
     module.__package__ = ""
+    previous = sys.modules.get(module_name)
     sys.modules[module_name] = module
     try:
         # Execute verified source bytes directly. Importlib's source loader
@@ -231,7 +249,10 @@ def import_model(model_path: Path, *, source_bytes: bytes | None = None) -> type
         source = model_path.read_bytes() if source_bytes is None else source_bytes
         exec(compile(source, str(model_path), "exec"), module.__dict__)
     finally:
-        sys.modules.pop(module_name, None)
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
     model_class = getattr(module, "WindTurbineMaintenanceModel", None)
     if model_class is None:
         raise RuntimeError("model revision does not export WindTurbineMaintenanceModel")
@@ -242,12 +263,15 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
     """Capture one verified immutable bundle snapshot for actual execution."""
 
     from .bundle import EXPECTED_FILES, model_revision_id
+    from .gate3_bundle import FRAMED_FILES, framed_revision_id
     from .verify_bundle import verify_bundle
 
     verified = verify_bundle(bundle_dir)
     if verified.get("model_revision_id") != expected_revision_id:
         raise RuntimeError("worker bundle verification returned the wrong model revision")
-    expected_paths = {"manifest.json", *EXPECTED_FILES}
+    branch = verified.get("bundle_branch", "legacy")
+    expected_bundle_files = FRAMED_FILES if branch == "framed" else EXPECTED_FILES
+    expected_paths = {"manifest.json", *expected_bundle_files}
     actual_paths = {
         path.relative_to(bundle_dir).as_posix()
         for path in bundle_dir.rglob("*")
@@ -265,18 +289,17 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
         manifest = json.loads(captured["manifest.json"])
     except json.JSONDecodeError as exc:
         raise RuntimeError("worker captured an invalid bundle manifest") from exc
-    if not isinstance(manifest, dict) or set(manifest) != {
-        "schema_version",
-        "model_id",
-        "model_revision_id",
-        "runtime_profile",
-        "files",
-    }:
+    expected_manifest_keys = (
+        {"schema_version", "bundle_protocol", "model_id", "model_revision_id", "runtime_profile", "files"}
+        if branch == "framed"
+        else {"schema_version", "model_id", "model_revision_id", "runtime_profile", "files"}
+    )
+    if not isinstance(manifest, dict) or set(manifest) != expected_manifest_keys:
         raise RuntimeError("worker captured a non-canonical bundle manifest contract")
     files = manifest["files"]
-    if not isinstance(files, dict) or set(files) != set(EXPECTED_FILES):
+    if not isinstance(files, dict) or set(files) != set(expected_bundle_files):
         raise RuntimeError("worker captured an invalid bundle file declaration set")
-    for relative in EXPECTED_FILES:
+    for relative in expected_bundle_files:
         declaration = files[relative]
         data = captured[relative]
         if (
@@ -285,7 +308,7 @@ def _capture_verified_bundle(bundle_dir: Path, expected_revision_id: str) -> tup
             or declaration.get("byte_length") != len(data)
         ):
             raise RuntimeError(f"worker bundle input drifted during capture: {relative}")
-    computed_revision = model_revision_id(files, manifest["runtime_profile"])
+    computed_revision = framed_revision_id(files) if branch == "framed" else model_revision_id(files, manifest["runtime_profile"])
     if (
         manifest.get("model_id") != MODEL_ID
         or manifest.get("model_revision_id") != expected_revision_id
@@ -358,7 +381,7 @@ def initial_metadata_v2(request: dict[str, Any], *, status: str = "queued") -> d
         "run_intent_digest": request["run_intent_digest"],
         "downstream_request_digest": request["downstream_request_digest"],
         "runtime_profile": request["runtime_profile"],
-        "limits": dict(LIMITS),
+        "limits": dict(FRAMED_LIMITS if request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay" else LIMITS),
         "event_truncated": False,
         "processed_scheduled_event_count": 0,
         "emitted_domain_event_count": 0,
@@ -420,7 +443,7 @@ def validate_request(request: object) -> dict[str, Any]:
 def validate_request_v2(request: object) -> dict[str, Any]:
     from .canonical_v2 import canonical_json_v2_bytes
     from .gate2_contracts import V2_IDENTITY_FIELDS as CONTRACT_IDENTITY_FIELDS
-    from .gate2_contracts import validate_experiment_v2, validate_run_admission
+    from .gate2_contracts import validate_experiment_for_run, validate_run_admission
     from .wind_contracts import validate_parameters
 
     if not isinstance(request, dict):
@@ -434,12 +457,13 @@ def validate_request_v2(request: object) -> dict[str, Any]:
     if set(request) != required:
         raise RuntimeError("v2 wind worker request keys do not match the exact contract")
     try:
-        experiment = validate_experiment_v2(request["experiment_document"])
+        experiment = validate_experiment_for_run(request["experiment_document"])
         admission = validate_run_admission(request["run_admission"])
         parameters = validate_parameters(request["parameters"])
     except Exception as exc:
         raise RuntimeError(f"v2 embedded document is invalid: {exc}") from exc
-    experiment_bytes = canonical_json_v2_bytes(experiment)
+    framed_schema = experiment.get("schema_id") == "riff://evidence-studio/experiment-revision/framed/v1"
+    experiment_bytes = canonical_json_v2_bytes(experiment) + (b"\n" if framed_schema else b"")
     if sha256_bytes(experiment_bytes) != request["experiment_sha256"]:
         raise RuntimeError("embedded experiment SHA does not match exact canonical bytes")
     if parameters != experiment["parameters"]:
@@ -461,7 +485,6 @@ def validate_request_v2(request: object) -> dict[str, Any]:
         or request["horizon_days"] != experiment["execution_values"]["horizon_days"]
         or request["warmup_days"] != experiment["execution_values"]["warmup_days"]
         or request["runtime_profile"] != experiment["runtime_profile"]
-        or request["runtime_profile"] != runtime_profile()
         or not isinstance(request["run_intent_digest"], str)
         or re.fullmatch(r"ri_[0-9a-f]{64}", request["run_intent_digest"]) is None
         or not isinstance(request["downstream_request_digest"], str)
@@ -469,6 +492,9 @@ def validate_request_v2(request: object) -> dict[str, Any]:
         or set(request["claim_labels"]) != set(REQUIRED_CLAIM_LABELS)
     ):
         raise RuntimeError("v2 request bindings are inconsistent")
+    framed_protocol = request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay"
+    if framed_schema is not framed_protocol:
+        raise RuntimeError("v2 request mixes legacy and framed experiment/runtime branches")
     canonical_json_v2_bytes(request)
     return request
 
@@ -745,6 +771,91 @@ def _write_event_batch(
     return expected_sequence, emitted_bytes, emitted
 
 
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _framed_artifact_id(run_id: str, name: str, digest: str) -> str:
+    from .canonical_v2 import sha256_v2
+    return "artifact_" + sha256_v2({"run_id": run_id, "name": name, "sha256": digest})
+
+
+def _framed_event_ranges(
+    path: Path,
+    frames: list[dict[str, Any]],
+    profile: dict[str, str],
+) -> tuple[list[dict[str, Any]], str, int]:
+    """Build exact contiguous raw/semantic partitions through sampled events."""
+
+    ranges: list[dict[str, Any]] = []
+    targets = {int(frame["through_event_sequence"]): index for index, frame in enumerate(frames)}
+    start_offset = 0
+    current_raw = bytearray()
+    current_semantic = hashlib.sha256()
+    first_sequence = 1
+    final_sequence = 0
+    offset = 0
+    whole_semantic = hashlib.sha256()
+    with path.open("rb") as handle:
+        for line in handle:
+            if not line.endswith(b"\n"):
+                raise RuntimeError("framed event source lacks a final newline")
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("framed event source contains invalid JSON") from exc
+            sequence = event.get("sequence")
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != final_sequence + 1:
+                raise RuntimeError("framed event source sequence is not gap-free")
+            semantic = canonical_json_v2_bytes(_semantic_event_projection(event, profile))
+            whole_semantic.update(semantic)
+            current_semantic.update(semantic)
+            current_raw.extend(line)
+            final_sequence = sequence
+            offset += len(line)
+            if sequence in targets:
+                frame_index = targets[sequence]
+                frame = frames[frame_index]
+                event_payload = event.get("payload")
+                if (
+                    event.get("event_type") != "daily_snapshot"
+                    or event.get("phase") != 50
+                    or int(event.get("sim_time_days", -1)) != frame["day"]
+                    or not isinstance(event_payload, dict)
+                    or event_payload.get("frame_state_sha256") != frame["frame_state_sha256"]
+                ):
+                    raise RuntimeError("sampled frame does not bind its phase-50 event")
+                value = {
+                    "range_index": len(ranges),
+                    "event_count": sequence - first_sequence + 1,
+                    "first_sequence": first_sequence,
+                    "last_sequence": sequence,
+                    "byte_offset": start_offset,
+                    "byte_length": len(current_raw),
+                    "raw_range_sha256": hashlib.sha256(current_raw).hexdigest(),
+                    "semantic_range_sha256": current_semantic.hexdigest(),
+                }
+                ranges.append(value)
+                frame["source_event_range_index"] = value["range_index"]
+                current_raw.clear()
+                current_semantic = hashlib.sha256()
+                start_offset = offset
+                first_sequence = sequence + 1
+    if current_raw or not frames or len(ranges) != len(frames) or start_offset != path.stat().st_size:
+        raise RuntimeError("sampled frame ranges do not partition the event source")
+    return ranges, whole_semantic.hexdigest(), final_sequence
+
+
+def _framed_source_set_digest(manifest_files: dict[str, Any]) -> str:
+    from .canonical_v2 import sha256_v2
+    names = (
+        "model-spec.json", "parameter-schema.json", "execution-field-schema.json",
+        "metric-schema.json", "visualization.json", "traceability.json",
+        "defaults/wind-turbine-maintenance-demo-v1.json", "provenance.json",
+    )
+    return "viewsrc_" + sha256_v2({name: manifest_files[name]["sha256"] for name in names})
+
+
 def execute(
     model_path: Path,
     request_path: Path,
@@ -791,6 +902,11 @@ def execute(
         raise RuntimeError("reviewed model manifest file declarations are unavailable")
     metric_schema = json.loads(captured_bundle["metric-schema.json"])
     _metric_contract(metric_schema)
+    is_framed = manifest.get("bundle_protocol") == "wind-turbine-maintenance-bundle-v2-framed"
+    if is_framed and request["runtime_profile"].get("model_protocol_version") != "wind-turbine-maintenance-v2-framed-replay":
+        raise RuntimeError("framed bundle requires the exact framed runtime profile")
+    if not is_framed and request["runtime_profile"].get("model_protocol_version") == "wind-turbine-maintenance-v2-framed-replay":
+        raise RuntimeError("legacy bundle cannot execute a framed experiment")
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"
     metadata = read_json(metadata_path) if metadata_path.exists() else (
@@ -802,7 +918,8 @@ def execute(
     canonical_request = canonical_json_v2_bytes(request) if is_v2 else canonical_json_bytes(request)
     if recorded_request_digest != sha256_bytes(canonical_request):
         raise RuntimeError("worker metadata does not bind the admitted request content")
-    metadata.update({"status": "running", "started_at": time.time()})
+    started_at_text = _iso_now()
+    metadata.update({"status": "running", "started_at": time.time(), "started_at_iso": started_at_text})
     atomic_json(metadata_path, metadata)
 
     cancel_marker = output_dir / "cancel_requested"
@@ -835,12 +952,42 @@ def execute(
                 raise CancelledRun("cancel marker observed")
 
         model_class = import_model(model_path, source_bytes=captured_bundle["model.py"])
+        replay_frames: list[dict[str, Any]] = []
+        framed_sample_days: list[int] = []
+        if is_framed and int(request["parameters"]["turbine_count"]) <= 100 and int(request["parameters"]["crew_count"]) <= 50:
+            from .gate3_contracts import sample_days
+            framed_sample_days = sample_days(request["horizon_days"], request["warmup_days"])
+            worst_case = len(framed_sample_days) * (
+                6_000 + 140 * int(request["parameters"]["turbine_count"]) + 180 * int(request["parameters"]["crew_count"])
+            )
+            if worst_case > FRAMED_LIMITS["replay_manifest_bytes"]:
+                raise WorkerLimitError("framed replay manifest preflight limit reached")
+
+        def capture_replay(raw_frame: dict[str, Any], through_sequence: int) -> None:
+            frame = dict(raw_frame)
+            frame["identity"] = {key: request[key] for key in V2_IDENTITY_FIELDS}
+            frame["through_event_sequence"] = through_sequence
+            replay_frames.append(frame)
+
+        model_kwargs: dict[str, Any] = {
+            "parameters": request["parameters"],
+            "horizon_days": request["horizon_days"],
+            "warmup_days": request["warmup_days"],
+            "seed": request["seed"],
+            "event_sink": stream_event,
+        }
+        if is_framed:
+            model_kwargs.update({
+                "replay_sample_days": set(framed_sample_days),
+                "replay_sink": capture_replay if framed_sample_days else None,
+                "replay_identity": {
+                    "model_revision_id": request["model_revision_id"],
+                    "experiment_revision_id": request["experiment_revision_id"],
+                    "preset_id": request["preset_id"],
+                },
+            })
         model = model_class(
-            parameters=request["parameters"],
-            horizon_days=request["horizon_days"],
-            warmup_days=request["warmup_days"],
-            seed=request["seed"],
-            event_sink=stream_event,
+            **model_kwargs,
         )
         if kpi_state["writer"] is None:
             raise RuntimeError("model initialization did not emit the required day-zero snapshot")
@@ -895,20 +1042,79 @@ def execute(
         summary["trust_label"] = request["trust_label"]
         summary["workflow_policy"] = request["workflow_policy"]
     summary_path = output_dir / "summary.json"
-    atomic_json(summary_path, summary)
+    (_atomic_canonical_v2_lf if is_framed else atomic_json)(summary_path, summary)
 
     canonical_event_sha = semantic_event_digest.hexdigest()
-    replay = {
-        **_identity(request),
-        "claim_labels": request["claim_labels"],
-        "source_artifact": "domain-events.jsonl",
-        "source_sha256": sha256_file(events_path),
-        "canonical_event_sha256": canonical_event_sha,
-        "event_count": emitted_count,
-        "frame_policy": {"kind": "daily_projection", "full_event_log_retained": True},
-    }
+    if is_framed:
+        from .gate3_contracts import CLAIM_LABELS, EMPTY_ARRAY_SHA256, NON_CLAIMS, sample_days_sha256
+        replay_identity = {key: request[key] for key in V2_IDENTITY_FIELDS}
+        event_source = {
+            "logical_name": "domain-events.jsonl",
+            "byte_length": events_path.stat().st_size,
+            "event_count": emitted_count,
+            "raw_sha256": sha256_file(events_path),
+            "semantic_sha256": canonical_event_sha,
+            "final_newline": True,
+        }
+        if framed_sample_days:
+            if len(replay_frames) != len(framed_sample_days):
+                raise RuntimeError("model did not capture every required sampled day")
+            replay_frames.sort(key=lambda item: item["day"])
+            for index, frame in enumerate(replay_frames):
+                frame["frame_index"] = index
+            ranges, range_semantic, range_count = _framed_event_ranges(events_path, replay_frames, request["runtime_profile"])
+            if range_semantic != canonical_event_sha or range_count != emitted_count:
+                raise RuntimeError("framed range semantic digest differs from complete event source")
+            replay = {
+                "schema_id": "riff://wind-turbine-maintenance/replay-manifest/framed/v1",
+                "schema_version": 1,
+                "canonical_json_version": "riff-canonical-json-v2",
+                "manifest_kind": "complete",
+                "identity": replay_identity,
+                "generator_version": "wind-worker-sampled-replay-v1",
+                "sampling_algorithm": "wind-replay-sample-days-v1",
+                "declared_population": {"turbine_count": request["parameters"]["turbine_count"], "crew_count": request["parameters"]["crew_count"]},
+                "event_source": event_source,
+                "sample_days": framed_sample_days,
+                "sample_days_sha256": sample_days_sha256(framed_sample_days),
+                "frame_count": len(replay_frames),
+                "source_event_ranges": ranges,
+                "frames": replay_frames,
+                "claim_labels": CLAIM_LABELS,
+                "non_claims": NON_CLAIMS,
+            }
+        else:
+            replay = {
+                "schema_id": "riff://wind-turbine-maintenance/replay-manifest/framed/v1",
+                "schema_version": 1,
+                "canonical_json_version": "riff-canonical-json-v2",
+                "manifest_kind": "unavailable_population_limit",
+                "identity": replay_identity,
+                "generator_version": "wind-worker-sampled-replay-v1",
+                "sampling_algorithm": "wind-replay-sample-days-v1",
+                "declared_population": {"turbine_count": request["parameters"]["turbine_count"], "crew_count": request["parameters"]["crew_count"]},
+                "event_source": event_source,
+                "unavailable_reason": "population_exceeds_frame_contract",
+                "sample_days": [],
+                "sample_days_sha256": EMPTY_ARRAY_SHA256,
+                "frame_count": 0,
+                "source_event_ranges": [],
+                "frames": [],
+                "claim_labels": CLAIM_LABELS,
+                "non_claims": NON_CLAIMS,
+            }
+    else:
+        replay = {
+            **_identity(request),
+            "claim_labels": request["claim_labels"],
+            "source_artifact": "domain-events.jsonl",
+            "source_sha256": sha256_file(events_path),
+            "canonical_event_sha256": canonical_event_sha,
+            "event_count": emitted_count,
+            "frame_policy": {"kind": "daily_projection", "full_event_log_retained": True},
+        }
     replay_path = output_dir / "replay-manifest.json"
-    atomic_json(replay_path, replay)
+    (_atomic_canonical_v2_lf if is_framed else atomic_json)(replay_path, replay)
 
     daily_semantic = _daily_semantic_digest(kpis_path)
     summary_projection = _semantic_without_run_context(summary)
@@ -933,7 +1139,85 @@ def execute(
         "views": ["entity_state", "process_swimlane", "business_traceability", "two_dimensional_replay"],
     }
     derived_path = output_dir / "derived-views-manifest.json"
-    atomic_json(derived_path, derived)
+    if is_framed:
+        from .canonical_v2 import sha256_v2
+        from .gate3_contracts import CLAIM_LABELS, NON_CLAIMS, metadata_core_digest
+        completed_at_text = _iso_now()
+        core_projection = {
+            "schema_id": "riff://wind-turbine-maintenance/metadata-core-projection/v1",
+            "schema_version": 1,
+            "canonical_json_version": "riff-canonical-json-v2",
+            **{key: request[key] for key in V2_IDENTITY_FIELDS},
+            "run_intent_digest": request["run_intent_digest"],
+            "request_digest": sha256_file(request_path),
+            "experiment_digest": request["experiment_sha256"],
+            "runtime_profile": request["runtime_profile"],
+            "terminal_status": "succeeded",
+            "started_at": started_at_text,
+            "completed_at": completed_at_text,
+        }
+        core_digest = metadata_core_digest(core_projection)
+        metadata_artifact = {
+            "schema_id": "riff://wind-turbine-maintenance/metadata/framed/v1",
+            "schema_version": 1,
+            "canonical_json_version": "riff-canonical-json-v2",
+            "metadata_kind": "framed_terminal_core",
+            "metadata_core_projection": core_projection,
+            "metadata_core_digest": core_digest,
+        }
+        _atomic_canonical_v2_lf(metadata_path, metadata_artifact)
+        input_paths = {
+            "request.json": request_path,
+            "daily-kpis.csv": kpis_path,
+            "domain-events.jsonl": events_path,
+            "summary.json": summary_path,
+            "replay-manifest.json": replay_path,
+        }
+        artifacts_input = {}
+        for name, path in input_paths.items():
+            digest = sha256_file(path)
+            artifacts_input[name] = {"artifact_id": _framed_artifact_id(request["run_id"], name, digest), "sha256": digest}
+        event_projection = {
+            "projection_kind": "filtered_domain_events", "projection_schema_version": 1,
+            "run_id": request["run_id"], "domain_events_sha256": artifacts_input["domain-events.jsonl"]["sha256"], "event_count": emitted_count,
+        }
+        kpi_projection = {
+            "projection_kind": "daily_kpis", "projection_schema_version": 1, "run_id": request["run_id"],
+            "daily_kpis_sha256": artifacts_input["daily-kpis.csv"]["sha256"], "summary_sha256": artifacts_input["summary.json"]["sha256"],
+        }
+        replay_projection = {
+            "projection_kind": "sampled_replay", "projection_schema_version": 1, "run_id": request["run_id"],
+            "replay_manifest_sha256": artifacts_input["replay-manifest.json"]["sha256"], "manifest_kind": replay["manifest_kind"], "frame_count": replay["frame_count"],
+        }
+        label_projection = {
+            "projection_kind": "run_labels", "projection_schema_version": 1, "run_id": request["run_id"],
+            "summary_sha256": artifacts_input["summary.json"]["sha256"], "replay_manifest_sha256": artifacts_input["replay-manifest.json"]["sha256"],
+            "claim_labels": CLAIM_LABELS, "non_claims": NON_CLAIMS,
+        }
+        derived = {
+            "schema_id": "riff://wind-turbine-maintenance/derived-views-manifest/framed/v1",
+            "schema_version": 1,
+            "canonical_json_version": "riff-canonical-json-v2",
+            "manifest_kind": "framed_evidence_views",
+            "identity": replay_identity,
+            "generator": {"generator_id": "wind-evidence-derived-views", "generator_version": "wind-evidence-derived-views-v1"},
+            "inputs": {
+                "metadata_core": {"metadata_core_digest": core_digest},
+                "model_sources": {"model_revision_id": request["model_revision_id"], "source_set_digest": _framed_source_set_digest(manifest_files)},
+                "artifacts": artifacts_input,
+            },
+            "claim_labels": CLAIM_LABELS,
+            "non_claims": NON_CLAIMS,
+            "projection_digests": {
+                "event_projection_sha256": sha256_v2(event_projection),
+                "kpi_projection_sha256": sha256_v2(kpi_projection),
+                "replay_projection_sha256": sha256_v2(replay_projection),
+                "label_projection_sha256": sha256_v2(label_projection),
+            },
+        }
+        _atomic_canonical_v2_lf(derived_path, derived)
+    else:
+        atomic_json(derived_path, derived)
 
     processed_count = int(final_snapshot.get("processed_scheduled_event_count", emitted_count))
     digests = {
@@ -958,8 +1242,13 @@ def execute(
     if any(path.is_symlink() or not path.is_file() for path in entries):
         raise RuntimeError("successful worker artifact set contains an unsafe entry")
     total_size = sum((output_dir / name).stat().st_size for name in REQUIRED_SUCCESS_ARTIFACTS)
-    if total_size > LIMITS["total_success_artifact_bytes"]:
+    active_limits = FRAMED_LIMITS if is_framed else LIMITS
+    if replay_path.stat().st_size > active_limits.get("replay_manifest_bytes", 2**63 - 1):
+        raise WorkerLimitError("replay manifest byte limit reached")
+    if total_size > active_limits["total_success_artifact_bytes"]:
         raise WorkerLimitError("total successful artifact byte limit reached")
+    if is_framed:
+        return summary
     metadata = read_json(metadata_path)
     metadata.update(
         {

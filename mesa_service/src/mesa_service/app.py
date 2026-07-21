@@ -10,7 +10,10 @@ from typing import Any
 
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .canonical_v2 import CanonicalV2Error, canonical_json_v2_bytes, strict_json_loads_v2
 
 from .service import MesaService, ServiceError
 
@@ -54,16 +57,50 @@ def create_app(
     app = FastAPI(title="Riff Mesa execution service", version="0.1.0", lifespan=lifespan)
     app.state.mesa_service = service
 
+    def _one_header(request: Request, name: str, expected: str | None = None) -> str:
+        values = request.headers.getlist(name)
+        if len(values) != 1 or (expected is not None and values[0] != expected):
+            raise ServiceError(422, "invalid_activation_protocol", "internal protocol headers are invalid")
+        return values[0]
+
+    async def _internal_json(request: Request, activation_id: str, *, if_match: bool = False) -> tuple[dict[str, Any], str | None]:
+        if request.url.query:
+            raise ServiceError(422, "invalid_activation_protocol", "internal protocol query keys are invalid")
+        _one_header(request, "content-type", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-activation-v1")
+        _one_header(request, "idempotency-key", activation_id)
+        match = _one_header(request, "if-match") if if_match else None
+        try:
+            body = await request.body()
+            value = strict_json_loads_v2(body)
+            if canonical_json_v2_bytes(value) != body or not isinstance(value, dict):
+                raise CanonicalV2Error("body is not exact canonical JSON")
+        except CanonicalV2Error as exc:
+            raise ServiceError(422, "invalid_activation_protocol", "internal JSON is invalid") from exc
+        return value, match
+
     @app.exception_handler(ServiceError)
-    async def service_error(_: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": {"code": exc.code, "message": exc.message, "details": {}}})
+    async def service_error(request: Request, exc: ServiceError) -> Response:
+        content = {"error": {"code": exc.code, "message": exc.message, "details": {}}}
+        if request.url.path.startswith("/internal/"):
+            return Response(status_code=exc.status_code, content=canonical_json_v2_bytes(content), media_type="application/json")
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)
-    async def request_validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"code": "invalid_request", "message": "request does not match the API contract", "details": {}}},
-        )
+    async def request_validation_error(request: Request, __: RequestValidationError) -> Response:
+        content = {"error": {"code": "invalid_request", "message": "request does not match the API contract", "details": {}}}
+        if request.url.path.startswith("/internal/"):
+            return Response(status_code=422, content=canonical_json_v2_bytes(content), media_type="application/json")
+        return JSONResponse(status_code=422, content=content)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if request.url.path.startswith("/internal/"):
+            code = "method_not_allowed" if exc.status_code == 405 else "resource_not_found"
+            message = "internal method is not allowed" if exc.status_code == 405 else "internal resource was not found"
+            content = {"error": {"code": code, "message": message, "details": {}}}
+            return Response(status_code=exc.status_code, content=canonical_json_v2_bytes(content), media_type="application/json")
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
     @app.put("/v1/projects/{project_id}/model")
     async def load_model(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +182,78 @@ def create_app(
     async def get_artifact(project_id: str, run_id: str, name: str) -> FileResponse:
         path, media_type = service.get_artifact(project_id, run_id, name)
         return FileResponse(path, media_type=media_type, filename=name)
+
+    @app.get("/internal/projects/{project_id}/wind/runtime-candidate-handshake/v1")
+    async def gate3_runtime_handshake(project_id: str, request: Request) -> Response:
+        if request.url.query or await request.body():
+            raise ServiceError(422, "invalid_activation_protocol", "handshake accepts no query or body")
+        _one_header(request, "accept", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-runtime-handshake-v1")
+        return Response(content=canonical_json_v2_bytes(service.gate3_runtime_handshake(project_id)), media_type="application/json")
+
+    @app.get("/internal/projects/{project_id}/wind/framed-candidate-descriptor/v1")
+    async def gate3_candidate_descriptor(project_id: str, request: Request) -> Response:
+        if request.url.query or await request.body():
+            raise ServiceError(422, "invalid_activation_protocol", "descriptor accepts no query or body")
+        _one_header(request, "accept", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-runtime-handshake-v1")
+        return Response(content=canonical_json_v2_bytes(service.gate3_candidate_descriptor(project_id)), media_type="application/json")
+
+    @app.post("/internal/wind/framed-candidates/materialize")
+    async def gate3_materialize_candidate(request: Request) -> Response:
+        raw = await request.body()
+        try:
+            preliminary = strict_json_loads_v2(raw)
+            activation_id = preliminary.get("activation_id") if isinstance(preliminary, dict) else None
+        except CanonicalV2Error:
+            activation_id = None
+        if not isinstance(activation_id, str):
+            raise ServiceError(422, "invalid_activation_protocol", "activation identity is invalid")
+        payload, _ = await _internal_json(request, activation_id)
+        status, receipt = service.gate3_materialize_candidate(payload, activation_id)
+        return Response(status_code=status, content=canonical_json_v2_bytes(receipt), media_type="application/json")
+
+    @app.get("/internal/wind/framed-candidates/{activation_id}")
+    async def gate3_capture_candidate(activation_id: str, request: Request) -> Response:
+        if request.url.query or await request.body():
+            raise ServiceError(422, "invalid_activation_protocol", "capture accepts no query or body")
+        _one_header(request, "accept", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-activation-v1")
+        _one_header(request, "idempotency-key", activation_id)
+        return Response(content=canonical_json_v2_bytes(service.gate3_capture_candidate(activation_id)), media_type="application/json")
+
+    @app.get("/internal/projects/{project_id}/wind/framed-candidates/{activation_id}/byte-capture/v1")
+    async def gate3_capture_candidate_bytes(project_id: str, activation_id: str, request: Request) -> Response:
+        if request.url.query or await request.body():
+            raise ServiceError(422, "invalid_activation_protocol", "byte capture accepts no query or body")
+        _one_header(request, "accept", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-activation-v1")
+        _one_header(request, "idempotency-key", activation_id)
+        match = _one_header(request, "if-match")
+        value = service.gate3_capture_candidate_bytes(project_id, activation_id, match)
+        return Response(content=canonical_json_v2_bytes(value), media_type="application/json")
+
+    @app.post("/internal/wind/active/cas")
+    async def gate3_active_cas(request: Request) -> Response:
+        raw = await request.body()
+        try:
+            preliminary = strict_json_loads_v2(raw)
+            activation_id = preliminary.get("activation_id") if isinstance(preliminary, dict) else None
+        except CanonicalV2Error:
+            activation_id = None
+        if not isinstance(activation_id, str):
+            raise ServiceError(422, "invalid_activation_protocol", "activation identity is invalid")
+        payload, match = await _internal_json(request, activation_id, if_match=True)
+        return Response(content=canonical_json_v2_bytes(service.gate3_cas_active(payload, activation_id, match or "")), media_type="application/json")
+
+    @app.get("/internal/wind/activations/{activation_id}/status")
+    async def gate3_activation_status(activation_id: str, request: Request) -> Response:
+        if request.url.query or await request.body():
+            raise ServiceError(422, "invalid_activation_protocol", "status accepts no query or body")
+        _one_header(request, "accept", "application/json")
+        _one_header(request, "x-riff-internal-protocol", "wind-activation-v1")
+        _one_header(request, "idempotency-key", activation_id)
+        return Response(content=canonical_json_v2_bytes(service.gate3_activation_status(activation_id)), media_type="application/json")
 
     return app
 

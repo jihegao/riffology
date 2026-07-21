@@ -27,6 +27,7 @@ from .wind_worker import (
     LIMITS as WIND_LIMITS,
     MODEL_ID as WIND_MODEL_ID,
     REQUIRED_SUCCESS_ARTIFACTS as WIND_ARTIFACTS,
+    V2_IDENTITY_FIELDS,
     build_run_request,
     initial_metadata,
 )
@@ -197,11 +198,70 @@ class MesaService:
         self.worker_delay_seconds = worker_delay_seconds  # test-only hook, not an HTTP input
         self.owner_lease_seconds = max(0.25, float(owner_lease_seconds))
         self.owner_instance_id = f"mesa_owner_{uuid.uuid4().hex}"
+        from .gate3_activation import Gate3ActivationStore
+        self.gate3_activation = Gate3ActivationStore(self)
         self.active_runs: dict[str, ActiveRun] = {}
         self._poll_lock = threading.Lock()
+        self._run_locks_guard = threading.Lock()
+        self._in_process_run_locks: dict[tuple[str, str], threading.RLock] = {}
         self.projects_root.mkdir(parents=True, exist_ok=True)
         self._safe_path(self.projects_root)
+        self.gate3_activation.recover_switches()
         self._recover_indexed_gate2_receipts()
+
+    def _gate3_fault_hook(self, _: str) -> None:
+        """Monkeypatch-only crash seam for receipt-first active CAS recovery."""
+
+    def gate3_runtime_handshake(self, project_id: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            return self.gate3_activation.handshake(project_id)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_candidate_descriptor(self, project_id: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            return self.gate3_activation.descriptor(project_id)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_materialize_candidate(self, payload: object, activation_id: str) -> tuple[int, dict[str, Any]]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            return self.gate3_activation.materialize(payload, activation_id)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_capture_candidate(self, activation_id: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            project_id = self.gate3_activation.project_for_activation(activation_id)
+            return self.gate3_activation.capture(project_id, activation_id)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_capture_candidate_bytes(self, project_id: str, activation_id: str, if_match: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            return self.gate3_activation.byte_capture(project_id, activation_id, if_match)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_cas_active(self, payload: object, activation_id: str, if_match: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            return self.gate3_activation.cas(payload, activation_id, if_match)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
+
+    def gate3_activation_status(self, activation_id: str) -> dict[str, Any]:
+        from .gate3_activation import ActivationProtocolError
+        try:
+            project_id = self.gate3_activation.project_for_activation(activation_id)
+            return self.gate3_activation.status(project_id, activation_id)
+        except ActivationProtocolError as exc:
+            raise ServiceError(exc.status_code, exc.code, exc.message) from exc
 
     def _recover_indexed_gate2_receipts(self) -> None:
         """Reconcile only projects named by the backend's durable workspace cache."""
@@ -282,15 +342,19 @@ class MesaService:
 
     @contextmanager
     def _run_lock(self, project_dir: Path, run_id: str):
+        key = (str(project_dir), run_id)
+        with self._run_locks_guard:
+            in_process_lock = self._in_process_run_locks.setdefault(key, threading.RLock())
         lock_dir = self._safe_path(project_dir / "mesa-run-locks")
         lock_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._safe_path(lock_dir / f"{run_id}.lock")
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with in_process_lock:
+            with lock_path.open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _validate_id(self, value: str, kind: str) -> str:
         if not SAFE_ID.fullmatch(value):
@@ -366,7 +430,13 @@ class MesaService:
         self._safe_path(path)
         if not path.is_file():
             raise ServiceError(500, "corrupt_run", "run metadata is unavailable")
-        return self._read_workspace_json(path)
+        value = self._read_workspace_json(path)
+        if value.get("metadata_kind") == "framed_terminal_core":
+            core = value.get("metadata_core_projection")
+            if not isinstance(core, dict) or core.get("terminal_status") != "succeeded":
+                raise ServiceError(500, "corrupt_run", "framed run metadata core is invalid")
+            return {**core, "status": "succeeded", "metadata_kind": "framed_terminal_core", "metadata_core_digest": value.get("metadata_core_digest")}
+        return value
 
     def _write_metadata(self, run_dir: Path, **updates: Any) -> dict[str, Any]:
         path = self._safe_path(run_dir / "metadata.json")
@@ -775,8 +845,9 @@ class MesaService:
     ) -> dict[str, Any] | None:
         prior = self._read_gate2_owner_lease(paths["lease"], receipt)
         now = int(time.time() * 1000)
-        if prior is not None and prior["owner_instance_id"] != self.owner_instance_id and prior["expires_at_unix_ms"] > now:
-            return None
+        if prior is not None and prior["expires_at_unix_ms"] > now:
+            if prior["owner_instance_id"] != self.owner_instance_id or prior["ownership_epoch"] != ownership_epoch:
+                return None
         return self._write_gate2_owner_lease(
             paths["lease"], receipt, ownership_epoch=ownership_epoch, prior=prior,
         )
@@ -848,7 +919,14 @@ class MesaService:
             context["deadline_at_unix_ms"] = renewed["deadline_at_unix_ms"]
             return True
 
-    def _read_gate2_canonical(self, path: Path, validator: Any, name: str) -> tuple[dict[str, Any], bytes]:
+    def _read_gate2_canonical(
+        self,
+        path: Path,
+        validator: Any,
+        name: str,
+        *,
+        framed_final_lf: bool = False,
+    ) -> tuple[dict[str, Any], bytes]:
         from .gate2_contracts import Gate2ContractError, validate_v2_record_bytes
 
         candidate = self._safe_path(path)
@@ -856,10 +934,45 @@ class MesaService:
             raise ServiceError(422, "run_admission_mismatch", f"{name} is unavailable")
         data = candidate.read_bytes()
         try:
-            value = validate_v2_record_bytes(data, validator)
+            if framed_final_lf:
+                if not data.endswith(b"\n") or data[:-1].endswith(b"\n"):
+                    raise Gate2ContractError("framed record must end in exactly one LF")
+                value = validate_v2_record_bytes(data[:-1], validator)
+            else:
+                value = validate_v2_record_bytes(data, validator)
         except Gate2ContractError as exc:
             raise ServiceError(422, "run_admission_mismatch", f"{name} is invalid: {exc}") from exc
         return value, data
+
+    def _read_framed_activation_lineage(
+        self,
+        path: Path,
+        *,
+        keys: set[str],
+        id_field: str,
+        id_prefix: str,
+        digest_field: str,
+        digest_prefix: str,
+    ) -> dict[str, Any]:
+        from .canonical_v2 import require_canonical_json_v2_bytes, sha256_v2
+
+        candidate = self._safe_path(path)
+        if not candidate.is_file() or candidate.is_symlink():
+            raise ServiceError(422, "run_admission_mismatch", f"framed {id_field} record is unavailable")
+        try:
+            data = candidate.read_bytes()
+            if not data.endswith(b"\n") or data[:-1].endswith(b"\n"):
+                raise ValueError("framed activation record must end in exactly one LF")
+            record = require_canonical_json_v2_bytes(data[:-1])
+        except Exception as exc:
+            raise ServiceError(422, "run_admission_mismatch", f"framed {id_field} bytes are invalid") from exc
+        if not isinstance(record, dict) or set(record) != keys:
+            raise ServiceError(422, "run_admission_mismatch", f"framed {id_field} keyset is invalid")
+        id_preimage = {key: nested for key, nested in record.items() if key not in {id_field, digest_field}}
+        digest_preimage = {key: nested for key, nested in record.items() if key != digest_field}
+        if record[id_field] != id_prefix + sha256_v2(id_preimage) or record[digest_field] != digest_prefix + sha256_v2(digest_preimage):
+            raise ServiceError(422, "run_admission_mismatch", f"framed {id_field} digest is invalid")
+        return record
 
     def _capture_gate2_inputs(
         self,
@@ -875,7 +988,7 @@ class MesaService:
             Gate2ContractError,
             build_v2_worker_request,
             downstream_request_digest,
-            validate_experiment_v2,
+            validate_experiment_for_run,
             validate_policy_snapshot,
             validate_run_admission,
             validate_run_intent,
@@ -912,11 +1025,48 @@ class MesaService:
             project_dir / "experiments" / "revisions" / experiment_revision_id / "experiment.json"
         )
         intent_dir = self._safe_path(project_dir / "run-intents" / run_id)
-        experiment, experiment_bytes = self._read_gate2_canonical(experiment_path, validate_experiment_v2, "experiment revision")
+        framed_activation = verified_bundle.get("bundle_branch") == "framed"
+        experiment, experiment_bytes = self._read_gate2_canonical(
+            experiment_path,
+            validate_experiment_for_run,
+            "experiment revision",
+            framed_final_lf=framed_activation,
+        )
         admission, admission_bytes = self._read_gate2_canonical(intent_dir / "admission.json", validate_run_admission, "run admission")
         intent, intent_bytes = self._read_gate2_canonical(intent_dir / "intent.json", validate_run_intent, "run intent")
         policy, policy_bytes = self._read_gate2_canonical(intent_dir / "policy-snapshot.json", validate_policy_snapshot, "policy snapshot")
         experiment_sha256 = hashlib.sha256(experiment_bytes).hexdigest()
+        if experiment.get("schema_id") == "riff://evidence-studio/experiment-revision/framed/v1":
+            brief_id = experiment["brief_revision_id"]
+            alignment_id = experiment["alignment_revision_id"]
+            brief = self._read_framed_activation_lineage(
+                project_dir / "alignment" / "decision-brief" / "revisions" / brief_id / "revision.json",
+                keys={"schema_id", "schema_version", "canonical_json_version", "project_id", "decision_brief_revision_id", "decision_brief_digest", "parent_brief_revision_id", "source_brief_revision_id", "operation", "copy_rule", "content", "created_by_actor_id", "created_at"},
+                id_field="decision_brief_revision_id", id_prefix="dbr_", digest_field="decision_brief_digest", digest_prefix="dbrd_",
+            )
+            alignment = self._read_framed_activation_lineage(
+                project_dir / "alignment" / "requirement-map" / "revisions" / alignment_id / "revision.json",
+                keys={"schema_id", "schema_version", "canonical_json_version", "project_id", "alignment_revision_id", "alignment_digest", "parent_alignment_revision_id", "brief_revision_id", "model_revision_id", "migration_rule", "mappings", "gaps", "source_refs", "created_by_actor_id", "created_at"},
+                id_field="alignment_revision_id", id_prefix="amr_", digest_field="alignment_digest", digest_prefix="amd_",
+            )
+            if (
+                brief.get("schema_id") != "riff://evidence-studio/decision-brief/activation-v1"
+                or brief.get("schema_version") != 1
+                or brief.get("canonical_json_version") != "riff-canonical-json-v2"
+                or brief.get("project_id") != project_id
+                or brief.get("decision_brief_revision_id") != brief_id
+                or brief.get("operation") != "activation_copy"
+                or brief.get("copy_rule") != "exact_content_activation_copy_v1"
+                or alignment.get("schema_id") != "riff://evidence-studio/alignment-map/framed/v1"
+                or alignment.get("schema_version") != 1
+                or alignment.get("canonical_json_version") != "riff-canonical-json-v2"
+                or alignment.get("project_id") != project_id
+                or alignment.get("alignment_revision_id") != alignment_id
+                or alignment.get("brief_revision_id") != brief_id
+                or alignment.get("model_revision_id") != model_revision_id
+                or alignment.get("migration_rule") != "framed_alignment_rebind_v1"
+            ):
+                raise ServiceError(422, "run_admission_mismatch", "framed brief/alignment lineage is inconsistent")
         if canonical_json_v2_bytes(admission["policy_snapshot"]) != policy_bytes or policy != admission["policy_snapshot"]:
             raise ServiceError(422, "run_admission_mismatch", "standalone and embedded policy snapshot bytes differ")
         identity_keys = (
@@ -990,7 +1140,10 @@ class MesaService:
 
     def _read_gate2_lifecycle(self, events_dir: Path, receipt: dict[str, Any]) -> list[dict[str, Any]]:
         from .canonical_v2 import require_canonical_json_v2_bytes
-        from .gate2_contracts import LIFECYCLE_KEYS, lifecycle_digest, validate_lifecycle_chain
+        from .gate2_contracts import (
+            LIFECYCLE_KEYS, lifecycle_digest, validate_cancel_tombstone, validate_lifecycle_chain,
+        )
+        from .gate2_project_evidence import verify_cancel_tombstone_committed
 
         if not events_dir.exists():
             return []
@@ -1023,8 +1176,41 @@ class MesaService:
                 raise ServiceError(500, "mesa_run_corrupt", "Mesa lifecycle binding or digest is invalid")
             previous = record["mesa_lifecycle_digest"]
             records.append(record)
+        cancel_path = self._safe_path(
+            self._project_dir(receipt["project_id"]) / "run-intents" / receipt["run_id"] / "cancel-tombstone.json"
+        )
+        cancel_tombstone = None
+        if cancel_path.exists():
+            try:
+                if cancel_path.is_symlink() or not cancel_path.is_file():
+                    raise ValueError("cancel tombstone path is unsafe")
+                cancel_tombstone = validate_cancel_tombstone(
+                    require_canonical_json_v2_bytes(cancel_path.read_bytes())
+                )
+                verify_cancel_tombstone_committed(
+                    self.workspace_root, receipt["project_id"], receipt["run_id"], cancel_tombstone,
+                )
+            except Exception as exc:
+                cancel_tombstone = None
+                if any(record["state"] == "cancel_requested" for record in records) or (
+                    records and records[-1]["state"] in {
+                        "verified_succeeded", "terminal_failed", "terminal_timed_out", "terminal_cancelled",
+                    }
+                ):
+                    raise ServiceError(
+                        500, "mesa_run_corrupt", "Mesa cancel tombstone evidence is invalid or uncommitted",
+                    ) from exc
         try:
-            validate_lifecycle_chain(records, receipt)
+            validate_lifecycle_chain(
+                records,
+                receipt,
+                cancel_tombstone,
+                require_complete_cancel_binding=bool(
+                    records and records[-1]["state"] in {
+                        "verified_succeeded", "terminal_failed", "terminal_timed_out", "terminal_cancelled",
+                    }
+                ),
+            )
         except Exception as exc:
             raise ServiceError(500, "mesa_run_corrupt", f"Mesa lifecycle state machine is invalid: {exc}") from exc
         return records
@@ -1333,6 +1519,13 @@ class MesaService:
                     "cancelled": "cancelled_by_worker",
                 }[status],
             )
+            records = self._read_gate2_lifecycle(paths["lifecycle"], receipt)
+            if not any(record["state"] == "cancel_requested" for record in records):
+                self._append_gate2_lifecycle(
+                    paths["lifecycle"], receipt, "cancel_requested",
+                    ownership_epoch=ownership_epoch,
+                    evidence_digest=tombstone["cancel_tombstone_digest"],
+                )
         if status != "succeeded":
             for child_path in list(evidence_root.iterdir()):
                 if child_path.name not in {"request.json", "metadata.json", "run.log"}:
@@ -1512,11 +1705,7 @@ class MesaService:
                     last = records[-1]
                     return {"run_id": run_id, "status": "running", "mesa_run_receipt_digest": receipt["mesa_run_receipt_digest"], "mesa_lifecycle_digest": last["mesa_lifecycle_digest"]}
                 lease = self._read_gate2_owner_lease(paths["lease"], receipt)
-                if (
-                    lease is not None
-                    and lease["owner_instance_id"] != self.owner_instance_id
-                    and lease["expires_at_unix_ms"] > int(time.time() * 1000)
-                ):
+                if lease is not None and lease["expires_at_unix_ms"] > int(time.time() * 1000):
                     return {
                         "run_id": run_id, "status": "running",
                         "mesa_run_receipt_digest": receipt["mesa_run_receipt_digest"],
@@ -1552,6 +1741,9 @@ class MesaService:
                     epoch = max(record["ownership_epoch"] for record in records) + 1
                     if self._claim_gate2_owner_lease(paths, receipt, ownership_epoch=epoch) is None:
                         raise ServiceError(409, "mesa_owner_fenced", "another live Mesa owner holds the run lease")
+                    self._append_gate2_lifecycle(
+                        paths["lifecycle"], receipt, "ownership_acquired", ownership_epoch=epoch,
+                    )
                     return self._recover_gate2_dead_worker(
                         captured=captured, paths=paths, receipt=receipt, ownership_epoch=epoch,
                     )
@@ -1746,6 +1938,40 @@ class MesaService:
         last = records[-1] if records else None
         if last is None or last["state"] not in terminal_states:
             return None
+        framed_path = self._safe_path(project_dir / "run-terminal-metadata" / receipt["run_id"] / "framed-v1.json")
+        if framed_path.is_file():
+            try:
+                data = framed_path.read_bytes()
+                if not data.endswith(b"\n"):
+                    raise ValueError("missing final LF")
+                value = require_canonical_json_v2_bytes(data[:-1])
+            except Exception as exc:
+                raise ServiceError(500, "mesa_run_corrupt", "framed terminal metadata bytes are corrupt") from exc
+            expected = {"schema_id", "schema_version", "canonical_json_version", "terminal_metadata_kind", "project_id", "run_id", "metadata_core_projection", "metadata_core_digest", "artifacts", "finalized_at", "terminal_metadata_digest"}
+            if (
+                not isinstance(value, dict) or set(value) != expected
+                or value.get("schema_id") != "riff://evidence-studio/framed-terminal-metadata/v1"
+                or value.get("schema_version") != 1 or value.get("canonical_json_version") != "riff-canonical-json-v2"
+                or value.get("terminal_metadata_kind") != "framed_verified_success"
+                or value.get("project_id") != receipt["project_id"] or value.get("run_id") != receipt["run_id"]
+                or value.get("terminal_metadata_digest") != prefixed_digest(value, field="terminal_metadata_digest", prefix="tm_")
+                or value.get("terminal_metadata_digest") != last.get("evidence_digest")
+            ):
+                raise ServiceError(500, "mesa_run_corrupt", "framed terminal metadata binding is invalid")
+            run_dir = self._safe_path(project_dir / "runs" / receipt["run_id"])
+            metadata_artifact = self._read_workspace_json(run_dir / "metadata.json")
+            if (
+                metadata_artifact.get("metadata_core_projection") != value.get("metadata_core_projection")
+                or metadata_artifact.get("metadata_core_digest") != value.get("metadata_core_digest")
+                or not isinstance(value.get("artifacts"), dict) or set(value["artifacts"]) != WIND_ARTIFACTS
+            ):
+                raise ServiceError(500, "mesa_run_corrupt", "framed terminal DAG core/artifact map is invalid")
+            for name, binding in value["artifacts"].items():
+                path = self._safe_path(run_dir / name)
+                digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+                if not isinstance(binding, dict) or set(binding) != {"artifact_id", "sha256", "byte_length"} or binding["sha256"] != digest or binding["byte_length"] != path.stat().st_size or binding["artifact_id"] != "artifact_" + sha256_v2({"run_id": receipt["run_id"], "name": name, "sha256": digest}):
+                    raise ServiceError(500, "mesa_run_corrupt", "framed terminal artifact binding is invalid")
+            return value
         path = self._safe_path(project_dir / "mesa-run-lifecycle" / receipt["run_id"] / "terminal-metadata.json")
         if not path.is_file():
             raise ServiceError(500, "mesa_run_corrupt", "terminal lifecycle lacks terminal metadata")
@@ -1874,6 +2100,52 @@ class MesaService:
 
         from .canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2
 
+        metadata = self._read_workspace_json(self._safe_path(run_dir / "metadata.json"))
+        if status == "succeeded" and metadata.get("metadata_kind") == "framed_terminal_core":
+            from .canonical_v2 import canonical_json_v2_bytes, prefixed_digest, require_canonical_json_v2_bytes, sha256_v2
+            artifacts: dict[str, Any] = {}
+            for name in sorted(WIND_ARTIFACTS):
+                path = self._safe_path(run_dir / name)
+                if not path.is_file() or path.parent != run_dir:
+                    raise ServiceError(500, "mesa_run_corrupt", "framed terminal evidence lacks an exact artifact")
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                artifacts[name] = {"artifact_id": "artifact_" + sha256_v2({"run_id": receipt["run_id"], "name": name, "sha256": digest}), "sha256": digest, "byte_length": path.stat().st_size}
+            path = self._safe_path(project_dir / "run-terminal-metadata" / receipt["run_id"] / "framed-v1.json")
+            if path.exists():
+                try:
+                    existing_data = path.read_bytes()
+                    if not existing_data.endswith(b"\n"):
+                        raise ValueError("missing final LF")
+                    existing = require_canonical_json_v2_bytes(existing_data[:-1])
+                except Exception as exc:
+                    raise ServiceError(500, "mesa_run_corrupt", "framed terminal metadata bytes are corrupt") from exc
+                if (
+                    not isinstance(existing, dict)
+                    or existing.get("metadata_core_projection") != metadata.get("metadata_core_projection")
+                    or existing.get("metadata_core_digest") != metadata.get("metadata_core_digest")
+                    or existing.get("artifacts") != artifacts
+                    or existing.get("terminal_metadata_digest") != prefixed_digest(existing, field="terminal_metadata_digest", prefix="tm_")
+                ):
+                    raise ServiceError(500, "mesa_run_corrupt", "framed terminal metadata changed after publication")
+                return existing
+            value = {
+                "schema_id": "riff://evidence-studio/framed-terminal-metadata/v1",
+                "schema_version": 1,
+                "canonical_json_version": "riff-canonical-json-v2",
+                "terminal_metadata_kind": "framed_verified_success",
+                "project_id": receipt["project_id"],
+                "run_id": receipt["run_id"],
+                "metadata_core_projection": metadata["metadata_core_projection"],
+                "metadata_core_digest": metadata["metadata_core_digest"],
+                "artifacts": artifacts,
+                "finalized_at": _utc_now(),
+                "terminal_metadata_digest": "",
+            }
+            value["terminal_metadata_digest"] = prefixed_digest(value, field="terminal_metadata_digest", prefix="tm_")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = canonical_json_v2_bytes(value) + b"\n"
+            self._write_workspace_bytes(path, data)
+            return value
         names = sorted(WIND_ARTIFACTS) if status == "succeeded" else []
         artifacts = []
         for name in names:
@@ -1886,7 +2158,6 @@ class MesaService:
                 "name": name,
                 "sha256": digest,
             })
-        metadata = self._read_workspace_json(self._safe_path(run_dir / "metadata.json"))
         cancel_outcome = metadata.get("cancel_outcome")
         allowed_cancel_outcomes = {
             "succeeded": {None, "completed_before_cancel_effect"},
@@ -2024,7 +2295,9 @@ class MesaService:
             if active.gate2_context is not None:
                 self._replay_gate2_frozen_admission(active)
                 self._apply_gate2_cancel_outcome(active, "succeeded")
-                self._finalize_gate2_success_metadata(active.temporary_dir)
+                metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
+                if metadata.get("metadata_kind") != "framed_terminal_core":
+                    self._finalize_gate2_success_metadata(active.temporary_dir)
             verify_run(active.temporary_dir)
             return True
         except Exception as exc:
@@ -2063,6 +2336,9 @@ class MesaService:
     def _apply_gate2_cancel_outcome(self, active: ActiveRun, status: str) -> None:
         context = active.gate2_context
         if context is None or self._gate2_cancel_tombstone(context["captured"]) is None:
+            return
+        metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
+        if metadata.get("metadata_kind") == "framed_terminal_core":
             return
         outcome = {
             "succeeded": "completed_before_cancel_effect",
@@ -2116,10 +2392,40 @@ class MesaService:
         finally:
             self._poll_lock.release()
 
+    def _project_gate2_cancel_tombstone(self, active: ActiveRun) -> None:
+        """Project one verified durable cancel tombstone into the live worker sandbox."""
+
+        context = active.gate2_context
+        if context is None or context.get("projected_cancel_tombstone_digest") is not None:
+            return
+        try:
+            tombstone = self._gate2_cancel_tombstone(context["captured"])
+        except ServiceError:
+            # Uncommitted, malformed, or mismatched bytes never gain signalling
+            # authority. The bounded poll will retry if committed evidence is
+            # later repaired/published atomically by its owner.
+            return
+        if tombstone is None:
+            return
+        with self._run_lock(context["project_dir"], active.run_id):
+            self._assert_gate2_owner_lease(active, require_live_child=False)
+            records = self._read_gate2_lifecycle(context["lifecycle"], context["receipt"])
+            if not any(record["state"] == "cancel_requested" for record in records):
+                self._append_gate2_lifecycle(
+                    context["lifecycle"], context["receipt"], "cancel_requested",
+                    ownership_epoch=context["ownership_epoch"],
+                    evidence_digest=tombstone["cancel_tombstone_digest"],
+                )
+            marker = self._safe_path(active.temporary_dir / "cancel_requested")
+            self._write_workspace_bytes(marker, b"")
+            context["projected_cancel_tombstone_digest"] = tombstone["cancel_tombstone_digest"]
+
     def _poll_unlocked(self) -> None:
         for active in list(self.active_runs.values()):
             if active.gate2_context is not None and not self._renew_gate2_owner_lease(active):
                 continue
+            if active.gate2_context is not None and active.process.poll() is None:
+                self._project_gate2_cancel_tombstone(active)
             timed_out = (
                 int(time.time() * 1000) >= active.gate2_context["deadline_at_unix_ms"]
                 if active.gate2_context is not None
@@ -2148,6 +2454,8 @@ class MesaService:
             self._close_log(active)
             metadata = self._read_workspace_json(active.temporary_dir / "metadata.json")
             status = metadata.get("status")
+            if metadata.get("metadata_kind") == "framed_terminal_core":
+                status = metadata.get("metadata_core_projection", {}).get("terminal_status")
             if active.model_id == WIND_MODEL_ID:
                 success = return_code == 0 and status == "succeeded"
                 if success and self._wind_success_is_valid(active):
@@ -2329,7 +2637,8 @@ class MesaService:
             raise ServiceError(422, "invalid_event_limit", "limit must be between 1 and 1000")
         run_dir = self._run_dir(project_id, run_id)
         metadata = self._read_workspace_json(run_dir / "metadata.json")
-        if metadata.get("model_id") != WIND_MODEL_ID:
+        core = self._artifact_metadata_core(metadata)
+        if core.get("model_id") != WIND_MODEL_ID:
             raise ServiceError(404, "events_not_found", "domain events are unavailable for this run")
         path = self._safe_path(run_dir / "domain-events.jsonl")
         if not path.is_file():
@@ -2349,7 +2658,8 @@ class MesaService:
         self.poll()
         run_dir = self._run_dir(project_id, run_id)
         metadata = self._read_workspace_json(run_dir / "metadata.json")
-        allowed = WIND_ARTIFACTS if metadata.get("model_id") == WIND_MODEL_ID else LEGACY_ARTIFACTS
+        core = self._artifact_metadata_core(metadata)
+        allowed = WIND_ARTIFACTS if core.get("model_id") == WIND_MODEL_ID else LEGACY_ARTIFACTS
         if name not in allowed:
             raise ServiceError(404, "artifact_not_found", "artifact not found")
         try:
@@ -2360,6 +2670,41 @@ class MesaService:
             raise ServiceError(404, "artifact_not_found", "artifact not found")
         media_type = "text/plain" if name in {"run.log", "timeseries.csv", "daily-kpis.csv", "domain-events.jsonl"} else "application/json"
         return path, media_type
+
+    @staticmethod
+    def _artifact_metadata_core(metadata: dict[str, Any]) -> dict[str, Any]:
+        """Select and validate the identity projection used by artifact/event reads."""
+        if "metadata_core_projection" not in metadata:
+            return metadata
+
+        from .gate3_contracts import metadata_core_digest
+
+        root_keys = {
+            "schema_id", "schema_version", "canonical_json_version", "metadata_kind",
+            "metadata_core_projection", "metadata_core_digest",
+        }
+        core_keys = {
+            "schema_id", "schema_version", "canonical_json_version", *V2_IDENTITY_FIELDS,
+            "run_intent_digest", "request_digest", "experiment_digest", "runtime_profile",
+            "terminal_status", "started_at", "completed_at",
+        }
+        core = metadata.get("metadata_core_projection")
+        if (
+            set(metadata) != root_keys
+            or metadata.get("schema_id") != "riff://wind-turbine-maintenance/metadata/framed/v1"
+            or metadata.get("schema_version") != 1
+            or metadata.get("canonical_json_version") != "riff-canonical-json-v2"
+            or metadata.get("metadata_kind") != "framed_terminal_core"
+            or not isinstance(core, dict)
+            or set(core) != core_keys
+            or core.get("schema_id") != "riff://wind-turbine-maintenance/metadata-core-projection/v1"
+            or core.get("schema_version") != 1
+            or core.get("canonical_json_version") != "riff-canonical-json-v2"
+            or core.get("terminal_status") != "succeeded"
+            or metadata.get("metadata_core_digest") != metadata_core_digest(core)
+        ):
+            raise ServiceError(500, "corrupt_run", "framed run metadata projection is invalid")
+        return core
 
     def shutdown(self) -> None:
         for active in list(self.active_runs.values()):
