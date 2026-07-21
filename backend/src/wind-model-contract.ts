@@ -36,7 +36,7 @@ const assertSafePath = (root: string, path: string): void => {
   }
 };
 
-export const loadVerifiedWindModelContract = (workspaceRoot: string, projectId: string, expected?: { model_revision_id?: string; experiment_revision_id?: string; preset_id?: string }): WindModelContract => {
+export const loadVerifiedWindModelContract = (workspaceRoot: string, projectId: string, expected?: { model_revision_id?: string; experiment_revision_id?: string; preset_id?: string; historical_model_revision_id?: string }): WindModelContract => {
   if (!/^project_[0-9a-f]{32}$/u.test(projectId)) throw new ApiError(404, "resource_not_found", "The project was not found.");
   const projectRoot = join(resolve(workspaceRoot), "projects", projectId);
   const activePath = join(projectRoot, "models", "active.json");
@@ -44,14 +44,15 @@ export const loadVerifiedWindModelContract = (workspaceRoot: string, projectId: 
   if (!existsSync(activePath) || !lstatSync(activePath).isFile()) throw new ApiError(502, "mesa_invalid_model", "Mesa did not materialize an active wind model.");
   const active = readJson(activePath);
   if (active.model_id !== "wind-turbine-maintenance" || !/^mr_[0-9a-f]{64}$/u.test(active.model_revision_id) || !/^er_[0-9a-f]{64}$/u.test(active.experiment_revision_id) || active.preset_id !== "wind-turbine-maintenance-demo-v1") throw new ApiError(502, "mesa_invalid_model", "Mesa returned an invalid active wind identity.");
-  if (expected?.model_revision_id && active.model_revision_id !== expected.model_revision_id || expected?.experiment_revision_id && active.experiment_revision_id !== expected.experiment_revision_id || expected?.preset_id && active.preset_id !== expected.preset_id) throw new ApiError(502, "mesa_invalid_model", "Mesa active wind identity differs from its bootstrap response.");
+  if (!expected?.historical_model_revision_id && (expected?.model_revision_id && active.model_revision_id !== expected.model_revision_id || expected?.experiment_revision_id && active.experiment_revision_id !== expected.experiment_revision_id || expected?.preset_id && active.preset_id !== expected.preset_id)) throw new ApiError(502, "mesa_invalid_model", "Mesa active wind identity differs from its bootstrap response.");
+  const selectedRevision = expected?.historical_model_revision_id ?? active.model_revision_id;
 
-  const bundle = join(projectRoot, "models", "wind-turbine-maintenance", "revisions", active.model_revision_id);
+  const bundle = join(projectRoot, "models", "wind-turbine-maintenance", "revisions", selectedRevision);
   assertSafePath(projectRoot, bundle);
   const actualFiles: string[] = []; const walk = (directory: string): void => { for (const entry of readdirSync(directory).sort()) { const path = join(directory, entry); assertSafePath(bundle, path); const info = lstatSync(path); if (info.isSymbolicLink()) throw new ApiError(500, "unsafe_workspace", "The wind bundle contains a symbolic link."); if (info.isDirectory()) walk(path); else if (info.isFile()) actualFiles.push(relative(bundle, path).split(sep).join("/")); else throw new ApiError(500, "unsafe_workspace", "The wind bundle contains a non-regular entry."); } }; walk(bundle);
   const requiredWithManifest = ["manifest.json", ...EXPECTED_FILES].sort(); if (actualFiles.sort().join("\n") !== requiredWithManifest.join("\n")) throw new ApiError(502, "mesa_invalid_model", "The wind bundle file set is not exact.");
   const manifestPath = join(bundle, "manifest.json"); const manifestBytes = readFileSync(manifestPath); const manifest = readJson(manifestPath); exactKeys(manifest, ["schema_version", "model_id", "model_revision_id", "runtime_profile", "files"], "The wind bundle manifest keys are not exact.");
-  if (!canonicalV1(manifest).equals(manifestBytes.subarray(0, manifestBytes.length - 1)) || manifestBytes.at(-1) !== 0x0a || manifest.schema_version !== 1 || manifest.model_id !== active.model_id || manifest.model_revision_id !== active.model_revision_id || !manifest.files || typeof manifest.files !== "object" || Array.isArray(manifest.files)) throw new ApiError(502, "mesa_invalid_model", "The wind bundle manifest identity or encoding is invalid.");
+  if (!canonicalV1(manifest).equals(manifestBytes.subarray(0, manifestBytes.length - 1)) || manifestBytes.at(-1) !== 0x0a || manifest.schema_version !== 1 || manifest.model_id !== active.model_id || manifest.model_revision_id !== selectedRevision || !manifest.files || typeof manifest.files !== "object" || Array.isArray(manifest.files)) throw new ApiError(502, "mesa_invalid_model", "The wind bundle manifest identity or encoding is invalid.");
   exactKeys(manifest.files, EXPECTED_FILES, "The wind bundle declarations are not exact.");
   for (const name of EXPECTED_FILES) {
     const declaration = manifest.files[name] as JsonRecord; if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)) throw new ApiError(502, "mesa_invalid_model", "A wind bundle declaration is invalid."); exactKeys(declaration, ["sha256", "byte_length", "media_type"], "A wind bundle declaration is not exact.");
@@ -60,13 +61,16 @@ export const loadVerifiedWindModelContract = (workspaceRoot: string, projectId: 
   }
   const runtime = manifest.runtime_profile as JsonRecord; if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) throw new ApiError(502, "mesa_invalid_model", "The wind runtime profile is invalid."); exactKeys(runtime, ["python_implementation", "python_major_minor", "mesa_version", "model_protocol_version", "canonical_json_version"], "The wind runtime profile is not exact.");
   if (!Object.values(runtime).every((value) => typeof value === "string" && value.length > 0) || runtime.model_protocol_version !== "wind-turbine-maintenance-v1" || runtime.canonical_json_version !== "rfc8259-sort-keys-compact-v1") throw new ApiError(502, "mesa_invalid_model", "The wind runtime profile is invalid.");
-  const computedRevision = `mr_${sha256Hex(canonicalV1({ model_id: active.model_id, runtime_profile: runtime, files: manifest.files }))}`; if (computedRevision !== active.model_revision_id) throw new ApiError(500, "immutable_record_corrupt", "The model revision does not match the exact bundle declarations.");
+  const computedRevision = `mr_${sha256Hex(canonicalV1({ model_id: active.model_id, runtime_profile: runtime, files: manifest.files }))}`; if (computedRevision !== selectedRevision) throw new ApiError(500, "immutable_record_corrupt", "The model revision does not match the exact bundle declarations.");
 
   const parameterSchema = readJson(join(bundle, "parameter-schema.json"));
   const metricSchema = readJson(join(bundle, "metric-schema.json"));
   const modelSpec = readJson(join(bundle, "model-spec.json"));
   const traceability = readJson(join(bundle, "traceability.json"));
   const parameterProperties = parameterSchema.properties as Record<string, JsonRecord>; if (!parameterProperties || typeof parameterProperties !== "object" || Array.isArray(parameterProperties)) throw new ApiError(502, "mesa_invalid_model", "The wind parameter contract is incomplete.");
+  if (expected?.historical_model_revision_id) {
+    const preset = readJson(join(bundle, "defaults/wind-turbine-maintenance-demo-v1.json")); const properties = parameterProperties; if (!Array.isArray(parameterSchema.required) || Object.keys(properties).sort().join() !== [...parameterSchema.required].sort().join() || Object.keys(properties).sort().join() !== Object.keys(preset.parameters ?? {}).sort().join()) throw new ApiError(502, "mesa_invalid_model", "The historical wind parameter contract is incomplete."); const parameterRules: Record<string, WindParameterRule> = {}; for (const [name, definition] of Object.entries(properties)) parameterRules[name] = { type: definition.type, ...(typeof definition.minimum === "number" ? { minimum: definition.minimum } : {}), ...(typeof definition.maximum === "number" ? { maximum: definition.maximum } : {}) } as WindParameterRule; const modelRefs = new Set<string>([...Object.keys(properties).map((name) => `parameter:${name}`), ...Object.keys(metricSchema.properties ?? {}).map((name) => `metric:${name}`), ...Object.keys(modelSpec).map((name) => `mechanism:${name}`)]); for (const family of [traceability.equipment_transitions, traceability.crew_transitions]) for (const item of Array.isArray(family) ? family : []) if (typeof item.target_rule === "string") modelRefs.add(`mechanism:${item.target_rule}`); return { model_id: "wind-turbine-maintenance", model_revision_id: selectedRevision, preset_id: "wind-turbine-maintenance-demo-v1", parameter_defaults: structuredClone(preset.parameters), execution_defaults: { horizon_days: preset.horizon_days, warmup_days: preset.warmup_days, seed: preset.seed }, runtime_profile: structuredClone(runtime), parameter_rules: parameterRules, allowed_model_refs: [...modelRefs].sort() };
+  }
 
   const experimentPath = join(projectRoot, "experiments", "revisions", active.experiment_revision_id, "experiment.json");
   assertSafePath(projectRoot, experimentPath);

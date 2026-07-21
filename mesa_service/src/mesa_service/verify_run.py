@@ -169,6 +169,18 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
     root = candidate.resolve()
     if not root.is_dir():
         raise RunVerificationError("run directory is unavailable or unsafe")
+    metadata_probe = root / "metadata.json"
+    if metadata_probe.is_file():
+        try:
+            probe = json.loads(metadata_probe.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            probe = None
+        if isinstance(probe, dict) and probe.get("metadata_kind") == "framed_terminal_core":
+            from .gate3_verify_run import FramedRunVerificationError, verify_framed_run
+            try:
+                return verify_framed_run(root)
+            except FramedRunVerificationError as exc:
+                raise RunVerificationError(str(exc)) from exc
     entries = list(root.iterdir())
     names = {path.name for path in entries}
     if names != REQUIRED_SUCCESS_ARTIFACTS or len(entries) != len(REQUIRED_SUCCESS_ARTIFACTS):

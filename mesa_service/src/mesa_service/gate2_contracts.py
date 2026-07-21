@@ -28,6 +28,14 @@ EXPERIMENT_V2_KEYS = {
     "parameter_defaults", "parameters", "parameter_diff", "execution_defaults",
     "execution_values", "execution_diff", "runtime_profile", "created_by_actor_id", "created_at",
 }
+EXPERIMENT_FRAMED_KEYS = {
+    "schema_id", "schema_version", "canonical_json_version", "project_id",
+    "parent_experiment_revision_id", "operation", "model_id", "model_revision_id",
+    "brief_revision_id", "alignment_revision_id", "preset_id", "defaults_digest",
+    "parameter_defaults", "parameters", "parameter_diff", "execution_defaults",
+    "execution_values", "execution_diff", "runtime_profile", "copy_migration_rule",
+    "created_by_actor_id", "created_at", "experiment_revision_id", "experiment_digest",
+}
 POLICY_KEYS = {
     "schema_version", "canonical_json_version", "policy_snapshot_digest", "project_id",
     "evaluated_at_snapshot_revision", "evaluated_project_event_digest", "alignment", "experiment",
@@ -149,8 +157,16 @@ def validate_experiment_v2(raw: object) -> dict[str, Any]:
     ]
     if value["execution_diff"] != expected_execution_diff:
         raise Gate2ContractError("execution_diff is not the exact canonical diff")
+    from .bundle import manifest_entries, model_revision_id
+    from .gate3_bundle import framed_manifest
+
+    legacy_revision = model_revision_id(manifest_entries(), runtime_profile())
+    if value["model_revision_id"] == framed_manifest()["model_revision_id"]:
+        raise Gate2ContractError("legacy experiment schema cannot bind the framed model revision")
+    if value["model_revision_id"] == legacy_revision and value["runtime_profile"] != runtime_profile():
+        raise Gate2ContractError("legacy experiment runtime profile does not match its model revision")
     if value["runtime_profile"] != runtime_profile():
-        raise Gate2ContractError("v2 experiment runtime profile does not match the active model")
+        raise Gate2ContractError("legacy experiment runtime profile is invalid")
     _id(value["created_by_actor_id"], "actor_", 32, "created_by_actor_id")
     _nonempty(value["created_at"], "created_at")
     value["parameter_defaults"] = defaults
@@ -161,6 +177,127 @@ def validate_experiment_v2(raw: object) -> dict[str, Any]:
     if computed != value["experiment_revision_id"]:
         raise Gate2ContractError("v2 experiment revision ID does not match canonical bytes")
     return deepcopy(value)
+
+
+def validate_experiment_framed(raw: object) -> dict[str, Any]:
+    """Validate one exact immutable framed experiment record."""
+
+    value = _exact_mapping(raw, EXPERIMENT_FRAMED_KEYS, "framed experiment")
+    if (
+        value["schema_id"] != "riff://evidence-studio/experiment-revision/framed/v1"
+        or value["schema_version"] != 1
+        or value["canonical_json_version"] != CANONICAL_JSON_VERSION_V2
+        or value["model_id"] != MODEL_ID
+        or value["preset_id"] != PRESET_ID
+        or value["copy_migration_rule"] != "framed_parameter_copy_revalidate_v1"
+    ):
+        raise Gate2ContractError("unsupported framed experiment schema")
+    operation = value["operation"]
+    parent_id = value["parent_experiment_revision_id"]
+    if operation == "create":
+        if parent_id is not None:
+            raise Gate2ContractError("framed create must not declare a parent")
+    elif operation in {"edit", "reset_defaults"}:
+        _id(parent_id, "er_", 64, "parent_experiment_revision_id")
+    else:
+        raise Gate2ContractError("invalid framed experiment operation")
+    _id(value["project_id"], "project_", 32, "project_id")
+    _id(value["model_revision_id"], "mr_", 64, "model_revision_id")
+    _id(value["brief_revision_id"], "dbr_", 64, "brief_revision_id")
+    _id(value["alignment_revision_id"], "amr_", 64, "alignment_revision_id")
+    _id(value["experiment_revision_id"], "er_", 64, "experiment_revision_id")
+    _id(value["experiment_digest"], "erd_", 64, "experiment_digest")
+    _id(value["defaults_digest"], "dd_", 64, "defaults_digest")
+    _id(value["created_by_actor_id"], "actor_", 32, "created_by_actor_id")
+    _nonempty(value["created_at"], "created_at")
+
+    from .gate3_bundle import framed_manifest, framed_runtime_profile, load_framed_json_source
+    from .gate3_contracts import validate_framed_parameter_sources
+
+    manifest = framed_manifest()
+    if value["model_revision_id"] != manifest["model_revision_id"] or value["runtime_profile"] != framed_runtime_profile():
+        raise Gate2ContractError("framed experiment model/runtime branch is mixed or stale")
+    schema = load_framed_json_source("parameter-schema.json")
+    preset = load_framed_json_source("defaults/wind-turbine-maintenance-demo-v1.json")
+    defaults = validate_framed_parameter_sources(schema, {"parameters": value["parameter_defaults"]})
+    parameters = validate_framed_parameter_sources(schema, {"parameters": value["parameters"]})
+    execution_defaults = _validate_execution(value["execution_defaults"], "execution_defaults")
+    execution_values = _validate_execution(value["execution_values"], "execution_values")
+    reviewed_execution_defaults = {
+        key: preset[key] for key in ("horizon_days", "warmup_days", "seed")
+    }
+    if (
+        preset.get("preset_id") != PRESET_ID
+        or canonical_json_v2_bytes(defaults) != canonical_json_v2_bytes(preset.get("parameters"))
+        or execution_defaults != reviewed_execution_defaults
+    ):
+        raise Gate2ContractError("framed defaults do not match the verified preset")
+    if value["defaults_digest"] != defaults_digest(PRESET_ID, defaults, execution_defaults):
+        raise Gate2ContractError("framed defaults_digest does not match exact defaults")
+    expected_parameter_diff = [
+        {"parameter_id": key, "default_value": defaults[key], "current_value": parameters[key]}
+        for key in sorted(defaults)
+        if canonical_json_v2_bytes(defaults[key]) != canonical_json_v2_bytes(parameters[key])
+    ]
+    expected_execution_diff = [
+        {"field": key, "default_value": execution_defaults[key], "current_value": execution_values[key]}
+        for key in ("horizon_days", "warmup_days", "seed")
+        if execution_defaults[key] != execution_values[key]
+    ]
+    if value["parameter_diff"] != expected_parameter_diff or value["execution_diff"] != expected_execution_diff:
+        raise Gate2ContractError("framed experiment diff is not exact")
+    if operation == "reset_defaults" and (
+        canonical_json_v2_bytes(parameters) != canonical_json_v2_bytes(defaults)
+        or execution_values != execution_defaults
+        or value["parameter_diff"] != []
+        or value["execution_diff"] != []
+    ):
+        raise Gate2ContractError("framed reset must restore exact defaults with empty diffs")
+    id_preimage = {key: nested for key, nested in value.items() if key not in {"experiment_revision_id", "experiment_digest"}}
+    expected_id = "er_" + sha256_v2(id_preimage)
+    digest_preimage = {key: nested for key, nested in value.items() if key != "experiment_digest"}
+    expected_digest = "erd_" + sha256_v2(digest_preimage)
+    if value["experiment_revision_id"] != expected_id or value["experiment_digest"] != expected_digest:
+        raise Gate2ContractError("framed experiment ID or digest does not match canonical bytes")
+    value["parameter_defaults"] = defaults
+    value["parameters"] = parameters
+    value["execution_defaults"] = execution_defaults
+    value["execution_values"] = execution_values
+    return deepcopy(value)
+
+
+def validate_framed_experiment_transition(raw: object, parent_raw: object | None) -> dict[str, Any]:
+    """Validate the immutable create/edit/reset union and its immediate parent edge."""
+
+    value = validate_experiment_framed(raw)
+    if value["operation"] == "create":
+        if parent_raw is not None:
+            raise Gate2ContractError("framed create cannot have a parent record")
+        return value
+    if parent_raw is None:
+        raise Gate2ContractError("framed successor parent record is unavailable")
+    parent = validate_experiment_framed(parent_raw)
+    if value["parent_experiment_revision_id"] != parent["experiment_revision_id"]:
+        raise Gate2ContractError("framed successor does not bind the exact parent revision")
+    inherited = (
+        "project_id", "model_id", "model_revision_id", "brief_revision_id", "alignment_revision_id",
+        "preset_id", "defaults_digest", "parameter_defaults", "execution_defaults", "runtime_profile",
+        "copy_migration_rule",
+    )
+    if any(canonical_json_v2_bytes(value[key]) != canonical_json_v2_bytes(parent[key]) for key in inherited):
+        raise Gate2ContractError("framed successor changed its inherited activation tuple")
+    if value["operation"] == "edit" and (
+        canonical_json_v2_bytes(value["parameters"]) == canonical_json_v2_bytes(parent["parameters"])
+        and value["execution_values"] == parent["execution_values"]
+    ):
+        raise Gate2ContractError("framed edit has no effective change from its parent")
+    return value
+
+
+def validate_experiment_for_run(raw: object) -> dict[str, Any]:
+    if isinstance(raw, Mapping) and raw.get("schema_id") == "riff://evidence-studio/experiment-revision/framed/v1":
+        return validate_experiment_framed(raw)
+    return validate_experiment_v2(raw)
 
 
 def _validate_execution(raw: object, name: str) -> dict[str, int]:
@@ -399,7 +536,13 @@ def validate_receipt(raw: object) -> dict[str, Any]:
     return deepcopy(value)
 
 
-def validate_lifecycle_chain(records: list[dict[str, Any]], receipt: dict[str, Any]) -> None:
+def validate_lifecycle_chain(
+    records: list[dict[str, Any]],
+    receipt: dict[str, Any],
+    cancel_tombstone: dict[str, Any] | None = None,
+    *,
+    require_complete_cancel_binding: bool = False,
+) -> None:
     terminal = {"verified_succeeded", "terminal_failed", "terminal_timed_out", "terminal_cancelled"}
     allowed: dict[str, set[str]] = {
         "receipt_committed": {"ownership_acquired"},
@@ -412,6 +555,7 @@ def validate_lifecycle_chain(records: list[dict[str, Any]], receipt: dict[str, A
     }
     owner_by_epoch: dict[int, str] = {}
     spawn_nonces: set[str] = set()
+    cancel_records: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
     terminal_count = 0
     for sequence, record in enumerate(records):
@@ -477,6 +621,7 @@ def validate_lifecycle_chain(records: list[dict[str, Any]], receipt: dict[str, A
         elif value["state"] == "cancel_requested":
             if not isinstance(evidence, str) or re.fullmatch(r"ct_[0-9a-f]{64}", evidence) is None:
                 raise Gate2ContractError("cancel lifecycle lacks an exact tombstone digest")
+            cancel_records.append(value)
         elif value["state"] in terminal | {"worker_exited"}:
             if not isinstance(evidence, str) or re.fullmatch(r"tm_[0-9a-f]{64}", evidence) is None:
                 raise Gate2ContractError("terminal lifecycle evidence is invalid")
@@ -489,6 +634,19 @@ def validate_lifecycle_chain(records: list[dict[str, Any]], receipt: dict[str, A
         previous = value
     if terminal_count > 1 or (terminal_count and records[-1]["state"] not in terminal):
         raise Gate2ContractError("invalid terminal lifecycle placement")
+    if cancel_tombstone is None:
+        if cancel_records:
+            raise Gate2ContractError("cancel lifecycle has no verified committed tombstone")
+    else:
+        tombstone = validate_cancel_tombstone(cancel_tombstone)
+        if tombstone["project_id"] != receipt["project_id"] or tombstone["run_id"] != receipt["run_id"]:
+            raise Gate2ContractError("cancel tombstone does not bind the lifecycle run")
+        if len(cancel_records) > 1:
+            raise Gate2ContractError("cancel lifecycle contains duplicate cancel_requested records")
+        if cancel_records and cancel_records[0]["evidence_digest"] != tombstone["cancel_tombstone_digest"]:
+            raise Gate2ContractError("cancel lifecycle digest differs from the committed tombstone")
+        if require_complete_cancel_binding and len(cancel_records) != 1:
+            raise Gate2ContractError("terminal lifecycle lacks one cancel_requested record")
 
 
 def validate_cancel_tombstone(raw: object) -> dict[str, Any]:

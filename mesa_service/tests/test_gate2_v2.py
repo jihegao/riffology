@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -552,6 +553,21 @@ def _wait(client: TestClient, run_id: str) -> dict:
     raise AssertionError("v2 run did not finish")
 
 
+def _rewrite_lifecycle(events_dir: Path, records: list[dict]) -> None:
+    for path in events_dir.glob("*.json"):
+        path.unlink()
+    previous = None
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+        record["previous_mesa_lifecycle_digest"] = previous
+        record["mesa_lifecycle_digest"] = ""
+        record["mesa_lifecycle_digest"] = prefixed_digest(
+            record, field="mesa_lifecycle_digest", prefix="mlr_",
+        )
+        _write(events_dir / f"{sequence:020d}.json", record)
+        previous = record["mesa_lifecycle_digest"]
+
+
 def test_canonical_v2_number_unicode_and_rejection_contract() -> None:
     assert canonical_json_v2_bytes({"b": 1.0, "a": -0.0, "x": 1e-6, "y": 1e-7}) == b'{"a":0,"b":1,"x":0.000001,"y":1e-7}'
     assert canonical_json_v2_bytes({"\ue000": 1, "\U00010000": 2}) == '{"𐀀":2,"":1}'.encode()
@@ -843,6 +859,134 @@ def test_v2_uncommitted_cancel_tombstone_cannot_signal_or_cancel(tmp_path: Path)
     assert not (project / ".pending" / RUN_ID / "domain-events.jsonl").exists()
 
 
+def test_v2_cancel_committed_after_barrier_without_rpc_is_projected_and_terminal(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    prepared = _prepare(workspace)
+    service = MesaService(workspace, wind_timeout_seconds=180, worker_delay_seconds=0.01)
+    committed = False
+
+    def commit_in_barrier_window(label: str) -> None:
+        nonlocal committed
+        if label == "after_worker_started" and not committed:
+            _commit_cancel(workspace, prepared)
+            committed = True
+
+    service._gate2_fault_hook = commit_in_barrier_window  # type: ignore[method-assign]
+    try:
+        assert service.start_wind_run_v2(
+            PROJECT_ID,
+            {"experiment_revision_id": prepared["experiment"]["experiment_revision_id"]},
+            downstream_key=prepared["key"], run_id=prepared["run_id"],
+            downstream_digest=prepared["request_digest"],
+        )["status"] == "queued"
+        deadline = time.monotonic() + 10
+        while RUN_ID in service.active_runs and time.monotonic() < deadline:
+            service.poll()
+            time.sleep(0.01)
+        assert committed is True
+        assert service.get_run(PROJECT_ID, RUN_ID)["status"] == "cancelled"
+    finally:
+        service.shutdown()
+    records = [
+        json.loads(path.read_text())
+        for path in sorted((workspace / "projects" / PROJECT_ID / "mesa-run-lifecycle" / RUN_ID / "events").glob("*.json"))
+    ]
+    assert [record["state"] for record in records][-4:] == [
+        "worker_started", "cancel_requested", "worker_exited", "terminal_cancelled",
+    ]
+    cancel_record = next(record for record in records if record["state"] == "cancel_requested")
+    tombstone = json.loads((
+        workspace / "projects" / PROJECT_ID / "run-intents" / RUN_ID / "cancel-tombstone.json"
+    ).read_text())
+    assert cancel_record["evidence_digest"] == tombstone["cancel_tombstone_digest"]
+
+
+@pytest.mark.parametrize("tamper", ["wrong_digest", "duplicate", "missing", "uncommitted"])
+def test_v2_terminal_lifecycle_requires_exact_committed_cancel_binding(
+    tmp_path: Path, tamper: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    prepared = _prepare(workspace)
+    _commit_cancel(workspace, prepared)
+    service = MesaService(workspace, wind_timeout_seconds=180)
+    assert service.start_wind_run_v2(
+        PROJECT_ID,
+        {"experiment_revision_id": prepared["experiment"]["experiment_revision_id"]},
+        downstream_key=prepared["key"], run_id=prepared["run_id"],
+        downstream_digest=prepared["request_digest"],
+    )["status"] == "cancelled"
+
+    project = workspace / "projects" / PROJECT_ID
+    events_dir = project / "mesa-run-lifecycle" / RUN_ID / "events"
+    records = [json.loads(path.read_text()) for path in sorted(events_dir.glob("*.json"))]
+    cancel_index = next(index for index, record in enumerate(records) if record["state"] == "cancel_requested")
+    if tamper == "wrong_digest":
+        records[cancel_index]["evidence_digest"] = "ct_" + "f" * 64
+    elif tamper == "duplicate":
+        records.insert(cancel_index + 1, copy.deepcopy(records[cancel_index]))
+    elif tamper == "missing":
+        records.pop(cancel_index)
+    else:
+        tombstone_path = project / "run-intents" / RUN_ID / "cancel-tombstone.json"
+        tombstone = json.loads(tombstone_path.read_text())
+        tombstone["created_at"] = "2026-07-21T00:00:06.000Z"
+        tombstone["cancel_tombstone_digest"] = ""
+        tombstone["cancel_tombstone_digest"] = prefixed_digest(
+            tombstone, field="cancel_tombstone_digest", prefix="ct_",
+        )
+        _write(tombstone_path, tombstone)
+        records[cancel_index]["evidence_digest"] = tombstone["cancel_tombstone_digest"]
+    _rewrite_lifecycle(events_dir, records)
+
+    with pytest.raises(ServiceError) as raised:
+        service.get_wind_run_evidence_v2(PROJECT_ID, RUN_ID)
+    assert raised.value.code == "mesa_run_corrupt"
+
+
+def test_v2_restart_owner_projects_rpc_missed_committed_cancel(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    prepared = _prepare(workspace)
+    first = MesaService(
+        workspace, wind_timeout_seconds=180, owner_lease_seconds=0.25, worker_delay_seconds=0.05,
+    )
+    first.start_wind_run_v2(
+        PROJECT_ID,
+        {"experiment_revision_id": prepared["experiment"]["experiment_revision_id"]},
+        downstream_key=prepared["key"], run_id=prepared["run_id"],
+        downstream_digest=prepared["request_digest"],
+    )
+    original = first.active_runs[RUN_ID]
+    model_execution_artifact = original.temporary_dir / "daily-kpis.csv"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if model_execution_artifact.is_file():
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("worker did not pass its one-time pre-execution tombstone check")
+    _commit_cancel(workspace, prepared)
+    time.sleep(0.3)
+    recovered = MesaService(
+        workspace, wind_timeout_seconds=180, owner_lease_seconds=0.25, worker_delay_seconds=0.01,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while RUN_ID in recovered.active_runs and time.monotonic() < deadline:
+            recovered.poll()
+            time.sleep(0.01)
+        assert recovered.get_run(PROJECT_ID, RUN_ID)["status"] == "cancelled"
+    finally:
+        original.process.wait(timeout=5)
+        first._close_log(original)
+        recovered.shutdown()
+    records = [
+        json.loads(path.read_text())
+        for path in sorted((workspace / "projects" / PROJECT_ID / "mesa-run-lifecycle" / RUN_ID / "events").glob("*.json"))
+    ]
+    assert sum(record["state"] == "cancel_requested" for record in records) == 1
+    assert records[-1]["state"] == "terminal_cancelled"
+
+
 def test_v2_dispatch_in_flight_committed_tombstone_stops_before_model_events(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     prepared = _prepare(workspace)
@@ -992,6 +1136,41 @@ def test_two_service_instances_duplicate_start_never_double_spawns(tmp_path: Pat
     ]
     assert states.count("worker_started") == 1
     assert states.count("terminal_cancelled") == 1
+
+
+def test_same_service_concurrent_duplicate_start_keeps_one_owner_epoch_and_barrier(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    prepared = _prepare(workspace)
+    service = MesaService(workspace, wind_timeout_seconds=180, worker_delay_seconds=0.05)
+    arguments = (
+        PROJECT_ID,
+        {"experiment_revision_id": prepared["experiment"]["experiment_revision_id"]},
+    )
+    keywords = {
+        "downstream_key": prepared["key"],
+        "run_id": prepared["run_id"],
+        "downstream_digest": prepared["request_digest"],
+    }
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(service.start_wind_run_v2, *arguments, **keywords) for _ in range(2)]
+            results = [future.result(timeout=15) for future in futures]
+        assert sorted(result["status"] for result in results) == ["queued", "running"]
+        _commit_cancel(workspace, prepared)
+        deadline = time.monotonic() + 10
+        while RUN_ID in service.active_runs and time.monotonic() < deadline:
+            service.poll()
+            time.sleep(0.01)
+        assert service.get_run(PROJECT_ID, RUN_ID)["status"] == "cancelled"
+    finally:
+        service.shutdown()
+    records = [
+        json.loads(path.read_text())
+        for path in sorted((workspace / "projects" / PROJECT_ID / "mesa-run-lifecycle" / RUN_ID / "events").glob("*.json"))
+    ]
+    assert [record["state"] for record in records].count("ownership_acquired") == 1
+    assert [record["state"] for record in records].count("worker_started") == 1
+    assert {record["ownership_epoch"] for record in records} == {1}
 
 
 def test_v2_post_admission_source_drift_is_durable_terminal_without_worker(tmp_path: Path) -> None:
