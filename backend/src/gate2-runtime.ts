@@ -7,6 +7,7 @@ import { DurableProjectStore } from "./durable-project-store.ts";
 import type { ProjectCommand, RunReference, VerifiedMesaArtifact, VerifiedMesaRunEvidence, WindModelContract } from "./durable-project-types.ts";
 import { DETERMINISTIC_MESA_ADMISSION_CODES, type MesaAdapter, type WindArtifact, type WindBootstrap, type WindEventPage } from "./mesa-adapter.ts";
 import { loadVerifiedWindModelContract } from "./wind-model-contract.ts";
+import { loadVerifiedFramedWindModelContract } from "./framed-wind-contract.ts";
 
 type LocalFact = { mesa_receipt_absent: boolean; dispatch_owner_absent: boolean; failure?: { code: unknown; safe_message: unknown } };
 const key = (projectId: string, runId: string): string => `${projectId}:${runId}`;
@@ -55,7 +56,8 @@ export class Gate2Runtime {
     }
     for (const projectId of projectIds) {
       try { const contract = loadVerifiedWindModelContract(this.#workspaceRoot, projectId); contracts.set(contract.model_revision_id, contract); }
-      catch { /* A project without a selected/materialized wind bundle needs no contract yet. */ }
+      catch { try { const contract = loadVerifiedFramedWindModelContract(this.#workspaceRoot, projectId); contracts.set(contract.model_revision_id, contract); } catch { /* A project without a selected/materialized wind bundle needs no contract yet. */ } }
+      const activations = join(this.#workspaceRoot, "projects", projectId, "activations"); if (existsSync(activations)) for (const activationId of readdirSync(activations).filter((name) => /^[0-9a-f-]{36}$/u.test(name))) { try { const intent = this.#canonicalLfRecord(join(activations, activationId, "intent.json")); const source = intent.source as Record<string, unknown>; const revision = String(source.model_revision_id); if (!contracts.has(revision)) { const contract = loadVerifiedWindModelContract(this.#workspaceRoot, projectId, { historical_model_revision_id: revision }); contracts.set(contract.model_revision_id, contract); } const target = intent.planned_target as Record<string, unknown>; const targetRevision = String(target.model_revision_id); const capturedManifest = join(activations, activationId, "captured-candidate", targetRevision, "manifest.json"); if (!contracts.has(targetRevision) && existsSync(capturedManifest)) { const contract = loadVerifiedFramedWindModelContract(this.#workspaceRoot, projectId, { captured_activation_id: activationId, model_revision_id: targetRevision }); contracts.set(contract.model_revision_id, contract); } } catch { /* Durable recovery will fail closed when an activation source or captured target cannot be verified. */ } }
       const receiptDir = join(this.#workspaceRoot, "projects", projectId, "mesa-run-receipts");
       if (!existsSync(receiptDir)) continue;
       for (const name of readdirSync(receiptDir).filter((item) => /^rk_[0-9a-f]{64}\.json$/u.test(item)).sort()) {
@@ -64,8 +66,8 @@ export class Gate2Runtime {
           const runId = String(receipt.run_id);
           const eventsDir = join(this.#workspaceRoot, "projects", projectId, "mesa-run-lifecycle", runId, "events");
           const lifecycle = readdirSync(eventsDir).filter((item) => /^[0-9]{20}\.json$/u.test(item)).sort().map((item) => this.#canonicalRecord(join(eventsDir, item)));
-          const terminalPath = join(this.#workspaceRoot, "projects", projectId, "mesa-run-lifecycle", runId, "terminal-metadata.json");
-          const terminal = existsSync(terminalPath) ? this.#canonicalRecord(terminalPath) : null;
+          const framedTerminalPath = join(this.#workspaceRoot, "projects", projectId, "run-terminal-metadata", runId, "framed-v1.json"); const terminalPath = join(this.#workspaceRoot, "projects", projectId, "mesa-run-lifecycle", runId, "terminal-metadata.json");
+          const terminal = existsSync(framedTerminalPath) ? this.#canonicalLfRecord(framedTerminalPath) : existsSync(terminalPath) ? this.#canonicalRecord(terminalPath) : null;
           this.#evidence.set(key(projectId, runId), { receipt, lifecycle_records: lifecycle, terminal_metadata: terminal } as VerifiedMesaRunEvidence);
         } catch { /* The durable store fails closed if a projected run requires corrupt evidence. */ }
       }
@@ -78,6 +80,7 @@ export class Gate2Runtime {
     if (!value || typeof value !== "object" || Array.isArray(value) || !canonicalJsonV2(value).equals(bytes)) throw new ApiError(500, "immutable_record_corrupt", "A local Mesa evidence record is not exact canonical JSON.");
     return value as Record<string, any>;
   }
+  #canonicalLfRecord(path: string): Record<string, any> { const bytes = readFileSync(path); if (bytes.at(-1) !== 0x0a) throw new ApiError(500, "immutable_record_corrupt", "A local framed evidence record is not LF-terminated."); const body = bytes.subarray(0, -1); const value = parseCanonicalJsonV2(body.toString("utf8")); if (!value || typeof value !== "object" || Array.isArray(value) || !canonicalJsonV2(value).equals(body)) throw new ApiError(500, "immutable_record_corrupt", "A local framed evidence record is not exact canonical JSON."); return value as Record<string, any>; }
 
   start(): void {
     if (this.#closing) return;
@@ -168,6 +171,19 @@ export class Gate2Runtime {
     return artifact;
   }
 
+  async verifiedRunEvidence(projectId: string, runId: string): Promise<VerifiedMesaRunEvidence> {
+    const run = this.store.run(projectId, runId);
+    if (run.reference_kind !== "terminal" || run.status !== "succeeded") throw new ApiError(409, "run_evidence_pending", "Run evidence is available only after verified success.");
+    if (!this.#mesa.getWindRunEvidence) throw new ApiError(503, "mesa_unconfigured", "Mesa evidence retrieval is unavailable.");
+    const evidence = await this.#mesa.getWindRunEvidence(projectId, runId); this.#evidence.set(key(projectId, runId), structuredClone(evidence)); this.store.reconcileVerifiedMesaState(projectId, runId); return structuredClone(evidence);
+  }
+  cachedRunEvidence(projectId: string, runId: string): VerifiedMesaRunEvidence | null { const value = this.#evidence.get(key(projectId, runId)); return value ? structuredClone(value) : null; }
+
+  async artifactByName(projectId: string, runId: string, name: VerifiedMesaArtifact["name"]): Promise<WindArtifact> {
+    if (!this.#mesa.getWindArtifact) throw new ApiError(503, "mesa_unconfigured", "Mesa artifact retrieval is unavailable.");
+    const { declaration } = await this.#verifiedArtifact(projectId, runId, name); const artifact = await this.#mesa.getWindArtifact(projectId, runId, name); this.#assertArtifactDigest(artifact, declaration.sha256); return artifact;
+  }
+
   async #reconcile(projectId: string, runId: string): Promise<void> {
     if (this.#closing) return;
     let run = this.store.run(projectId, runId);
@@ -244,8 +260,9 @@ export class Gate2Runtime {
   async #verifiedArtifact(projectId: string, runId: string, name?: VerifiedMesaArtifact["name"], artifactId?: string): Promise<{ evidence: VerifiedMesaRunEvidence; declaration: VerifiedMesaArtifact }> {
     const evidence = await this.#mesa.getWindRunEvidence!(projectId, runId); const terminal = evidence.terminal_metadata;
     this.#assertOpen();
-    if (!terminal || terminal.status !== "succeeded") throw new ApiError(500, "mesa_run_corrupt", "Current Mesa evidence is not verified success.");
-    const declaration = terminal.artifacts.find((item) => name ? item.name === name : item.artifact_id === artifactId);
+    const framed = terminal && "terminal_metadata_kind" in terminal && terminal.terminal_metadata_kind === "framed_verified_success"; if (!terminal || (!framed && terminal.status !== "succeeded")) throw new ApiError(500, "mesa_run_corrupt", "Current Mesa evidence is not verified success.");
+    const artifacts: VerifiedMesaArtifact[] = framed ? Object.entries(terminal.artifacts).map(([logicalName, item]) => ({ name: logicalName as VerifiedMesaArtifact["name"], ...item })) : terminal.artifacts;
+    const declaration = artifacts.find((item) => name ? item.name === name : item.artifact_id === artifactId);
     if (!declaration) throw new ApiError(500, "mesa_run_corrupt", "The declared artifact is absent from terminal evidence."); this.#evidence.set(key(projectId, runId), evidence); this.store.reconcileVerifiedMesaState(projectId, runId);
     return { evidence, declaration };
   }
