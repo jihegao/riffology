@@ -61,12 +61,16 @@ bash scripts/start-local-demo.sh
 停止脚本会停止三个子进程，但不会删除项目和运行工件。重启后，持久化修订、问题、认可、
 运行和证据仍由同一项目恢复。
 
+当前阶段只交付可演示的私有草稿工作流，不执行真实工作区删除，也不要求生成 Report A/B、
+运行 workspace-retirement auditor/apply 或取得 GitHub approval。仓库中保留的离线审计器是后续
+可选运维能力；`scripts/start-local-demo.sh` 和浏览器演示路径都不会调用它。
+
 ## 测试
 
 ```sh
 cd mesa_service && PYTHONDONTWRITEBYTECODE=1 uv run pytest -q
-cd ../backend && npm test
-cd ../web && npm test && npm run build && npm run test:retirement && npm run test:e2e
+cd ../backend && npm run test:demo
+cd ../web && npm run test:demo && npm run test:startup-config && npm run test:e2e
 ```
 
 完整测试范围和最终通用规则扫描命令见 [`docs/test-plan.md`](docs/test-plan.md)。

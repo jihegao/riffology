@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:demo": "node --experimental-strip-types --test test/durable-project-store.test.ts test/gate2-api.test.ts test/gate2-real-integration.test.ts test/gate3-api.test.ts test/gate3-real-integration.test.ts test/gate3-recovery.test.ts test/mesa-adapter.test.ts test/workspace-lifecycle.test.ts"
   },
   "engines": {
     "node": ">=23"

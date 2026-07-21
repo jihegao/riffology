@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:demo": "vitest run && tsc --noEmit && vite build && node --test e2e/supervise-evidence-backend.test.mjs",
     "test:retirement": "vite build && node ../scripts/test-gate4-runtime-absence.mjs && node --test e2e/supervise-evidence-backend.test.mjs",
     "test:startup-config": "node ../scripts/test-start-local-demo.mjs",
     "test:watch": "vitest",
