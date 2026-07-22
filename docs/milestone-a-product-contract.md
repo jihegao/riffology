@@ -96,10 +96,11 @@ skill explicitly; otherwise the Agent may route to a relevant skill and reports
 which skill it used. Full skill instructions and references are loaded only
 when needed rather than injecting every skill into every turn.
 
-If OpenCode or the selected provider/model is unavailable, Riff enters an
-explicit read-only mode. Existing models, projects, configurations, runs, and
-results remain browsable and saved configurations remain runnable. Riff does
-not use canned responses to imitate a live Agent.
+If OpenCode or the selected provider/model is unavailable, Agent conversation
+mutation enters an explicit read-only mode. Existing models, projects,
+configurations, runs, and results remain browsable, and direct run controls for
+saved configurations remain available. Riff does not use canned responses to
+imitate a live Agent.
 
 ## Conversation changes and temporary documents
 
@@ -244,13 +245,19 @@ disposable.
 ## Milestone A delivery stages
 
 The stages are sequential. Each receives its own design, tests, review, PR, and
-merge before the next depends on it.
+merge before the next depends on it: [Stage 1 / #12](https://github.com/jihegao/riffology/issues/12),
+[Stage 2 / #13](https://github.com/jihegao/riffology/issues/13),
+[Stage 3 / #14](https://github.com/jihegao/riffology/issues/14), and
+[Stage 4 / #15](https://github.com/jihegao/riffology/issues/15).
 
 ### Stage 1 — product and data foundation
 
 Add the simplified SQLite/object-store domain for models, projects,
 conversations, temporary documents, attachments, experiments, runs, trash, and
-restart recovery. Do not implement OpenCode or the final UI in this stage.
+restart recovery. This stage owns the internal project-creation primitive that
+copies a fixed model snapshot and proves later source edits cannot affect it; it
+does not expose the final New project workflow. Do not implement OpenCode or the
+final UI in this stage.
 
 ### Stage 2 — Agent and model workspace
 
@@ -262,17 +269,19 @@ path.
 
 ### Stage 3 — projects and execution
 
-Add model-copy project creation, project-scoped permissions, experiment
-configuration, visual and batch execution, direct run controls, output indexes,
-bounded events, Playwright visual inspection boundaries, and the migration of
-the existing wind model into the generic runtime.
+Expose New project through the Stage 1 fixed-copy primitive, add project-scoped
+permissions, experiment configuration, visual and batch execution, direct run
+controls, output indexes, bounded events, Playwright visual inspection
+boundaries, and migrate the existing wind model and example project into the
+generic runtime.
 
 ### Stage 4 — two-pane product and wind acceptance
 
 Add the Models/Projects home, shared two-pane shell, dynamic document workspace,
-conversation cards and management, wind example model/project, offline read-only
-behavior, recovery UX, old-product cleanup, documentation, and real browser
-acceptance.
+conversation cards and management, offline read-only behavior, recovery UX,
+old-product cleanup, documentation, and real browser acceptance of the wind
+model and example project delivered by Stage 3. Stage 4 does not re-import or
+redefine those objects.
 
 ## Milestone A exit story
 
