@@ -1,5 +1,12 @@
 # Product positioning and roadmap: business-aligned simulation agents
 
+> **Superseded target notice:** the approved
+> [`milestone-a-product-contract.md`](milestone-a-product-contract.md) is the
+> current product authority. The Gate 0-4 roadmap below is retained as design
+> history and wind-model evidence. It must not be used to remove the OpenCode
+> conversation surface, require immutable user-visible revisions, or hard-code
+> Wind Evidence Studio as the product.
+
 ## Gate 0 status
 
 The wind-turbine Phase 1 direction and Gates 1-4 below are approved target

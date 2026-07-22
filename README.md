@@ -2,6 +2,12 @@
 
 本地双栏演示：左侧为由 OpenCode 驱动的建模对话与文件上传，右侧为 Mesa 仿真工作台。
 
+> **Milestone A target:** the newly approved product contract is
+> [`docs/milestone-a-product-contract.md`](docs/milestone-a-product-contract.md).
+> It restores this two-pane interaction as the shared shell for generic Models
+> and Projects and treats wind-turbine maintenance as the first ordinary case.
+> The current `main` implementation predates that contract.
+
 ## Gate 0 status
 
 Gate 0 已冻结下一阶段目标：以本机 AnyLogic `Field Service` 示例为结构证据，
