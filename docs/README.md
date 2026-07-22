@@ -20,6 +20,12 @@ product.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between future tracked-code retirement and protected local
   workspaces/artifacts; it does not authorize deletion.
+- [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md):
+  Stage 2 design for persistent OpenCode conversations, backend-only session
+  recovery, progressive skill/action audit, owner-scoped Model tools, atomic
+  workspace mutation, generic Mesa scaffolding, and technical executability
+  checks. Implementation is in progress on #13; Stage 3/4 behavior remains
+  explicitly out of scope.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
