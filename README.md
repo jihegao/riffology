@@ -6,7 +6,32 @@
 > [`docs/milestone-a-product-contract.md`](docs/milestone-a-product-contract.md).
 > It restores this two-pane interaction as the shared shell for generic Models
 > and Projects and treats wind-turbine maintenance as the first ordinary case.
-> The current `main` implementation predates that contract.
+> The legacy runtime described below predates that contract and still coexists
+> while the sequential Milestone A stages replace it.
+
+## Milestone A2 implementation status
+
+Stage 1's `ProductStoreV2` foundation is implemented and Stage 2 / #13 is now
+the current implementation authority. The Stage 2 branch includes schema v3,
+durable per-conversation Agent state, bounded OpenCode context/session recovery,
+scoped MCP tools and simulation-skill audit, a generic Model scaffold, a
+restricted macOS Model process, and digest-bound technical checks. HTTP
+integration for providers, Models, conversations, turns, and checks is being
+added; the final API and browser acceptance evidence is not yet complete.
+
+The older Gate wind path and `queue-network-v1` code still coexist in the tree.
+They remain runnable history, not the Milestone A2 product authority, and this
+stage does not authorize their deletion. Project experiment/execution and wind
+import belong to #14; the final Models/Projects home and two-pane shell belong
+to #15.
+
+Restricted Model execution currently supports the local-user macOS boundary
+through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
+environment, no network rule, and finite process/output/time limits. This is
+defense against accidental access, not container/VM-grade isolation from
+hostile code. “Technically executable” means only that the thin syntax,
+interface, dependency, smoke, output, resource, cancellation, and applicable
+visual-health checks pass; it is not scientific validation or decision trust.
 
 ## Legacy implementation status
 
@@ -95,6 +120,26 @@ the demo backend only checks health and the configured provider/model before it
 accepts chat. The live acceptance gate is not satisfied by deterministic mode.
 
 ## Verification
+
+Focused Milestone A2 verification while #13 is in progress:
+
+```sh
+cd backend
+node --experimental-strip-types --test \
+  test/product-schema.test.ts \
+  test/agent-conversation-store.test.ts \
+  test/product-store-v3-recovery.test.ts \
+  test/agent-context.test.ts \
+  test/opencode-conversation-runtime.test.ts \
+  test/agent-mcp-permissions.test.ts \
+  test/simulation-skill-catalog.test.ts \
+  test/model-workspace.test.ts \
+  test/model-process-isolation.test.ts \
+  test/model-technical-checker.test.ts
+```
+
+Final focused/full counts and API/browser evidence are pending the completed
+#13 integration run; do not infer them from this status note.
 
 Run the component suites:
 

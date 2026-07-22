@@ -5,6 +5,14 @@ directory. Gate 0 is a design baseline: it approves the target but is not proof
 that Gates 1-4 are implemented. Technical owners must document public
 interfaces, test expectations, and assumptions before implementation.
 
+Stage 2 / #13 is the current implementation stage. Its authority is the
+Milestone A product contract plus
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
+Schema v3/store, conversation/OpenCode context, scoped MCP/skills, generic
+Model workspace, restricted process, and technical checker are implemented;
+HTTP/API integration and final acceptance are in progress. Legacy Gate and
+queue code still coexist and are not silently retired by Stage 2.
+
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
 supersedes the former Gate 0-4 product target wherever they disagree. The older
@@ -30,11 +38,16 @@ product.
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
 - [`architecture.md`](architecture.md): target system boundaries, revision
-  identities, storage ownership, and current/target distinction.
-- [`product-roadmap.md`](product-roadmap.md): evolution from the bounded MVP to open model creation,
-  sandboxed draft execution, progressive validation, and governed publication.
-- [`ui-workflow.md`](ui-workflow.md): target browser-visible workflow and acceptance checks.
+  identities, ProductStoreV2 authority, Stage 2 process boundaries, and the
+  legacy/current distinction.
+- [`product-roadmap.md`](product-roadmap.md): legacy long-term roadmap retained
+  as history, with the current Milestone A2 boundary called out explicitly.
+- [`ui-workflow.md`](ui-workflow.md): minimal Stage 2 acceptance surface and the
+  legacy/future browser workflow boundaries.
 - [`mesa-service.md`](mesa-service.md): target Mesa model, event, revision, and artifact contract.
-- [`opencode-bridge.md`](opencode-bridge.md): target OpenCode proposal and domain-action boundary.
-- [`backend-api.md`](backend-api.md): target durable project, issue, attestation, experiment, and run API.
-- [`test-plan.md`](test-plan.md): Gate 1-4 unit, contract, integration, browser, and review requirements.
+- [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
+  OpenCode/session/context contract followed by the legacy Gate contract.
+- [`backend-api.md`](backend-api.md): current Stage 2 API integration boundary
+  followed by the legacy Gate project API target.
+- [`test-plan.md`](test-plan.md): current Stage 2 focused/full verification
+  commands and acceptance, plus retained legacy Gate test history.

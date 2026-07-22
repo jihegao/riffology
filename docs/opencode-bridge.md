@@ -1,9 +1,50 @@
-# OpenCode bridge target contract
+# OpenCode bridge contracts
+
+## Milestone A2 current authority
+
+Stage 2 gives each durable Model or Project conversation its own backend-only
+OpenCode session binding. Riff-owned schema v3 messages, summaries, turn
+receipts, skill uses, and action records are authoritative; OpenCode history and
+text are external context. The browser receives only a redacted session state,
+never the opaque session reference or credentials.
+
+The implemented conversation runtime discovers provider/models from the
+configured loopback OpenCode service, requires the conversation's exact pair,
+reuses a live session, and marks a missing session lost. Reconstruction creates
+a new session from bounded Riff context: owner/workspace summary, rolling
+summary, recent complete messages, explicitly relevant bounded documents and
+attachments, catalog metadata, and selected skill instructions. Included IDs,
+limits, and context digest are auditable. Unrelated objects, credentials, raw
+paths, and opaque session data are excluded.
+
+OpenCode, authentication, provider/model discovery, validation, or rebuild
+failure produces an explicit read-only reason. Riff preserves the transcript
+and committed Model state and does not substitute another model or deterministic
+canned reply.
+
+Scoped MCP exposes typed current-owner tools only. Skill catalog metadata is
+preloaded; full selected instructions are loaded progressively, and explicit or
+automatic selection is recorded. A skill never grants authority. Model
+conversations may read or atomically change allowlisted files in their own
+workspace. Project conversations cannot change Model/snapshot code, schemas,
+execution description, or dependencies. Neither owner receives generic shell,
+SQL, arbitrary filesystem, URL-fetch, product-source, or ambient-credential
+tools.
+
+Provider, Model, conversation, turn, and technical-check HTTP integration is in
+progress. Final real-provider API/browser acceptance and exact test counts are
+therefore still pending. Project execution/wind migration belongs to #14; the
+final shared shell belongs to #15.
+
+---
+
+# Legacy OpenCode bridge target contract
 
 ## Status and authority
 
-This Gate 0 document defines the Gate 4 integration target. The current bridge
-still exposes legacy queue actions. The backend project state remains
+This Gate 0 document defines the former Gate 4 integration target and is
+retained as history. The coexisting bridge still exposes legacy queue actions,
+but those actions are not current A2 authority. The backend project state remains
 authoritative: OpenCode text/session history, DOM state, diagrams, Playwright
 observations, and fixture responses are never model, workflow, or run truth.
 

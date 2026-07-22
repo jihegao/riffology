@@ -1,4 +1,62 @@
-# Wind-turbine delivery test plan
+# Delivery test plan
+
+## Milestone A2 current verification
+
+Stage 2 verification is governed by
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
+Implemented focused coverage includes schema v3/store recovery, durable
+conversation state, bounded context and per-conversation OpenCode sessions,
+scoped MCP/skills, generic Model workspace, restricted process isolation, and
+digest-bound technical checks.
+
+Run the focused backend set with:
+
+```bash
+cd backend
+node --experimental-strip-types --test \
+  test/product-schema.test.ts \
+  test/agent-conversation-store.test.ts \
+  test/product-store-v3-recovery.test.ts \
+  test/agent-context.test.ts \
+  test/opencode-conversation-runtime.test.ts \
+  test/agent-mcp-permissions.test.ts \
+  test/simulation-skill-catalog.test.ts \
+  test/model-workspace.test.ts \
+  test/model-process-isolation.test.ts \
+  test/model-technical-checker.test.ts
+```
+
+Run the full component gates with:
+
+```bash
+(cd backend && npm test)
+(cd web && npm test && npm run build)
+```
+
+The API integration tests must additionally cover provider/model discovery,
+generic Model creation, conversation creation/listing, idempotent turns,
+explicit read-only errors, opaque-session omission, and technical-check
+start/read. Real browser acceptance must cover live multi-turn session reuse, a
+second independent conversation, lost-session bounded reconstruction, restart,
+temporary documents/actions, scoped Model mutation, Project mutation denial,
+and honest technical-status copy.
+
+Final focused/full pass counts, optional skips, API evidence, and browser
+evidence: **pending the completed #13 integration run**. Do not substitute the
+legacy Gate results below or a mock-only/healthy-port check for those numbers.
+
+The macOS `sandbox-exec` tests prove the stated local-user process boundary,
+workspace restriction, scrubbed environment, no network rule, cancellation,
+and finite limits. They do not prove containment of hostile code. An executable
+check result proves the thin technical contract only, not scientific validity
+or trust.
+
+Legacy Gate/queue tests remain present while the implementations coexist. #14
+Project execution/wind import and #15 final-shell E2E are non-scope for A2.
+
+---
+
+# Legacy wind-turbine delivery test plan
 
 ## Status
 

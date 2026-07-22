@@ -1,9 +1,43 @@
-# Wind-turbine alignment workbench target
+# UI workflow contracts
+
+## Milestone A2 current acceptance surface
+
+Stage 2 requires only a narrow integration surface sufficient to prove the New
+model and persistent-conversation contracts. It is not the final product shell.
+The current authority is
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md):
+
+- create a generic Model using only name and initial provider/model;
+- show multiple named conversations with independent durable context;
+- show provider/model locked after the first accepted user message;
+- distinguish live, connecting, lost, and explicit read-only Agent state;
+- show skill-use and allowed/denied action records without exposing opaque
+  sessions, credentials, absolute paths, or raw tool payloads;
+- keep temporary documents visibly separate from committed Model workspace;
+- show Model technical state as “Technically executable,” never as valid,
+  trusted, calibrated, or recommended.
+
+The HTTP/browser integration for this surface is in progress, so these items
+are acceptance requirements rather than a current visible-behavior claim. A
+mock conversation, screenshot, or healthy port alone is insufficient; final
+review must exercise a real provider, provider unavailable/read-only, session
+loss/rebuild, restart, scoped mutation, and technical checks against backend
+state.
+
+The legacy queue/wind UI still coexists and remains runnable history. Stage 2
+does not delete it or treat its fixed tabs as the generic workspace. Project
+experiments/execution and wind import are #14; the final Models/Projects home,
+shared two-pane shell, responsive layout, and polished dynamic right pane are
+#15.
+
+---
+
+# Legacy wind-turbine alignment workbench target
 
 ## Status and authority
 
-This Gate 0 contract is the Gate 3 browser target, not current UI behaviour.
-Until Gates 1-4 land, the checked-out UI still exposes the legacy queue demo.
+This Gate 0 contract is the former Gate 3 browser target, not current A2 UI
+authority. The checked-out UI may still expose the legacy queue demo.
 Backend `ProjectState` and immutable artifacts are authoritative; conversation,
 DOM, diagrams, and Playwright actions are projections or verification layers.
 

@@ -1,10 +1,54 @@
-# Wind-turbine alignment architecture target
+# Architecture contracts
+
+## Milestone A2 current architecture
+
+The current authority is the
+[`Milestone A product contract`](milestone-a-product-contract.md), the
+[`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
+[`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
+`ProductStoreV2` over SQLite schema v3 and checked object bytes is the system of
+record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
+helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
+write around that store or become authoritative state.
+
+Stage 2 currently adds these implemented boundaries:
+
+```text
+API integration (in progress)
+  -> conversation / Agent session coordination
+       -> ProductStoreV2 schema v3
+       -> loopback OpenCode adapter + bounded Riff context
+       -> scoped MCP tools + progressive simulation-skill loading
+       -> generic Model workspace
+            -> restricted macOS process + digest-bound technical checker
+```
+
+One conversation owns one provider/model lock and at most one nonterminal
+backend-only external session generation. Lost sessions rebuild from bounded
+Riff-owned context; provider failure is explicit read-only. All direct Model
+changes use typed owner-scoped tools and Stage 1 database/filesystem recovery.
+Project conversations cannot change copied Model code, schema, or dependencies.
+
+The restricted runner supplies a capability-resolved Model directory, fixed
+executable/arguments, scrubbed environment, no network rule, cancellation, and
+finite time/output limits through macOS `sandbox-exec`. This local-user boundary
+does not claim VM/container isolation from malicious code. Technical
+executability is digest-bound evidence that a thin interface runs; it is not
+scientific validity, calibration, trust, or decision suitability.
+
+Legacy Gate/wind and queue components still coexist and are retired only by an
+explicit later audit. #14 owns Project execution and wind migration; #15 owns
+the final Models/Projects home and shared two-pane browser shell.
+
+---
+
+# Legacy wind-turbine alignment architecture target
 
 ## Status
 
-This is the approved Gate 0 target, not an implementation claim. The current
-checkout still runs the in-memory, queue-bound Phase 0 path. Gates 1-4 replace
-that path before Gate 4 removes it.
+This is the former approved Gate 0 target, retained as implementation history.
+Parts of the in-memory queue/wind path still coexist, but it no longer governs
+the Milestone A2 implementation or authorizes removal.
 
 ## Objective and boundaries
 
