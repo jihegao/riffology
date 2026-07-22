@@ -10,8 +10,11 @@ import { Gate2Runtime } from "./gate2-runtime.ts";
 import { Gate3Runtime, type Gate3ActivationCheckpoint } from "./gate3-runtime.ts";
 import { McpToolServer } from "./mcp.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
-import type { OpenCodeAdapter, OpenCodeReadiness } from "./opencode-adapter.ts";
+import type { OpenCodeAdapter, OpenCodeConversationPort, OpenCodeReadiness } from "./opencode-adapter.ts";
 import { OpenCodeEventBridge } from "./opencode-events.ts";
+import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import { MilestoneA2Api } from "./milestone-a2-api.ts";
+import { ProductStoreV2 } from "./product-store-v2.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
@@ -28,6 +31,9 @@ export type BackendOptions = {
   store?: ProjectStore;
   durableStore?: DurableProjectStore;
   gate3FaultInjector?: (checkpoint: Gate3ActivationCheckpoint) => void;
+  a2ProductRoot?: string;
+  productStore?: ProductStoreV2;
+  a2OpenCode?: OpenCodeConversationPort;
 };
 
 export class BackendApp {
@@ -36,6 +42,8 @@ export class BackendApp {
   readonly mcp: McpToolServer;
   readonly gate2: Gate2Runtime;
   readonly gate3: Gate3Runtime;
+  readonly productStore?: ProductStoreV2;
+  readonly a2?: MilestoneA2Api;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
@@ -51,6 +59,11 @@ export class BackendApp {
     this.actions = new SimulationActions(this.store, options.mesa, options.projector);
     this.mcp = new McpToolServer(this.actions);
     this.#openCodeEvents = new OpenCodeEventBridge(this.store);
+    if (options.productStore || options.a2ProductRoot) {
+      const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
+      this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
+      this.a2 = new MilestoneA2Api(new AgentWorkspaceService(this.productStore, a2OpenCode));
+    }
   }
 
   async initialize(): Promise<ProjectState> {
@@ -102,11 +115,13 @@ export class BackendApp {
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
     this.mcp.revokeAll();
     await this.gate2.close();
-    if (!this.#server) return;
-    this.#server.closeIdleConnections?.();
-    this.#server.closeAllConnections?.();
-    await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
-    this.#server = undefined;
+    if (this.#server) {
+      this.#server.closeIdleConnections?.();
+      this.#server.closeAllConnections?.();
+      await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
+      this.#server = undefined;
+    }
+    this.productStore?.close();
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -114,6 +129,7 @@ export class BackendApp {
     try {
       const url = requestUrl;
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
       if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
       if (parts[0] === "api" && parts[1] === "projects") return await this.#gate2(request, response, url, parts);
@@ -438,6 +454,16 @@ const publicAgent = (readiness: OpenCodeReadiness): ProjectState["agent"] => ({
   status: readiness.status,
   ...(readiness.lastError ? { lastError: readiness.lastError } : {}),
 });
+
+const asConversationOpenCode = (value: OpenCodeAdapter): OpenCodeConversationPort => {
+  const candidate = value as Partial<OpenCodeConversationPort>;
+  if (typeof candidate.discoverProviderModels !== "function" || typeof candidate.getSession !== "function"
+    || typeof candidate.createSession !== "function" || typeof candidate.injectContext !== "function"
+    || typeof candidate.promptWithModel !== "function" || typeof candidate.abort !== "function") {
+    throw new ApiError(500, "a2_opencode_invalid", "Milestone A2 requires the loopback OpenCode conversation adapter.");
+  }
+  return candidate as OpenCodeConversationPort;
+};
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });

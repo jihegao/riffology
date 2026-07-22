@@ -121,7 +121,7 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
-    fetch: async (_input, init) => { bodies.push(init?.body ? JSON.parse(String(init.body)) : null); return Response.json({ id: "ok" }); },
+    fetch: async (_input, init) => { bodies.push(init?.body ? JSON.parse(String(init.body)) : null); return Response.json({ id: "ok", parts: [{ type: "text", text: "assistant answer" }] }); },
   });
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "hello", system: "bounded", attachments: [] });
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });

@@ -21,6 +21,12 @@ export type OpenCodeProviderModel = {
   qualifiedId: string;
 };
 
+export type OpenCodeAssistantResponse = {
+  messageId: string | null;
+  text: string;
+  content: { source: "opencode"; textParts: number };
+};
+
 export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Record<string, unknown> };
 
 /** Legacy Gate adapter retained while the old server routes are migrated. */
@@ -44,7 +50,7 @@ export interface OpenCodeConversationPort {
     binding: { providerId: string; modelId: string },
     prompt: OpenCodePrompt,
     signal?: AbortSignal,
-  ): Promise<void>;
+  ): Promise<OpenCodeAssistantResponse>;
   abort(sessionId: string): Promise<void>;
 }
 
@@ -162,8 +168,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     binding: { providerId: string; modelId: string },
     prompt: OpenCodePrompt,
     signal?: AbortSignal,
-  ): Promise<void> {
-    if (this.config.skipLive) return;
+  ): Promise<OpenCodeAssistantResponse> {
+    if (this.config.skipLive) throw new ApiError(503, "opencode_canned_forbidden", "A live OpenCode response is required.");
     assertOpaqueId(sessionId, "OpenCode session ID");
     const model = validatedModelReference(binding);
     const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
@@ -172,7 +178,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
     ).join("\n");
     const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
-    await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
+    const response = await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
       method: "POST",
       signal,
       body: JSON.stringify({
@@ -183,6 +189,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         tools: disabledBuiltInTools(),
       }),
     });
+    return normalizedAssistantResponse(response);
   }
 
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
@@ -190,7 +197,21 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
       throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
     }
-    await this.promptWithModel(sessionId, splitQualifiedModel(this.#readiness.modelId), prompt, signal);
+    const binding = splitQualifiedModel(this.#readiness.modelId);
+    const attachmentText = prompt.attachments.map((attachment) =>
+      `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
+    ).join("\n");
+    await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
+      method: "POST",
+      signal,
+      body: JSON.stringify({
+        messageID: `msg_${randomUUID()}`,
+        model: validatedModelReference(binding),
+        system: prompt.system,
+        parts: [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }],
+        tools: disabledBuiltInTools(),
+      }),
+    });
   }
 
   async abort(sessionId: string): Promise<void> {
@@ -383,6 +404,19 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
 
 const apiErrorFromResponse = (response: Response, payload: Record<string, any>): ApiError =>
   new ApiError(response.status, String(payload?.error?.code ?? "opencode_error"), "OpenCode rejected the local request.");
+
+const normalizedAssistantResponse = (payload: Record<string, any>): OpenCodeAssistantResponse => {
+  const parts = Array.isArray(payload.parts) ? payload.parts : Array.isArray(payload.message?.parts) ? payload.message.parts : [];
+  const texts = parts
+    .filter((part: any) => part && part.type === "text" && typeof part.text === "string" && part.text.trim())
+    .map((part: any) => part.text.trim());
+  if (!texts.length && typeof payload.text === "string" && payload.text.trim()) texts.push(payload.text.trim());
+  const text = texts.join("\n").trim();
+  if (!text) throw new ApiError(502, "opencode_empty_response", "OpenCode returned no assistant text.");
+  const rawId = payload.info?.id ?? payload.info?.messageID ?? payload.id ?? payload.messageID;
+  const messageId = typeof rawId === "string" && rawId.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(rawId) ? rawId : null;
+  return { messageId, text, content: { source: "opencode", textParts: texts.length } };
+};
 
 const disabledBuiltInTools = () => ({
   invalid: false,

@@ -1,6 +1,6 @@
 import { ApiError } from "./errors.ts";
 import { buildBoundedAgentContext, type AgentContextInput, type AgentContextLimits, type BoundedAgentContext } from "./agent-context.ts";
-import type { OpenCodeConversationPort } from "./opencode-adapter.ts";
+import type { OpenCodeAssistantResponse, OpenCodeConversationPort } from "./opencode-adapter.ts";
 
 export type DurableConversationRuntime = {
   conversationId: string;
@@ -29,7 +29,8 @@ export type AgentReadOnlyReason =
   | "provider_unavailable"
   | "model_unavailable"
   | "session_validation_failed"
-  | "session_rebuild_failed";
+  | "session_rebuild_failed"
+  | "empty_assistant_response";
 
 export type PreparedConversationSession =
   | {
@@ -44,6 +45,10 @@ export type PreparedConversationSession =
       context: BoundedAgentContext;
     }
   | { mode: "read_only"; conversationId: string; reason: AgentReadOnlyReason; retryable: boolean };
+
+export type ConversationPromptResult =
+  | (Extract<PreparedConversationSession, { mode: "live" }> & { assistant: OpenCodeAssistantResponse })
+  | Extract<PreparedConversationSession, { mode: "read_only" }>;
 
 export class AgentConversationSessionManager {
   readonly #pending = new Map<string, Promise<PreparedConversationSession>>();
@@ -77,17 +82,17 @@ export class AgentConversationSessionManager {
     text: string,
     attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }> = [],
     signal?: AbortSignal,
-  ): Promise<PreparedConversationSession> {
+  ): Promise<ConversationPromptResult> {
     const prepared = await this.ensureSession(conversationId, contextInput);
     if (prepared.mode === "read_only") return prepared;
     try {
-      await this.#openCode.promptWithModel(
+      const assistant = await this.#openCode.promptWithModel(
         prepared.externalSessionRef,
         { providerId: prepared.providerId, modelId: prepared.modelId },
         { text, system: prepared.context.text, attachments },
         signal,
       );
-      return prepared;
+      return { ...prepared, assistant };
     } catch (error) {
       if (signal?.aborted) throw error;
       return { mode: "read_only", conversationId, reason: stableReason(error, "opencode_unavailable"), retryable: true };
@@ -154,5 +159,6 @@ const stableReason = (error: unknown, fallback: AgentReadOnlyReason): AgentReadO
   if (error.code === "opencode_auth_failed" || error.status === 401) return "opencode_auth_failed";
   if (["opencode_unavailable", "opencode_unconfigured", "agent_not_ready"].includes(error.code)) return "opencode_unavailable";
   if (error.code === "opencode_model_unavailable") return "model_unavailable";
+  if (error.code === "opencode_empty_response") return "empty_assistant_response";
   return fallback;
 };
