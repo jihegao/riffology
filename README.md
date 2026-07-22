@@ -9,10 +9,10 @@
 > The legacy runtime described below predates that contract and still coexists
 > while the sequential Milestone A stages replace it.
 
-## Milestone A2 implementation status
+## Milestone A2 implementation and A3 design status
 
 Stage 1's `ProductStoreV2` foundation is implemented and Stage 2 / #13 is the
-current implementation authority. The Stage 2 branch now wires schema v3,
+current completed implementation authority. The Stage 2 implementation wires schema v3,
 durable per-conversation Agent state, bounded OpenCode context/session recovery,
 per-turn capability-scoped MCP tools, progressive simulation-skill audit,
 conversation attachments and temporary documents, a generic Model scaffold, a
@@ -25,6 +25,12 @@ They remain runnable history, not the Milestone A2 product authority, and this
 stage does not authorize their deletion. Project experiment/execution and wind
 import belong to #14; the final Models/Projects home and two-pane shell belong
 to #15.
+
+Stage 3 / #14 has entered its design gate. The review draft is
+[`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
+It freezes the intended Project, experiment, run snapshot, generic batch/visual
+runtime, output/event, scoped visual access, and ordinary wind-import
+contracts. No Stage 3 implementation or acceptance is claimed yet.
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
