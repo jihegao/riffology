@@ -103,15 +103,3 @@ export type PermanentDeletePreview = {
   /** Digest of target and dependency state, used to reject stale previews. */
   stateToken: Sha256Digest;
 };
-
-export interface ProductRepository {
-  createModel(record: ModelRecord): void;
-  createProjectFromModel(input: CreateProjectFromModelInput): ProjectRecord;
-  listModels(options?: { includeArchived?: boolean; includeTrashed?: boolean }): ModelRecord[];
-  listProjects(options?: { includeArchived?: boolean; includeTrashed?: boolean }): ProjectRecord[];
-  renameResource(kind: NamedManagedResourceKind, id: ProductId, name: string, updatedAt: IsoTimestamp): void;
-  archiveResource(kind: NamedManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
-  restoreResource(kind: ManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
-  trashResource(kind: ManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
-  previewPermanentDelete(kind: ManagedResourceKind, id: ProductId): PermanentDeletePreview;
-}

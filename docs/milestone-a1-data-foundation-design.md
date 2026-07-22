@@ -225,3 +225,46 @@ Focused schema/domain tests must prove:
   untracked files.
 
 The full backend suite remains mandatory before Stage 1 review and merge.
+
+## ProductStoreV2 implementation
+
+`backend/src/product-store-v2.ts` is the Stage 1 repository implementation; its
+name deliberately avoids the legacy in-memory `project-store.ts`. `open(root)`
+publishes a fresh root only after building a complete sibling staging root,
+closing SQLite, atomically renaming the directory, and fsyncing the parent.
+Existing roots reopen the schema, acquire the single writer lock, and complete
+MutationCoordinator recovery before serving reads or writes.
+The production `open(root)` accepts no injection options. Fault injection is
+available only through the explicitly internal `openForTesting` entrypoint.
+The former `ProductRepository` interface was removed because its stale
+`createModel(ModelRecord)` signature described a second, incompatible public
+contract; the typed ProductStoreV2 methods are the sole Stage 1 repository
+contract.
+
+All mixed file/database methods pass declarative statements with mandatory
+`expectedChanges` through MutationCoordinator. Pure database methods use the
+same expected-change contract inside `BEGIN IMMEDIATE` while the ProductStore
+owns that writer lock. Model creation accepts intent and bytes and calculates
+all file metadata. Project creation accepts only project intent, reads each
+eligible source file through one checked descriptor, captures the stored
+execution description, and computes both per-file and canonical aggregate
+snapshot digests before committing the copied rows and bytes together.
+Model and Project creation use stable transaction identities and complete
+intent matching, so a response lost after SQLite commit can be retried without
+duplicating rows or bytes. A conflicting intent fails closed. Project snapshot
+file IDs are deterministic, and transaction-local CAS statements recheck the
+source Model state, execution description, update timestamp, complete eligible
+file count, and every captured file identity/metadata field before inserting
+the Project.
+
+Typed Stage 1 methods cover conversations, messages, temporary documents,
+attachments and adoption, experiments, runs, and output indexes. Adoption is a
+separate operation after a Model/Project-owned conversation attachment exists;
+this preserves the schema rule that provenance ownership is already provable.
+No purge method exists. Deterministic previews validate every selected file
+against its owner, path, size, and digest and return exact composite record
+keys, blockers, and exclusions for all six managed resource kinds.
+Each child-resource mutation guards its active parent and same-owner binding in
+the same SQLite transaction. Preview records include every selected
+`object_files` row in both record and state-token material, and byte totals are
+checked as safe integers before filesystem verification.
