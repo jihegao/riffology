@@ -10,27 +10,35 @@ only durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
 technical status.
 
-HTTP integration is in progress for the following Stage 2 families:
+The implemented Stage 2 routes are:
 
 | Route family | Current Stage 2 contract |
 | --- | --- |
 | `GET /api/providers` | Discover backend-validated OpenCode provider/model pairs; return no credentials or upstream session IDs. |
 | `POST /api/models` | Accept a name and initial provider/model, then atomically create a generic Model, its first conversation, and server-owned scaffold. |
-| `/api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
-| `/api/objects/{kind}/{id}/conversations` | Create/list owner-scoped named conversations. Provider/model locks with the first accepted user message. |
-| `/api/conversations/{conversationId}/turns` | Start/poll an idempotent durable turn, expose structured read-only state, skill uses, and action records. |
-| `/api/models/{modelId}/technical-checks` | Start/read digest-bound thin technical checks and publish status only by compare-and-set. |
+| `GET /api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
+| `POST /api/models/{modelId}/technical-checks` | Start or idempotently return a digest-bound thin technical check using a `commandId`. |
+| `GET /api/models/{modelId}/technical-checks/{checkId}` | Read the bounded check DTO and its `pending`, `published`, or `superseded` publication state. |
+| `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. Provider/model locks with the first accepted user message. |
+| `GET /api/conversations/{conversationId}` | Return the redacted durable conversation and public session state. |
+| `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. |
+| `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
+| `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
+| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. |
+| `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
 
-Exact route shapes and API tests remain subject to the integration slice and
-must be updated here in the same PR. Opaque OpenCode sessions stay backend-only.
+Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
 canned Agent response. Model mutation is limited to typed current-Model tools;
 Project conversations cannot mutate Model code, schemas, execution description,
 or dependencies.
 
 The Stage 2 process boundary is macOS/local-user `sandbox-exec` with a
-Model-owned working root, scrubbed environment, denied network by default, and
-finite time/output/process limits. It is not hostile-code containment.
+Model-owned writable root, scrubbed environment, denied network by default,
+finite time/output/process limits, and read-only access only to the fixed Python
+application/framework and exact configured virtual-environment roots needed by
+the backend-selected interpreter. Arbitrary home, repository, credential, and
+sibling paths remain denied. It is not hostile-code containment.
 `technicalStatus: "executable"` means the thin technical checks passed; it is
 not a scientific-validity, calibration, trust, or recommendation field.
 

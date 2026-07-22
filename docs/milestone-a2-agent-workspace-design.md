@@ -1,6 +1,8 @@
 # Milestone A2 Agent and model-workspace design
 
-Status: Stage 2 implementation design. This document is subordinate to the
+Status: Stage 2 implemented design; final release acceptance retains the live
+provider browser caveat recorded in [`test-plan.md`](test-plan.md). This
+document is subordinate to the
 [Milestone A product contract](milestone-a-product-contract.md) and builds on
 the [Stage 1 data foundation](milestone-a1-data-foundation-design.md). It owns
 persistent Agent conversations and the generic Model workspace. Project
@@ -409,8 +411,8 @@ must not imply validity, accuracy, calibration, safety, or recommendation.
 
 ## HTTP API boundary
 
-Stage 2 routes are backend-owned and return the DTO allowlists above. Proposed
-resource shape:
+Stage 2 routes are backend-owned and return the DTO allowlists above. The
+implemented resource shape is:
 
 ```text
 GET    /api/providers
@@ -420,20 +422,21 @@ POST   /api/models/:modelId/technical-checks
 GET    /api/models/:modelId/technical-checks/:checkId
 GET    /api/objects/:ownerKind/:ownerId/conversations
 POST   /api/objects/:ownerKind/:ownerId/conversations
-PATCH  /api/conversations/:conversationId
+GET    /api/conversations/:conversationId
 GET    /api/conversations/:conversationId/messages
+GET    /api/conversations/:conversationId/documents
 POST   /api/conversations/:conversationId/turns
-GET    /api/conversations/:conversationId/turns/:requestKey
 POST   /api/conversations/:conversationId/attachments
-POST   /api/attachments/:attachmentId/adoptions
-POST   /api/conversations/:conversationId/documents
-POST   /api/documents/:documentId/transitions
+POST   /a2/mcp?cap=<server-minted capability>  (internal loopback only)
 ```
 
 Mutation routes require idempotency/request keys, bounded bodies, strict media
 types, server-derived ownership, and structured errors. Attachment names never
-become storage paths. Turn delivery may stream, but polling the durable turn is
-the recovery contract. The API does not expose a generic tool execution route.
+become storage paths. The current public turn surface completes synchronously;
+its durable receipt and idempotent retry are the recovery contract. The API does
+not expose a generic browser tool execution route. Adoption and temporary-
+document transitions are available only through the turn-scoped typed Agent
+tools in Stage 2, not public mutation endpoints.
 
 ## Failure and restart recovery
 

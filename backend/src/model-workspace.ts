@@ -173,7 +173,8 @@ export const captureWorkspaceDigest = (
     }
   };
   visit(root);
-  const frozen = files.map((file) => Object.freeze(file));
+  const frozen = files.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0)
+    .map((file) => Object.freeze(file));
   return Object.freeze({ digest: sha256(Buffer.from(canonicalJsonV2(frozen))), fileCount: frozen.length, totalBytes, files: Object.freeze(frozen) });
 };
 

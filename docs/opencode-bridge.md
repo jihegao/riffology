@@ -31,10 +31,31 @@ execution description, or dependencies. Neither owner receives generic shell,
 SQL, arbitrary filesystem, URL-fetch, product-source, or ambient-credential
 tools.
 
-Provider, Model, conversation, turn, and technical-check HTTP integration is in
-progress. Final real-provider API/browser acceptance and exact test counts are
-therefore still pending. Project execution/wind migration belongs to #14; the
-final shared shell belongs to #15.
+The production turn path binds a stable conversation-level OpenCode MCP name to
+a fresh server-minted capability URL, connects it only for turns that need Riff
+tools, and revokes/unbinds it in `finally`. The capability binds owner,
+conversation, turn, external-session generation, intent authority, attachment
+IDs, and the allowlisted tools. Execution revalidates that the durable turn is
+still running and that the latest available session generation matches the
+grant. The OpenCode prompt denies `*` tools by default
+and enables only that turn's exact scoped MCP name, excluding built-ins and
+ambient MCP servers. Ambiguous requests are proposal-only: they may create a
+draft temporary document, but every other durable mutation or lifecycle
+transition requires an explicit imperative. Temporary documents remain
+conversation state, and an attachment can be adopted only when it was explicitly
+included in that explicit turn. Per-conversation queuing prevents overlapping turns,
+while scoped MCP operations are globally serialized around OpenCode's
+process-wide MCP registry.
+
+Provider, Model, conversation, turn, attachment/document, workspace, and
+technical-check HTTP integration is implemented. A direct real-provider
+adapter check reused one session for two distinct turns. Browser acceptance
+created a Model, completed a real-provider turn and scoped tool call, and
+verified explicit read-only behavior after upstream failure. The provider then
+returned repeated network errors, so the final browser pass did not obtain a
+second clean same-session response; that rerun remains open and is not claimed
+as passed. Project execution/wind migration belongs to #14; the final shared
+shell belongs to #15.
 
 ---
 

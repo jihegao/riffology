@@ -81,6 +81,7 @@ export class AgentConversationSessionManager {
     contextInput: AgentContextInput,
     text: string,
     attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }> = [],
+    scopedMcpScopeId?: string,
     signal?: AbortSignal,
   ): Promise<ConversationPromptResult> {
     const prepared = await this.ensureSession(conversationId, contextInput);
@@ -89,7 +90,7 @@ export class AgentConversationSessionManager {
       const assistant = await this.#openCode.promptWithModel(
         prepared.externalSessionRef,
         { providerId: prepared.providerId, modelId: prepared.modelId },
-        { text, system: prepared.context.text, attachments },
+        { text, system: prepared.context.text, attachments, ...(scopedMcpScopeId ? { scopedMcpScopeId } : {}) },
         signal,
       );
       return { ...prepared, assistant };

@@ -8,6 +8,18 @@ export class MilestoneA2Api {
   constructor(service: AgentWorkspaceService) { this.service = service; }
 
   async handle(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<boolean> {
+    if (request.method === "POST" && url.pathname === "/a2/mcp") {
+      if ([...url.searchParams.keys()].some((key) => key !== "cap") || url.searchParams.getAll("cap").length !== 1) {
+        throw new ApiError(422, "invalid_mcp_capability", "The scoped A2 MCP capability query is invalid.");
+      }
+      const capability = url.searchParams.get("cap");
+      if (!capability) throw new ApiError(401, "mcp_capability_required", "A scoped A2 MCP capability is required.");
+      const body = await strictJsonBody(request, ["jsonrpc", "id", "method", "params"], ["id", "params"], 1_200_000);
+      const result = await this.service.handleAgentMcp(capability, body);
+      if (result === undefined) { response.writeHead(204, { "cache-control": "no-store" }); response.end(); }
+      else json(response, 200, result);
+      return true;
+    }
     if (request.method === "GET" && url.pathname === "/a2") {
       html(response, acceptanceHtml());
       return true;
@@ -26,6 +38,22 @@ export class MilestoneA2Api {
         modelId: requiredString(body.modelId, "modelId"),
       }));
       return true;
+    }
+    if (parts.length >= 4 && parts[1] === "models") {
+      const modelId = parts[2];
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "workspace") {
+        json(response, 200, this.service.modelWorkspace(modelId));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "technical-checks") {
+        const body = await strictJsonBody(request, ["commandId"]);
+        json(response, 200, await this.service.startTechnicalCheck(modelId, requiredString(body.commandId, "commandId")));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 5 && parts[3] === "technical-checks") {
+        json(response, 200, this.service.getTechnicalCheck(modelId, parts[4]));
+        return true;
+      }
     }
     if (parts.length === 5 && parts[1] === "objects" && parts[4] === "conversations") {
       const owner = ownerFromRoute(parts[2], parts[3]);
@@ -55,6 +83,22 @@ export class MilestoneA2Api {
         json(response, 200, { messages: this.service.listMessages(conversationId) });
         return true;
       }
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "documents") {
+        json(response, 200, { documents: this.service.listTemporaryDocuments(conversationId) });
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "attachments") {
+        const body = await strictJsonBody(request, ["commandId", "originalName", "mediaType", "base64", "purpose"], ["purpose"], 1_500_000);
+        json(response, 201, this.service.createAttachment({
+          commandId: requiredString(body.commandId, "commandId"),
+          conversationId,
+          originalName: requiredString(body.originalName, "originalName"),
+          mediaType: requiredString(body.mediaType, "mediaType"),
+          bytes: strictBase64(body.base64),
+          ...(body.purpose === undefined ? {} : { purpose: requiredString(body.purpose, "purpose") }),
+        }));
+        return true;
+      }
       if (request.method === "POST" && parts.length === 4 && parts[3] === "turns") {
         const body = await strictJsonBody(request, ["requestKey", "text", "attachmentIds"], ["attachmentIds"]);
         const result = await this.service.runTurn({
@@ -76,7 +120,7 @@ const ownerFromRoute = (kind: string, id: string): ConversationOwner => {
   return { kind, id };
 };
 
-const strictJsonBody = async (request: IncomingMessage, allowed: string[], optional: string[] = []): Promise<Record<string, unknown>> => {
+const strictJsonBody = async (request: IncomingMessage, allowed: string[], optional: string[] = [], maximumBytes = 128_000): Promise<Record<string, unknown>> => {
   const contentType = String(request.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") throw new ApiError(415, "unsupported_media_type", "Use application/json.");
   const chunks: Buffer[] = [];
@@ -84,7 +128,7 @@ const strictJsonBody = async (request: IncomingMessage, allowed: string[], optio
   for await (const chunk of request) {
     const bytes = Buffer.from(chunk);
     size += bytes.byteLength;
-    if (size > 128_000) throw new ApiError(413, "request_too_large", "The request body is too large.");
+    if (size > maximumBytes) throw new ApiError(413, "request_too_large", "The request body is too large.");
     chunks.push(bytes);
   }
   let value: unknown;
@@ -105,6 +149,15 @@ const requiredString = (value: unknown, name: string): string => {
 const stringArray = (value: unknown, name: string): string[] => {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new ApiError(422, "invalid_request", `${name} must be a text array.`);
   return value;
+};
+
+const strictBase64 = (value: unknown): Buffer => {
+  if (typeof value !== "string" || !value || value.length > 1_400_000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    throw new ApiError(422, "invalid_attachment", "base64 must be canonical encoded attachment bytes.");
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (!bytes.length || bytes.byteLength > 1_048_576 || bytes.toString("base64") !== value) throw new ApiError(422, "invalid_attachment", "Attachment bytes are empty or too large.");
+  return bytes;
 };
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {

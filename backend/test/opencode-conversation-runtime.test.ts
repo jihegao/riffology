@@ -118,14 +118,115 @@ test("provider discovery is stable, deduplicated, allowlisted, and has no first-
 
 test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async () => {
   const bodies: any[] = [];
+  let userMessageId = "";
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
-    fetch: async (_input, init) => { bodies.push(init?.body ? JSON.parse(String(init.body)) : null); return Response.json({ id: "ok", parts: [{ type: "text", text: "assistant answer" }] }); },
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        const body = JSON.parse(String(init?.body));
+        bodies.push(body);
+        userMessageId = body.messageID;
+        return new Response(null, { status: 204 });
+      }
+      return Response.json([{ info: { id: "ok", role: "assistant", parentID: userMessageId }, parts: [{ type: "text", text: "assistant answer" }] }]);
+    },
   });
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "hello", system: "bounded", attachments: [] });
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });
+  assert.equal(bodies[0].tools["*"], false);
   assert.equal(Object.values(bodies[0].tools).every((value) => value === false), true);
+});
+
+test("adapter binds one uniquely named scoped MCP and enables only that server for the prompt", async () => {
+  const calls: Array<{ path: string; body: any }> = [];
+  let userMessageId = "";
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      calls.push({ path, body });
+      if (path === "/mcp" || path.endsWith("/disconnect")) return Response.json({});
+      if (path.endsWith("/prompt_async")) { userMessageId = body.messageID; return new Response(null, { status: 204 }); }
+      return Response.json([{ info: { id: "ok", role: "assistant", parentID: userMessageId }, parts: [{ type: "text", text: "scoped answer" }] }]);
+    },
+  });
+  const scopeId = "turn_scoped_binding";
+  await adapter.bindScopedMcp(scopeId, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
+  await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
+    text: "change", system: "bounded", attachments: [], scopedMcpScopeId: scopeId,
+  });
+  await adapter.unbindScopedMcp(scopeId);
+
+  const registration = calls.find((call) => call.path === "/mcp")!;
+  assert.match(registration.body.name, /^riffa2[0-9a-f]{24}$/u);
+  assert.equal(registration.body.config.url, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
+  const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
+  assert.equal(prompt.tools["*"], false);
+  assert.equal(prompt.tools[`${registration.body.name}_*`], true);
+  assert.ok(calls.some((call) => call.path === `/mcp/${registration.body.name}/disconnect`));
+  await assert.rejects(() => adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
+    text: "stale", system: "bounded", attachments: [], scopedMcpScopeId: scopeId,
+  }), (error: any) => error.code === "opencode_mcp_unbound");
+  await assert.rejects(() => adapter.bindScopedMcp("turn_external", "http://example.com/a2/mcp?cap=x"), /capability-scoped local/u);
+});
+
+test("adapter does not persist bounded reconstruction context as a synthetic user message", async () => {
+  let requests = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    fetch: async () => { requests += 1; return Response.json({}); },
+  });
+  await adapter.injectContext("opaque-session", "bounded context");
+  assert.equal(requests, 0);
+});
+
+test("adapter ignores a stale assistant and waits for the response parented to this prompt", async () => {
+  let requestedMessageId = "";
+  let polls = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/prompt_async")) {
+        requestedMessageId = JSON.parse(String(init?.body)).messageID;
+        return new Response(null, { status: 204 });
+      }
+      polls += 1;
+      const messages: any[] = [{ info: { id: "stale", role: "assistant", parentID: "older-user" }, parts: [{ type: "text", text: "old answer" }] }];
+      if (polls > 1) messages.push({ info: { id: "fresh", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "text", text: "new answer" }] });
+      return Response.json(messages);
+    },
+  });
+  const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "next", system: "bounded", attachments: [] });
+  assert.equal(result.text, "new answer");
+  assert.equal(polls, 2);
+});
+
+test("adapter waits past a tool-only assistant segment for the final text segment", async () => {
+  let requestedMessageId = "";
+  let polls = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/prompt_async")) {
+        requestedMessageId = JSON.parse(String(init?.body)).messageID;
+        return new Response(null, { status: 204 });
+      }
+      polls += 1;
+      const messages: any[] = [{ info: { id: "tool-segment", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] }];
+      if (polls > 1) messages.push({ info: { id: "final-segment", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "text", text: "final answer" }] });
+      return Response.json(messages);
+    },
+  });
+  const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "next", system: "bounded", attachments: [] });
+  assert.equal(result.text, "final answer");
+  assert.equal(result.messageId, "final-segment");
+  assert.equal(polls, 2);
 });
 
 test("session manager reuses one available session per conversation", async () => {

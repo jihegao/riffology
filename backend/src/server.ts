@@ -13,8 +13,11 @@ import type { MesaAdapter } from "./mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeConversationPort, OpenCodeReadiness } from "./opencode-adapter.ts";
 import { OpenCodeEventBridge } from "./opencode-events.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
+import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2 } from "./product-store-v2.ts";
+import { SimulationSkillCatalog } from "./simulation-skill-catalog.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
@@ -34,6 +37,9 @@ export type BackendOptions = {
   a2ProductRoot?: string;
   productStore?: ProductStoreV2;
   a2OpenCode?: OpenCodeConversationPort;
+  a2TechnicalChecker?: ModelTechnicalCheckerPort;
+  a2SkillRoot?: string;
+  a2AllowedSkills?: string[];
 };
 
 export class BackendApp {
@@ -62,7 +68,16 @@ export class BackendApp {
     if (options.productStore || options.a2ProductRoot) {
       const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
-      this.a2 = new MilestoneA2Api(new AgentWorkspaceService(this.productStore, a2OpenCode));
+      const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
+      const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
+      this.a2 = new MilestoneA2Api(new AgentWorkspaceService(
+        this.productStore,
+        a2OpenCode,
+        undefined,
+        options.a2TechnicalChecker,
+        turnRuntime,
+        (capability) => this.#a2McpUrl(capability),
+      ));
     }
   }
 
@@ -150,6 +165,14 @@ export class BackendApp {
       if (!response.headersSent) { const correlationId = randomUUID(); const error = { code: apiError.code, message: apiError.message, correlation_id: correlationId, ...(apiError.details ? { details: apiError.details } : {}) }; const gate3 = isGate3Route(request.method ?? "", requestUrl.pathname); (gate3 ? canonicalJson : json)(response, apiError.status, gate3 ? { schema_id: "riff://evidence-studio/error/v1", schema_version: 1, canonical_json_version: "riff-canonical-json-v2", accepted: false, error } : { accepted: false, error }); }
       else response.end();
     }
+  }
+
+  #a2McpUrl(capability: string): string {
+    const address = this.#server?.address();
+    if (!address || typeof address === "string") throw new ApiError(503, "a2_mcp_unavailable", "The local A2 MCP endpoint is not listening.");
+    const url = new URL(`http://127.0.0.1:${address.port}/a2/mcp`);
+    url.searchParams.set("cap", capability);
+    return url.toString();
   }
 
   async #gate2(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<void> {

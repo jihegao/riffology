@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type ModelWorkspaceCapability = Readonly<{
@@ -108,7 +108,10 @@ export class RestrictedProcessRunner {
   constructor(options: RestrictedProcessOptions) {
     this.#workspace = options.workspace;
     this.#command = resolveCommand(options.command);
-    this.#isolation = options.isolation ?? { kind: "macos-sandbox" };
+    this.#isolation = options.isolation ?? {
+      kind: "macos-sandbox",
+      runtimeReadRoots: trustedPythonRuntimeRoots(options.command.executable, this.#command.executable),
+    };
     this.#limits = validateLimits({ ...DEFAULT_LIMITS, ...options.limits });
     this.#now = options.now ?? Date.now;
   }
@@ -223,6 +226,11 @@ const canonicalExecutable = (input: string): string => {
     executable = process.platform === "darwin" && input === "/usr/bin/python3"
       ? realpathSync("/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python")
       : realpathSync(input);
+    if (process.platform === "darwin") {
+      const framework = versionedPythonFrameworkRoot(executable);
+      const appBinary = framework ? join(framework, "Resources/Python.app/Contents/MacOS/Python") : "";
+      if (appBinary && existsSync(appBinary)) executable = realpathSync(appBinary);
+    }
   }
   catch (error) { throw new RestrictedProcessError("invalid_executable", "The restricted executable is unavailable.", { cause: error }); }
   const stat = statSync(executable);
@@ -233,12 +241,42 @@ const canonicalExecutable = (input: string): string => {
 const canonicalRuntimeRoot = (input: string, workspace: string): string => {
   const root = realpathSync(resolve(input));
   if (!statSync(root).isDirectory()) throw new RestrictedProcessError("invalid_runtime_root", "A runtime read root is not a directory.");
-  // Trusted runtime material must be inside this Model capability. Broad read
-  // roots would silently turn the sandbox into an ambient filesystem reader.
-  if (root !== workspace && relative(workspace, root).startsWith("..")) {
+  // Runtime roots outside the Model capability are accepted only when they are
+  // recognisable Python runtime material selected by the backend executable:
+  // an exact virtual environment or a versioned Python.framework directory.
+  // Arbitrary directories (including home, repo, and credential roots) remain
+  // invalid even though this option is application-owned.
+  if (root !== workspace && relative(workspace, root).startsWith("..") && !trustedExternalPythonRoot(root)) {
     throw new RestrictedProcessError("invalid_runtime_root", "Runtime read roots must be owned by the current Model workspace.");
   }
   return root;
+};
+
+const trustedPythonRuntimeRoots = (requestedExecutable: string, canonical: string): string[] => {
+  const roots: string[] = [];
+  const requestedVenv = resolve(requestedExecutable, "../..");
+  if (existsSync(join(requestedVenv, "pyvenv.cfg"))) roots.push(requestedVenv);
+  let target = canonical;
+  try { target = realpathSync(requestedExecutable); } catch { /* executable validation reports this */ }
+  const framework = versionedPythonFrameworkRoot(target);
+  if (framework) roots.push(framework);
+  const installation = versionedHomebrewPythonRoot(target);
+  if (installation) roots.push(installation, "/opt/homebrew/opt", "/opt/homebrew/Cellar", "/opt/homebrew/lib");
+  return roots;
+};
+
+const trustedExternalPythonRoot = (root: string): boolean =>
+  existsSync(join(root, "pyvenv.cfg")) || Boolean(versionedPythonFrameworkRoot(root) === root) || Boolean(versionedHomebrewPythonRoot(root) === root)
+  || ["/opt/homebrew/opt", "/opt/homebrew/Cellar", "/opt/homebrew/lib"].includes(root);
+
+const versionedPythonFrameworkRoot = (value: string): string | null => {
+  const match = /^(.*\/Python\.framework\/Versions\/[^/]+)(?:\/|$)/u.exec(value);
+  return match?.[1] ?? null;
+};
+
+const versionedHomebrewPythonRoot = (value: string): string | null => {
+  const match = /^(.*\/Cellar\/python(?:@[^/]+)?\/[^/]+)(?:\/|$)/u.exec(value);
+  return match?.[1] ?? null;
 };
 
 const validateLimits = (limits: RestrictedProcessLimits): RestrictedProcessLimits => {
@@ -268,22 +306,28 @@ const killProcessGroup = (child: ChildProcessWithoutNullStreams, signal: NodeJS.
 
 export const macosSandboxProfile = (workspace: string, executable: string, runtimeReadRoots: readonly string[]): string => {
   const literal = (value: string): string => `\"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}\"`;
-  const roots = [...new Set([workspace, dirname(executable), ...runtimeReadRoots])];
+  const executableTarget = realpathSync(executable);
+  const roots = [...new Set([workspace, dirname(executable), dirname(executableTarget), ...runtimeReadRoots])];
   const reads = roots.map((root) => `(literal ${literal(root)}) (subpath ${literal(root)})`).join(" ");
+  const runtimeMetadata = [...new Set(runtimeReadRoots.flatMap(pathAncestors))]
+    .map((root) => `(literal ${literal(root)})`).join(" ");
   const applePythonFramework = "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework";
-  const applePython = executable.startsWith(`${applePythonFramework}/`);
+  const applePython = executableTarget.startsWith(`${applePythonFramework}/`);
+  const versionedFramework = versionedPythonFrameworkRoot(executableTarget);
   const userRoots = ["/Users"];
   try { userRoots.push(realpathSync("/Users")); } catch { /* fail-closed rules still include /Users */ }
-  const denyUserReads = [...new Set(userRoots)].map((root) => `(deny file-read* (require-all (subpath ${literal(root)}) (require-not (subpath ${literal(workspace)}))))`);
+  const readableUserRoots = [workspace, ...runtimeReadRoots].filter((root) => root === "/Users" || root.startsWith("/Users/"));
+  const readExclusions = readableUserRoots.map((root) => `(require-not (subpath ${literal(root)}))`).join(" ");
+  const denyUserReads = [...new Set(userRoots)].map((root) => `(deny file-read-data (require-all (subpath ${literal(root)}) ${readExclusions}))`);
   const denyUserWrites = [...new Set(userRoots)].map((root) => `(deny file-write* (require-all (subpath ${literal(root)}) (require-not (subpath ${literal(workspace)}))))`);
   return [
     "(version 1)",
     "(deny default)",
     "(allow process-fork)",
-    `(allow process-exec (literal ${literal(executable)})${applePython ? ` (subpath ${literal(applePythonFramework)})` : ""})`,
+    `(allow process-exec (literal ${literal(executable)}) (literal ${literal(executableTarget)})${versionedFramework ? ` (subpath ${literal(versionedFramework)})` : ""}${applePython ? ` (subpath ${literal(applePythonFramework)})` : ""})`,
     "(allow sysctl-read)",
     "(allow mach-lookup)",
-    `(allow file-read-metadata ${reads} (subpath \"/System\") (subpath \"/usr\")${applePython ? ` (literal \"/Library\") (literal \"/Library/Developer\") (subpath \"/Library/Developer/CommandLineTools\")` : ""} (subpath \"/private/var/db/timezone\") (literal \"/dev/null\") (literal \"/dev/urandom\"))`,
+    `(allow file-read-metadata ${reads} ${runtimeMetadata} (subpath \"/System\") (subpath \"/usr\")${applePython ? ` (literal \"/Library\") (literal \"/Library/Developer\") (subpath \"/Library/Developer/CommandLineTools\")` : ""} (subpath \"/private/var/db/timezone\") (literal \"/dev/null\") (literal \"/dev/urandom\"))`,
     // Inherited pipes need data access, but regular files still require one of
     // the explicit path grants below.
     "(allow file-read-data (require-not (vnode-type REGULAR-FILE)))",
@@ -296,6 +340,13 @@ export const macosSandboxProfile = (workspace: string, executable: string, runti
     // No network rule is present: deny-default rejects inbound and outbound
     // sockets, including direct connections that ignore proxy variables.
   ].join("\n");
+};
+
+const pathAncestors = (value: string): string[] => {
+  const ancestors: string[] = [];
+  let cursor = dirname(value);
+  while (cursor !== "/" && cursor !== ".") { ancestors.push(cursor); cursor = dirname(cursor); }
+  return ancestors;
 };
 
 const cancelledBeforeStart = (): RestrictedProcessResult => Object.freeze({

@@ -11,9 +11,10 @@
 > current authority through
 > [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
 > Schema v3/store, durable per-conversation OpenCode context, scoped MCP/skills,
-> generic Model workspace, restricted macOS process, and technical checker are
-> implemented; provider/Model/conversation/turn/check API integration and final
-> acceptance are in progress. Legacy Gate and queue code still coexist. #14
+> attachments/documents, generic Model workspace, restricted macOS process,
+> technical checker, and the narrow provider/Model/conversation/turn/check API
+> are implemented. Final acceptance retains one real-provider browser rerun
+> after upstream network errors. Legacy Gate and queue code still coexist. #14
 > owns Project execution/wind import and #15 owns the final shared shell.
 
 > The current process claim is deliberately narrow: macOS, local user,

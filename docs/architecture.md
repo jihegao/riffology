@@ -14,25 +14,38 @@ write around that store or become authoritative state.
 Stage 2 currently adds these implemented boundaries:
 
 ```text
-API integration (in progress)
+Narrow A2 HTTP/API acceptance surface
   -> conversation / Agent session coordination
        -> ProductStoreV2 schema v3
        -> loopback OpenCode adapter + bounded Riff context
-       -> scoped MCP tools + progressive simulation-skill loading
+       -> per-conversation serialized turns
+       -> per-turn capability-scoped MCP tools + progressive skill loading
+       -> conversation attachments + temporary documents
        -> generic Model workspace
             -> restricted macOS process + digest-bound technical checker
 ```
 
 One conversation owns one provider/model lock and at most one nonterminal
-backend-only external session generation. Lost sessions rebuild from bounded
-Riff-owned context; provider failure is explicit read-only. All direct Model
+backend-only external session generation. Its turns are serialized; the scoped
+OpenCode MCP registration is additionally serialized because that registry is
+process-global. Each turn receives a server-minted owner/conversation/turn/
+generation capability that is revoked and unbound at completion. Lost sessions
+rebuild from bounded Riff-owned context; provider failure is explicit read-only.
+Tool execution rechecks the running turn and latest available session
+generation. Proposal-only turns may create draft temporary documents but cannot
+perform any other durable mutation or lifecycle transition. All direct Model
 changes use typed owner-scoped tools and Stage 1 database/filesystem recovery.
 Project conversations cannot change copied Model code, schema, or dependencies.
+OpenCode prompt-tool policy denies `*` by default and enables only the exact
+scoped MCP name for that turn, so unrelated built-ins or ambient MCP servers do
+not become authority.
 
-The restricted runner supplies a capability-resolved Model directory, fixed
-executable/arguments, scrubbed environment, no network rule, cancellation, and
-finite time/output limits through macOS `sandbox-exec`. This local-user boundary
-does not claim VM/container isolation from malicious code. Technical
+The restricted runner supplies a capability-resolved writable Model directory,
+fixed executable/arguments, scrubbed environment, no network rule,
+cancellation, finite time/output limits, and only fixed read-only Python
+runtime/virtual-environment roots through macOS `sandbox-exec`. Arbitrary home
+and sibling paths stay outside the profile. This local-user boundary does not
+claim VM/container isolation from malicious code. Technical
 executability is digest-bound evidence that a thin interface runs; it is not
 scientific validity, calibration, trust, or decision suitability.
 

@@ -17,12 +17,17 @@ The current authority is
 - show Model technical state as “Technically executable,” never as valid,
   trusted, calibrated, or recommended.
 
-The HTTP/browser integration for this surface is in progress, so these items
-are acceptance requirements rather than a current visible-behavior claim. A
-mock conversation, screenshot, or healthy port alone is insufficient; final
-review must exercise a real provider, provider unavailable/read-only, session
-loss/rebuild, restart, scoped mutation, and technical checks against backend
-state.
+The narrow `/a2` HTTP/browser acceptance surface is implemented. It discovers
+provider/model pairs, creates a generic Model and its initial conversation, and
+sends live turns; the richer conversation/document/action/workspace projections
+are verified through the API rather than presented as the final product shell.
+A real browser run created a Model, completed one provider-backed turn and a
+scoped tool call, then showed explicit read-only state after provider failure.
+Repeated upstream network errors prevented a second clean same-session browser
+turn in the final pass. That rerun, plus the existing session-loss/rebuild,
+restart, scoped mutation, and technical-check backend evidence, remains the
+honest release-acceptance boundary. A mock conversation, screenshot, or healthy
+port alone is insufficient.
 
 The legacy queue/wind UI still coexists and remains runnable history. Stage 2
 does not delete it or treat its fixed tabs as the generic workspace. Project

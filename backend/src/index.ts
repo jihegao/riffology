@@ -16,6 +16,8 @@ const app = new BackendApp({
   openCode,
   a2OpenCode: openCode,
   a2ProductRoot: process.env.RIFF_PRODUCT_ROOT ?? join(root, "milestone-a-product"),
+  ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
+  a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
   mcpUrl: process.env.RIFF_MCP_URL ?? `http://127.0.0.1:${port}/mcp`,

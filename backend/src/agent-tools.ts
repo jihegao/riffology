@@ -25,6 +25,8 @@ export type AgentToolGrant = {
   turnId: string;
   externalSessionGeneration: number;
   allowedTools: ReadonlySet<AgentToolName>;
+  intentAuthority: "explicit" | "proposal_only";
+  attachmentIds: ReadonlySet<string>;
   expiresAt: number;
 };
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -73,9 +73,11 @@ export type ModelTechnicalCheckInput = Readonly<{
 
 const PYTHON_SYNTAX_SCRIPT = `import json,py_compile,sys\nfor p in json.load(sys.stdin): py_compile.compile(p,doraise=True)\n`;
 const PYTHON_DEPENDENCY_SCRIPT = `import importlib.util,json,sys\nnames=json.load(sys.stdin)\nmissing=[name for name in names if importlib.util.find_spec(name) is None]\nprint(json.dumps({"missing":missing},sort_keys=True,separators=(",",":")))\nraise SystemExit(1 if missing else 0)\n`;
+const PYTHON_RUN_SCRIPT = `import os,runpy,sys\nscript=sys.argv[1]\nsys.path.insert(0,os.path.dirname(os.path.abspath(script)))\nsys.argv=sys.argv[1:]\nrunpy.run_path(script,run_name="__main__")\n`;
 
 export class ModelTechnicalChecker {
   readonly #python: string;
+  readonly #pythonImportRoots: readonly string[];
   readonly #executor: TechnicalCheckExecutor;
   readonly #now: () => Date;
   readonly #idFactory: () => string;
@@ -84,6 +86,7 @@ export class ModelTechnicalChecker {
 
   constructor(options: ModelTechnicalCheckerOptions) {
     this.#python = options.pythonExecutable;
+    this.#pythonImportRoots = pythonImportRoots(options.pythonExecutable);
     this.#executor = options.executor ?? defaultExecutor;
     this.#now = options.now ?? (() => new Date());
     this.#idFactory = options.idFactory ?? (() => `check_${randomUUID().replaceAll("-", "")}`);
@@ -143,12 +146,12 @@ export class ModelTechnicalChecker {
       if (!succeeded(syntax)) throw processFailure("syntax_failed", "Python syntax validation failed.", syntax);
       checks.push(pass("syntax", "python_syntax_valid", `${pythonFiles.length} Python files compiled.`));
 
-      const dependency = await this.#execute("dependency", checkWorkspace, ["-I", "-c", PYTHON_DEPENDENCY_SCRIPT], JSON.stringify(dependencies), input.signal);
+      const dependency = await this.#execute("dependency", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_DEPENDENCY_SCRIPT)], JSON.stringify(dependencies), input.signal);
       recordProcess(logs, "dependency", dependency);
       if (!succeeded(dependency)) throw processFailure("dependency_unavailable", "The isolated interpreter cannot resolve all declared dependencies.", dependency);
       checks.push(pass("dependency", "dependencies_resolved", `${dependencies.length} dependency imports resolved in environment ${environmentKey}.`));
 
-      const smoke = await this.#execute("smoke", checkWorkspace, ["-I", description.entryPoint, "--riff-smoke"], JSON.stringify(description.inputs.smoke), input.signal);
+      const smoke = await this.#execute("smoke", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), description.entryPoint, "--riff-smoke"], JSON.stringify(description.inputs.smoke), input.signal);
       recordProcess(logs, "smoke", smoke);
       if (!succeeded(smoke)) throw processFailure("smoke_failed", "The bounded Model smoke execution failed.", smoke);
       checks.push(pass("smoke", "smoke_passed", "The bounded smoke process completed."));
@@ -166,7 +169,7 @@ export class ModelTechnicalChecker {
       input.signal?.addEventListener("abort", forwardAbort, { once: true });
       const cancelTimer = setTimeout(() => cancellationController.abort(), this.#cancellationProbeDelayMs);
       cancelTimer.unref?.();
-      const cancellation = await this.#execute("cancellation", checkWorkspace, ["-I", description.entryPoint, "--riff-cancellation-probe"], undefined, cancellationController.signal);
+      const cancellation = await this.#execute("cancellation", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), description.entryPoint, "--riff-cancellation-probe"], undefined, cancellationController.signal);
       clearTimeout(cancelTimer);
       input.signal?.removeEventListener("abort", forwardAbort);
       recordProcess(logs, "cancellation", cancellation);
@@ -176,7 +179,7 @@ export class ModelTechnicalChecker {
 
       if (description.runMode === "visual" || description.runMode === "both") {
         const visual = description.visual!;
-        const health = await this.#execute("visual_health", checkWorkspace, ["-I", visual.entryPoint, "--riff-health-check", visual.healthPath], undefined, input.signal);
+        const health = await this.#execute("visual_health", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), visual.entryPoint, "--riff-health-check", visual.healthPath], undefined, input.signal);
         recordProcess(logs, "visual_health", health);
         if (!succeeded(health)) throw processFailure("visual_health_failed", "The visual entry point did not pass local health inspection.", health);
         checks.push(pass("visual_health", "visual_health_passed", "The declared visual entry point passed its local health check."));
@@ -218,6 +221,19 @@ const defaultExecutor: TechnicalCheckExecutor = ({ workspace, executable, argv, 
   command: { executable, argv },
   limits: { timeoutMs, maxOutputBytes },
 }).run({ ...(stdin === undefined ? {} : { stdin }), ...(signal ? { signal } : {}) });
+
+const pythonImportRoots = (executable: string): readonly string[] => {
+  const venv = resolve(executable, "../..");
+  if (!existsSync(join(venv, "pyvenv.cfg"))) return Object.freeze([]);
+  const lib = join(venv, "lib");
+  let versions: string[];
+  try { versions = readdirSync(lib).filter((name) => /^python\d+(?:\.\d+)?$/u.test(name)).sort(); }
+  catch { return Object.freeze([]); }
+  return Object.freeze(versions.map((name) => join(lib, name, "site-packages")).filter(existsSync));
+};
+
+const pythonWithImportRoots = (roots: readonly string[], script: string): string =>
+  roots.length ? `import sys\nsys.path[:0]=${JSON.stringify(roots)}\n${script}` : script;
 
 const parseDependencyImports = (source: string): string[] => {
   const imports = new Set<string>();

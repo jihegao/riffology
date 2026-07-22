@@ -96,6 +96,18 @@ export type CompleteAgentTurnInput = {
   completedAt: IsoTimestamp;
 };
 
+export type TechnicalCheckRecord = {
+  id: string;
+  modelId: string;
+  workspaceDigest: string;
+  executionDescriptionDigest: string;
+  state: "running" | "passed" | "failed" | "cancelled";
+  results: Record<string, unknown>;
+  limits: Record<string, unknown>;
+  startedAt: IsoTimestamp;
+  finishedAt: IsoTimestamp | null;
+};
+
 export type BindAgentSessionInput = {
   id: string;
   conversationId: string;
@@ -138,6 +150,7 @@ export type CreateTemporaryDocumentInput = {
   documentState: TemporaryDocumentState;
   mediaType: string;
   content: string;
+  transactionId?: string;
   createdAt: IsoTimestamp;
 };
 
@@ -159,6 +172,7 @@ export type AdoptAttachmentInput = {
   sourceAttachmentId: string;
   relativePath: string;
   purpose: string;
+  transactionId?: string;
   createdAt: IsoTimestamp;
 };
 
@@ -520,13 +534,19 @@ export class ProductStoreV2 {
   }
 
   createTemporaryDocument(input: CreateTemporaryDocumentInput): void {
-    this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId), {
+    const statements = [activeLifecycleGuard("conversations", input.conversationId), {
       sql: `INSERT INTO temporary_documents
         (id, conversation_id, source_message_id, name, document_state, media_type, content, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [input.id, input.conversationId, input.sourceMessageId ?? null, input.name, input.documentState, input.mediaType, input.content, input.createdAt, input.createdAt],
       expectedChanges: 1,
+    }];
+    if (input.transactionId) this.#databaseMutation([...statements, {
+      sql: "INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, ?)",
+      params: [input.transactionId, sha256(Buffer.from(`database-only:${input.transactionId}`, "utf8")), input.createdAt],
+      expectedChanges: 1,
     }]);
+    else this.#databaseMutation(statements);
   }
 
   transitionTemporaryDocument(documentId: string, nextState: Exclude<TemporaryDocumentState, "draft">, actionRecordIds: string[], at: IsoTimestamp): void {
@@ -577,6 +597,18 @@ export class ProductStoreV2 {
       providerModelId: row.provider_model_id,
       session: session ? { generation: session.generation, state: session.state, externalSessionRef: session.external_session_ref } : null,
     };
+  }
+
+  assertActiveAgentToolGrant(input: { conversationId: string; turnId: string; externalSessionGeneration: number }): void {
+    this.#assertOpen();
+    const turn = this.#database.prepare("SELECT state FROM agent_turns WHERE id = ? AND conversation_id = ?")
+      .get(input.turnId, input.conversationId) as { state: string } | undefined;
+    if (turn?.state !== "running") throw new ProductStoreV2Error("Agent tool grant turn is no longer active.");
+    const session = this.#database.prepare("SELECT generation, state FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
+      .get(input.conversationId) as { generation: number; state: DurableAgentSessionState } | undefined;
+    if (session?.state !== "available" || session.generation !== input.externalSessionGeneration) {
+      throw new ProductStoreV2Error("Agent tool grant session generation is no longer active.");
+    }
   }
 
   async markSessionLost(input: { conversationId: string; generation: number; expectedExternalSessionRef: string; reason: string }): Promise<void> {
@@ -711,6 +743,42 @@ export class ProductStoreV2 {
     return this.#file(input.objectFileId);
   }
 
+  /** Backend-only attachment metadata. Absolute paths and bytes are omitted. */
+  getConversationAttachment(id: string): {
+    id: string; conversationId: string; objectFileId: string; originalName: string; purpose: string | null;
+    mediaType: string; sizeBytes: number; sha256: string; relativePath: string;
+  } {
+    this.#assertOpen();
+    const row = this.#database.prepare(`SELECT a.id, a.conversation_id, a.object_file_id, a.original_name, a.purpose,
+      f.media_type, f.size_bytes, f.sha256, f.relative_path FROM attachments a JOIN object_files f ON f.id = a.object_file_id
+      WHERE a.id = ? AND f.owner_conversation_id = a.conversation_id AND f.kind = 'conversation_attachment'`).get(id) as any;
+    if (!row) throw new ProductStoreV2Error("Conversation attachment does not exist.");
+    this.#verifiedMetadata(this.#objectRow(row.object_file_id));
+    return { id: row.id, conversationId: row.conversation_id, objectFileId: row.object_file_id, originalName: row.original_name,
+      purpose: row.purpose, mediaType: row.media_type, sizeBytes: row.size_bytes, sha256: row.sha256, relativePath: row.relative_path };
+  }
+
+  readConversationAttachment(id: string, conversationId: string, maximumBytes = 64_000): Buffer {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 1_048_576) throw new ProductStoreV2Error("Attachment read limit is invalid.");
+    const attachment = this.getConversationAttachment(id);
+    if (attachment.conversationId !== conversationId) throw new ProductStoreV2Error("Conversation attachment ownership mismatch.");
+    if (attachment.sizeBytes > maximumBytes) throw new ProductStoreV2Error("Conversation attachment exceeds the bounded read limit.");
+    return this.readObjectFile(attachment.objectFileId);
+  }
+
+  listTemporaryDocuments(conversationId: string): Array<{
+    id: string; conversationId: string; sourceMessageId: string | null; name: string; documentState: TemporaryDocumentState;
+    mediaType: string; content: string; lifecycleState: LifecycleState; createdAt: string; updatedAt: string;
+  }> {
+    this.#assertOpen();
+    if (!this.#database.prepare("SELECT 1 FROM conversations WHERE id = ?").get(conversationId)) throw new ProductStoreV2Error("Conversation does not exist.");
+    return (this.#database.prepare("SELECT * FROM temporary_documents WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[]).map((row) => ({
+      id: row.id, conversationId: row.conversation_id, sourceMessageId: row.source_message_id, name: row.name,
+      documentState: row.document_state, mediaType: row.media_type, content: row.content, lifecycleState: row.lifecycle_state,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }));
+  }
+
   linkMessageAttachment(messageId: string, attachmentId: string): void {
     this.#databaseMutation([
       { sql: `UPDATE conversations SET updated_at = updated_at WHERE lifecycle_state = 'active'
@@ -729,7 +797,7 @@ export class ProductStoreV2 {
     const inspected = this.#objects.readWithInspection({ owner: { kind: "conversation", id: source.owner_conversation_id }, relativePath: source.relative_path });
     if (!inspected || inspected.sha256 !== source.sha256 || inspected.sizeBytes !== source.size_bytes) throw new ProductStoreV2Error("Source attachment metadata or bytes drifted.");
     const relativePath = `attachments/${input.relativePath}`;
-    this.#coordinator.execute({ files: [{ operation: "write", target: { owner: input.owner, relativePath }, bytes: inspected.bytes, expectedPriorSha256: null }], statements: [
+    this.#coordinator.execute({ ...(input.transactionId ? { transactionId: input.transactionId } : {}), files: [{ operation: "write", target: { owner: input.owner, relativePath }, bytes: inspected.bytes, expectedPriorSha256: null }], statements: [
       activeLifecycleGuard("conversations", source.owner_conversation_id),
       activeOwnerGuard(input.owner),
       objectInsert({ id: input.objectFileId, owner: input.owner, kind: "adopted_attachment", relativePath, mediaType: source.media_type,
@@ -1009,19 +1077,24 @@ export class ProductStoreV2 {
     return { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
   }
 
-  startTechnicalCheck(input: { id: string; modelId: string; limits: Record<string, unknown>; startedAt: IsoTimestamp }): { workspaceDigest: string; executionDescriptionDigest: string } {
+  startTechnicalCheck(input: { id: string; modelId: string; limits: Record<string, unknown>; startedAt: IsoTimestamp }): {
+    workspaceDigest: string;
+    executionDescriptionDigest: string;
+    executionDescription: Record<string, unknown>;
+  } {
     assertId(input.id);
     const model = this.#database.prepare("SELECT execution_description_json FROM models WHERE id = ? AND lifecycle_state = 'active'").get(input.modelId) as { execution_description_json: string } | undefined;
     if (!model) throw new ProductStoreV2Error("Technical check requires an active Model.");
     const files = this.#objectRows("owner_model_id = ? AND kind IN ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')", [input.modelId]);
     files.forEach((file) => this.#verifiedMetadata(file));
     const workspaceDigest = workspaceDigestOf(files);
-    const executionDescriptionDigest = canonicalDigest(JSON.parse(model.execution_description_json));
+    const executionDescription = JSON.parse(model.execution_description_json) as Record<string, unknown>;
+    const executionDescriptionDigest = canonicalDigest(executionDescription);
     this.#databaseMutation([activeLifecycleGuard("models", input.modelId), { sql: `INSERT INTO model_technical_checks
       (id, model_id, workspace_sha256, execution_description_sha256, state, results_json, limits_json, started_at)
       VALUES (?, ?, ?, ?, 'running', '{}', ?, ?)`, params: [input.id, input.modelId, workspaceDigest, executionDescriptionDigest, json(input.limits), input.startedAt], expectedChanges: 1 },
       { sql: `UPDATE models SET technical_status = 'checking', updated_at = ? WHERE id = ? AND lifecycle_state = 'active'`, params: [input.startedAt, input.modelId], expectedChanges: 1 }]);
-    return { workspaceDigest, executionDescriptionDigest };
+    return { workspaceDigest, executionDescriptionDigest, executionDescription };
   }
 
   finishTechnicalCheck(input: { id: string; state: "passed" | "failed" | "cancelled"; results: Record<string, unknown>; finishedAt: IsoTimestamp }): { published: boolean } {
@@ -1033,10 +1106,27 @@ export class ProductStoreV2 {
     const executionDigest = canonicalDigest(JSON.parse(row.execution_description_json));
     const publish = workspaceDigest === row.workspace_sha256 && executionDigest === row.execution_description_sha256;
     this.#databaseMutation([{ sql: `UPDATE model_technical_checks SET state = ?, results_json = ?, finished_at = ? WHERE id = ? AND state = 'running'`,
-      params: [input.state, json(input.results), input.finishedAt, input.id], expectedChanges: 1 },
+      params: [input.state, json({ ...input.results, published: publish }), input.finishedAt, input.id], expectedChanges: 1 },
       ...(publish ? [{ sql: "UPDATE models SET technical_status = ?, updated_at = ? WHERE id = ? AND technical_status = 'checking'",
         params: [input.state === "passed" ? "executable" : "failed", input.finishedAt, row.model_id], expectedChanges: 1 } satisfies DatabaseMutationStatement] : [])]);
     return { published: publish };
+  }
+
+  getTechnicalCheck(modelId: string, id: string): TechnicalCheckRecord {
+    assertId(modelId); assertId(id);
+    const row = this.#database.prepare("SELECT * FROM model_technical_checks WHERE id = ? AND model_id = ?").get(id, modelId) as any;
+    if (!row) throw new ProductStoreV2Error("Technical check does not exist.");
+    return {
+      id: row.id,
+      modelId: row.model_id,
+      workspaceDigest: row.workspace_sha256,
+      executionDescriptionDigest: row.execution_description_sha256,
+      state: row.state,
+      results: JSON.parse(row.results_json),
+      limits: JSON.parse(row.limits_json),
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+    };
   }
 
   readObjectFile(id: string): Buffer {
@@ -1283,8 +1373,11 @@ const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: 
 };
 
 const compareObjectRows = (left: ObjectRow, right: ObjectRow): number => compareStrings(left.relative_path, right.relative_path) || compareStrings(left.id, right.id);
-const workspaceDigestOf = (rows: ObjectRow[]): string => canonicalDigest(rows.map((file) => ({ id: file.id, path: file.relative_path, sha256: file.sha256 }))
-  .sort((left, right) => compareStrings(left.path, right.path) || compareStrings(left.id, right.id)));
+const workspaceDigestOf = (rows: ObjectRow[]): string => canonicalDigest(rows.map((file) => ({
+  relativePath: file.relative_path,
+  sizeBytes: file.size_bytes,
+  sha256: file.sha256,
+})).sort((left, right) => compareStrings(left.relativePath, right.relativePath)));
 const compareKindId = (left: { kind: string; id: string }, right: { kind: string; id: string }): number => compareStrings(left.kind, right.kind) || compareStrings(left.id, right.id);
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const visible = (state: LifecycleState, options: { includeArchived?: boolean; includeTrashed?: boolean }): boolean => state === "active" || state === "archived" && Boolean(options.includeArchived) || state === "trashed" && Boolean(options.includeTrashed);

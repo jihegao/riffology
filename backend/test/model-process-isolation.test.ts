@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { createModelWorkspaceCapability, RestrictedProcessError, RestrictedProcessRunner } from "../src/restricted-process.ts";
 
@@ -51,6 +51,33 @@ test("macOS sandbox cannot read an arbitrary home file outside the Model capabil
   const result = await runner.run();
   assert.notEqual(result.exitCode, 0);
   assert.doesNotMatch(result.stdout, /do-not-read/u);
+});
+
+test("macOS sandbox reads an exact configured Python venv but still denies its home siblings", { skip: process.platform !== "darwin" }, async (t) => {
+  const venvPython = resolve(import.meta.dirname, "../../mesa_service/.venv/bin/python3");
+  if (!existsSync(venvPython)) return t.skip("repository Mesa venv is not installed");
+  const root = mkdtempSync(join(tmpdir(), "riff-process-venv-"));
+  const outside = mkdtempSync(join(homedir(), ".riff-process-venv-outside-"));
+  const secret = join(outside, "credential.txt");
+  writeFileSync(secret, "do-not-read");
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+  const workspace = createModelWorkspaceCapability(root, "model:venv");
+  const venvRoot = resolve(venvPython, "../..");
+  const pythonLib = readdirSync(join(venvRoot, "lib")).find((name) => /^python\d/u.test(name));
+  assert.ok(pythonLib);
+  const sitePackages = join(venvRoot, "lib", pythonLib, "site-packages");
+  const importResult = await new RestrictedProcessRunner({
+    workspace,
+    command: { executable: venvPython, argv: ["-I", "-c", `import sys;sys.path.insert(0,${JSON.stringify(sitePackages)});import mesa;print(mesa.__name__)`] },
+  }).run();
+  assert.equal(importResult.exitCode, 0, importResult.stderr);
+  assert.equal(importResult.stdout.trim(), "mesa");
+  const denied = await new RestrictedProcessRunner({
+    workspace,
+    command: { executable: venvPython, argv: ["-I", "-c", `from pathlib import Path;print(Path(${JSON.stringify(secret)}).read_text())`] },
+  }).run();
+  assert.notEqual(denied.exitCode, 0);
+  assert.doesNotMatch(denied.stdout, /do-not-read/u);
 });
 
 test("timeout, output limit, and AbortSignal terminate the separate process group", async (t) => {

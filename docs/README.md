@@ -8,10 +8,12 @@ interfaces, test expectations, and assumptions before implementation.
 Stage 2 / #13 is the current implementation stage. Its authority is the
 Milestone A product contract plus
 [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
-Schema v3/store, conversation/OpenCode context, scoped MCP/skills, generic
-Model workspace, restricted process, and technical checker are implemented;
-HTTP/API integration and final acceptance are in progress. Legacy Gate and
-queue code still coexist and are not silently retired by Stage 2.
+Schema v3/store, conversation/OpenCode context, scoped MCP/skills, attachments,
+temporary documents, generic Model workspace, restricted process, technical
+checker, and the narrow HTTP/API surface are implemented. Final acceptance has
+one documented real-provider browser rerun outstanding after upstream network
+errors. Legacy Gate and queue code still coexist and are not silently retired
+by Stage 2.
 
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
@@ -32,8 +34,9 @@ product.
   Stage 2 design for persistent OpenCode conversations, backend-only session
   recovery, progressive skill/action audit, owner-scoped Model tools, atomic
   workspace mutation, generic Mesa scaffolding, and technical executability
-  checks. Implementation is in progress on #13; Stage 3/4 behavior remains
-  explicitly out of scope.
+  checks. The #13 implementation is present; release acceptance retains the
+  provider-stability caveat documented in the test plan. Stage 3/4 behavior
+  remains explicitly out of scope.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.

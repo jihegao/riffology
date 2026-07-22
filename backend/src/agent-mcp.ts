@@ -19,6 +19,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
   riff_apply_model_changes: definition("Apply one explicit, validated, atomic Model change set.", {
     requestKey: { type: "string" },
     changes: { type: "array", minItems: 1, maxItems: 64, items: { type: "object" } },
+    executionDescription: { type: "object" },
   }, ["requestKey", "changes"]),
   riff_create_temporary_document: definition("Create a persistent draft document in this conversation.", {
     name: { type: "string" }, mediaType: { type: "string" }, content: { type: "string" },
@@ -49,12 +50,20 @@ export class AgentMcpServer {
     turnId: string;
     externalSessionGeneration: number;
     allowedTools: ReadonlySet<AgentToolName>;
+    intentAuthority?: "explicit" | "proposal_only";
+    attachmentIds?: ReadonlySet<string>;
   }): string {
     if (!input.conversationId || !input.owner.id || !input.turnId || !Number.isSafeInteger(input.externalSessionGeneration) || input.externalSessionGeneration < 1) {
       throw new AgentToolPermissionError("Agent capability scope is invalid.");
     }
     const capability = randomUUID();
-    this.#grants.set(capability, { ...input, allowedTools: new Set(input.allowedTools), expiresAt: this.#now() + this.#ttlMs });
+    this.#grants.set(capability, {
+      ...input,
+      allowedTools: new Set(input.allowedTools),
+      intentAuthority: input.intentAuthority ?? "proposal_only",
+      attachmentIds: new Set(input.attachmentIds ?? []),
+      expiresAt: this.#now() + this.#ttlMs,
+    });
     return capability;
   }
 
@@ -119,7 +128,7 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_read_owner_summary: [],
     riff_list_model_workspace: [],
     riff_read_model_file: ["fileId"],
-    riff_apply_model_changes: ["requestKey", "changes"],
+    riff_apply_model_changes: ["requestKey", "changes", "executionDescription"],
     riff_create_temporary_document: ["name", "mediaType", "content"],
     riff_transition_temporary_document: ["documentId", "transition"],
     riff_adopt_attachment: ["attachmentId", "purpose", "logicalName"],
@@ -134,6 +143,9 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     text("requestKey", 256);
     if (!Array.isArray(input.changes) || input.changes.length < 1 || input.changes.length > 64 || input.changes.some((change) => !change || typeof change !== "object" || Array.isArray(change))) {
       throw new AgentToolPermissionError("Agent model changes are invalid.");
+    }
+    if (input.executionDescription !== undefined && (!input.executionDescription || typeof input.executionDescription !== "object" || Array.isArray(input.executionDescription))) {
+      throw new AgentToolPermissionError("Agent execution description is invalid.");
     }
   }
   if (name === "riff_create_temporary_document") { text("name", 400); text("mediaType", 200); text("content", 1_000_000); }

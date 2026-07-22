@@ -7,6 +7,8 @@ import { createGenericModelScaffold } from "./model-workspace.ts";
 import type { OpenCodeConversationPort, OpenCodeProviderModel } from "./opencode-adapter.ts";
 import { ProductStoreV2, ProductStoreV2Error } from "./product-store-v2.ts";
 import type { ModelRecord } from "./product-domain.ts";
+import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
+import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -25,19 +27,39 @@ export class AgentWorkspaceService {
   readonly #sessions: AgentConversationSessionManager;
   readonly #now: () => string;
   readonly #pendingTurns = new Map<string, Promise<AgentTurnResult>>();
+  readonly #conversationTurnTails = new Map<string, Promise<void>>();
+  #scopedMcpTail: Promise<void> = Promise.resolve();
+  readonly #scopedMcpUrl?: (capability: string) => string;
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
+  readonly technicalChecks: ModelTechnicalCheckService;
+  readonly turnRuntime?: AgentTurnRuntime;
 
   constructor(
     store: ProductStoreV2,
     openCode: OpenCodeConversationPort,
     now: () => string = () => new Date().toISOString(),
+    technicalChecker?: ModelTechnicalCheckerPort,
+    turnRuntime?: AgentTurnRuntime,
+    scopedMcpUrl?: (capability: string) => string,
   ) {
     this.store = store;
     this.openCode = openCode;
     this.#sessions = new AgentConversationSessionManager(store, openCode);
     this.#now = now;
+    this.technicalChecks = new ModelTechnicalCheckService(store, technicalChecker, now);
+    this.turnRuntime = turnRuntime;
+    this.#scopedMcpUrl = scopedMcpUrl;
   }
+
+  handleAgentMcp(capability: string | undefined, request: unknown) {
+    if (!this.turnRuntime) throw new ApiError(503, "agent_tools_unavailable", "Scoped Agent tools are not configured.");
+    return this.turnRuntime.handle(capability, request);
+  }
+
+  modelWorkspace(modelId: string): ModelWorkspaceProjectionDto { return this.technicalChecks.workspace(modelId); }
+  startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheckDto> { return this.technicalChecks.start(modelId, commandId); }
+  getTechnicalCheck(modelId: string, checkId: string): TechnicalCheckDto { return this.technicalChecks.read(modelId, checkId); }
 
   async discoverProviders(): Promise<ProviderDiscoveryDto> {
     try { return { mode: "live", providerModels: await this.openCode.discoverProviderModels() }; }
@@ -132,15 +154,59 @@ export class AgentWorkspaceService {
     catch (error) { throw storeApiError(error); }
   }
 
+  createAttachment(input: { commandId: string; conversationId: string; originalName: string; mediaType: string; bytes: Uint8Array; purpose?: string | null }) {
+    const commandId = boundedKey(input.commandId, "commandId"); const conversationId = boundedId(input.conversationId);
+    this.store.getConversation(conversationId);
+    if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength < 1 || input.bytes.byteLength > 1_048_576) throw new ApiError(422, "invalid_attachment", "Attachment bytes are empty or too large.");
+    const originalName = boundedName(input.originalName, "Attachment name");
+    const mediaType = boundedProviderPart(input.mediaType, "mediaType");
+    const purpose = input.purpose == null ? null : boundedPurpose(input.purpose);
+    const attachmentId = stableId("attachment", `${conversationId}:${commandId}`);
+    const objectFileId = stableId("file", `attachment:${conversationId}:${commandId}`);
+    try {
+      const existing = this.store.getConversationAttachment(attachmentId);
+      const digest = createHash("sha256").update(input.bytes).digest("hex");
+      if (existing.conversationId !== conversationId || existing.originalName !== originalName || existing.mediaType !== mediaType
+        || existing.purpose !== purpose || existing.sha256 !== digest) throw new ApiError(409, "idempotency_conflict", "That commandId was already used with different attachment intent.");
+      return existing;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof ProductStoreV2Error && !/does not exist/u.test(error.message)) throw storeApiError(error);
+    }
+    try {
+      this.store.createAttachment({ id: attachmentId, objectFileId, conversationId, relativePath: stableId("upload", commandId), originalName,
+        mediaType, purpose, bytes: input.bytes, createdAt: this.#now() });
+      return this.store.getConversationAttachment(attachmentId);
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  listTemporaryDocuments(conversationId: string) {
+    const id = boundedId(conversationId);
+    this.store.getConversation(id);
+    try { return this.store.listTemporaryDocuments(id); }
+    catch (error) { throw storeApiError(error); }
+  }
+
   runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[] }): Promise<AgentTurnResult> {
     const key = `${input.conversationId}\u0000${input.requestKey}`;
     const pending = this.#pendingTurns.get(key);
     if (pending) return pending;
-    const operation = this.#runTurn(input).finally(() => {
-      if (this.#pendingTurns.get(key) === operation) this.#pendingTurns.delete(key);
-    });
-    this.#pendingTurns.set(key, operation);
-    return operation;
+    const previous = this.#conversationTurnTails.get(input.conversationId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(() => this.#runTurn(input));
+    let tail: Promise<void>;
+    const tracked = operation.then(
+      (result) => { this.#releaseTurn(key, input.conversationId, tracked, tail); return result; },
+      (error: unknown) => { this.#releaseTurn(key, input.conversationId, tracked, tail); throw error; },
+    );
+    tail = tracked.then(() => undefined, () => undefined);
+    this.#pendingTurns.set(key, tracked);
+    this.#conversationTurnTails.set(input.conversationId, tail);
+    return tracked;
+  }
+
+  #releaseTurn(key: string, conversationId: string, operation: Promise<AgentTurnResult>, tail: Promise<void>): void {
+    if (this.#pendingTurns.get(key) === operation) this.#pendingTurns.delete(key);
+    if (this.#conversationTurnTails.get(conversationId) === tail) this.#conversationTurnTails.delete(conversationId);
   }
 
   async #runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[] }): Promise<AgentTurnResult> {
@@ -169,9 +235,25 @@ export class AgentWorkspaceService {
       return { mode: "read_only", reason: asReadOnlyReason(turn.failure?.code), turn, messages: this.store.listConversationMessages(conversationId) };
     }
 
+    let prepared: PreparedAgentTurnRuntime | undefined;
+    let scopedRelease: (() => void) | undefined;
+    let mcpBound = false;
     try {
-      const context = this.#contextFor(conversationId, turn.userMessageId);
-      const result = await this.#sessions.prompt(conversationId, context, text);
+      prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId) });
+      if (prepared?.requiresMcp) {
+        if (!this.#scopedMcpUrl || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
+          throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind a scoped MCP server for this Agent turn.");
+        }
+        scopedRelease = await this.#acquireScopedMcpTurn();
+        // Keep the OpenCode MCP server name stable for the durable conversation.
+        // Only its short-lived capability URL rotates per turn. Some OpenCode
+        // runtimes stop advancing a reused session when every turn introduces
+        // an entirely new tool namespace.
+        await this.openCode.bindScopedMcp(conversationId, this.#scopedMcpUrl(prepared.capability));
+        mcpBound = true;
+      }
+      const context = this.#contextFor(conversationId, turn.userMessageId, prepared);
+      const result = await this.#sessions.prompt(conversationId, context, text, prepared?.promptAttachments ?? [], mcpBound ? conversationId : undefined);
       if (result.mode === "read_only") {
         turn = this.store.failAgentTurn(conversationId, requestKey, result.reason, result.retryable, this.#now());
         return { mode: "read_only", reason: result.reason, turn, messages: this.store.listConversationMessages(conversationId) };
@@ -191,10 +273,26 @@ export class AgentWorkspaceService {
       try { turn = this.store.failAgentTurn(conversationId, requestKey, code, true, this.#now()); }
       catch { throw storeApiError(error); }
       return { mode: "read_only", reason: asReadOnlyReason(code), turn, messages: this.store.listConversationMessages(conversationId) };
+    } finally {
+      prepared?.release();
+      if (mcpBound && prepared) await this.openCode.unbindScopedMcp?.(conversationId).catch(() => undefined);
+      scopedRelease?.();
     }
   }
 
-  #contextFor(conversationId: string, currentUserMessageId: string | null): AgentContextInput {
+  async #acquireScopedMcpTurn(): Promise<() => void> {
+    // OpenCode's dynamic MCP registry is process-global rather than session-local.
+    // Keep only one live Riff capability registered at a time; per-prompt tool
+    // filtering is defense in depth, not the authority boundary.
+    const previous = this.#scopedMcpTail;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.#scopedMcpTail = previous.catch(() => undefined).then(() => current);
+    await previous.catch(() => undefined);
+    return release;
+  }
+
+  #contextFor(conversationId: string, currentUserMessageId: string | null, prepared?: PreparedAgentTurnRuntime): AgentContextInput {
     const snapshot = this.store.readConversationContext(conversationId, { maxMessages: 32, maxBytes: 48_000 });
     const ownerSummary = this.#ownerSummary(snapshot.owner);
     return {
@@ -210,6 +308,9 @@ export class AgentWorkspaceService {
         status: message.status,
         text: message.text,
       })),
+      ...(prepared?.context.attachments ? { attachments: prepared.context.attachments } : {}),
+      ...(prepared?.context.documents ? { documents: prepared.context.documents } : {}),
+      ...(prepared?.context.selectedSkills ? { selectedSkills: prepared.context.selectedSkills } : {}),
     };
   }
 
@@ -275,6 +376,12 @@ const boundedProviderPart = (value: string, label: string): string => {
 };
 const boundedText = (value: string): string => {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 64_000) throw new ApiError(422, "invalid_turn", "Turn text is empty or too large.");
+  return value.trim();
+};
+const boundedPurpose = (value: string): string => {
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 2_000 || value.includes("\0")) {
+    throw new ApiError(422, "invalid_attachment", "Attachment purpose is invalid.");
+  }
   return value.trim();
 };
 const assertOwner = (owner: ConversationOwner): void => {
