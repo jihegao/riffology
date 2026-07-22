@@ -14,6 +14,12 @@ product.
 
 - [`milestone-a-product-contract.md`](milestone-a-product-contract.md): current
   shared two-pane Models/Projects product contract and four-stage delivery plan.
+- [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md):
+  Stage 1 SQLite/object-store domain, atomic mutation, recovery, lifecycle, and
+  deletion-preview design implemented by `backend/src/product-store-v2.ts`.
+- [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
+  audited boundary between future tracked-code retirement and protected local
+  workspaces/artifacts; it does not authorize deletion.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
