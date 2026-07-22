@@ -5,6 +5,16 @@ directory. Gate 0 is a design baseline: it approves the target but is not proof
 that Gates 1-4 are implemented. Technical owners must document public
 interfaces, test expectations, and assumptions before implementation.
 
+Stage 2 / #13 is the current implementation stage. Its authority is the
+Milestone A product contract plus
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
+Schema v3/store, conversation/OpenCode context, scoped MCP/skills, attachments,
+temporary documents, generic Model workspace, restricted process, technical
+checker, and the narrow HTTP/API surface are implemented. Final acceptance has
+one documented real-provider browser rerun outstanding after upstream network
+errors. Legacy Gate and queue code still coexist and are not silently retired
+by Stage 2.
+
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
 supersedes the former Gate 0-4 product target wherever they disagree. The older
@@ -20,15 +30,27 @@ product.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between future tracked-code retirement and protected local
   workspaces/artifacts; it does not authorize deletion.
+- [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md):
+  Stage 2 design for persistent OpenCode conversations, backend-only session
+  recovery, progressive skill/action audit, owner-scoped Model tools, atomic
+  workspace mutation, generic Mesa scaffolding, and technical executability
+  checks. The #13 implementation is present; release acceptance retains the
+  provider-stability caveat documented in the test plan. Stage 3/4 behavior
+  remains explicitly out of scope.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
 - [`architecture.md`](architecture.md): target system boundaries, revision
-  identities, storage ownership, and current/target distinction.
-- [`product-roadmap.md`](product-roadmap.md): evolution from the bounded MVP to open model creation,
-  sandboxed draft execution, progressive validation, and governed publication.
-- [`ui-workflow.md`](ui-workflow.md): target browser-visible workflow and acceptance checks.
+  identities, ProductStoreV2 authority, Stage 2 process boundaries, and the
+  legacy/current distinction.
+- [`product-roadmap.md`](product-roadmap.md): legacy long-term roadmap retained
+  as history, with the current Milestone A2 boundary called out explicitly.
+- [`ui-workflow.md`](ui-workflow.md): minimal Stage 2 acceptance surface and the
+  legacy/future browser workflow boundaries.
 - [`mesa-service.md`](mesa-service.md): target Mesa model, event, revision, and artifact contract.
-- [`opencode-bridge.md`](opencode-bridge.md): target OpenCode proposal and domain-action boundary.
-- [`backend-api.md`](backend-api.md): target durable project, issue, attestation, experiment, and run API.
-- [`test-plan.md`](test-plan.md): Gate 1-4 unit, contract, integration, browser, and review requirements.
+- [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
+  OpenCode/session/context contract followed by the legacy Gate contract.
+- [`backend-api.md`](backend-api.md): current Stage 2 API integration boundary
+  followed by the legacy Gate project API target.
+- [`test-plan.md`](test-plan.md): current Stage 2 focused/full verification
+  commands and acceptance, plus retained legacy Gate test history.

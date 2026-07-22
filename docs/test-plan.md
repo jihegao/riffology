@@ -1,4 +1,80 @@
-# Wind-turbine delivery test plan
+# Delivery test plan
+
+## Milestone A2 current verification
+
+Stage 2 verification is governed by
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
+Implemented focused coverage includes schema v3/store recovery, durable
+conversation state, bounded context and per-conversation OpenCode sessions,
+scoped MCP/skills, generic Model workspace, restricted process isolation, and
+digest-bound technical checks.
+
+Run the focused backend set with:
+
+```bash
+cd backend
+node --experimental-strip-types --test \
+  test/product-schema.test.ts \
+  test/agent-conversation-store.test.ts \
+  test/product-store-v3-recovery.test.ts \
+  test/agent-context.test.ts \
+  test/agent-api.test.ts \
+  test/agent-turn-runtime.test.ts \
+  test/agent-workspace-concurrency.test.ts \
+  test/opencode-conversation-runtime.test.ts \
+  test/agent-mcp-permissions.test.ts \
+  test/simulation-skill-catalog.test.ts \
+  test/model-workspace.test.ts \
+  test/model-process-isolation.test.ts \
+  test/model-technical-checker.test.ts
+```
+
+Run the full component gates with:
+
+```bash
+(cd backend && npm test)
+(cd web && npm test && npm run build)
+```
+
+The API integration tests cover provider/model discovery,
+generic Model creation, conversation creation/listing, idempotent turns,
+attachment upload, temporary-document projection, explicit read-only errors,
+opaque-session/capability/path omission, scoped MCP mutation/revocation, and
+technical-check start/read. Real browser acceptance must cover live multi-turn
+session reuse, a second independent conversation, lost-session bounded
+reconstruction, restart, temporary documents/actions, scoped Model mutation,
+Project mutation denial, and honest technical-status copy.
+
+Latest branch evidence: the full backend suite executed 185 tests, with 184
+passing, zero failures, and one optional installed-OpenCode smoke skipped. The
+latest web suite has 104 passing tests and the production build succeeds. A
+live technical check materialized an isolated generic Model workspace and
+published `executable`; path, interface, syntax, dependency (Mesa), smoke,
+resource, output, and cancellation checks passed, while visual health was
+correctly skipped for `batch_only`.
+
+Real-provider evidence is not all green. The direct OpenCode adapter reused one
+session for two distinct turns. The browser acceptance surface created a New
+Model, completed a provider-backed turn, observed a completed scoped
+`riff_read_owner_summary` call, and later showed a structured read-only result
+without a fabricated assistant response. Repeated upstream provider network
+errors prevented a second clean same-session browser turn during the final
+pass. Repeat that browser case when the provider is stable before treating
+release acceptance as complete; do not replace it with the direct adapter,
+mock-only tests, or a healthy-port check.
+
+The macOS `sandbox-exec` tests prove the stated local-user process boundary,
+workspace restriction, scrubbed environment, no network rule, cancellation,
+and finite limits. They do not prove containment of hostile code. An executable
+check result proves the thin technical contract only, not scientific validity
+or trust.
+
+Legacy Gate/queue tests remain present while the implementations coexist. #14
+Project execution/wind import and #15 final-shell E2E are non-scope for A2.
+
+---
+
+# Legacy wind-turbine delivery test plan
 
 ## Status
 

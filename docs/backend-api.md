@@ -1,10 +1,60 @@
-# Durable project and backend API target
+# Backend API contracts
+
+## Milestone A2 current authority
+
+The current authority is the
+[`Milestone A product contract`](milestone-a-product-contract.md) and
+[`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
+Gate API retained below. `ProductStoreV2` and schema v3 are implemented as the
+only durable authority. Browser/API callers cannot supply ownership, workspace
+paths, file digests, OpenCode session identifiers, process commands, or
+technical status.
+
+The implemented Stage 2 routes are:
+
+| Route family | Current Stage 2 contract |
+| --- | --- |
+| `GET /api/providers` | Discover backend-validated OpenCode provider/model pairs; return no credentials or upstream session IDs. |
+| `POST /api/models` | Accept a name and initial provider/model, then atomically create a generic Model, its first conversation, and server-owned scaffold. |
+| `GET /api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
+| `POST /api/models/{modelId}/technical-checks` | Start or idempotently return a digest-bound thin technical check using a `commandId`. |
+| `GET /api/models/{modelId}/technical-checks/{checkId}` | Read the bounded check DTO and its `pending`, `published`, or `superseded` publication state. |
+| `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. Provider/model locks with the first accepted user message. |
+| `GET /api/conversations/{conversationId}` | Return the redacted durable conversation and public session state. |
+| `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. |
+| `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
+| `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
+| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. |
+| `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
+
+Opaque OpenCode sessions and MCP capabilities stay backend-only.
+Provider/OpenCode unavailability returns explicit read-only state and never a
+canned Agent response. Model mutation is limited to typed current-Model tools;
+Project conversations cannot mutate Model code, schemas, execution description,
+or dependencies.
+
+The Stage 2 process boundary is macOS/local-user `sandbox-exec` with a
+Model-owned writable root, scrubbed environment, denied network by default,
+finite time/output/process limits, and read-only access only to the fixed Python
+application/framework and exact configured virtual-environment roots needed by
+the backend-selected interpreter. Arbitrary home, repository, credential, and
+sibling paths remain denied. It is not hostile-code containment.
+`technicalStatus: "executable"` means the thin technical checks passed; it is
+not a scientific-validity, calibration, trust, or recommendation field.
+
+Project experiment/run APIs, wind migration, and final shell routes remain
+#14/#15 non-scope. The legacy Gate API below still coexists in tracked code and
+documentation until its separately reviewed retirement.
+
+---
+
+# Legacy durable project and backend API target
 
 ## Status
 
-This Gate 0 contract describes the Gate 2 target. The current backend remains a
-queue-bound, in-memory Phase 0 implementation; these routes and records are not
-yet available.
+This Gate 0 contract describes the former Gate 2 target. It is retained as
+implementation history and may still describe coexisting legacy queue/wind
+code. It is not the current Milestone A2 API authority.
 
 The backend is the only browser-facing authority. It owns durable project
 identity, project snapshots, business artifacts, issue/attestation records,

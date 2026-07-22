@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ApiError } from "./errors.ts";
 import type { AgentStatus } from "./types.ts";
 
@@ -13,10 +13,25 @@ export type OpenCodePrompt = {
   text: string;
   system: string;
   attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }>;
+  /** Backend-only binding for one short-lived, capability-scoped Riff MCP server. */
+  scopedMcpScopeId?: string;
+};
+
+export type OpenCodeProviderModel = {
+  providerId: string;
+  modelId: string;
+  qualifiedId: string;
+};
+
+export type OpenCodeAssistantResponse = {
+  messageId: string | null;
+  text: string;
+  content: { source: "opencode"; textParts: number };
 };
 
 export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Record<string, unknown> };
 
+/** Legacy Gate adapter retained while the old server routes are migrated. */
 export interface OpenCodeAdapter {
   initialize(): Promise<OpenCodeReadiness>;
   createSession(projectId: string): Promise<string>;
@@ -26,7 +41,24 @@ export interface OpenCodeAdapter {
   subscribeEvents?(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void>;
 }
 
-type OpenCodeConfig = {
+/** Narrow A2 port: provider/model is explicit on every prompt. */
+export interface OpenCodeConversationPort {
+  discoverProviderModels(): Promise<OpenCodeProviderModel[]>;
+  getSession(sessionId: string): Promise<boolean>;
+  createSession(conversationId: string): Promise<string>;
+  injectContext(sessionId: string, context: string, signal?: AbortSignal): Promise<void>;
+  promptWithModel(
+    sessionId: string,
+    binding: { providerId: string; modelId: string },
+    prompt: OpenCodePrompt,
+    signal?: AbortSignal,
+  ): Promise<OpenCodeAssistantResponse>;
+  abort(sessionId: string): Promise<void>;
+  bindScopedMcp?(scopeId: string, mcpUrl: string): Promise<void>;
+  unbindScopedMcp?(scopeId: string): Promise<void>;
+}
+
+export type OpenCodeConfig = {
   baseUrl?: string;
   serverUsername?: string;
   serverPassword?: string;
@@ -34,172 +66,302 @@ type OpenCodeConfig = {
   allowedProviders?: string[];
   skipLive?: boolean;
   fetch?: typeof fetch;
+  requestTimeoutMs?: number;
+  maxResponseBytes?: number;
+  maxEventBufferBytes?: number;
 };
 
-export class HttpOpenCodeAdapter implements OpenCodeAdapter {
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
+const DEFAULT_MAX_EVENT_BUFFER_BYTES = 256_000;
+
+export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversationPort {
   readonly #fetch: typeof fetch;
   private readonly config: OpenCodeConfig;
   readonly #mcpProjects = new Map<string, string>();
+  readonly #scopedMcp = new Map<string, { name: string; url: string }>();
+  readonly #baseUrl?: URL;
+  readonly #requestTimeoutMs: number;
+  readonly #maxResponseBytes: number;
+  readonly #maxEventBufferBytes: number;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
 
   constructor(config: OpenCodeConfig) {
     this.config = config;
     this.#fetch = config.fetch ?? fetch;
+    this.#baseUrl = config.baseUrl ? loopbackHttpUrl(config.baseUrl, "OpenCode URL") : undefined;
+    this.#requestTimeoutMs = positiveLimit(config.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, "OpenCode request timeout");
+    this.#maxResponseBytes = positiveLimit(config.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, "OpenCode response limit");
+    this.#maxEventBufferBytes = positiveLimit(config.maxEventBufferBytes, DEFAULT_MAX_EVENT_BUFFER_BYTES, "OpenCode event buffer limit");
   }
 
   async initialize(): Promise<OpenCodeReadiness> {
     if (this.config.skipLive) {
-      this.#readiness = {
-        status: "ready",
-        modelId: "dev/deterministic",
-      };
+      // Compatibility-only deterministic mode for the old component-test route.
+      this.#readiness = { status: "ready", modelId: "dev/deterministic" };
       return this.#readiness;
     }
-    if (!this.config.baseUrl) {
-      this.#readiness = {
-        status: "error",
-        modelId: null,
-        lastError: { code: "opencode_unconfigured", message: "Set OPENCODE_URL and OPENCODE_MODEL to enable the modelling assistant." },
-      };
-      return this.#readiness;
-    }
+    if (!this.#baseUrl) return this.#setReadinessError("opencode_unconfigured", "Set OPENCODE_URL and OPENCODE_MODEL to enable the modelling assistant.");
+    if (!this.config.model) return this.#setReadinessError("opencode_model_unconfigured", "Select an explicit provider/model before enabling the modelling assistant.");
     try {
+      const binding = splitQualifiedModel(this.config.model);
+      const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
+      if (allowed.size && !allowed.has(binding.providerId)) {
+        return this.#setReadinessError("opencode_provider_not_allowed", "The configured OpenCode provider is not approved.");
+      }
       const health = await this.#json("/global/health");
-      const providerConfig = await this.#json("/config/providers");
-      const models = discoveredModels(providerConfig);
-      const configured = this.config.model;
-      const candidate = configured && models.includes(configured) ? configured : configured ? undefined : defaultModel(providerConfig, models);
-      if (!candidate) {
-        this.#readiness = {
-          status: "error",
-          modelId: null,
-          lastError: { code: "opencode_model_unavailable", message: "The configured OpenCode model was not found in the live provider catalogue." },
-        };
-        return this.#readiness;
-      }
-      const provider = candidate.split("/", 1)[0];
-      const allowed = this.config.allowedProviders?.filter(Boolean);
-      if (allowed?.length && !allowed.includes(provider)) {
-        this.#readiness = {
-          status: "error",
-          modelId: null,
-          lastError: { code: "opencode_provider_not_allowed", message: "The configured OpenCode provider is not approved for this demo." },
-        };
-        return this.#readiness;
-      }
-      this.#readiness = { status: "ready", modelId: candidate, version: typeof health.version === "string" ? health.version : undefined };
+      const models = await this.discoverProviderModels();
+      const candidate = models.find((item) => item.providerId === binding.providerId && item.modelId === binding.modelId);
+      if (!candidate) return this.#setReadinessError("opencode_model_unavailable", "The configured OpenCode model was not found in the live provider catalogue.");
+      this.#readiness = { status: "ready", modelId: candidate.qualifiedId, version: typeof health.version === "string" ? health.version : undefined };
       return this.#readiness;
     } catch (error) {
-      this.#readiness = {
-        status: "error",
-        modelId: null,
-        lastError: error instanceof ApiError && error.status === 401
-          ? { code: "opencode_auth_failed", message: "OpenCode rejected the local server credential." }
-          : { code: "opencode_unavailable", message: "The local OpenCode server is not reachable." },
-      };
-      return this.#readiness;
+      return this.#setReadinessError(
+        error instanceof ApiError && error.status === 401 ? "opencode_auth_failed" : "opencode_unavailable",
+        error instanceof ApiError && error.status === 401 ? "OpenCode rejected the local server credential." : "The local OpenCode server is not reachable.",
+      );
     }
   }
 
-  async createSession(projectId: string): Promise<string> {
-    if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
-      throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
-    }
-    if (this.config.skipLive) {
-      return `dev-${projectId}-${randomUUID()}`;
-    }
-    const session = await this.#json("/session", { method: "POST", body: JSON.stringify({ title: `Riff ${projectId.slice(0, 8)}` }) });
+  async discoverProviderModels(): Promise<OpenCodeProviderModel[]> {
+    this.#requireLiveBaseUrl();
+    const payload = await this.#json("/config/providers");
+    const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
+    return discoveredProviderModels(payload).filter((item) => !allowed.size || allowed.has(item.providerId));
+  }
+
+  async getSession(sessionId: string): Promise<boolean> {
+    this.#requireLiveBaseUrl();
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    const result = await this.#request(`/session/${encodeURIComponent(sessionId)}`, { method: "GET" });
+    if (result.response.status === 404) return false;
+    if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+    return true;
+  }
+
+  async createSession(projectOrConversationId: string): Promise<string> {
+    if (this.config.skipLive) return `dev-${projectOrConversationId}-${randomUUID()}`;
+    this.#requireLiveBaseUrl();
+    const session = await this.#json("/session", {
+      method: "POST",
+      body: JSON.stringify({ title: `Riff ${safeTitleFragment(projectOrConversationId)}` }),
+    });
     const sessionId = String(session.id ?? session.sessionID ?? "");
     if (!sessionId) throw new ApiError(502, "opencode_invalid_session", "OpenCode did not return a session ID.");
+    assertOpaqueId(sessionId, "OpenCode session ID");
     return sessionId;
   }
 
+  async injectContext(sessionId: string, context: string, signal?: AbortSignal): Promise<void> {
+    if (this.config.skipLive) return;
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    if (!context) return;
+    // Do not persist reconstruction context as a synthetic user message.
+    // OpenCode can later treat that no-reply message as the parent of the first
+    // real prompt, causing the next synchronous prompt to return the previous
+    // assistant response. The bounded context is supplied as `system` on every
+    // real prompt instead, so a recreated session remains deterministic without
+    // corrupting message ordering.
+    void signal;
+  }
+
+  async promptWithModel(
+    sessionId: string,
+    binding: { providerId: string; modelId: string },
+    prompt: OpenCodePrompt,
+    signal?: AbortSignal,
+  ): Promise<OpenCodeAssistantResponse> {
+    if (this.config.skipLive) throw new ApiError(503, "opencode_canned_forbidden", "A live OpenCode response is required.");
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    const model = validatedModelReference(binding);
+    const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
+    if (allowed.size && !allowed.has(model.providerID)) throw new ApiError(503, "opencode_provider_not_allowed", "The selected OpenCode provider is not allowed.");
+    const attachmentText = prompt.attachments.map((attachment) =>
+      `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
+    ).join("\n");
+    const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
+    const userMessageId = `msg_${randomUUID()}`;
+    await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+      method: "POST",
+      signal,
+      body: JSON.stringify({
+        messageID: userMessageId,
+        model,
+        system: prompt.system,
+        parts,
+        tools: this.#promptTools(prompt.scopedMcpScopeId),
+      }),
+    });
+    return this.#waitForAssistant(sessionId, userMessageId, signal);
+  }
+
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
+    if (this.config.skipLive) return;
     if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
       throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
     }
-    if (this.config.skipLive) return;
+    const binding = splitQualifiedModel(this.#readiness.modelId);
     const attachmentText = prompt.attachments.map((attachment) =>
-      `- attachment ${attachment.id}: ${attachment.mediaType}, ${attachment.workspaceRelativePath}`,
+      `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
     ).join("\n");
-    const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
     await this.#json(`/session/${encodeURIComponent(sessionId)}/message`, {
       method: "POST",
       signal,
       body: JSON.stringify({
         messageID: `msg_${randomUUID()}`,
-        model: modelReference(this.#readiness.modelId),
+        model: validatedModelReference(binding),
         system: prompt.system,
-        parts,
-        tools: {
-          // OpenCode 1.17 treats this object as built-in tool toggles. Riff's
-          // MCP tools are discovered from the registered MCP server instead.
-          invalid: false,
-          question: false,
-          bash: false,
-          read: false,
-          glob: false,
-          grep: false,
-          write: false,
-          edit: false,
-          task: false,
-          webfetch: false,
-          todowrite: false,
-          websearch: false,
-          skill: false,
-          apply_patch: false,
-        },
+        parts: [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }],
+        tools: disabledBuiltInTools(),
       }),
     });
   }
 
   async abort(sessionId: string): Promise<void> {
-    if (!this.config.baseUrl) return;
+    if (!this.#baseUrl || this.config.skipLive) return;
+    assertOpaqueId(sessionId, "OpenCode session ID");
     await this.#json(`/session/${encodeURIComponent(sessionId)}/abort`, { method: "POST" });
   }
 
   async bindProject(projectId: string, mcpUrl: string): Promise<void> {
-    if (this.config.skipLive || !this.config.baseUrl) return;
-    if (this.#mcpProjects.get(projectId) === mcpUrl) return;
+    if (this.config.skipLive) return;
+    this.#requireLiveBaseUrl();
+    const safeMcpUrl = loopbackHttpUrl(mcpUrl, "Riff MCP URL").toString();
+    if (this.#mcpProjects.get(projectId) === safeMcpUrl) return;
     const name = `riff-${projectId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
     await this.#json("/mcp", {
       method: "POST",
-      body: JSON.stringify({ name, config: { type: "remote", url: mcpUrl, enabled: true, oauth: false, timeout: 10_000 } }),
+      body: JSON.stringify({ name, config: { type: "remote", url: safeMcpUrl, enabled: true, oauth: false, timeout: 10_000 } }),
     });
-    this.#mcpProjects.set(projectId, mcpUrl);
+    this.#mcpProjects.set(projectId, safeMcpUrl);
+  }
+
+  async bindScopedMcp(scopeId: string, mcpUrl: string): Promise<void> {
+    if (this.config.skipLive) return;
+    this.#requireLiveBaseUrl();
+    assertOpaqueId(scopeId, "Riff MCP scope ID");
+    const safeMcpUrl = loopbackMcpUrl(mcpUrl).toString();
+    const name = scopedMcpName(scopeId);
+    const existing = this.#scopedMcp.get(scopeId);
+    if (existing?.url === safeMcpUrl) return;
+    await this.#json("/mcp", {
+      method: "POST",
+      body: JSON.stringify({ name, config: { type: "remote", url: safeMcpUrl, enabled: true, oauth: false, timeout: 10_000 } }),
+    });
+    const connected = await this.#request(`/mcp/${encodeURIComponent(name)}/connect`, { method: "POST" });
+    if (!connected.response.ok) throw apiErrorFromResponse(connected.response, connected.payload);
+    this.#scopedMcp.set(scopeId, { name, url: safeMcpUrl });
+  }
+
+  async unbindScopedMcp(scopeId: string): Promise<void> {
+    if (this.config.skipLive) return;
+    assertOpaqueId(scopeId, "Riff MCP scope ID");
+    const binding = this.#scopedMcp.get(scopeId);
+    if (!binding) return;
+    try {
+      await this.#json(`/mcp/${encodeURIComponent(binding.name)}/disconnect`, { method: "POST" });
+    } finally {
+      this.#scopedMcp.delete(scopeId);
+    }
+  }
+
+  #promptTools(scopeId: string | undefined): Record<string, boolean> {
+    // OpenCode may have unrelated local or plugin MCP servers configured.
+    // Deny every tool first, then enable only this turn's opaque Riff scope.
+    // The explicit built-in map is retained for compatibility with versions
+    // that merge exact names after wildcard rules.
+    const tools = { "*": false, ...disabledBuiltInTools() };
+    if (!scopeId) return tools;
+    const binding = this.#scopedMcp.get(scopeId);
+    if (!binding) throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");
+    return { ...tools, [`${binding.name}_*`]: true };
   }
 
   async subscribeEvents(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void> {
-    if (!this.config.baseUrl || this.config.skipLive) return () => undefined;
+    if (!this.#baseUrl || this.config.skipLive) return () => undefined;
     const controller = new AbortController();
-    const response = await this.#fetch(new URL("/event", this.config.baseUrl), {
-      headers: this.#authorization(),
-      signal: controller.signal,
-    });
-    if (!response.ok || !response.body) throw new ApiError(503, "opencode_event_unavailable", "OpenCode event streaming is unavailable.");
-    void consumeSse(response.body, listener, controller.signal);
-    return () => controller.abort();
-  }
-
-  async #json(path: string, init: RequestInit = {}): Promise<Record<string, any>> {
     let response: Response;
     try {
-      response = await this.#fetch(new URL(path, this.config.baseUrl), {
-        ...init,
-        headers: { "content-type": "application/json", ...this.#authorization(), ...(init.headers ?? {}) },
+      response = await this.#fetch(new URL("/event", this.#baseUrl), {
+        headers: this.#authorization(),
+        signal: controller.signal,
+        redirect: "manual",
       });
     } catch {
       throw new ApiError(503, "opencode_unavailable", "The local OpenCode server is not reachable.");
     }
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new ApiError(response.status, String(payload?.error?.code ?? "opencode_error"), "OpenCode rejected the local request.");
-    return payload;
+    if (isRedirect(response.status)) throw new ApiError(502, "opencode_redirect_forbidden", "OpenCode redirects are not accepted.");
+    if (!response.ok || !response.body) throw new ApiError(503, "opencode_event_unavailable", "OpenCode event streaming is unavailable.");
+    void consumeSse(response.body, listener, controller.signal, this.#maxEventBufferBytes);
+    return () => controller.abort();
+  }
+
+  async #json(path: string, init: RequestInit = {}): Promise<Record<string, any>> {
+    const result = await this.#request(path, init);
+    if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+    if (!result.payload || typeof result.payload !== "object" || Array.isArray(result.payload)) {
+      if (result.response.status === 204) return {};
+      throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an unexpected JSON payload.");
+    }
+    return result.payload;
+  }
+
+  async #waitForAssistant(sessionId: string, userMessageId: string, signal?: AbortSignal): Promise<OpenCodeAssistantResponse> {
+    const deadlineSignal = signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
+    while (!deadlineSignal.aborted) {
+      const result = await this.#request(`/session/${encodeURIComponent(sessionId)}/message`, { method: "GET", signal: deadlineSignal });
+      if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+      const messages = Array.isArray(result.payload) ? result.payload : [];
+      const assistants = messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId);
+      for (const assistant of assistants.toReversed()) {
+        if (assistant.info?.error) throw new ApiError(502, "opencode_prompt_failed", "OpenCode failed to complete the assistant response.");
+        try { return normalizedAssistantResponse(assistant); }
+        catch (error) {
+          if (!(error instanceof ApiError) || error.code !== "opencode_empty_response") throw error;
+        }
+      }
+      await abortableDelay(50, deadlineSignal);
+    }
+    throw deadlineSignal.reason ?? new ApiError(504, "opencode_prompt_timeout", "OpenCode did not complete the assistant response in time.");
+  }
+
+  async #request(path: string, init: RequestInit): Promise<{ response: Response; payload: any }> {
+    const base = this.#requireLiveBaseUrl();
+    // Existing callers already impose a stricter turn timeout and require their
+    // exact signal to reach fetch. Unsignalled discovery/session calls receive
+    // the adapter's own bounded timeout.
+    const signal = init.signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
+    let response: Response;
+    try {
+      response = await this.#fetch(new URL(path, base), {
+        ...init,
+        signal,
+        redirect: "manual",
+        headers: { "content-type": "application/json", ...this.#authorization(), ...(init.headers ?? {}) },
+      });
+    } catch (error) {
+      if (init.signal?.aborted) throw error;
+      throw new ApiError(503, "opencode_unavailable", "The local OpenCode server is not reachable.");
+    }
+    if (isRedirect(response.status)) throw new ApiError(502, "opencode_redirect_forbidden", "OpenCode redirects are not accepted.");
+    const payload = await readBoundedJson(response, this.#maxResponseBytes);
+    return { response, payload };
   }
 
   #authorization(): Record<string, string> {
     if (!this.config.serverPassword) return {};
     const username = this.config.serverUsername || "opencode";
     return { authorization: `Basic ${Buffer.from(`${username}:${this.config.serverPassword}`).toString("base64")}` };
+  }
+
+  #requireLiveBaseUrl(): URL {
+    if (!this.#baseUrl) throw new ApiError(503, "opencode_unconfigured", "The local OpenCode server is not configured.");
+    return this.#baseUrl;
+  }
+
+  #setReadinessError(code: string, message: string): OpenCodeReadiness {
+    this.#readiness = { status: "error", modelId: null, lastError: { code, message } };
+    return this.#readiness;
   }
 }
 
@@ -209,40 +371,157 @@ export const opencodeFromEnvironment = (env: NodeJS.ProcessEnv = process.env): H
   serverPassword: env.OPENCODE_SERVER_PASSWORD,
   model: env.OPENCODE_MODEL,
   allowedProviders: env.OPENCODE_ALLOWED_PROVIDERS?.split(",").map((value) => value.trim()),
+  requestTimeoutMs: optionalPositiveInteger(env.OPENCODE_REQUEST_TIMEOUT_MS ?? env.OPENCODE_PROMPT_TIMEOUT_MS),
   skipLive: env.RIFF_SKIP_OPENCODE === "true",
 });
 
-const discoveredModels = (payload: Record<string, any>): string[] => {
-  const found = new Set<string>();
+const discoveredProviderModels = (payload: Record<string, any>): OpenCodeProviderModel[] => {
+  const found = new Map<string, OpenCodeProviderModel>();
   const providers = payload.providers ?? payload.all ?? [];
-  const list = Array.isArray(providers) ? providers : Object.entries(providers).map(([id, value]) => ({ id, ...(value as object) }));
+  const list = Array.isArray(providers)
+    ? providers
+    : providers && typeof providers === "object"
+      ? Object.entries(providers).map(([id, value]) => ({ id, ...(value && typeof value === "object" ? value as object : {}) }))
+      : [];
   for (const provider of list) {
-    const providerId = String(provider.id ?? provider.name ?? "");
+    const providerId = validIdentifier(String(provider.id ?? provider.name ?? ""));
+    if (!providerId) continue;
     const models = provider.models ?? {};
-    if (Array.isArray(models)) {
-      for (const model of models) found.add(`${providerId}/${String(model.id ?? model.name ?? model)}`);
-    } else if (models && typeof models === "object") {
-      for (const [modelKey, model] of Object.entries(models)) found.add(String((model as any)?.id?.includes?.("/") ? (model as any).id : `${providerId}/${modelKey}`));
+    const candidates = Array.isArray(models)
+      ? models.map((model) => typeof model === "string" ? model : String(model?.id ?? model?.name ?? ""))
+      : models && typeof models === "object" ? Object.keys(models) : [];
+    for (const rawModelId of candidates) {
+      const explicit = rawModelId.includes("/") ? splitQualifiedModelOrNull(rawModelId) : null;
+      const modelProvider = explicit?.providerId ?? providerId;
+      const modelId = validIdentifier(explicit?.modelId ?? rawModelId);
+      if (!modelId || modelProvider !== providerId) continue;
+      const qualifiedId = `${providerId}/${modelId}`;
+      found.set(qualifiedId, { providerId, modelId, qualifiedId });
     }
   }
-  return [...found];
+  return [...found.values()].sort((left, right) => left.qualifiedId.localeCompare(right.qualifiedId, "en"));
 };
 
-const defaultModel = (payload: Record<string, any>, models: string[]): string | undefined => {
-  const defaults = payload.default ?? {};
-  for (const value of Object.values(defaults)) {
-    if (typeof value === "string" && models.includes(value)) return value;
+const splitQualifiedModel = (qualifiedId: string): { providerId: string; modelId: string } => {
+  const result = splitQualifiedModelOrNull(qualifiedId);
+  if (!result) throw new ApiError(503, "opencode_invalid_model", "OpenCode returned an invalid provider/model ID.");
+  return result;
+};
+
+const splitQualifiedModelOrNull = (qualifiedId: string): { providerId: string; modelId: string } | null => {
+  const slash = qualifiedId.indexOf("/");
+  if (slash <= 0 || slash === qualifiedId.length - 1) return null;
+  const providerId = validIdentifier(qualifiedId.slice(0, slash));
+  const modelId = validIdentifier(qualifiedId.slice(slash + 1));
+  return providerId && modelId ? { providerId, modelId } : null;
+};
+
+const validatedModelReference = (binding: { providerId: string; modelId: string }): { providerID: string; modelID: string } => {
+  const providerID = validIdentifier(binding.providerId);
+  const modelID = validIdentifier(binding.modelId);
+  if (!providerID || !modelID) throw new ApiError(422, "opencode_invalid_model", "The provider/model binding is invalid.");
+  return { providerID, modelID };
+};
+
+const validIdentifier = (value: string): string | null => {
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= 300 && !/[\u0000-\u001f\u007f\s]/u.test(trimmed) ? trimmed : null;
+};
+
+const loopbackHttpUrl = (raw: string, label: string): URL => {
+  let url: URL;
+  try { url = new URL(raw); }
+  catch { throw new ApiError(503, "opencode_invalid_url", `${label} must be an absolute loopback HTTP URL.`); }
+  if (url.protocol !== "http:" || url.username || url.password || !isLoopbackHostname(url.hostname)) {
+    throw new ApiError(503, "opencode_invalid_url", `${label} must be an unauthenticated loopback HTTP URL.`);
   }
-  return models[0];
+  if (url.pathname !== "/" || url.search || url.hash) throw new ApiError(503, "opencode_invalid_url", `${label} must not include a path, query, or fragment.`);
+  return url;
 };
 
-const modelReference = (modelId: string): { providerID: string; modelID: string } => {
-  const slash = modelId.indexOf("/");
-  if (slash <= 0 || slash === modelId.length - 1) throw new ApiError(503, "opencode_invalid_model", "OpenCode returned an invalid provider/model ID.");
-  return { providerID: modelId.slice(0, slash), modelID: modelId.slice(slash + 1) };
+const loopbackMcpUrl = (raw: string): URL => {
+  let url: URL;
+  try { url = new URL(raw); }
+  catch { throw new ApiError(503, "opencode_invalid_url", "Riff MCP URL must be an absolute loopback HTTP URL."); }
+  if (url.protocol !== "http:" || url.username || url.password || !isLoopbackHostname(url.hostname)
+    || url.pathname !== "/a2/mcp" || url.hash || url.searchParams.size !== 1 || !url.searchParams.get("cap")) {
+    throw new ApiError(503, "opencode_invalid_url", "Riff MCP URL must be a capability-scoped local A2 MCP endpoint.");
+  }
+  return url;
 };
 
-const consumeSse = async (stream: ReadableStream<Uint8Array>, listener: (event: OpenCodeRuntimeEvent) => void, signal: AbortSignal): Promise<void> => {
+const scopedMcpName = (scopeId: string): string => `riffa2${createHash("sha256").update(scopeId).digest("hex").slice(0, 24)}`;
+
+const isLoopbackHostname = (hostname: string): boolean => {
+  const normalized = hostname.toLowerCase();
+  if (normalized === "localhost" || normalized === "[::1]" || normalized === "::1") return true;
+  const match = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(normalized);
+  return Boolean(match && match.slice(1).every((part) => Number(part) <= 255));
+};
+
+const readBoundedJson = async (response: Response, maximumBytes: number): Promise<any> => {
+  const length = Number(response.headers.get("content-length"));
+  if (Number.isFinite(length) && length > maximumBytes) throw new ApiError(502, "opencode_response_too_large", "OpenCode returned an oversized response.");
+  if (!response.body) return {};
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maximumBytes) throw new ApiError(502, "opencode_response_too_large", "OpenCode returned an oversized response.");
+      chunks.push(next.value);
+    }
+  } finally { reader.releaseLock(); }
+  if (!total) return {};
+  const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total);
+  try {
+    const value = JSON.parse(bytes.toString("utf8"));
+    return value && typeof value === "object" ? value : {};
+  } catch { throw new ApiError(502, "opencode_invalid_response", "OpenCode returned invalid JSON."); }
+};
+
+const apiErrorFromResponse = (response: Response, payload: Record<string, any>): ApiError =>
+  new ApiError(response.status, String(payload?.error?.code ?? "opencode_error"), "OpenCode rejected the local request.");
+
+const normalizedAssistantResponse = (payload: Record<string, any>): OpenCodeAssistantResponse => {
+  const parts = Array.isArray(payload.parts) ? payload.parts : Array.isArray(payload.message?.parts) ? payload.message.parts : [];
+  const texts = parts
+    .filter((part: any) => part && part.type === "text" && typeof part.text === "string" && part.text.trim())
+    .map((part: any) => part.text.trim());
+  if (!texts.length && typeof payload.text === "string" && payload.text.trim()) texts.push(payload.text.trim());
+  const text = texts.join("\n").trim();
+  if (!text) throw new ApiError(502, "opencode_empty_response", "OpenCode returned no assistant text.");
+  const rawId = payload.info?.id ?? payload.info?.messageID ?? payload.id ?? payload.messageID;
+  const messageId = typeof rawId === "string" && rawId.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(rawId) ? rawId : null;
+  return { messageId, text, content: { source: "opencode", textParts: texts.length } };
+};
+
+const disabledBuiltInTools = () => ({
+  invalid: false,
+  question: false,
+  bash: false,
+  read: false,
+  glob: false,
+  grep: false,
+  write: false,
+  edit: false,
+  task: false,
+  webfetch: false,
+  todowrite: false,
+  websearch: false,
+  skill: false,
+  apply_patch: false,
+});
+
+const consumeSse = async (
+  stream: ReadableStream<Uint8Array>,
+  listener: (event: OpenCodeRuntimeEvent) => void,
+  signal: AbortSignal,
+  maximumBufferBytes: number,
+): Promise<void> => {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -251,6 +530,7 @@ const consumeSse = async (stream: ReadableStream<Uint8Array>, listener: (event: 
       const next = await reader.read();
       if (next.done) return;
       buffer += decoder.decode(next.value, { stream: true });
+      if (Buffer.byteLength(buffer, "utf8") > maximumBufferBytes) return;
       let split: number;
       while ((split = buffer.indexOf("\n\n")) >= 0) {
         const frame = buffer.slice(0, split);
@@ -261,8 +541,30 @@ const consumeSse = async (stream: ReadableStream<Uint8Array>, listener: (event: 
       }
     }
   } catch {
-    // The bridge will retain canonical state and reconnect on the next startup.
-  } finally {
-    reader.releaseLock();
-  }
+    // Canonical Riff state remains authoritative; the service can reconnect.
+  } finally { reader.releaseLock(); }
+};
+
+const positiveLimit = (value: number | undefined, fallback: number, label: string): number => {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected < 1) throw new ApiError(500, "opencode_invalid_limit", `${label} must be a positive integer.`);
+  return selected;
+};
+const optionalPositiveInteger = (value: string | undefined): number | undefined => {
+  if (value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+const isRedirect = (status: number): boolean => status >= 300 && status < 400;
+const abortableDelay = (milliseconds: number, signal: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+  if (signal.aborted) return reject(signal.reason);
+  const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+  const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
+  signal.addEventListener("abort", onAbort, { once: true });
+});
+const safeTitleFragment = (value: string): string => value.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 32) || "conversation";
+const safeContextLabel = (value: string): string => value.replace(/[\r\n\u0000-\u001f\u007f]/gu, " ").slice(0, 500);
+const assertOpaqueId = (value: string, label: string): void => {
+  if (!value || value.length > 500 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ApiError(422, "opencode_invalid_session", `${label} is invalid.`);
 };

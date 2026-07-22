@@ -540,7 +540,208 @@ export const PRODUCT_SCHEMA_V2_SQL = SQL`
   ${lifecycleIntegrityTriggers("experiment_configurations")}
 `;
 
+export const PRODUCT_SCHEMA_V3_SQL = SQL`
+  CREATE TEMP TABLE product_schema_v3_guard (valid INTEGER NOT NULL CHECK (valid = 1)) STRICT;
+
+  INSERT INTO product_schema_v3_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM conversations c
+    WHERE c.provider_locked_at IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user')
+  );
+
+  INSERT INTO product_schema_v3_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM messages m
+    WHERE m.ordinal != (SELECT count(*) - 1 FROM messages prior
+      WHERE prior.conversation_id = m.conversation_id AND prior.ordinal <= m.ordinal)
+  );
+
+  INSERT INTO product_schema_v3_guard(valid)
+  SELECT 0 WHERE EXISTS (SELECT 1 FROM messages WHERE NOT json_valid(content_json) OR (action_json IS NOT NULL AND NOT json_valid(action_json)));
+
+  UPDATE conversations
+  SET provider_locked_at = (
+    SELECT min(created_at) FROM messages WHERE conversation_id = conversations.id AND role = 'user'
+  )
+  WHERE provider_locked_at IS NULL
+    AND EXISTS (SELECT 1 FROM messages WHERE conversation_id = conversations.id AND role = 'user');
+
+  DROP TABLE product_schema_v3_guard;
+
+  CREATE UNIQUE INDEX messages_id_conversation_v3 ON messages(id, conversation_id);
+
+  CREATE TABLE conversation_summaries (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    covered_through_ordinal INTEGER NOT NULL CHECK (covered_through_ordinal >= 0),
+    content TEXT NOT NULL CHECK (length(content) <= 65536),
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE agent_sessions (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    state TEXT NOT NULL CHECK (state IN ('creating', 'available', 'lost', 'rebuilding', 'closed')),
+    provider_id TEXT NOT NULL,
+    provider_model_id TEXT NOT NULL,
+    external_session_ref TEXT CHECK (external_session_ref IS NULL OR length(external_session_ref) BETWEEN 1 AND 4096),
+    context_sha256 TEXT CHECK (context_sha256 IS NULL OR (length(context_sha256) = 64 AND context_sha256 NOT GLOB '*[^0-9a-f]*')),
+    failure_reason TEXT CHECK (failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 200),
+    last_successful_turn_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (conversation_id, generation),
+    FOREIGN KEY (last_successful_turn_id, conversation_id)
+      REFERENCES agent_turns(id, conversation_id) DEFERRABLE INITIALLY DEFERRED,
+    CHECK (state != 'available' OR external_session_ref IS NOT NULL)
+  ) STRICT;
+  CREATE UNIQUE INDEX one_live_agent_session_v3 ON agent_sessions(conversation_id) WHERE state != 'closed';
+
+  CREATE TABLE agent_turns (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 300),
+    intent_sha256 TEXT NOT NULL CHECK (length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'),
+    input_message_id TEXT NOT NULL,
+    assistant_message_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'complete', 'failed', 'read_only')),
+    reconstructed_context_sha256 TEXT CHECK (reconstructed_context_sha256 IS NULL OR (length(reconstructed_context_sha256) = 64 AND reconstructed_context_sha256 NOT GLOB '*[^0-9a-f]*')),
+    failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 200),
+    failure_retryable INTEGER CHECK (failure_retryable IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (conversation_id, request_key),
+    UNIQUE (id, conversation_id),
+    FOREIGN KEY (input_message_id, conversation_id) REFERENCES messages(id, conversation_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (assistant_message_id, conversation_id) REFERENCES messages(id, conversation_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK ((state = 'failed' AND failure_code IS NOT NULL AND failure_retryable IS NOT NULL)
+      OR (state != 'failed' AND failure_code IS NULL AND failure_retryable IS NULL))
+  ) STRICT;
+
+  CREATE TABLE skill_uses (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    skill_id TEXT NOT NULL CHECK (length(trim(skill_id)) BETWEEN 1 AND 300),
+    skill_version TEXT NOT NULL CHECK (length(trim(skill_version)) BETWEEN 1 AND 100),
+    routing_mode TEXT NOT NULL CHECK (routing_mode IN ('explicit', 'automatic')),
+    catalog_sha256 TEXT NOT NULL CHECK (length(catalog_sha256) = 64 AND catalog_sha256 NOT GLOB '*[^0-9a-f]*'),
+    instruction_sha256 TEXT NOT NULL CHECK (length(instruction_sha256) = 64 AND instruction_sha256 NOT GLOB '*[^0-9a-f]*'),
+    load_state TEXT NOT NULL CHECK (load_state IN ('selected', 'loaded', 'failed')),
+    rationale TEXT CHECK (rationale IS NULL OR length(rationale) <= 2000),
+    created_at TEXT NOT NULL,
+    UNIQUE (id, turn_id),
+    FOREIGN KEY (turn_id, conversation_id) REFERENCES agent_turns(id, conversation_id) ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TABLE action_records (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    action_kind TEXT NOT NULL CHECK (length(trim(action_kind)) BETWEEN 1 AND 200),
+    intent_json TEXT NOT NULL CHECK (json_valid(intent_json) AND json_type(intent_json) = 'object'),
+    permission_decision TEXT NOT NULL CHECK (permission_decision IN ('pending', 'allowed', 'denied')),
+    state TEXT NOT NULL CHECK (state IN ('proposed', 'authorized', 'staging', 'committed', 'denied', 'rolled_back', 'failed')),
+    mutation_transaction_id TEXT,
+    affected_resources_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(affected_resources_json) AND json_type(affected_resources_json) = 'array'),
+    error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 200),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (id, turn_id),
+    FOREIGN KEY (turn_id, conversation_id) REFERENCES agent_turns(id, conversation_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK ((state = 'denied' AND permission_decision = 'denied')
+      OR (state IN ('authorized', 'staging', 'committed') AND permission_decision = 'allowed')
+      OR state IN ('proposed', 'rolled_back', 'failed'))
+  ) STRICT;
+
+  CREATE TABLE temporary_document_adoptions (
+    document_id TEXT NOT NULL REFERENCES temporary_documents(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    action_record_id TEXT NOT NULL REFERENCES action_records(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (document_id, action_record_id)
+  ) STRICT;
+
+  CREATE TABLE model_technical_checks (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    model_id TEXT NOT NULL REFERENCES models(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    workspace_sha256 TEXT NOT NULL CHECK (length(workspace_sha256) = 64 AND workspace_sha256 NOT GLOB '*[^0-9a-f]*'),
+    execution_description_sha256 TEXT NOT NULL CHECK (length(execution_description_sha256) = 64 AND execution_description_sha256 NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK (state IN ('running', 'passed', 'failed', 'cancelled')),
+    results_json TEXT NOT NULL CHECK (json_valid(results_json) AND json_type(results_json) = 'object'),
+    limits_json TEXT NOT NULL CHECK (json_valid(limits_json) AND json_type(limits_json) = 'object'),
+    log_object_file_id TEXT REFERENCES object_files(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    CHECK ((state = 'running' AND finished_at IS NULL) OR (state != 'running' AND finished_at IS NOT NULL))
+  ) STRICT;
+  CREATE UNIQUE INDEX one_running_model_check_v3 ON model_technical_checks(model_id) WHERE state = 'running';
+
+  CREATE TRIGGER conversation_provider_locked_v3
+  BEFORE UPDATE OF provider_id, provider_model_id ON conversations
+  WHEN OLD.provider_locked_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'conversation provider is locked'); END;
+
+  CREATE TRIGGER first_user_message_requires_provider_lock_v3
+  BEFORE INSERT ON messages WHEN NEW.role = 'user'
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM conversations WHERE id = NEW.conversation_id AND provider_locked_at IS NOT NULL
+    ) THEN RAISE(ABORT, 'first user message requires provider lock') END;
+  END;
+
+  CREATE TRIGGER message_ordinal_append_only_v3
+  BEFORE INSERT ON messages
+  WHEN NEW.ordinal != (SELECT count(*) FROM messages WHERE conversation_id = NEW.conversation_id)
+  BEGIN SELECT RAISE(ABORT, 'message ordinal must append contiguously'); END;
+
+  CREATE TRIGGER summary_coverage_forward_v3
+  BEFORE UPDATE OF covered_through_ordinal ON conversation_summaries
+  WHEN NEW.covered_through_ordinal <= OLD.covered_through_ordinal
+  BEGIN SELECT RAISE(ABORT, 'summary coverage must advance'); END;
+
+  CREATE TRIGGER agent_session_provider_owner_v3
+  BEFORE INSERT ON agent_sessions
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = NEW.conversation_id
+      AND c.provider_id = NEW.provider_id AND c.provider_model_id = NEW.provider_model_id AND c.provider_locked_at IS NOT NULL)
+      THEN RAISE(ABORT, 'agent session provider mismatch') END;
+  END;
+
+  CREATE TRIGGER technical_check_log_owner_v3
+  BEFORE INSERT ON model_technical_checks WHEN NEW.log_object_file_id IS NOT NULL
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM object_files WHERE id = NEW.log_object_file_id AND owner_model_id = NEW.model_id)
+      THEN RAISE(ABORT, 'technical check log owner mismatch') END;
+  END;
+
+  CREATE TRIGGER document_adoption_owner_v3
+  BEFORE INSERT ON temporary_document_adoptions
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM temporary_documents d JOIN action_records a ON a.id = NEW.action_record_id
+      WHERE d.id = NEW.document_id AND d.conversation_id = a.conversation_id AND a.state = 'committed'
+    ) THEN RAISE(ABORT, 'document adoption action owner mismatch') END;
+  END;
+
+  CREATE TRIGGER temporary_document_transition_v3
+  BEFORE UPDATE OF document_state ON temporary_documents
+  WHEN OLD.document_state != 'draft' OR NEW.document_state NOT IN ('adopted', 'rejected', 'superseded')
+  BEGIN SELECT RAISE(ABORT, 'invalid temporary document transition'); END;
+
+  CREATE TRIGGER committed_action_receipt_v3
+  BEFORE UPDATE OF state ON action_records WHEN NEW.state = 'committed'
+  BEGIN
+    SELECT CASE WHEN NEW.mutation_transaction_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM committed_mutations WHERE transaction_id = NEW.mutation_transaction_id
+    ) THEN RAISE(ABORT, 'committed action requires mutation receipt') END;
+  END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
+  Object.freeze({ version: 3, sql: PRODUCT_SCHEMA_V3_SQL }),
 ]);

@@ -10,8 +10,14 @@ import { Gate2Runtime } from "./gate2-runtime.ts";
 import { Gate3Runtime, type Gate3ActivationCheckpoint } from "./gate3-runtime.ts";
 import { McpToolServer } from "./mcp.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
-import type { OpenCodeAdapter, OpenCodeReadiness } from "./opencode-adapter.ts";
+import type { OpenCodeAdapter, OpenCodeConversationPort, OpenCodeReadiness } from "./opencode-adapter.ts";
 import { OpenCodeEventBridge } from "./opencode-events.ts";
+import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
+import { MilestoneA2Api } from "./milestone-a2-api.ts";
+import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
+import { ProductStoreV2 } from "./product-store-v2.ts";
+import { SimulationSkillCatalog } from "./simulation-skill-catalog.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
@@ -28,6 +34,12 @@ export type BackendOptions = {
   store?: ProjectStore;
   durableStore?: DurableProjectStore;
   gate3FaultInjector?: (checkpoint: Gate3ActivationCheckpoint) => void;
+  a2ProductRoot?: string;
+  productStore?: ProductStoreV2;
+  a2OpenCode?: OpenCodeConversationPort;
+  a2TechnicalChecker?: ModelTechnicalCheckerPort;
+  a2SkillRoot?: string;
+  a2AllowedSkills?: string[];
 };
 
 export class BackendApp {
@@ -36,6 +48,8 @@ export class BackendApp {
   readonly mcp: McpToolServer;
   readonly gate2: Gate2Runtime;
   readonly gate3: Gate3Runtime;
+  readonly productStore?: ProductStoreV2;
+  readonly a2?: MilestoneA2Api;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
@@ -51,6 +65,20 @@ export class BackendApp {
     this.actions = new SimulationActions(this.store, options.mesa, options.projector);
     this.mcp = new McpToolServer(this.actions);
     this.#openCodeEvents = new OpenCodeEventBridge(this.store);
+    if (options.productStore || options.a2ProductRoot) {
+      const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
+      this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
+      const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
+      const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
+      this.a2 = new MilestoneA2Api(new AgentWorkspaceService(
+        this.productStore,
+        a2OpenCode,
+        undefined,
+        options.a2TechnicalChecker,
+        turnRuntime,
+        (capability) => this.#a2McpUrl(capability),
+      ));
+    }
   }
 
   async initialize(): Promise<ProjectState> {
@@ -102,11 +130,13 @@ export class BackendApp {
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
     this.mcp.revokeAll();
     await this.gate2.close();
-    if (!this.#server) return;
-    this.#server.closeIdleConnections?.();
-    this.#server.closeAllConnections?.();
-    await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
-    this.#server = undefined;
+    if (this.#server) {
+      this.#server.closeIdleConnections?.();
+      this.#server.closeAllConnections?.();
+      await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
+      this.#server = undefined;
+    }
+    this.productStore?.close();
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -114,6 +144,7 @@ export class BackendApp {
     try {
       const url = requestUrl;
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
       if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
       if (parts[0] === "api" && parts[1] === "projects") return await this.#gate2(request, response, url, parts);
@@ -134,6 +165,14 @@ export class BackendApp {
       if (!response.headersSent) { const correlationId = randomUUID(); const error = { code: apiError.code, message: apiError.message, correlation_id: correlationId, ...(apiError.details ? { details: apiError.details } : {}) }; const gate3 = isGate3Route(request.method ?? "", requestUrl.pathname); (gate3 ? canonicalJson : json)(response, apiError.status, gate3 ? { schema_id: "riff://evidence-studio/error/v1", schema_version: 1, canonical_json_version: "riff-canonical-json-v2", accepted: false, error } : { accepted: false, error }); }
       else response.end();
     }
+  }
+
+  #a2McpUrl(capability: string): string {
+    const address = this.#server?.address();
+    if (!address || typeof address === "string") throw new ApiError(503, "a2_mcp_unavailable", "The local A2 MCP endpoint is not listening.");
+    const url = new URL(`http://127.0.0.1:${address.port}/a2/mcp`);
+    url.searchParams.set("cap", capability);
+    return url.toString();
   }
 
   async #gate2(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<void> {
@@ -438,6 +477,16 @@ const publicAgent = (readiness: OpenCodeReadiness): ProjectState["agent"] => ({
   status: readiness.status,
   ...(readiness.lastError ? { lastError: readiness.lastError } : {}),
 });
+
+const asConversationOpenCode = (value: OpenCodeAdapter): OpenCodeConversationPort => {
+  const candidate = value as Partial<OpenCodeConversationPort>;
+  if (typeof candidate.discoverProviderModels !== "function" || typeof candidate.getSession !== "function"
+    || typeof candidate.createSession !== "function" || typeof candidate.injectContext !== "function"
+    || typeof candidate.promptWithModel !== "function" || typeof candidate.abort !== "function") {
+    throw new ApiError(500, "a2_opencode_invalid", "Milestone A2 requires the loopback OpenCode conversation adapter.");
+  }
+  return candidate as OpenCodeConversationPort;
+};
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });

@@ -11,6 +11,7 @@ import {
   PRODUCT_DATABASE_PRAGMAS,
   PRODUCT_SCHEMA_MIGRATIONS,
   PRODUCT_SCHEMA_SQL,
+  PRODUCT_SCHEMA_V2_SQL,
 } from "../src/product-schema.ts";
 
 const NOW = "2026-07-22T00:00:00.000Z";
@@ -53,8 +54,8 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     assert.equal((database.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys, 1);
     assert.equal((database.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode, PRODUCT_DATABASE_PRAGMAS.journalMode.toLowerCase());
     assert.equal((database.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous, 2);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 2);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
     assert.deepEqual(Object.keys(PROJECT_INTENT).sort(), ["createdAt", "projectId", "projectName", "sourceModelId"]);
     insertModel(database);
     insertProject(database, "project_alpha", "model_alpha");
@@ -67,6 +68,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
       (id, conversation_id, object_file_id, original_name, purpose, created_at)
       VALUES ('attachment_alpha', 'conversation_alpha', 'file_attachment', 'input.csv', 'source data', ?)`
     ).run(NOW);
+    database.prepare("UPDATE conversations SET provider_locked_at = ? WHERE id = 'conversation_alpha'").run(NOW);
     database.prepare(`INSERT INTO messages
       (id, conversation_id, ordinal, role, status, text, created_at, updated_at)
       VALUES ('message_alpha', 'conversation_alpha', 0, 'user', 'complete', 'hello', ?, ?)`
@@ -109,25 +111,67 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     for (const table of ["models", "projects", "conversations", "messages", "temporary_documents", "experiment_configurations", "runs", "object_files", "attachments", "message_attachments", "output_indexes", "trash_entries", "committed_mutations"]) {
       assert.equal((reopened.prepare(`SELECT count(*) AS count FROM ${table}`).get() as { count: number }).count > 0, true, table);
     }
+    for (const table of ["conversation_summaries", "agent_sessions", "agent_turns", "skill_uses", "action_records", "temporary_document_adoptions", "model_technical_checks"]) {
+      assert.equal(Boolean(reopened.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
+    }
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("schema migrations advance sequentially from v1 and expose the v2 adoption contract", () => {
+test("schema migrations advance sequentially from v1 through v3 and expose Agent records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
     database.exec("PRAGMA user_version = 1");
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 2);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
     const columns = database.prepare("PRAGMA table_info(object_files)").all() as Array<{ name: string }>;
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
+    assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_turns'").get()), true);
   } finally {
     database.close();
   }
+});
+
+test("ordered v2 to v3 migration locks legacy first-user providers and rolls back inconsistent bindings", () => {
+  const legacy = new DatabaseSync(":memory:");
+  try {
+    legacy.exec(PRODUCT_SCHEMA_SQL);
+    legacy.exec(PRODUCT_SCHEMA_V2_SQL);
+    legacy.prepare("UPDATE product_schema SET version = 2 WHERE singleton = 1").run();
+    legacy.exec("PRAGMA user_version = 2");
+    insertModel(legacy);
+    insertConversation(legacy, "conversation_legacy", { model: "model_alpha" });
+    legacy.prepare(`INSERT INTO messages (id, conversation_id, ordinal, role, status, text, created_at, updated_at)
+      VALUES ('message_legacy', 'conversation_legacy', 0, 'user', 'complete', 'hello', ?, ?)`).run(NOW, NOW);
+    initializeProductSchema(legacy);
+    assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+    assert.equal((legacy.prepare("SELECT provider_locked_at FROM conversations WHERE id = 'conversation_legacy'").get() as { provider_locked_at: string }).provider_locked_at, NOW);
+  } finally { legacy.close(); }
+
+  const root = mkdtempSync(join(tmpdir(), "riff-product-v3-invalid-"));
+  const path = join(root, "riff.sqlite3");
+  try {
+    const invalid = new DatabaseSync(path);
+    invalid.exec(PRODUCT_SCHEMA_SQL);
+    invalid.exec(PRODUCT_SCHEMA_V2_SQL);
+    invalid.prepare("UPDATE product_schema SET version = 2 WHERE singleton = 1").run();
+    invalid.exec("PRAGMA user_version = 2");
+    insertModel(invalid);
+    insertConversation(invalid, "conversation_invalid", { model: "model_alpha" });
+    invalid.prepare("UPDATE conversations SET provider_locked_at = ? WHERE id = 'conversation_invalid'").run(NOW);
+    invalid.close();
+    for (let attempt = 0; attempt < 2; attempt += 1) assert.throws(() => openProductDatabase(path), /CHECK constraint failed: valid = 1/u);
+    const inspected = new DatabaseSync(path);
+    assert.equal((inspected.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+    assert.equal((inspected.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 2);
+    assert.equal(Boolean(inspected.prepare("SELECT 1 FROM sqlite_master WHERE name = 'agent_turns'").get()), false);
+    assert.equal((inspected.prepare("SELECT provider_locked_at FROM conversations WHERE id = 'conversation_invalid'").get() as { provider_locked_at: string }).provider_locked_at, NOW);
+    inspected.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("v2 migration rejects legacy integrity violations without rewriting v1 data", () => {
@@ -252,6 +296,7 @@ test("schema version drift and failed migrations fail closed with transactional 
     assert.throws(() => initializeProductSchema(failed, [
       PRODUCT_SCHEMA_MIGRATIONS[0],
       { version: 2, sql: "CREATE TABLE migration_sentinel (id INTEGER); INSERT INTO missing_table VALUES (1);" },
+      PRODUCT_SCHEMA_MIGRATIONS[2],
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);
@@ -356,6 +401,7 @@ test("attachment, message, document and output links cannot cross ownership boun
       VALUES ('attachment_a', 'conversation_a', 'file_attachment', 'input.csv', ?)`
     ).run(NOW);
 
+    database.prepare("UPDATE conversations SET provider_locked_at = ? WHERE id IN ('conversation_a', 'conversation_b')").run(NOW);
     database.prepare(`INSERT INTO messages
       (id, conversation_id, ordinal, role, status, text, created_at, updated_at)
       VALUES ('message_b', 'conversation_b', 0, 'user', 'complete', 'hello', ?, ?)`

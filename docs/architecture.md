@@ -1,10 +1,67 @@
-# Wind-turbine alignment architecture target
+# Architecture contracts
+
+## Milestone A2 current architecture
+
+The current authority is the
+[`Milestone A product contract`](milestone-a-product-contract.md), the
+[`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
+[`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
+`ProductStoreV2` over SQLite schema v3 and checked object bytes is the system of
+record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
+helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
+write around that store or become authoritative state.
+
+Stage 2 currently adds these implemented boundaries:
+
+```text
+Narrow A2 HTTP/API acceptance surface
+  -> conversation / Agent session coordination
+       -> ProductStoreV2 schema v3
+       -> loopback OpenCode adapter + bounded Riff context
+       -> per-conversation serialized turns
+       -> per-turn capability-scoped MCP tools + progressive skill loading
+       -> conversation attachments + temporary documents
+       -> generic Model workspace
+            -> restricted macOS process + digest-bound technical checker
+```
+
+One conversation owns one provider/model lock and at most one nonterminal
+backend-only external session generation. Its turns are serialized; the scoped
+OpenCode MCP registration is additionally serialized because that registry is
+process-global. Each turn receives a server-minted owner/conversation/turn/
+generation capability that is revoked and unbound at completion. Lost sessions
+rebuild from bounded Riff-owned context; provider failure is explicit read-only.
+Tool execution rechecks the running turn and latest available session
+generation. Proposal-only turns may create draft temporary documents but cannot
+perform any other durable mutation or lifecycle transition. All direct Model
+changes use typed owner-scoped tools and Stage 1 database/filesystem recovery.
+Project conversations cannot change copied Model code, schema, or dependencies.
+OpenCode prompt-tool policy denies `*` by default and enables only the exact
+scoped MCP name for that turn, so unrelated built-ins or ambient MCP servers do
+not become authority.
+
+The restricted runner supplies a capability-resolved writable Model directory,
+fixed executable/arguments, scrubbed environment, no network rule,
+cancellation, finite time/output limits, and only fixed read-only Python
+runtime/virtual-environment roots through macOS `sandbox-exec`. Arbitrary home
+and sibling paths stay outside the profile. This local-user boundary does not
+claim VM/container isolation from malicious code. Technical
+executability is digest-bound evidence that a thin interface runs; it is not
+scientific validity, calibration, trust, or decision suitability.
+
+Legacy Gate/wind and queue components still coexist and are retired only by an
+explicit later audit. #14 owns Project execution and wind migration; #15 owns
+the final Models/Projects home and shared two-pane browser shell.
+
+---
+
+# Legacy wind-turbine alignment architecture target
 
 ## Status
 
-This is the approved Gate 0 target, not an implementation claim. The current
-checkout still runs the in-memory, queue-bound Phase 0 path. Gates 1-4 replace
-that path before Gate 4 removes it.
+This is the former approved Gate 0 target, retained as implementation history.
+Parts of the in-memory queue/wind path still coexist, but it no longer governs
+the Milestone A2 implementation or authorizes removal.
 
 ## Objective and boundaries
 

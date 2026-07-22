@@ -7,6 +7,22 @@
 > conversation surface, require immutable user-visible revisions, or hard-code
 > Wind Evidence Studio as the product.
 
+> **Current delivery status:** Stage 1 is implemented. Stage 2 / #13 is the
+> current authority through
+> [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
+> Schema v3/store, durable per-conversation OpenCode context, scoped MCP/skills,
+> attachments/documents, generic Model workspace, restricted macOS process,
+> technical checker, and the narrow provider/Model/conversation/turn/check API
+> are implemented. Final acceptance retains one real-provider browser rerun
+> after upstream network errors. Legacy Gate and queue code still coexist. #14
+> owns Project execution/wind import and #15 owns the final shared shell.
+
+> The current process claim is deliberately narrow: macOS, local user,
+> `sandbox-exec`, restricted Model workspace, scrubbed environment, no network
+> by default, and finite limits. It is not hostile-code containment. A
+> “Technically executable” Model has passed only the thin technical contract;
+> it is not scientifically validated, calibrated, trusted, or recommended.
+
 ## Gate 0 status
 
 The wind-turbine Phase 1 direction and Gates 1-4 below are approved target

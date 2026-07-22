@@ -15,6 +15,18 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { canonicalDigest, canonicalJsonV2 } from "./canonical-json-v2.ts";
 import type {
+  ActionRecordDto,
+  AgentTurnDto,
+  ContextSnapshot,
+  ConversationDto,
+  ConversationMessageDto,
+  DurableAgentSessionState,
+  ModelFileMutation,
+  SkillUseDto,
+  StartAgentTurnIntent,
+} from "./agent-domain.ts";
+import type { DurableConversationRuntime } from "./agent-session-manager.ts";
+import type {
   CreateProjectFromModelInput,
   IsoTimestamp,
   LifecycleState,
@@ -72,6 +84,52 @@ export type CreateConversationInput = {
   createdAt: IsoTimestamp;
 };
 
+export type ConversationListOptions = { includeArchived?: boolean; includeTrashed?: boolean };
+
+export type CompleteAgentTurnInput = {
+  conversationId: string;
+  requestKey: string;
+  assistantMessageId: string;
+  assistantContent: unknown;
+  assistantText: string;
+  contextDigest?: string | null;
+  completedAt: IsoTimestamp;
+};
+
+export type TechnicalCheckRecord = {
+  id: string;
+  modelId: string;
+  workspaceDigest: string;
+  executionDescriptionDigest: string;
+  state: "running" | "passed" | "failed" | "cancelled";
+  results: Record<string, unknown>;
+  limits: Record<string, unknown>;
+  startedAt: IsoTimestamp;
+  finishedAt: IsoTimestamp | null;
+};
+
+export type BindAgentSessionInput = {
+  id: string;
+  conversationId: string;
+  expectedGeneration: number;
+  state: Extract<DurableAgentSessionState, "creating" | "available" | "rebuilding">;
+  externalSessionRef: string;
+  at: IsoTimestamp;
+};
+
+export type RecordSkillUseInput = {
+  id: string; conversationId: string; turnId: string; skillId: string; skillVersion: string;
+  routingMode: "explicit" | "automatic"; catalogDigest: string; instructionDigest: string;
+  loadState: "selected" | "loaded" | "failed"; rationale?: string | null; createdAt: IsoTimestamp;
+};
+
+export type RecordActionInput = {
+  id: string; conversationId: string; turnId: string; actionKind: string; intent: Record<string, unknown>;
+  permissionDecision: "pending" | "allowed" | "denied";
+  state: "proposed" | "authorized" | "denied" | "failed";
+  affectedResources?: unknown[]; errorCode?: string | null; createdAt: IsoTimestamp;
+};
+
 export type CreateMessageInput = {
   id: string;
   conversationId: string;
@@ -92,6 +150,7 @@ export type CreateTemporaryDocumentInput = {
   documentState: TemporaryDocumentState;
   mediaType: string;
   content: string;
+  transactionId?: string;
   createdAt: IsoTimestamp;
 };
 
@@ -113,6 +172,7 @@ export type AdoptAttachmentInput = {
   sourceAttachmentId: string;
   relativePath: string;
   purpose: string;
+  transactionId?: string;
   createdAt: IsoTimestamp;
 };
 
@@ -233,6 +293,8 @@ export class ProductStoreV2 {
     this.#database = database;
     this.#objects = objects;
     this.#coordinator = coordinator;
+    try { this.#reconcileInterruptedAgentState(); }
+    catch (error) { coordinator.close(); throw error; }
   }
 
   close(): void {
@@ -350,7 +412,8 @@ export class ProductStoreV2 {
     return this.#project(input.projectId);
   }
 
-  createConversation(input: CreateConversationInput): void {
+  createConversation(input: CreateConversationInput): ConversationDto {
+    assertId(input.id);
     this.#databaseMutation([activeOwnerGuard(input.owner), {
       sql: `INSERT INTO conversations
         (id, model_id, project_id, name, provider_id, provider_model_id, created_at, updated_at)
@@ -358,10 +421,110 @@ export class ProductStoreV2 {
       params: [input.id, input.owner.kind === "model" ? input.owner.id : null, input.owner.kind === "project" ? input.owner.id : null,
         input.name, input.providerId, input.providerModelId, input.createdAt, input.createdAt], expectedChanges: 1,
     }]);
+    return this.getConversation(input.id);
+  }
+
+  listConversations(owner: Extract<ResourceOwner, { kind: "model" | "project" }>, options: ConversationListOptions = {}): ConversationDto[] {
+    this.#assertOpen();
+    const column = owner.kind === "model" ? "model_id" : "project_id";
+    return (this.#database.prepare(`SELECT c.* FROM conversations c WHERE c.${column} = ? ORDER BY c.updated_at DESC, c.id`).all(owner.id) as any[])
+      .map((row) => conversationDto(row, this.#sessionProjection(row.id)))
+      .filter((row) => visible(row.lifecycleState, options));
+  }
+
+  getConversation(id: string): ConversationDto {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as any;
+    if (!row) throw new ProductStoreV2Error("Conversation does not exist.");
+    return conversationDto(row, this.#sessionProjection(id));
+  }
+
+  listConversationMessages(conversationId: string): ConversationMessageDto[] {
+    this.#assertOpen();
+    if (!this.#database.prepare("SELECT 1 FROM conversations WHERE id = ?").get(conversationId)) throw new ProductStoreV2Error("Conversation does not exist.");
+    return (this.#database.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY ordinal").all(conversationId) as any[]).map(messageDto);
+  }
+
+  changeConversationProvider(conversationId: string, providerId: string, providerModelId: string, updatedAt: IsoTimestamp): ConversationDto {
+    this.#databaseMutation([{ sql: `UPDATE conversations SET provider_id = ?, provider_model_id = ?, updated_at = ?
+      WHERE id = ? AND lifecycle_state = 'active' AND provider_locked_at IS NULL`, params: [providerId, providerModelId, updatedAt, conversationId], expectedChanges: 1 }]);
+    return this.getConversation(conversationId);
+  }
+
+  startAgentTurn(input: StartAgentTurnIntent): AgentTurnDto {
+    this.#assertOpen();
+    assertId(input.turnId); assertId(input.userMessageId);
+    if (!input.requestKey.trim() || input.requestKey.length > 300 || !input.text.trim()) throw new ProductStoreV2Error("Agent turn intent is invalid.");
+    const attachmentIds = [...new Set(input.attachmentIds ?? [])];
+    if (attachmentIds.length !== (input.attachmentIds ?? []).length) throw new ProductStoreV2Error("Agent turn attachment IDs must be unique.");
+    const intentDigest = canonicalDigest({ text: input.text, attachmentIds });
+    const existing = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?")
+      .get(input.conversationId, input.requestKey) as any;
+    if (existing) {
+      if (existing.id !== input.turnId || existing.input_message_id !== input.userMessageId || existing.intent_sha256 !== intentDigest) {
+        throw new ProductStoreV2Error("Agent turn request key was reused with different intent.");
+      }
+      return this.#agentTurn(input.conversationId, input.requestKey);
+    }
+    const conversation = this.#database.prepare("SELECT model_id, project_id FROM conversations WHERE id = ?").get(input.conversationId) as { model_id: string | null; project_id: string | null } | undefined;
+    if (!conversation) throw new ProductStoreV2Error("Conversation does not exist.");
+    const owner = conversation.model_id ? { kind: "model" as const, id: conversation.model_id } : { kind: "project" as const, id: conversation.project_id! };
+    this.#databaseMutation([
+      activeOwnerGuard(owner),
+      { sql: `UPDATE conversations SET provider_locked_at = coalesce(provider_locked_at, ?), updated_at = ?
+        WHERE id = ? AND lifecycle_state = 'active'`, params: [input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
+      { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
+        SELECT ?, ?, count(*), 'user', 'complete', ?, '{}', ?, ? FROM messages WHERE conversation_id = ?`,
+        params: [input.userMessageId, input.conversationId, input.text, input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
+      ...attachmentIds.map((attachmentId) => ({ sql: `INSERT INTO message_attachments (message_id, attachment_id)
+        SELECT ?, id FROM attachments WHERE id = ? AND conversation_id = ?`, params: [input.userMessageId, attachmentId, input.conversationId], expectedChanges: 1 } satisfies DatabaseMutationStatement)),
+      { sql: `INSERT INTO agent_turns (id, conversation_id, request_key, intent_sha256, input_message_id, state, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'running', ?, ?)`, params: [input.turnId, input.conversationId, input.requestKey, intentDigest, input.userMessageId, input.createdAt, input.createdAt], expectedChanges: 1 },
+    ]);
+    return this.#agentTurn(input.conversationId, input.requestKey);
+  }
+
+  completeAgentTurn(input: CompleteAgentTurnInput): AgentTurnDto {
+    this.#assertOpen(); assertId(input.assistantMessageId);
+    const turn = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(input.conversationId, input.requestKey) as any;
+    if (!turn) throw new ProductStoreV2Error("Agent turn does not exist.");
+    const contentJson = json(input.assistantContent);
+    if (turn.state === "complete") {
+      const message = this.#database.prepare("SELECT text, content_json FROM messages WHERE id = ? AND conversation_id = ?").get(turn.assistant_message_id, input.conversationId) as any;
+      if (turn.assistant_message_id !== input.assistantMessageId || message?.text !== input.assistantText || message?.content_json !== contentJson) {
+        throw new ProductStoreV2Error("Completed Agent turn retry differs from the durable result.");
+      }
+      return this.#agentTurn(input.conversationId, input.requestKey);
+    }
+    if (input.contextDigest != null && !/^[0-9a-f]{64}$/u.test(input.contextDigest)) throw new ProductStoreV2Error("Context digest is invalid.");
+    this.#databaseMutation([
+      activeLifecycleGuard("conversations", input.conversationId),
+      { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
+        SELECT ?, ?, count(*), 'assistant', 'complete', ?, ?, ?, ? FROM messages WHERE conversation_id = ?`,
+        params: [input.assistantMessageId, input.conversationId, input.assistantText, contentJson, input.completedAt, input.completedAt, input.conversationId], expectedChanges: 1 },
+      { sql: `UPDATE agent_turns SET state = 'complete', assistant_message_id = ?, reconstructed_context_sha256 = ?, updated_at = ?
+        WHERE conversation_id = ? AND request_key = ? AND state = 'running'`,
+        params: [input.assistantMessageId, input.contextDigest ?? null, input.completedAt, input.conversationId, input.requestKey], expectedChanges: 1 },
+    ]);
+    return this.#agentTurn(input.conversationId, input.requestKey);
+  }
+
+  failAgentTurn(conversationId: string, requestKey: string, code: string, retryable: boolean, at: IsoTimestamp): AgentTurnDto {
+    if (!code.trim() || code.length > 200) throw new ProductStoreV2Error("Agent turn failure code is invalid.");
+    const existing = this.#database.prepare("SELECT state, failure_code, failure_retryable FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(conversationId, requestKey) as any;
+    if (existing?.state === "failed") {
+      if (existing.failure_code !== code || Boolean(existing.failure_retryable) !== retryable) throw new ProductStoreV2Error("Failed Agent turn retry differs from durable result.");
+      return this.#agentTurn(conversationId, requestKey);
+    }
+    this.#databaseMutation([{ sql: `UPDATE agent_turns SET state = 'failed', failure_code = ?, failure_retryable = ?, updated_at = ?
+      WHERE conversation_id = ? AND request_key = ? AND state IN ('queued', 'running')`, params: [code, retryable ? 1 : 0, at, conversationId, requestKey], expectedChanges: 1 }]);
+    return this.#agentTurn(conversationId, requestKey);
   }
 
   createMessage(input: CreateMessageInput): void {
-    this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId), {
+    this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId),
+      ...(input.role === "user" ? [{ sql: `UPDATE conversations SET provider_locked_at = coalesce(provider_locked_at, ?)
+        WHERE id = ? AND lifecycle_state = 'active'`, params: [input.createdAt, input.conversationId], expectedChanges: 1 } satisfies DatabaseMutationStatement] : []), {
       sql: `INSERT INTO messages
         (id, conversation_id, ordinal, role, status, text, content_json, action_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -371,13 +534,199 @@ export class ProductStoreV2 {
   }
 
   createTemporaryDocument(input: CreateTemporaryDocumentInput): void {
-    this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId), {
+    const statements = [activeLifecycleGuard("conversations", input.conversationId), {
       sql: `INSERT INTO temporary_documents
         (id, conversation_id, source_message_id, name, document_state, media_type, content, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [input.id, input.conversationId, input.sourceMessageId ?? null, input.name, input.documentState, input.mediaType, input.content, input.createdAt, input.createdAt],
       expectedChanges: 1,
+    }];
+    if (input.transactionId) this.#databaseMutation([...statements, {
+      sql: "INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, ?)",
+      params: [input.transactionId, sha256(Buffer.from(`database-only:${input.transactionId}`, "utf8")), input.createdAt],
+      expectedChanges: 1,
     }]);
+    else this.#databaseMutation(statements);
+  }
+
+  transitionTemporaryDocument(documentId: string, nextState: Exclude<TemporaryDocumentState, "draft">, actionRecordIds: string[], at: IsoTimestamp): void {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT conversation_id FROM temporary_documents WHERE id = ?").get(documentId) as { conversation_id: string } | undefined;
+    if (!row) throw new ProductStoreV2Error("Temporary document does not exist.");
+    if (nextState === "adopted" && actionRecordIds.length === 0) throw new ProductStoreV2Error("Adopted document requires action evidence.");
+    if (nextState !== "adopted" && actionRecordIds.length !== 0) throw new ProductStoreV2Error("Only adoption can bind action evidence.");
+    if (new Set(actionRecordIds).size !== actionRecordIds.length) throw new ProductStoreV2Error("Document action evidence must be unique.");
+    this.#databaseMutation([
+      activeLifecycleGuard("conversations", row.conversation_id),
+      { sql: `UPDATE temporary_documents SET document_state = ?, updated_at = ? WHERE id = ? AND document_state = 'draft' AND lifecycle_state = 'active'`,
+        params: [nextState, at, documentId], expectedChanges: 1 },
+      ...actionRecordIds.map((actionId) => ({ sql: `INSERT INTO temporary_document_adoptions (document_id, action_record_id, created_at)
+        SELECT ?, a.id, ? FROM action_records a WHERE a.id = ? AND a.conversation_id = ? AND a.state = 'committed'`,
+        params: [documentId, at, actionId, row.conversation_id], expectedChanges: 1 } satisfies DatabaseMutationStatement)),
+    ]);
+  }
+
+  bindAgentSession(input: BindAgentSessionInput): { generation: number; state: DurableAgentSessionState } {
+    this.#assertOpen(); assertId(input.id);
+    if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0 || !input.externalSessionRef) throw new ProductStoreV2Error("Agent session binding is invalid.");
+    const conversation = this.#database.prepare("SELECT provider_id, provider_model_id, provider_locked_at FROM conversations WHERE id = ? AND lifecycle_state = 'active'")
+      .get(input.conversationId) as { provider_id: string; provider_model_id: string; provider_locked_at: string | null } | undefined;
+    if (!conversation?.provider_locked_at) throw new ProductStoreV2Error("Agent session requires a provider-locked active conversation.");
+    const prior = this.#database.prepare("SELECT id, generation, state FROM agent_sessions WHERE conversation_id = ? AND state != 'closed'").get(input.conversationId) as any;
+    if ((prior?.generation ?? 0) !== input.expectedGeneration) throw new ProductStoreV2Error("Agent session generation changed.");
+    const generation = input.expectedGeneration + 1;
+    this.#databaseMutation([
+      ...(prior ? [{ sql: "UPDATE agent_sessions SET state = 'closed', updated_at = ? WHERE id = ? AND generation = ? AND state != 'closed'", params: [input.at, prior.id, input.expectedGeneration], expectedChanges: 1 } satisfies DatabaseMutationStatement] : []),
+      { sql: `INSERT INTO agent_sessions (id, conversation_id, generation, state, provider_id, provider_model_id, external_session_ref, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, generation, input.state, conversation.provider_id, conversation.provider_model_id, input.externalSessionRef, input.at, input.at], expectedChanges: 1 },
+    ]);
+    return { generation, state: input.state };
+  }
+
+  /** Backend-only runtime read. Never pass its session reference into an HTTP DTO. */
+  async getConversationRuntime(conversationId: string): Promise<DurableConversationRuntime | null> {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT * FROM conversations WHERE id = ? AND lifecycle_state = 'active' AND provider_locked_at IS NOT NULL").get(conversationId) as any;
+    if (!row) return null;
+    const session = this.#database.prepare("SELECT generation, state, external_session_ref FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
+      .get(conversationId) as any;
+    return {
+      conversationId,
+      owner: row.model_id ? { kind: "model", id: row.model_id } : { kind: "project", id: row.project_id },
+      providerId: row.provider_id,
+      providerModelId: row.provider_model_id,
+      session: session ? { generation: session.generation, state: session.state, externalSessionRef: session.external_session_ref } : null,
+    };
+  }
+
+  assertActiveAgentToolGrant(input: { conversationId: string; turnId: string; externalSessionGeneration: number }): void {
+    this.#assertOpen();
+    const turn = this.#database.prepare("SELECT state FROM agent_turns WHERE id = ? AND conversation_id = ?")
+      .get(input.turnId, input.conversationId) as { state: string } | undefined;
+    if (turn?.state !== "running") throw new ProductStoreV2Error("Agent tool grant turn is no longer active.");
+    const session = this.#database.prepare("SELECT generation, state FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
+      .get(input.conversationId) as { generation: number; state: DurableAgentSessionState } | undefined;
+    if (session?.state !== "available" || session.generation !== input.externalSessionGeneration) {
+      throw new ProductStoreV2Error("Agent tool grant session generation is no longer active.");
+    }
+  }
+
+  async markSessionLost(input: { conversationId: string; generation: number; expectedExternalSessionRef: string; reason: string }): Promise<void> {
+    if (!input.reason.trim() || input.reason.length > 200) throw new ProductStoreV2Error("Agent session failure reason is invalid.");
+    this.#databaseMutation([{ sql: `UPDATE agent_sessions SET state = 'lost', failure_reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE conversation_id = ? AND generation = ? AND state = 'available' AND external_session_ref = ?`,
+      params: [input.reason, input.conversationId, input.generation, input.expectedExternalSessionRef], expectedChanges: 1 }]);
+  }
+
+  async beginSessionGeneration(input: { conversationId: string; expectedGeneration: number | null }): Promise<{ generation: number }> {
+    this.#assertOpen();
+    const conversation = this.#database.prepare("SELECT provider_id, provider_model_id, provider_locked_at FROM conversations WHERE id = ? AND lifecycle_state = 'active'")
+      .get(input.conversationId) as { provider_id: string; provider_model_id: string; provider_locked_at: string | null } | undefined;
+    if (!conversation?.provider_locked_at) throw new ProductStoreV2Error("Agent session requires a provider-locked active conversation.");
+    const prior = this.#database.prepare("SELECT id, generation, state FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
+      .get(input.conversationId) as { id: string; generation: number; state: DurableAgentSessionState } | undefined;
+    if ((prior?.generation ?? null) !== input.expectedGeneration) throw new ProductStoreV2Error("Agent session generation changed.");
+    const generation = (prior?.generation ?? 0) + 1;
+    const id = `session_${randomUUID().replaceAll("-", "")}`;
+    this.#databaseMutation([
+      activeLifecycleGuard("conversations", input.conversationId),
+      ...(prior && prior.state !== "closed" ? [{ sql: "UPDATE agent_sessions SET state = 'closed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND generation = ? AND state = ?",
+        params: [prior.id, prior.generation, prior.state], expectedChanges: 1 } satisfies DatabaseMutationStatement] : []),
+      { sql: `INSERT INTO agent_sessions (id, conversation_id, generation, state, provider_id, provider_model_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'creating', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+        params: [id, input.conversationId, generation, conversation.provider_id, conversation.provider_model_id], expectedChanges: 1 },
+    ]);
+    return { generation };
+  }
+
+  async activateSession(input: { conversationId: string; generation: number; externalSessionRef: string; contextSha256: string }): Promise<void> {
+    if (!input.externalSessionRef || !/^[0-9a-f]{64}$/u.test(input.contextSha256)) throw new ProductStoreV2Error("Agent session activation is invalid.");
+    this.#databaseMutation([{ sql: `UPDATE agent_sessions SET state = 'available', external_session_ref = ?, context_sha256 = ?, failure_reason = NULL,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE conversation_id = ? AND generation = ? AND state IN ('creating', 'rebuilding')`,
+      params: [input.externalSessionRef, input.contextSha256, input.conversationId, input.generation], expectedChanges: 1 }]);
+  }
+
+  async failSessionGeneration(input: { conversationId: string; generation: number; reason: string }): Promise<void> {
+    if (!input.reason.trim() || input.reason.length > 200) throw new ProductStoreV2Error("Agent session failure reason is invalid.");
+    this.#databaseMutation([{ sql: `UPDATE agent_sessions SET state = 'closed', failure_reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE conversation_id = ? AND generation = ? AND state IN ('creating', 'rebuilding')`,
+      params: [input.reason, input.conversationId, input.generation], expectedChanges: 1 }]);
+  }
+
+  transitionAgentSession(conversationId: string, expectedGeneration: number, state: "available" | "lost" | "rebuilding" | "closed", at: IsoTimestamp): void {
+    this.#databaseMutation([{ sql: `UPDATE agent_sessions SET state = ?, updated_at = ?
+      WHERE conversation_id = ? AND generation = ? AND state != 'closed'`, params: [state, at, conversationId, expectedGeneration], expectedChanges: 1 }]);
+  }
+
+  readConversationContext(conversationId: string, limits: { maxMessages: number; maxBytes: number }): ContextSnapshot {
+    this.#assertOpen();
+    if (!Number.isSafeInteger(limits.maxMessages) || limits.maxMessages < 1 || limits.maxMessages > 500
+      || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1 || limits.maxBytes > 1_000_000) throw new ProductStoreV2Error("Conversation context limits are invalid.");
+    const conversation = this.#database.prepare("SELECT * FROM conversations WHERE id = ?").get(conversationId) as any;
+    if (!conversation) throw new ProductStoreV2Error("Conversation does not exist.");
+    const summaryRow = this.#database.prepare("SELECT * FROM conversation_summaries WHERE conversation_id = ?").get(conversationId) as any;
+    const candidates = this.#database.prepare(`SELECT * FROM messages WHERE conversation_id = ? AND status IN ('complete', 'failed')
+      AND ordinal > ? ORDER BY ordinal DESC LIMIT ?`).all(conversationId, summaryRow?.covered_through_ordinal ?? -1, limits.maxMessages) as any[];
+    let usedBytes = 0;
+    const selected: any[] = [];
+    for (const row of candidates) {
+      const size = Buffer.byteLength(row.text, "utf8") + Buffer.byteLength(row.content_json, "utf8");
+      if (size > limits.maxBytes - usedBytes) continue;
+      selected.push(row); usedBytes += size;
+    }
+    selected.reverse();
+    const messages = selected.map(messageDto);
+    const owner = conversation.model_id ? { kind: "model" as const, id: conversation.model_id } : { kind: "project" as const, id: conversation.project_id };
+    const summary = summaryRow ? { content: summaryRow.content, coveredThroughOrdinal: summaryRow.covered_through_ordinal } : null;
+    const payload = { conversationId, owner, summary, messages, includedMessageIds: messages.map((message) => message.id), limits: { ...limits } };
+    return { ...payload, digest: canonicalDigest(payload) };
+  }
+
+  advanceConversationSummary(input: { conversationId: string; expectedCoveredThroughOrdinal: number | null; coveredThroughOrdinal: number; content: string; at: IsoTimestamp }): void {
+    if (Buffer.byteLength(input.content, "utf8") > 65_536 || input.coveredThroughOrdinal < 0) throw new ProductStoreV2Error("Conversation summary is invalid.");
+    const digest = sha256(Buffer.from(input.content, "utf8"));
+    const max = this.#database.prepare("SELECT max(ordinal) AS ordinal FROM messages WHERE conversation_id = ? AND status IN ('complete', 'failed')")
+      .get(input.conversationId) as { ordinal: number | null };
+    if (max.ordinal === null || input.coveredThroughOrdinal > max.ordinal) throw new ProductStoreV2Error("Conversation summary coverage exceeds durable messages.");
+    if (input.expectedCoveredThroughOrdinal === null) {
+      this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId), { sql: `INSERT INTO conversation_summaries
+        (conversation_id, covered_through_ordinal, content, content_sha256, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        params: [input.conversationId, input.coveredThroughOrdinal, input.content, digest, input.at, input.at], expectedChanges: 1 }]);
+    } else {
+      this.#databaseMutation([activeLifecycleGuard("conversations", input.conversationId), { sql: `UPDATE conversation_summaries
+        SET covered_through_ordinal = ?, content = ?, content_sha256 = ?, updated_at = ?
+        WHERE conversation_id = ? AND covered_through_ordinal = ?`, params: [input.coveredThroughOrdinal, input.content, digest, input.at, input.conversationId, input.expectedCoveredThroughOrdinal], expectedChanges: 1 }]);
+    }
+  }
+
+  recordSkillUse(input: RecordSkillUseInput): SkillUseDto {
+    assertId(input.id);
+    this.#databaseMutation([{ sql: `INSERT INTO skill_uses
+      (id, conversation_id, turn_id, skill_id, skill_version, routing_mode, catalog_sha256, instruction_sha256, load_state, rationale, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, input.turnId, input.skillId, input.skillVersion, input.routingMode,
+        input.catalogDigest, input.instructionDigest, input.loadState, input.rationale ?? null, input.createdAt], expectedChanges: 1 }]);
+    return this.#skillUses(input.turnId).find((row) => row.id === input.id)!;
+  }
+
+  recordAction(input: RecordActionInput): ActionRecordDto {
+    assertId(input.id);
+    this.#databaseMutation([{ sql: `INSERT INTO action_records
+      (id, conversation_id, turn_id, action_kind, intent_json, permission_decision, state, affected_resources_json, error_code, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, input.turnId, input.actionKind, json(input.intent),
+        input.permissionDecision, input.state, json(input.affectedResources ?? []), input.errorCode ?? null, input.createdAt, input.createdAt], expectedChanges: 1 }]);
+    return this.#actions(input.turnId).find((row) => row.id === input.id)!;
+  }
+
+  transitionActionRecord(input: { id: string; expectedState: "proposed" | "authorized" | "staging"; state: "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed"; mutationTransactionId?: string | null; affectedResources?: unknown[]; errorCode?: string | null; at: IsoTimestamp }): ActionRecordDto {
+    const allowed = new Set(["proposed:authorized", "proposed:denied", "authorized:staging", "staging:committed", "staging:rolled_back", "staging:failed", "authorized:failed"]);
+    if (!allowed.has(`${input.expectedState}:${input.state}`)) throw new ProductStoreV2Error("Action transition is invalid.");
+    this.#databaseMutation([{ sql: `UPDATE action_records SET state = ?, permission_decision = CASE
+        WHEN ? = 'authorized' THEN 'allowed' WHEN ? = 'denied' THEN 'denied' ELSE permission_decision END,
+        mutation_transaction_id = coalesce(?, mutation_transaction_id), affected_resources_json = ?, error_code = ?, updated_at = ?
+      WHERE id = ? AND state = ?`, params: [input.state, input.state, input.state, input.mutationTransactionId ?? null,
+        json(input.affectedResources ?? []), input.errorCode ?? null, input.at, input.id, input.expectedState], expectedChanges: 1 }]);
+    const row = this.#database.prepare("SELECT turn_id FROM action_records WHERE id = ?").get(input.id) as { turn_id: string };
+    return this.#actions(row.turn_id).find((action) => action.id === input.id)!;
   }
 
   createAttachment(input: CreateAttachmentInput): StoredObjectMetadata {
@@ -392,6 +741,42 @@ export class ProductStoreV2 {
         VALUES (?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, input.objectFileId, input.originalName, input.purpose ?? null, input.createdAt], expectedChanges: 1 },
     ] });
     return this.#file(input.objectFileId);
+  }
+
+  /** Backend-only attachment metadata. Absolute paths and bytes are omitted. */
+  getConversationAttachment(id: string): {
+    id: string; conversationId: string; objectFileId: string; originalName: string; purpose: string | null;
+    mediaType: string; sizeBytes: number; sha256: string; relativePath: string;
+  } {
+    this.#assertOpen();
+    const row = this.#database.prepare(`SELECT a.id, a.conversation_id, a.object_file_id, a.original_name, a.purpose,
+      f.media_type, f.size_bytes, f.sha256, f.relative_path FROM attachments a JOIN object_files f ON f.id = a.object_file_id
+      WHERE a.id = ? AND f.owner_conversation_id = a.conversation_id AND f.kind = 'conversation_attachment'`).get(id) as any;
+    if (!row) throw new ProductStoreV2Error("Conversation attachment does not exist.");
+    this.#verifiedMetadata(this.#objectRow(row.object_file_id));
+    return { id: row.id, conversationId: row.conversation_id, objectFileId: row.object_file_id, originalName: row.original_name,
+      purpose: row.purpose, mediaType: row.media_type, sizeBytes: row.size_bytes, sha256: row.sha256, relativePath: row.relative_path };
+  }
+
+  readConversationAttachment(id: string, conversationId: string, maximumBytes = 64_000): Buffer {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 1_048_576) throw new ProductStoreV2Error("Attachment read limit is invalid.");
+    const attachment = this.getConversationAttachment(id);
+    if (attachment.conversationId !== conversationId) throw new ProductStoreV2Error("Conversation attachment ownership mismatch.");
+    if (attachment.sizeBytes > maximumBytes) throw new ProductStoreV2Error("Conversation attachment exceeds the bounded read limit.");
+    return this.readObjectFile(attachment.objectFileId);
+  }
+
+  listTemporaryDocuments(conversationId: string): Array<{
+    id: string; conversationId: string; sourceMessageId: string | null; name: string; documentState: TemporaryDocumentState;
+    mediaType: string; content: string; lifecycleState: LifecycleState; createdAt: string; updatedAt: string;
+  }> {
+    this.#assertOpen();
+    if (!this.#database.prepare("SELECT 1 FROM conversations WHERE id = ?").get(conversationId)) throw new ProductStoreV2Error("Conversation does not exist.");
+    return (this.#database.prepare("SELECT * FROM temporary_documents WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[]).map((row) => ({
+      id: row.id, conversationId: row.conversation_id, sourceMessageId: row.source_message_id, name: row.name,
+      documentState: row.document_state, mediaType: row.media_type, content: row.content, lifecycleState: row.lifecycle_state,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }));
   }
 
   linkMessageAttachment(messageId: string, attachmentId: string): void {
@@ -412,7 +797,7 @@ export class ProductStoreV2 {
     const inspected = this.#objects.readWithInspection({ owner: { kind: "conversation", id: source.owner_conversation_id }, relativePath: source.relative_path });
     if (!inspected || inspected.sha256 !== source.sha256 || inspected.sizeBytes !== source.size_bytes) throw new ProductStoreV2Error("Source attachment metadata or bytes drifted.");
     const relativePath = `attachments/${input.relativePath}`;
-    this.#coordinator.execute({ files: [{ operation: "write", target: { owner: input.owner, relativePath }, bytes: inspected.bytes, expectedPriorSha256: null }], statements: [
+    this.#coordinator.execute({ ...(input.transactionId ? { transactionId: input.transactionId } : {}), files: [{ operation: "write", target: { owner: input.owner, relativePath }, bytes: inspected.bytes, expectedPriorSha256: null }], statements: [
       activeLifecycleGuard("conversations", source.owner_conversation_id),
       activeOwnerGuard(input.owner),
       objectInsert({ id: input.objectFileId, owner: input.owner, kind: "adopted_attachment", relativePath, mediaType: source.media_type,
@@ -542,6 +927,7 @@ export class ProductStoreV2 {
       this.#collectConversationClosure(conversations.map((item) => item.id), addRows, fileRows, blockers, exclusions);
       fileRows.push(...this.#objectRows(`owner_${kind}_id = ?`, [id]));
       if (kind === "model") {
+        addRows("model_technical_checks", this.#database.prepare("SELECT * FROM model_technical_checks WHERE model_id = ? ORDER BY id").all(id) as any[]);
         for (const project of this.#database.prepare("SELECT id FROM projects WHERE source_model_id = ? ORDER BY id").all(id) as Array<{ id: string }>) blockers.push({ kind: "project_lineage", id: project.id });
       } else {
         exclusions.push({ kind: "model", id: row.source_model_id, reason: "source lineage outside project closure" });
@@ -624,11 +1010,162 @@ export class ProductStoreV2 {
     return this.#file(objectFileId);
   }
 
+  mutateModelFiles(input: { modelId: string; files: ModelFileMutation[]; executionDescription?: Record<string, unknown>; updatedAt: IsoTimestamp; transactionId?: string }): StoredObjectMetadata[] {
+    this.#assertOpen();
+    if (!input.files.length || new Set(input.files.map((file) => file.objectFileId)).size !== input.files.length) throw new ProductStoreV2Error("Model mutation requires unique files.");
+    const plans = input.files.map((file) => {
+      assertId(file.objectFileId);
+      const relativePath = modelFilePath(file.kind, file.relativePath);
+      const prior = this.#database.prepare("SELECT * FROM object_files WHERE id = ?").get(file.objectFileId) as ObjectRow | undefined;
+      if (prior) {
+        if (prior.owner_model_id !== input.modelId || prior.kind !== file.kind || prior.relative_path !== relativePath || prior.sha256 !== file.expectedPriorSha256) {
+          throw new ProductStoreV2Error("Model file mutation precondition or ownership mismatch.");
+        }
+      } else if (file.expectedPriorSha256 !== null) throw new ProductStoreV2Error("New Model file must expect no prior digest.");
+      const bytes = Buffer.from(file.bytes);
+      const digest = sha256(bytes);
+      return { file, prior, bytes, digest, relativePath, target: { owner: { kind: "model" as const, id: input.modelId }, relativePath } };
+    });
+    const statements: DatabaseMutationStatement[] = [activeLifecycleGuard("models", input.modelId), ...plans.map(({ file, prior, bytes, digest, relativePath }) => prior ? ({
+      sql: "UPDATE object_files SET media_type = ?, size_bytes = ?, sha256 = ? WHERE id = ? AND owner_model_id = ? AND sha256 = ?",
+      params: [file.mediaType, bytes.byteLength, digest, file.objectFileId, input.modelId, file.expectedPriorSha256], expectedChanges: 1,
+    }) : objectInsert({ id: file.objectFileId, owner: { kind: "model", id: input.modelId }, kind: file.kind, relativePath,
+      mediaType: file.mediaType, sizeBytes: bytes.byteLength, digest, createdAt: input.updatedAt })), {
+      sql: `UPDATE models SET technical_status = 'draft', execution_description_json = coalesce(?, execution_description_json), updated_at = ?
+        WHERE id = ? AND lifecycle_state = 'active'`, params: [input.executionDescription === undefined ? null : json(input.executionDescription), input.updatedAt, input.modelId], expectedChanges: 1,
+    }];
+    this.#coordinator.execute({ transactionId: input.transactionId, files: plans.map(({ target, bytes, file }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: file.expectedPriorSha256 })), statements });
+    return plans.map(({ file }) => this.#file(file.objectFileId));
+  }
+
+  createModelWithFirstConversation(input: { model: CreateModelInput; conversation: Omit<CreateConversationInput, "owner"> }): { model: ModelRecord; conversation: ConversationDto } {
+    this.#assertOpen();
+    const { model, conversation } = input;
+    assertId(model.id); assertId(conversation.id);
+    if (!model.files.length) throw new ProductStoreV2Error("A Model requires at least one initial owned file.");
+    const owner = { kind: "model" as const, id: model.id };
+    const files = model.files.map((file) => {
+      assertId(file.id);
+      if (!FILE_KINDS.has(file.kind)) throw new ProductStoreV2Error("Initial Model file kind is invalid.");
+      const relativePath = modelFilePath(file.kind, file.relativePath); const bytes = Buffer.from(file.bytes); const digest = sha256(bytes);
+      return { file, relativePath, bytes, digest, target: { owner, relativePath } satisfies OwnerPath };
+    });
+    const existing = this.#database.prepare("SELECT id FROM models WHERE id = ?").get(model.id);
+    if (existing) {
+      const existingModel = this.#database.prepare("SELECT * FROM models WHERE id = ?").get(model.id) as any;
+      const existingConversation = this.#database.prepare("SELECT * FROM conversations WHERE id = ? AND model_id = ?").get(conversation.id, model.id) as any;
+      const rows = this.#objectRows("owner_model_id = ? AND kind IN ('model_code', 'model_environment', 'model_visual_asset')", [model.id]);
+      const matches = existingConversation && existingModel.name === model.name && existingModel.technical_status === model.technicalStatus
+        && existingModel.run_mode === model.runMode && existingModel.execution_description_json === json(model.executionDescription)
+        && existingModel.created_at === model.createdAt && existingConversation.name === conversation.name
+        && existingConversation.provider_id === conversation.providerId && existingConversation.provider_model_id === conversation.providerModelId
+        && existingConversation.created_at === conversation.createdAt && rows.length === files.length
+        && files.every(({ file, relativePath, bytes, digest }) => rows.some((row) => row.id === file.id && row.kind === file.kind
+          && row.relative_path === relativePath && row.media_type === file.mediaType && row.size_bytes === bytes.byteLength && row.sha256 === digest));
+      if (!matches) throw new ProductStoreV2Error("Composite Model creation ID was reused with different intent.");
+      return { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+    }
+    const statements: DatabaseMutationStatement[] = [{ sql: `INSERT INTO models
+      (id, name, technical_status, run_mode, execution_description_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [model.id, model.name, model.technicalStatus, model.runMode, json(model.executionDescription), model.createdAt, model.createdAt], expectedChanges: 1 },
+      ...files.map(({ file, bytes, relativePath, digest }) => objectInsert({ id: file.id, owner, kind: file.kind, relativePath, mediaType: file.mediaType,
+        sizeBytes: bytes.byteLength, digest, createdAt: model.createdAt })),
+      { sql: `INSERT INTO conversations (id, model_id, name, provider_id, provider_model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        params: [conversation.id, model.id, conversation.name, conversation.providerId, conversation.providerModelId, conversation.createdAt, conversation.createdAt], expectedChanges: 1 }];
+    this.#coordinator.execute({ transactionId: stableTransactionId("create_model_conversation", model.id),
+      files: files.map(({ target, bytes }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: null })), statements });
+    return { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+  }
+
+  startTechnicalCheck(input: { id: string; modelId: string; limits: Record<string, unknown>; startedAt: IsoTimestamp }): {
+    workspaceDigest: string;
+    executionDescriptionDigest: string;
+    executionDescription: Record<string, unknown>;
+  } {
+    assertId(input.id);
+    const model = this.#database.prepare("SELECT execution_description_json FROM models WHERE id = ? AND lifecycle_state = 'active'").get(input.modelId) as { execution_description_json: string } | undefined;
+    if (!model) throw new ProductStoreV2Error("Technical check requires an active Model.");
+    const files = this.#objectRows("owner_model_id = ? AND kind IN ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')", [input.modelId]);
+    files.forEach((file) => this.#verifiedMetadata(file));
+    const workspaceDigest = workspaceDigestOf(files);
+    const executionDescription = JSON.parse(model.execution_description_json) as Record<string, unknown>;
+    const executionDescriptionDigest = canonicalDigest(executionDescription);
+    this.#databaseMutation([activeLifecycleGuard("models", input.modelId), { sql: `INSERT INTO model_technical_checks
+      (id, model_id, workspace_sha256, execution_description_sha256, state, results_json, limits_json, started_at)
+      VALUES (?, ?, ?, ?, 'running', '{}', ?, ?)`, params: [input.id, input.modelId, workspaceDigest, executionDescriptionDigest, json(input.limits), input.startedAt], expectedChanges: 1 },
+      { sql: `UPDATE models SET technical_status = 'checking', updated_at = ? WHERE id = ? AND lifecycle_state = 'active'`, params: [input.startedAt, input.modelId], expectedChanges: 1 }]);
+    return { workspaceDigest, executionDescriptionDigest, executionDescription };
+  }
+
+  finishTechnicalCheck(input: { id: string; state: "passed" | "failed" | "cancelled"; results: Record<string, unknown>; finishedAt: IsoTimestamp }): { published: boolean } {
+    const row = this.#database.prepare(`SELECT t.*, m.execution_description_json FROM model_technical_checks t JOIN models m ON m.id = t.model_id WHERE t.id = ?`)
+      .get(input.id) as any;
+    if (!row || row.state !== "running") throw new ProductStoreV2Error("Technical check is not running.");
+    const currentFiles = this.#objectRows("owner_model_id = ? AND kind IN ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')", [row.model_id]);
+    const workspaceDigest = workspaceDigestOf(currentFiles);
+    const executionDigest = canonicalDigest(JSON.parse(row.execution_description_json));
+    const publish = workspaceDigest === row.workspace_sha256 && executionDigest === row.execution_description_sha256;
+    this.#databaseMutation([{ sql: `UPDATE model_technical_checks SET state = ?, results_json = ?, finished_at = ? WHERE id = ? AND state = 'running'`,
+      params: [input.state, json({ ...input.results, published: publish }), input.finishedAt, input.id], expectedChanges: 1 },
+      ...(publish ? [{ sql: "UPDATE models SET technical_status = ?, updated_at = ? WHERE id = ? AND technical_status = 'checking'",
+        params: [input.state === "passed" ? "executable" : "failed", input.finishedAt, row.model_id], expectedChanges: 1 } satisfies DatabaseMutationStatement] : [])]);
+    return { published: publish };
+  }
+
+  getTechnicalCheck(modelId: string, id: string): TechnicalCheckRecord {
+    assertId(modelId); assertId(id);
+    const row = this.#database.prepare("SELECT * FROM model_technical_checks WHERE id = ? AND model_id = ?").get(id, modelId) as any;
+    if (!row) throw new ProductStoreV2Error("Technical check does not exist.");
+    return {
+      id: row.id,
+      modelId: row.model_id,
+      workspaceDigest: row.workspace_sha256,
+      executionDescriptionDigest: row.execution_description_sha256,
+      state: row.state,
+      results: JSON.parse(row.results_json),
+      limits: JSON.parse(row.limits_json),
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+    };
+  }
+
   readObjectFile(id: string): Buffer {
     const row = this.#objectRow(id);
     const inspected = this.#objects.readWithInspection(ownerPath(row));
     if (!inspected || inspected.sha256 !== row.sha256 || inspected.sizeBytes !== row.size_bytes) throw new ProductStoreV2Error("Stored object metadata or bytes drifted.");
     return inspected.bytes;
+  }
+
+  #sessionProjection(conversationId: string): "none" | "connecting" | "available" | "lost" | "read_only" {
+    const row = this.#database.prepare("SELECT state FROM agent_sessions WHERE conversation_id = ? AND state != 'closed'").get(conversationId) as { state: DurableAgentSessionState } | undefined;
+    if (!row) return "none";
+    if (row.state === "available") return "available";
+    if (row.state === "lost") return "lost";
+    return "connecting";
+  }
+
+  #skillUses(turnId: string): SkillUseDto[] {
+    return (this.#database.prepare("SELECT * FROM skill_uses WHERE turn_id = ? ORDER BY created_at, id").all(turnId) as any[]).map((row) => ({
+      id: row.id, skillId: row.skill_id, skillVersion: row.skill_version, routingMode: row.routing_mode,
+      loadState: row.load_state, rationale: row.rationale,
+    }));
+  }
+
+  #actions(turnId: string): ActionRecordDto[] {
+    return (this.#database.prepare("SELECT * FROM action_records WHERE turn_id = ? ORDER BY created_at, id").all(turnId) as any[]).map((row) => ({
+      id: row.id, actionKind: row.action_kind, intent: JSON.parse(row.intent_json), permissionDecision: row.permission_decision,
+      state: row.state, affectedResources: JSON.parse(row.affected_resources_json), errorCode: row.error_code,
+    }));
+  }
+
+  #agentTurn(conversationId: string, requestKey: string): AgentTurnDto {
+    const row = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(conversationId, requestKey) as any;
+    if (!row) throw new ProductStoreV2Error("Agent turn does not exist.");
+    return {
+      requestKey: row.request_key, state: row.state, userMessageId: row.input_message_id, assistantMessageId: row.assistant_message_id,
+      skillUses: this.#skillUses(row.id), actions: this.#actions(row.id),
+      failure: row.failure_code ? { code: row.failure_code, retryable: Boolean(row.failure_retryable) } : null,
+    };
   }
 
   #collectConversationClosure(
@@ -637,6 +1174,16 @@ export class ProductStoreV2 {
   ): void {
     for (const conversationId of conversationIds.sort()) {
       addRows("messages", this.#database.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY ordinal").all(conversationId) as any[]);
+      addRows("conversation_summaries", this.#database.prepare("SELECT * FROM conversation_summaries WHERE conversation_id = ?").all(conversationId) as any[], (item) => ({ conversation_id: item.conversation_id }));
+      addRows("agent_sessions", this.#database.prepare("SELECT * FROM agent_sessions WHERE conversation_id = ? ORDER BY generation").all(conversationId) as any[]);
+      const turns = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[];
+      addRows("agent_turns", turns);
+      for (const turn of turns) {
+        addRows("skill_uses", this.#database.prepare("SELECT * FROM skill_uses WHERE turn_id = ? ORDER BY id").all(turn.id) as any[]);
+        const actions = this.#database.prepare("SELECT * FROM action_records WHERE turn_id = ? ORDER BY id").all(turn.id) as any[];
+        addRows("action_records", actions);
+        for (const action of actions) addRows("temporary_document_adoptions", this.#database.prepare("SELECT * FROM temporary_document_adoptions WHERE action_record_id = ? ORDER BY document_id").all(action.id) as any[], (item) => ({ document_id: item.document_id, action_record_id: item.action_record_id }));
+      }
       addRows("temporary_documents", this.#database.prepare("SELECT * FROM temporary_documents WHERE conversation_id = ? ORDER BY id").all(conversationId) as any[]);
       const attachments = this.#database.prepare("SELECT * FROM attachments WHERE conversation_id = ? ORDER BY id").all(conversationId) as any[];
       addRows("attachments", attachments);
@@ -681,6 +1228,32 @@ export class ProductStoreV2 {
       if (error instanceof ProductStoreV2Error) throw error;
       throw new ProductStoreV2Error("Product database mutation failed.", { cause: error });
     }
+  }
+
+  #reconcileInterruptedAgentState(): void {
+    const committedActions = (this.#database.prepare(`SELECT count(*) AS count FROM action_records a WHERE a.state = 'staging'
+      AND a.mutation_transaction_id IS NOT NULL AND EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = a.mutation_transaction_id)`).get() as { count: number }).count;
+    const rolledBackActions = (this.#database.prepare(`SELECT count(*) AS count FROM action_records a WHERE a.state = 'staging'
+      AND (a.mutation_transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = a.mutation_transaction_id))`).get() as { count: number }).count;
+    const runningTurns = (this.#database.prepare("SELECT count(*) AS count FROM agent_turns WHERE state IN ('queued', 'running')").get() as { count: number }).count;
+    const liveSessions = (this.#database.prepare("SELECT count(*) AS count FROM agent_sessions WHERE state != 'closed'").get() as { count: number }).count;
+    const runningChecks = (this.#database.prepare("SELECT count(*) AS count FROM model_technical_checks WHERE state = 'running'").get() as { count: number }).count;
+    const checkingModels = (this.#database.prepare(`SELECT count(*) AS count FROM models m WHERE m.technical_status = 'checking'
+      AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = m.id AND t.state = 'running')`).get() as { count: number }).count;
+    if (committedActions + rolledBackActions + runningTurns + liveSessions + runningChecks === 0) return;
+    const now = new Date().toISOString();
+    this.#databaseMutation([
+      { sql: `UPDATE action_records SET state = 'committed', updated_at = ? WHERE state = 'staging' AND mutation_transaction_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = action_records.mutation_transaction_id)`, params: [now], expectedChanges: committedActions },
+      { sql: `UPDATE action_records SET state = 'rolled_back', error_code = 'interrupted_before_commit', updated_at = ? WHERE state = 'staging'
+        AND (mutation_transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = action_records.mutation_transaction_id))`, params: [now], expectedChanges: rolledBackActions },
+      { sql: `UPDATE agent_turns SET state = 'failed', failure_code = 'interrupted', failure_retryable = 1, updated_at = ?
+        WHERE state IN ('queued', 'running')`, params: [now], expectedChanges: runningTurns },
+      { sql: `UPDATE agent_sessions SET state = 'lost', failure_reason = 'process_restarted', updated_at = ? WHERE state != 'closed'`, params: [now], expectedChanges: liveSessions },
+      { sql: `UPDATE models SET technical_status = 'failed', updated_at = ? WHERE technical_status = 'checking'
+        AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = models.id AND t.state = 'running')`, params: [now], expectedChanges: checkingModels },
+      { sql: `UPDATE model_technical_checks SET state = 'failed', results_json = '{"failureCode":"interrupted"}', finished_at = ? WHERE state = 'running'`, params: [now], expectedChanges: runningChecks },
+    ]);
   }
 
   #model(id: string): ModelRecord {
@@ -761,6 +1334,21 @@ const metadata = (row: ObjectRow): StoredObjectMetadata => ({
   createdAt: row.created_at,
 });
 
+const conversationDto = (row: any, sessionState: ConversationDto["sessionState"]): ConversationDto => ({
+  id: row.id,
+  owner: row.model_id ? { kind: "model", id: row.model_id } : { kind: "project", id: row.project_id },
+  name: row.name,
+  provider: { providerId: row.provider_id, modelId: row.provider_model_id, locked: row.provider_locked_at !== null },
+  sessionState,
+  lifecycleState: row.lifecycle_state,
+  updatedAt: row.updated_at,
+});
+
+const messageDto = (row: any): ConversationMessageDto => ({
+  id: row.id, ordinal: row.ordinal, role: row.role, status: row.status, text: row.text,
+  content: JSON.parse(row.content_json), createdAt: row.created_at, updatedAt: row.updated_at,
+});
+
 const modelRecord = (row: any): ModelRecord => ({
   id: row.id, name: row.name, lifecycleState: row.lifecycle_state, technicalStatus: row.technical_status, runMode: row.run_mode,
   executionDescription: JSON.parse(row.execution_description_json), createdAt: row.created_at, updatedAt: row.updated_at,
@@ -785,6 +1373,11 @@ const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: 
 };
 
 const compareObjectRows = (left: ObjectRow, right: ObjectRow): number => compareStrings(left.relative_path, right.relative_path) || compareStrings(left.id, right.id);
+const workspaceDigestOf = (rows: ObjectRow[]): string => canonicalDigest(rows.map((file) => ({
+  relativePath: file.relative_path,
+  sizeBytes: file.size_bytes,
+  sha256: file.sha256,
+})).sort((left, right) => compareStrings(left.relativePath, right.relativePath)));
 const compareKindId = (left: { kind: string; id: string }, right: { kind: string; id: string }): number => compareStrings(left.kind, right.kind) || compareStrings(left.id, right.id);
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const visible = (state: LifecycleState, options: { includeArchived?: boolean; includeTrashed?: boolean }): boolean => state === "active" || state === "archived" && Boolean(options.includeArchived) || state === "trashed" && Boolean(options.includeTrashed);

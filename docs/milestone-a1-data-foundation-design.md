@@ -5,6 +5,15 @@ Status: Stage 1 implementation design. This document is subordinate to the
 local domain and persistence boundary only; it does not connect that boundary
 to HTTP, OpenCode, Mesa execution, or the final UI.
 
+Stage 1's historical schema contract ended at v2. Stage 2 / #13 now extends the
+same ProductStoreV2 authority through the ordered schema v3 migration for Agent
+sessions, turns, summaries, skill/action evidence, document adoption, and Model
+technical checks. The current v3 behavior is specified by
+[`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md);
+it does not create a second repository or invalidate the Stage 1 atomic
+storage/recovery guarantees. Legacy Gate/queue state still coexists until an
+explicit later removal, and existing untracked workspaces remain protected.
+
 ## Stage boundary
 
 Stage 1 provides a generic, local, single-user system of record for Models and

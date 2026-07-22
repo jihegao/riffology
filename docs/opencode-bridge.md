@@ -1,9 +1,71 @@
-# OpenCode bridge target contract
+# OpenCode bridge contracts
+
+## Milestone A2 current authority
+
+Stage 2 gives each durable Model or Project conversation its own backend-only
+OpenCode session binding. Riff-owned schema v3 messages, summaries, turn
+receipts, skill uses, and action records are authoritative; OpenCode history and
+text are external context. The browser receives only a redacted session state,
+never the opaque session reference or credentials.
+
+The implemented conversation runtime discovers provider/models from the
+configured loopback OpenCode service, requires the conversation's exact pair,
+reuses a live session, and marks a missing session lost. Reconstruction creates
+a new session from bounded Riff context: owner/workspace summary, rolling
+summary, recent complete messages, explicitly relevant bounded documents and
+attachments, catalog metadata, and selected skill instructions. Included IDs,
+limits, and context digest are auditable. Unrelated objects, credentials, raw
+paths, and opaque session data are excluded.
+
+OpenCode, authentication, provider/model discovery, validation, or rebuild
+failure produces an explicit read-only reason. Riff preserves the transcript
+and committed Model state and does not substitute another model or deterministic
+canned reply.
+
+Scoped MCP exposes typed current-owner tools only. Skill catalog metadata is
+preloaded; full selected instructions are loaded progressively, and explicit or
+automatic selection is recorded. A skill never grants authority. Model
+conversations may read or atomically change allowlisted files in their own
+workspace. Project conversations cannot change Model/snapshot code, schemas,
+execution description, or dependencies. Neither owner receives generic shell,
+SQL, arbitrary filesystem, URL-fetch, product-source, or ambient-credential
+tools.
+
+The production turn path binds a stable conversation-level OpenCode MCP name to
+a fresh server-minted capability URL, connects it only for turns that need Riff
+tools, and revokes/unbinds it in `finally`. The capability binds owner,
+conversation, turn, external-session generation, intent authority, attachment
+IDs, and the allowlisted tools. Execution revalidates that the durable turn is
+still running and that the latest available session generation matches the
+grant. The OpenCode prompt denies `*` tools by default
+and enables only that turn's exact scoped MCP name, excluding built-ins and
+ambient MCP servers. Ambiguous requests are proposal-only: they may create a
+draft temporary document, but every other durable mutation or lifecycle
+transition requires an explicit imperative. Temporary documents remain
+conversation state, and an attachment can be adopted only when it was explicitly
+included in that explicit turn. Per-conversation queuing prevents overlapping turns,
+while scoped MCP operations are globally serialized around OpenCode's
+process-wide MCP registry.
+
+Provider, Model, conversation, turn, attachment/document, workspace, and
+technical-check HTTP integration is implemented. A direct real-provider
+adapter check reused one session for two distinct turns. Browser acceptance
+created a Model, completed a real-provider turn and scoped tool call, and
+verified explicit read-only behavior after upstream failure. The provider then
+returned repeated network errors, so the final browser pass did not obtain a
+second clean same-session response; that rerun remains open and is not claimed
+as passed. Project execution/wind migration belongs to #14; the final shared
+shell belongs to #15.
+
+---
+
+# Legacy OpenCode bridge target contract
 
 ## Status and authority
 
-This Gate 0 document defines the Gate 4 integration target. The current bridge
-still exposes legacy queue actions. The backend project state remains
+This Gate 0 document defines the former Gate 4 integration target and is
+retained as history. The coexisting bridge still exposes legacy queue actions,
+but those actions are not current A2 authority. The backend project state remains
 authoritative: OpenCode text/session history, DOM state, diagrams, Playwright
 observations, and fixture responses are never model, workflow, or run truth.
 

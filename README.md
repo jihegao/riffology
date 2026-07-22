@@ -6,7 +6,34 @@
 > [`docs/milestone-a-product-contract.md`](docs/milestone-a-product-contract.md).
 > It restores this two-pane interaction as the shared shell for generic Models
 > and Projects and treats wind-turbine maintenance as the first ordinary case.
-> The current `main` implementation predates that contract.
+> The legacy runtime described below predates that contract and still coexists
+> while the sequential Milestone A stages replace it.
+
+## Milestone A2 implementation status
+
+Stage 1's `ProductStoreV2` foundation is implemented and Stage 2 / #13 is the
+current implementation authority. The Stage 2 branch now wires schema v3,
+durable per-conversation Agent state, bounded OpenCode context/session recovery,
+per-turn capability-scoped MCP tools, progressive simulation-skill audit,
+conversation attachments and temporary documents, a generic Model scaffold, a
+restricted macOS Model process, digest-bound technical checks, and the narrow
+HTTP/API acceptance surface. API integration is complete; final release
+acceptance still needs one stable real-provider browser rerun, described under
+Verification below.
+
+The older Gate wind path and `queue-network-v1` code still coexist in the tree.
+They remain runnable history, not the Milestone A2 product authority, and this
+stage does not authorize their deletion. Project experiment/execution and wind
+import belong to #14; the final Models/Projects home and two-pane shell belong
+to #15.
+
+Restricted Model execution currently supports the local-user macOS boundary
+through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
+environment, no network rule, and finite process/output/time limits. This is
+defense against accidental access, not container/VM-grade isolation from
+hostile code. “Technically executable” means only that the thin syntax,
+interface, dependency, smoke, output, resource, cancellation, and applicable
+visual-health checks pass; it is not scientific validation or decision trust.
 
 ## Legacy implementation status
 
@@ -87,14 +114,63 @@ OPENCODE_ALLOWED_PROVIDERS=provider_id
 OPENCODE_SERVER_USERNAME=opencode
 OPENCODE_SERVER_PASSWORD=
 RIFF_SKIP_OPENCODE=false
+# Optional Stage 2 controls.
+OPENCODE_REQUEST_TIMEOUT_MS=30000
+RIFF_PRODUCT_ROOT=/absolute/path/to/application-owned-product-data
+RIFF_MODEL_PYTHON=/absolute/path/to/the/approved/python
+RIFF_SKILL_ROOT=/absolute/path/to/simulation-skills
+RIFF_ALLOWED_SKILLS=skill-one,skill-two
 ```
 
 `OPENCODE_API_KEY` is never sent to the browser or stored in the demo workspace.
 The local OpenCode installation/provider configuration must consume that key;
-the demo backend only checks health and the configured provider/model before it
-accepts chat. The live acceptance gate is not satisfied by deterministic mode.
+the demo backend checks health and the exact configured provider/model before
+it accepts a turn. `OPENCODE_REQUEST_TIMEOUT_MS` also accepts the legacy
+`OPENCODE_PROMPT_TIMEOUT_MS` fallback. `RIFF_MODEL_PYTHON` must name an
+application-approved absolute interpreter; the restricted runner grants only
+the exact virtual-environment/framework runtime roots it derives from that
+interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
+`RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
+deterministic mode.
 
 ## Verification
+
+Focused Milestone A2 verification:
+
+```sh
+cd backend
+node --experimental-strip-types --test \
+  test/product-schema.test.ts \
+  test/agent-conversation-store.test.ts \
+  test/product-store-v3-recovery.test.ts \
+  test/agent-context.test.ts \
+  test/agent-api.test.ts \
+  test/agent-turn-runtime.test.ts \
+  test/agent-workspace-concurrency.test.ts \
+  test/opencode-conversation-runtime.test.ts \
+  test/agent-mcp-permissions.test.ts \
+  test/simulation-skill-catalog.test.ts \
+  test/model-workspace.test.ts \
+  test/model-process-isolation.test.ts \
+  test/model-technical-checker.test.ts
+```
+
+The latest full backend run on this branch executed 185 tests: 184 passed,
+zero failed, and one optional smoke against an installed OpenCode instance was
+skipped. The latest web evidence is 104 passing tests plus a successful
+production build. API tests cover provider discovery, atomic generic Model
+creation, independent/rebuilt conversations, idempotent turns, attachment and
+temporary-document projection, scoped MCP mutation/revocation, read-only
+failure, workspace secrecy, and technical-check start/read.
+
+Live evidence is intentionally split. A direct real-OpenCode adapter run reused
+one session for two distinct turns. The real browser acceptance surface created
+a New Model, completed a provider-backed turn, exercised a scoped
+`riff_read_owner_summary` tool call, and later projected an explicit read-only
+result without fabricating an assistant reply. During the final browser pass,
+the configured upstream provider repeatedly returned network errors, so a
+second clean browser turn in that same session was not obtained. That provider
+rerun remains an acceptance item; it is not reported as green.
 
 Run the component suites:
 

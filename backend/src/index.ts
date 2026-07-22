@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { HttpMesaAdapter, UnavailableMesaAdapter } from "./mesa-adapter.ts";
 import { opencodeFromEnvironment } from "./opencode-adapter.ts";
@@ -6,11 +7,17 @@ import { PlaywrightCdpProjector } from "./playwright-projection.ts";
 import { BackendApp } from "./server.ts";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)), ".riff-workspaces");
+mkdirSync(root, { recursive: true, mode: 0o700 });
 const mesa = process.env.MESA_SERVICE_URL ? new HttpMesaAdapter(process.env.MESA_SERVICE_URL) : new UnavailableMesaAdapter();
 const port = Number(process.env.PORT ?? 8787);
+const openCode = opencodeFromEnvironment();
 const app = new BackendApp({
   mesa,
-  openCode: opencodeFromEnvironment(),
+  openCode,
+  a2OpenCode: openCode,
+  a2ProductRoot: process.env.RIFF_PRODUCT_ROOT ?? join(root, "milestone-a-product"),
+  ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
+  a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
   mcpUrl: process.env.RIFF_MCP_URL ?? `http://127.0.0.1:${port}/mcp`,
