@@ -2,13 +2,18 @@
 
 本地双栏演示：左侧为由 OpenCode 驱动的建模对话与文件上传，右侧为 Mesa 仿真工作台。
 
-## Gate 0 status
+> **Milestone A target:** the newly approved product contract is
+> [`docs/milestone-a-product-contract.md`](docs/milestone-a-product-contract.md).
+> It restores this two-pane interaction as the shared shell for generic Models
+> and Projects and treats wind-turbine maintenance as the first ordinary case.
+> The current `main` implementation predates that contract.
 
-Gate 0 已冻结下一阶段目标：以本机 AnyLogic `Field Service` 示例为结构证据，
-独立实现 `wind-turbine-maintenance` 风机维护案例，验证业务需求、模型、实验和
-人类审查之间的对齐闭环。当前可执行代码仍是 `queue-network-v1`；Gate 0 只改
-合同与路线图，不声称风机模型、持久化、自动图或新 UI 已实现。完整合同见
-[`docs/wind-turbine-maintenance-gate-0.md`](docs/wind-turbine-maintenance-gate-0.md)。
+## Legacy implementation status
+
+`main` currently contains the completed historical Gate 0-3 wind implementation
+and the earlier `queue-network-v1` demo. Those records remain useful as wind-model
+evidence and implementation history, but they no longer define the target product.
+Where they conflict, the Milestone A contract above is authoritative.
 
 ## Delivery gates
 
@@ -25,15 +30,15 @@ Riff 的长期定位不是 Mesa 代码生成器，而是面向业务决策的 AI
 Agent 工作平台。它帮助人类把目标、约束、数据和不确定假设快速对齐为可
 执行的模型、场景与实验方案，再通过计算分析持续比较方案和修订问题定义。
 
-安全隔离与可复现是运行这一协作循环的先决条件；基于 exact revision、场景、
-运行产物和适用范围积累的证据，则决定结果能否支持具体决策。产品核心价值是
-在业务要求、模型、实验、分析和人类决策之间保持结构化、可审查的连续性。
+安全隔离与可复现是运行这一协作循环的先决条件；基于模型身份、运行时冻结的
+配置、运行产物和适用范围积累的证据，则决定结果能否支持具体决策。产品核心
+价值是在业务要求、模型、实验、分析和人类决策之间保持结构化、可审查的连续性。
 
-当前单模型限制只是这一方向的实现边界。后续路线先用审查过的风机维护案例
-验证业务对齐和场景分析循环，再提取通用模型包合同，并逐步支持隔离执行、
-Evidence Studio、自动评审和专家评审。旧队列案例将在 Gate 4 从当前产品树和
-已精确识别的本地工件中彻底删除，不保留为 fallback 或回归 fixture。详见
-[`docs/product-roadmap.md`](docs/product-roadmap.md)。
+Milestone A 依次交付 SQLite/对象目录基础、持久 OpenCode 对话与通用模型工作区、
+项目实验与通用执行，以及共享双栏产品和风机案例的浏览器验收。它不保留旧的
+immutable-revision、Evidence Studio 或 Gate 4 作为产品路线。详见当前
+[`Milestone A contract`](docs/milestone-a-product-contract.md)；旧
+[`product roadmap`](docs/product-roadmap.md) 仅保留为设计历史。
 
 ## Run locally
 
@@ -51,8 +56,8 @@ cp .env.example .env
 ```
 
 The commands below describe the legacy implementation that remains runnable
-until Gate 4; they are not the wind-turbine target. For the default browser
-demonstration, no live provider is contacted. It starts
+while Milestone A is implemented; they are not the target product. For the
+default browser demonstration, no live provider is contacted. It starts
 with a deliberately limited deterministic development agent which can only load
 the legacy bundled `queue-network-v1` model from a matching chat request. Start all
 three local processes with:
