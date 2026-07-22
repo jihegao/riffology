@@ -95,8 +95,19 @@ export class AgentConversationSessionManager {
       );
       return { ...prepared, assistant };
     } catch (error) {
+      const reason = stableReason(error, "opencode_unavailable");
+      // A prompt may have reached OpenCode even when the client times out or
+      // disconnects. Retiring that opaque session prevents a late user/assistant
+      // pair from being mistaken for the next serialized Riff turn.
+      await this.#openCode.abort(prepared.externalSessionRef).catch(() => undefined);
+      await this.#repository.markSessionLost({
+        conversationId,
+        generation: prepared.generation,
+        expectedExternalSessionRef: prepared.externalSessionRef,
+        reason: `prompt_failed:${reason}`,
+      });
       if (signal?.aborted) throw error;
-      return { mode: "read_only", conversationId, reason: stableReason(error, "opencode_unavailable"), retryable: true };
+      return { mode: "read_only", conversationId, reason, retryable: true };
     }
   }
 

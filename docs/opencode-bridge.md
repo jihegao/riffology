@@ -48,14 +48,18 @@ while scoped MCP operations are globally serialized around OpenCode's
 process-wide MCP registry.
 
 Provider, Model, conversation, turn, attachment/document, workspace, and
-technical-check HTTP integration is implemented. A direct real-provider
-adapter check reused one session for two distinct turns. Browser acceptance
-created a Model, completed a real-provider turn and scoped tool call, and
-verified explicit read-only behavior after upstream failure. The provider then
-returned repeated network errors, so the final browser pass did not obtain a
-second clean same-session response; that rerun remains open and is not claimed
-as passed. Project execution/wind migration belongs to #14; the final shared
-shell belongs to #15.
+technical-check HTTP integration is implemented. Browser closure with OpenCode
+`1.18.4` created a generic Model and completed two
+`opencode-go/deepseek-v4-pro` turns in one external session; the second response
+correctly reused the first-turn context. OpenCode mints upstream user-message
+IDs. Before each asynchronous prompt Riff records the existing message IDs,
+then accepts only an assistant parented to the newly observed user message.
+This avoids treating OpenCode's caller-supplied replacement ID semantics as a
+new turn. Any failed prompt aborts and retires that opaque external session
+before a later turn rebuilds from durable Riff context, so late upstream
+messages cannot be associated with the next turn. Prior provider-failure
+evidence still verifies explicit read-only behavior. Project execution/wind
+migration belongs to #14; the final shared shell belongs to #15.
 
 ---
 

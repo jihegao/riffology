@@ -180,19 +180,20 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
     ).join("\n");
     const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
-    const userMessageId = `msg_${randomUUID()}`;
+    const deadlineSignal = signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
+    const before = await this.#sessionMessages(sessionId, deadlineSignal);
+    const priorMessageIds = new Set(before.map(messageId).filter((id): id is string => Boolean(id)));
     await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       method: "POST",
-      signal,
+      signal: deadlineSignal,
       body: JSON.stringify({
-        messageID: userMessageId,
         model,
         system: prompt.system,
         parts,
         tools: this.#promptTools(prompt.scopedMcpScopeId),
       }),
     });
-    return this.#waitForAssistant(sessionId, userMessageId, signal);
+    return this.#waitForAssistant(sessionId, priorMessageIds, deadlineSignal);
   }
 
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
@@ -306,12 +307,22 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return result.payload;
   }
 
-  async #waitForAssistant(sessionId: string, userMessageId: string, signal?: AbortSignal): Promise<OpenCodeAssistantResponse> {
-    const deadlineSignal = signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
+  async #sessionMessages(sessionId: string, signal: AbortSignal): Promise<any[]> {
+    const result = await this.#request(`/session/${encodeURIComponent(sessionId)}/message`, { method: "GET", signal });
+    if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+    return Array.isArray(result.payload) ? result.payload : [];
+  }
+
+  async #waitForAssistant(sessionId: string, priorMessageIds: Set<string>, deadlineSignal: AbortSignal): Promise<OpenCodeAssistantResponse> {
+    let userMessageId: string | null = null;
     while (!deadlineSignal.aborted) {
-      const result = await this.#request(`/session/${encodeURIComponent(sessionId)}/message`, { method: "GET", signal: deadlineSignal });
-      if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
-      const messages = Array.isArray(result.payload) ? result.payload : [];
+      const messages = await this.#sessionMessages(sessionId, deadlineSignal);
+      userMessageId ??= messageId(messages.find((entry: any) => entry?.info?.role === "user"
+        && !priorMessageIds.has(messageId(entry) ?? "")));
+      if (!userMessageId) {
+        await abortableDelay(50, deadlineSignal);
+        continue;
+      }
       const assistants = messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId);
       for (const assistant of assistants.toReversed()) {
         if (assistant.info?.error) throw new ApiError(502, "opencode_prompt_failed", "OpenCode failed to complete the assistant response.");
@@ -497,6 +508,11 @@ const normalizedAssistantResponse = (payload: Record<string, any>): OpenCodeAssi
   const rawId = payload.info?.id ?? payload.info?.messageID ?? payload.id ?? payload.messageID;
   const messageId = typeof rawId === "string" && rawId.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(rawId) ? rawId : null;
   return { messageId, text, content: { source: "opencode", textParts: texts.length } };
+};
+
+const messageId = (payload: Record<string, any> | undefined): string | null => {
+  const rawId = payload?.info?.id ?? payload?.info?.messageID ?? payload?.id ?? payload?.messageID;
+  return typeof rawId === "string" && rawId.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(rawId) ? rawId : null;
 };
 
 const disabledBuiltInTools = () => ({
