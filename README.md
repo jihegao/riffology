@@ -17,9 +17,8 @@ durable per-conversation Agent state, bounded OpenCode context/session recovery,
 per-turn capability-scoped MCP tools, progressive simulation-skill audit,
 conversation attachments and temporary documents, a generic Model scaffold, a
 restricted macOS Model process, digest-bound technical checks, and the narrow
-HTTP/API acceptance surface. API integration is complete; final release
-acceptance still needs one stable real-provider browser rerun, described under
-Verification below.
+HTTP/API acceptance surface. API integration and the real-provider two-turn
+browser closure are complete; the live evidence is described under Verification.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not the Milestone A2 product authority, and this
@@ -155,22 +154,22 @@ node --experimental-strip-types --test \
   test/model-technical-checker.test.ts
 ```
 
-The latest full backend run on this branch executed 185 tests: 184 passed,
-zero failed, and one optional smoke against an installed OpenCode instance was
-skipped. The latest web evidence is 104 passing tests plus a successful
-production build. API tests cover provider discovery, atomic generic Model
-creation, independent/rebuilt conversations, idempotent turns, attachment and
-temporary-document projection, scoped MCP mutation/revocation, read-only
-failure, workspace secrecy, and technical-check start/read.
+The latest full backend suite passed, with only the optional smoke against an
+installed OpenCode instance skipped. The latest web evidence is 104 passing
+tests plus a successful production build. API tests cover provider discovery,
+atomic generic Model creation, independent/rebuilt conversations, idempotent
+turns, attachment and temporary-document projection, scoped MCP
+mutation/revocation, read-only failure, workspace secrecy, and technical-check
+start/read.
 
-Live evidence is intentionally split. A direct real-OpenCode adapter run reused
-one session for two distinct turns. The real browser acceptance surface created
-a New Model, completed a provider-backed turn, exercised a scoped
-`riff_read_owner_summary` tool call, and later projected an explicit read-only
-result without fabricating an assistant reply. During the final browser pass,
-the configured upstream provider repeatedly returned network errors, so a
-second clean browser turn in that same session was not obtained. That provider
-rerun remains an acceptance item; it is not reported as green.
+Final live closure used OpenCode `1.18.4` with
+`opencode-go/deepseek-v4-pro`. The real browser acceptance surface created a
+new generic Model and completed two clean turns in one OpenCode session; the
+second response correctly incorporated the first-turn token. OpenCode owns the
+upstream user-message IDs, while Riff snapshots prior message IDs and accepts
+only the assistant parented to the newly created user message. The earlier
+explicit read-only result remains valid fail-closed evidence; no canned reply,
+mock, or healthy-port check was used for the successful two-turn claim.
 
 Run the component suites:
 

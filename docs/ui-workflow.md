@@ -21,13 +21,13 @@ The narrow `/a2` HTTP/browser acceptance surface is implemented. It discovers
 provider/model pairs, creates a generic Model and its initial conversation, and
 sends live turns; the richer conversation/document/action/workspace projections
 are verified through the API rather than presented as the final product shell.
-A real browser run created a Model, completed one provider-backed turn and a
-scoped tool call, then showed explicit read-only state after provider failure.
-Repeated upstream network errors prevented a second clean same-session browser
-turn in the final pass. That rerun, plus the existing session-loss/rebuild,
-restart, scoped mutation, and technical-check backend evidence, remains the
-honest release-acceptance boundary. A mock conversation, screenshot, or healthy
-port alone is insufficient.
+A final real browser run created a new generic Model and completed two clean
+`opencode-go/deepseek-v4-pro` turns in one OpenCode `1.18.4` session. The second
+response incorporated the exact first-turn token, proving visible context reuse.
+The prior provider-failure run still proves explicit read-only behavior without
+a fabricated assistant response. Session-loss/rebuild, restart, scoped mutation,
+and technical-check behavior remain backend integration evidence. A mock
+conversation, screenshot, or healthy port alone is insufficient.
 
 The legacy queue/wind UI still coexists and remains runnable history. Stage 2
 does not delete it or treat its fixed tabs as the generic workspace. Project

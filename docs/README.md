@@ -11,8 +11,8 @@ Milestone A product contract plus
 Schema v3/store, conversation/OpenCode context, scoped MCP/skills, attachments,
 temporary documents, generic Model workspace, restricted process, technical
 checker, and the narrow HTTP/API surface are implemented. Final acceptance has
-one documented real-provider browser rerun outstanding after upstream network
-errors. Legacy Gate and queue code still coexist and are not silently retired
+completed the real-provider, same-session, two-turn browser rerun with OpenCode
+`1.18.4`. Legacy Gate and queue code still coexist and are not silently retired
 by Stage 2.
 
 The authoritative product target is now
@@ -34,9 +34,9 @@ product.
   Stage 2 design for persistent OpenCode conversations, backend-only session
   recovery, progressive skill/action audit, owner-scoped Model tools, atomic
   workspace mutation, generic Mesa scaffolding, and technical executability
-  checks. The #13 implementation is present; release acceptance retains the
-  provider-stability caveat documented in the test plan. Stage 3/4 behavior
-  remains explicitly out of scope.
+  checks. The #13 implementation and real-provider two-turn browser closure are
+  complete as documented in the test plan. Stage 3/4 behavior remains
+  explicitly out of scope.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.

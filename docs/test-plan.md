@@ -40,28 +40,32 @@ The API integration tests cover provider/model discovery,
 generic Model creation, conversation creation/listing, idempotent turns,
 attachment upload, temporary-document projection, explicit read-only errors,
 opaque-session/capability/path omission, scoped MCP mutation/revocation, and
-technical-check start/read. Real browser acceptance must cover live multi-turn
-session reuse, a second independent conversation, lost-session bounded
-reconstruction, restart, temporary documents/actions, scoped Model mutation,
-Project mutation denial, and honest technical-status copy.
+technical-check start/read. Combined release acceptance uses the real browser
+for live same-session multi-turn behavior and visible fail-closed state. API and
+backend integration evidence covers the second independent conversation,
+lost-session bounded reconstruction, restart, temporary documents/actions,
+scoped Model mutation, Project mutation denial, and honest technical-status
+copy until the final shared product shell is delivered by #15.
 
-Latest branch evidence: the full backend suite executed 185 tests, with 184
-passing, zero failures, and one optional installed-OpenCode smoke skipped. The
-latest web suite has 104 passing tests and the production build succeeds. A
+Latest branch evidence: the full backend suite passed, with zero failures and
+one optional installed-OpenCode smoke skipped. The latest web suite has 104
+passing tests and the production build succeeds. A
 live technical check materialized an isolated generic Model workspace and
 published `executable`; path, interface, syntax, dependency (Mesa), smoke,
 resource, output, and cancellation checks passed, while visual health was
 correctly skipped for `batch_only`.
 
-Real-provider evidence is not all green. The direct OpenCode adapter reused one
-session for two distinct turns. The browser acceptance surface created a New
-Model, completed a provider-backed turn, observed a completed scoped
-`riff_read_owner_summary` call, and later showed a structured read-only result
-without a fabricated assistant response. Repeated upstream provider network
-errors prevented a second clean same-session browser turn during the final
-pass. Repeat that browser case when the provider is stable before treating
-release acceptance as complete; do not replace it with the direct adapter,
-mock-only tests, or a healthy-port check.
+Real-provider closure is green. With OpenCode `1.18.4` and
+`opencode-go/deepseek-v4-pro`, the browser acceptance surface created a new
+generic Model and completed two clean turns in the same OpenCode session. The
+second response repeated the exact first-turn token and added the requested
+second-turn token. Focused adapter/API/concurrency regression coverage passed
+25/25. OpenCode now generates upstream user-message IDs; Riff records the
+pre-prompt message set and accepts only the assistant parented to the new user
+message. A failed prompt aborts and retires its opaque session before the next
+turn rebuilds, preventing a late response from being mis-associated. Existing
+explicit read-only evidence still proves that failure does not fabricate an
+assistant response.
 
 The macOS `sandbox-exec` tests prove the stated local-user process boundary,
 workspace restriction, scrubbed environment, no network rule, cancellation,

@@ -44,9 +44,11 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
   created: string[] = [];
   injected: Array<{ sessionId: string; context: string }> = [];
   prompts: Array<{ sessionId: string; binding: { providerId: string; modelId: string }; prompt: OpenCodePrompt }> = [];
+  aborted: string[] = [];
   createDelay?: Promise<void>;
   failDiscovery?: Error;
   failCreate?: Error;
+  failPrompt?: Error;
 
   async discoverProviderModels() { if (this.failDiscovery) throw this.failDiscovery; return this.catalogue; }
   async getSession(sessionId: string) { return this.existing.has(sessionId); }
@@ -59,8 +61,11 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
     return id;
   }
   async injectContext(sessionId: string, value: string) { this.injected.push({ sessionId, context: value }); }
-  async promptWithModel(sessionId: string, binding: { providerId: string; modelId: string }, prompt: OpenCodePrompt) { this.prompts.push({ sessionId, binding, prompt }); }
-  async abort() {}
+  async promptWithModel(sessionId: string, binding: { providerId: string; modelId: string }, prompt: OpenCodePrompt) {
+    this.prompts.push({ sessionId, binding, prompt });
+    if (this.failPrompt) throw this.failPrompt;
+  }
+  async abort(sessionId: string) { this.aborted.push(sessionId); }
 }
 
 test("adapter accepts only credential-free loopback HTTP base URLs", () => {
@@ -118,7 +123,7 @@ test("provider discovery is stable, deduplicated, allowlisted, and has no first-
 
 test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async () => {
   const bodies: any[] = [];
-  let userMessageId = "";
+  let prompted = false;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
@@ -127,21 +132,54 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
       if (path.endsWith("/prompt_async")) {
         const body = JSON.parse(String(init?.body));
         bodies.push(body);
-        userMessageId = body.messageID;
+        prompted = true;
         return new Response(null, { status: 204 });
       }
-      return Response.json([{ info: { id: "ok", role: "assistant", parentID: userMessageId }, parts: [{ type: "text", text: "assistant answer" }] }]);
+      return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+        { info: { id: "ok", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "assistant answer" }] },
+      ] : []);
     },
   });
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "hello", system: "bounded", attachments: [] });
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });
+  assert.equal("messageID" in bodies[0], false);
   assert.equal(bodies[0].tools["*"], false);
   assert.equal(Object.values(bodies[0].tools).every((value) => value === false), true);
 });
 
+test("adapter reuses one OpenCode session across turns with server-generated user message IDs", async () => {
+  const messages: any[] = [];
+  let promptNumber = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        const body = JSON.parse(String(init?.body));
+        assert.equal("messageID" in body, false);
+        promptNumber += 1;
+        const userId = `server-user-${promptNumber}`;
+        messages.push(
+          { info: { id: userId, role: "user" }, parts: body.parts },
+          { info: { id: `assistant-${promptNumber}`, role: "assistant", parentID: userId }, parts: [{ type: "text", text: `answer-${promptNumber}` }] },
+        );
+        return new Response(null, { status: 204 });
+      }
+      return Response.json(messages);
+    },
+  });
+
+  const first = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "first", system: "bounded", attachments: [] });
+  const second = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "second", system: "bounded", attachments: [] });
+  assert.equal(first.text, "answer-1");
+  assert.equal(second.text, "answer-2");
+});
+
 test("adapter binds one uniquely named scoped MCP and enables only that server for the prompt", async () => {
   const calls: Array<{ path: string; body: any }> = [];
-  let userMessageId = "";
+  let prompted = false;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
@@ -150,8 +188,11 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
       const body = init?.body ? JSON.parse(String(init.body)) : null;
       calls.push({ path, body });
       if (path === "/mcp" || path.endsWith("/disconnect")) return Response.json({});
-      if (path.endsWith("/prompt_async")) { userMessageId = body.messageID; return new Response(null, { status: 204 }); }
-      return Response.json([{ info: { id: "ok", role: "assistant", parentID: userMessageId }, parts: [{ type: "text", text: "scoped answer" }] }]);
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "change" }] },
+        { info: { id: "ok", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "scoped answer" }] },
+      ] : []);
     },
   });
   const scopeId = "turn_scoped_binding";
@@ -185,48 +226,52 @@ test("adapter does not persist bounded reconstruction context as a synthetic use
 });
 
 test("adapter ignores a stale assistant and waits for the response parented to this prompt", async () => {
-  let requestedMessageId = "";
+  let prompted = false;
   let polls = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/prompt_async")) {
-        requestedMessageId = JSON.parse(String(init?.body)).messageID;
+        prompted = true;
         return new Response(null, { status: 204 });
       }
       polls += 1;
       const messages: any[] = [{ info: { id: "stale", role: "assistant", parentID: "older-user" }, parts: [{ type: "text", text: "old answer" }] }];
-      if (polls > 1) messages.push({ info: { id: "fresh", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "text", text: "new answer" }] });
+      if (prompted) messages.push({ info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "next" }] });
+      if (polls > 2) messages.push({ info: { id: "fresh", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "new answer" }] });
       return Response.json(messages);
     },
   });
   const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "next", system: "bounded", attachments: [] });
   assert.equal(result.text, "new answer");
-  assert.equal(polls, 2);
+  assert.equal(polls, 3);
 });
 
 test("adapter waits past a tool-only assistant segment for the final text segment", async () => {
-  let requestedMessageId = "";
+  let prompted = false;
   let polls = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/prompt_async")) {
-        requestedMessageId = JSON.parse(String(init?.body)).messageID;
+        prompted = true;
         return new Response(null, { status: 204 });
       }
       polls += 1;
-      const messages: any[] = [{ info: { id: "tool-segment", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] }];
-      if (polls > 1) messages.push({ info: { id: "final-segment", role: "assistant", parentID: requestedMessageId }, parts: [{ type: "text", text: "final answer" }] });
+      const messages: any[] = prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
+        { info: { id: "tool-segment", role: "assistant", parentID: "server-user" }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] },
+      ] : [];
+      if (polls > 2) messages.push({ info: { id: "final-segment", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "final answer" }] });
       return Response.json(messages);
     },
   });
   const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "next", system: "bounded", attachments: [] });
   assert.equal(result.text, "final answer");
   assert.equal(result.messageId, "final-segment");
-  assert.equal(polls, 2);
+  assert.equal(polls, 3);
 });
 
 test("session manager reuses one available session per conversation", async () => {
@@ -245,6 +290,29 @@ test("session manager reuses one available session per conversation", async () =
     ["external-one", { providerId: "provider-z", modelId: "model-2" }],
     ["external-one", { providerId: "provider-z", modelId: "model-2" }],
   ]);
+});
+
+test("a failed prompt retires its session before the next turn rebuilds", async () => {
+  const repository = new MemoryRepository();
+  repository.runtime.session = { generation: 3, state: "available", externalSessionRef: "external-one" };
+  const openCode = new FakeConversationOpenCode();
+  openCode.existing.add("external-one");
+  openCode.failPrompt = new Error("timed out after OpenCode accepted the prompt");
+  const manager = new AgentConversationSessionManager(repository, openCode);
+
+  const failed = await manager.prompt("conversation-a", context(), "first");
+  assert.deepEqual(failed, { mode: "read_only", conversationId: "conversation-a", reason: "opencode_unavailable", retryable: true });
+  assert.deepEqual(openCode.aborted, ["external-one"]);
+  assert.deepEqual(repository.lost, [{
+    conversationId: "conversation-a", generation: 3, expectedExternalSessionRef: "external-one",
+    reason: "prompt_failed:opencode_unavailable",
+  }]);
+
+  openCode.failPrompt = undefined;
+  const recovered = await manager.prompt("conversation-a", context(), "second");
+  assert.equal(recovered.mode, "live");
+  assert.deepEqual(openCode.prompts.map((item) => item.sessionId), ["external-one", "external-1"]);
+  assert.equal(repository.activated.at(-1)?.generation, 4);
 });
 
 test("a second named conversation receives an independent external session", async () => {
