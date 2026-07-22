@@ -136,6 +136,11 @@ The ownership closure is:
 - **Conversation:** the conversation row, its messages, temporary document
   cards, action records when present, and attachments still owned by that
   conversation. Copies adopted by a model or project are excluded.
+- **Temporary Document:** the document row only. Its source message and owning
+  conversation are references, not descendants, and are explicitly excluded.
+- **Experiment:** the experiment-configuration row only. Runs that freeze or
+  reference the configuration are blocking references; their rows, indexes,
+  and files are explicitly excluded.
 - **Run:** the run row, its output and bounded-event indexes, and files in that
   run's exact object directory. The experiment configuration and parent project
   are excluded.
@@ -143,7 +148,10 @@ The ownership closure is:
 Archive and trash are lifecycle states, not ownership edges. Trashing or
 previewing a source model cannot reach project copies; deleting a conversation
 cannot reach adopted copies. Shared references are reported as exclusions or
-blockers rather than followed.
+blockers rather than followed. Trash remains reversible and is not blocked by
+an adopted copy. A future physical purge of a source attachment or its
+conversation is blocked while an adopted Model/Project copy retains the
+non-null `source_attachment_id`; provenance is never silently severed.
 
 Every previewed path must be recorded in SQLite, have the same owner as the row
 being traversed, and resolve beneath the exact directory

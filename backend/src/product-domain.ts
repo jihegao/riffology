@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 1 as const;
+export const PRODUCT_SCHEMA_VERSION = 2 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -6,6 +6,8 @@ export type Sha256Digest = string;
 
 export type LifecycleState = "active" | "archived" | "trashed";
 export type RestorableLifecycleState = Exclude<LifecycleState, "trashed">;
+export type ManagedResourceKind = "model" | "project" | "conversation" | "temporary_document" | "experiment" | "run";
+export type NamedManagedResourceKind = Exclude<ManagedResourceKind, "run">;
 export type ModelTechnicalStatus = "draft" | "checking" | "executable" | "failed";
 export type ModelRunMode = "visual" | "batch" | "both";
 export type ConversationProviderBinding = {
@@ -42,6 +44,7 @@ export type StoredObjectMetadata = {
   sizeBytes: number;
   sha256: Sha256Digest;
   sourceAttachmentId: ProductId | null;
+  adoptionPurpose: string | null;
   createdAt: IsoTimestamp;
 };
 
@@ -85,18 +88,16 @@ export type CreateProjectFromModelInput = {
   projectId: ProductId;
   projectName: string;
   sourceModelId: ProductId;
-  snapshotFiles: ProjectSnapshotFile[];
-  snapshotDigest: Sha256Digest;
-  executionDescription: Record<string, unknown>;
   createdAt: IsoTimestamp;
 };
 
 export type PermanentDeletePreview = {
-  target: { kind: "model" | "project" | "conversation" | "experiment" | "run"; id: ProductId };
-  records: Array<{ table: string; id: ProductId }>;
+  target: { kind: ManagedResourceKind; id: ProductId };
+  records: Array<{ table: string; key: Readonly<Record<string, string | number>> }>;
   files: StoredObjectMetadata[];
   totalBytes: number;
   blockingReferences: Array<{ kind: string; id: ProductId }>;
+  exclusions: Array<{ kind: string; id: ProductId; reason: string }>;
   /** Digest of the canonical, deterministically ordered preview payload. */
   previewToken: Sha256Digest;
   /** Digest of target and dependency state, used to reject stale previews. */
@@ -108,9 +109,9 @@ export interface ProductRepository {
   createProjectFromModel(input: CreateProjectFromModelInput): ProjectRecord;
   listModels(options?: { includeArchived?: boolean; includeTrashed?: boolean }): ModelRecord[];
   listProjects(options?: { includeArchived?: boolean; includeTrashed?: boolean }): ProjectRecord[];
-  renameResource(kind: "model" | "project" | "conversation" | "experiment", id: ProductId, name: string, updatedAt: IsoTimestamp): void;
-  archiveResource(kind: "model" | "project" | "conversation" | "experiment", id: ProductId, at: IsoTimestamp): void;
-  restoreResource(kind: "model" | "project" | "conversation" | "experiment" | "run", id: ProductId, at: IsoTimestamp): void;
-  trashResource(kind: "model" | "project" | "conversation" | "experiment" | "run", id: ProductId, at: IsoTimestamp): void;
-  previewPermanentDelete(kind: "model" | "project" | "conversation" | "experiment" | "run", id: ProductId): PermanentDeletePreview;
+  renameResource(kind: NamedManagedResourceKind, id: ProductId, name: string, updatedAt: IsoTimestamp): void;
+  archiveResource(kind: NamedManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
+  restoreResource(kind: ManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
+  trashResource(kind: ManagedResourceKind, id: ProductId, at: IsoTimestamp): void;
+  previewPermanentDelete(kind: ManagedResourceKind, id: ProductId): PermanentDeletePreview;
 }

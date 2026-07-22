@@ -4,6 +4,7 @@ import { PRODUCT_SCHEMA_VERSION } from "./product-domain.ts";
 const SQL = String.raw;
 
 export type ProductDatabase = DatabaseSync;
+export type ProductSchemaMigration = Readonly<{ version: number; sql: string }>;
 
 export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
   foreignKeys: true,
@@ -21,21 +22,65 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
   `);
 };
 
-export const initializeProductSchema = (database: ProductDatabase): void => {
+export const initializeProductSchema = (
+  database: ProductDatabase,
+  migrations: readonly ProductSchemaMigration[] = PRODUCT_SCHEMA_MIGRATIONS,
+): void => {
   configureProductDatabase(database);
+  assertMigrationSequence(migrations);
+  const installed = (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  const hasSchemaTable = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'product_schema'").get());
+  const declared = hasSchemaTable
+    ? (database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number } | undefined)?.version
+    : undefined;
+  if (installed > PRODUCT_SCHEMA_VERSION) throw new Error(`Unsupported product schema version: ${installed}`);
+  if (hasSchemaTable && declared !== installed) {
+    throw new Error(`Product schema version drift: user_version=${installed}, product_schema=${String(declared ?? "missing")}`);
+  }
+  if (!hasSchemaTable && installed !== 0) {
+    throw new Error(`Product schema version drift: user_version=${installed}, product_schema=missing`);
+  }
+
   database.exec("BEGIN IMMEDIATE");
   try {
-    database.exec(PRODUCT_SCHEMA_SQL);
-    const version = database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number } | undefined;
-    if (!version || version.version !== PRODUCT_SCHEMA_VERSION) {
-      throw new Error(`Unsupported product schema version: ${String(version?.version ?? "missing")}`);
+    let version = installed;
+    for (const migration of migrations) {
+      if (migration.version <= version) continue;
+      if (migration.version !== version + 1) throw new Error(`Missing product schema migration from ${version} to ${migration.version}`);
+      database.exec(migration.sql);
+      assertProductDatabaseIntegrity(database, migration.version);
+      database.prepare("UPDATE product_schema SET version = ? WHERE singleton = 1").run(migration.version);
+      database.exec(`PRAGMA user_version = ${migration.version}`);
+      version = migration.version;
     }
-    database.exec(`PRAGMA user_version = ${PRODUCT_SCHEMA_VERSION}`);
+    const schemaRow = database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number } | undefined;
+    const userVersion = (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (!schemaRow || schemaRow.version !== PRODUCT_SCHEMA_VERSION || userVersion !== PRODUCT_SCHEMA_VERSION) {
+      throw new Error(`Incomplete product schema migration: user_version=${userVersion}, product_schema=${String(schemaRow?.version ?? "missing")}`);
+    }
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* preserve the initialization error */ }
     throw error;
   }
+};
+
+const assertProductDatabaseIntegrity = (database: ProductDatabase, migrationVersion: number): void => {
+  const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
+  if (foreignKeyViolation) {
+    throw new Error(`Product schema migration ${migrationVersion} found a foreign-key violation`);
+  }
+  const rows = database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+  if (rows.length !== 1 || rows[0]?.integrity_check !== "ok") {
+    throw new Error(`Product schema migration ${migrationVersion} failed SQLite integrity_check`);
+  }
+};
+
+const assertMigrationSequence = (migrations: readonly ProductSchemaMigration[]): void => {
+  if (migrations.length !== PRODUCT_SCHEMA_VERSION) throw new Error("Product schema migration list does not reach the current version");
+  migrations.forEach((migration, index) => {
+    if (migration.version !== index + 1) throw new Error(`Product schema migrations are not sequential at index ${index}`);
+  });
 };
 
 export const openProductDatabase = (path: string): ProductDatabase => {
@@ -55,7 +100,7 @@ export const PRODUCT_SCHEMA_SQL = SQL`
     version INTEGER NOT NULL CHECK (version >= 1),
     installed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   ) STRICT;
-  INSERT INTO product_schema (singleton, version) VALUES (1, ${PRODUCT_SCHEMA_VERSION})
+  INSERT INTO product_schema (singleton, version) VALUES (1, 1)
     ON CONFLICT(singleton) DO NOTHING;
 
   CREATE TABLE IF NOT EXISTS models (
@@ -383,3 +428,119 @@ export const PRODUCT_SCHEMA_SQL = SQL`
     SELECT RAISE(ABORT, 'trash target is immutable');
   END;
 `;
+
+const lifecycleIntegrityTriggers = (table: string): string => SQL`
+  CREATE TRIGGER ${table}_lifecycle_v2_insert
+  BEFORE INSERT ON ${table}
+  WHEN NOT (
+    (NEW.lifecycle_state = 'active' AND NEW.archived_at IS NULL AND NEW.trashed_at IS NULL AND NEW.pre_trash_state IS NULL)
+    OR (NEW.lifecycle_state = 'archived' AND NEW.archived_at IS NOT NULL AND NEW.trashed_at IS NULL AND NEW.pre_trash_state IS NULL)
+    OR (NEW.lifecycle_state = 'trashed' AND NEW.trashed_at IS NOT NULL AND NEW.pre_trash_state = 'active' AND NEW.archived_at IS NULL)
+    OR (NEW.lifecycle_state = 'trashed' AND NEW.trashed_at IS NOT NULL AND NEW.pre_trash_state = 'archived' AND NEW.archived_at IS NOT NULL)
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'lifecycle timestamp and pre-trash state mismatch');
+  END;
+
+  CREATE TRIGGER ${table}_lifecycle_v2_update
+  BEFORE UPDATE OF lifecycle_state, pre_trash_state, archived_at, trashed_at ON ${table}
+  WHEN NOT (
+    (NEW.lifecycle_state = 'active' AND NEW.archived_at IS NULL AND NEW.trashed_at IS NULL AND NEW.pre_trash_state IS NULL)
+    OR (NEW.lifecycle_state = 'archived' AND NEW.archived_at IS NOT NULL AND NEW.trashed_at IS NULL AND NEW.pre_trash_state IS NULL)
+    OR (NEW.lifecycle_state = 'trashed' AND NEW.trashed_at IS NOT NULL AND NEW.pre_trash_state = 'active' AND NEW.archived_at IS NULL)
+    OR (NEW.lifecycle_state = 'trashed' AND NEW.trashed_at IS NOT NULL AND NEW.pre_trash_state = 'archived' AND NEW.archived_at IS NOT NULL)
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'lifecycle timestamp and pre-trash state mismatch');
+  END;
+`;
+
+export const PRODUCT_SCHEMA_V2_SQL = SQL`
+  ALTER TABLE object_files ADD COLUMN adoption_purpose TEXT;
+
+  CREATE TEMP TABLE product_schema_v2_guard (
+    valid INTEGER NOT NULL CHECK (valid = 1)
+  ) STRICT;
+
+  INSERT INTO product_schema_v2_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM object_files
+    WHERE kind = 'project_model_snapshot' AND owner_project_id IS NULL
+  );
+
+  INSERT INTO product_schema_v2_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1
+    FROM object_files f
+    WHERE (f.kind = 'adopted_attachment' AND (
+        f.source_attachment_id IS NULL
+        OR f.adoption_purpose IS NULL
+        OR length(trim(f.adoption_purpose)) = 0
+        OR NOT EXISTS (
+          SELECT 1
+          FROM attachments a
+          JOIN conversations c ON c.id = a.conversation_id
+          WHERE a.id = f.source_attachment_id
+            AND ((f.owner_model_id IS NOT NULL AND c.model_id = f.owner_model_id)
+              OR (f.owner_project_id IS NOT NULL AND c.project_id = f.owner_project_id))
+        )
+      ))
+      OR (f.kind != 'adopted_attachment' AND (f.source_attachment_id IS NOT NULL OR f.adoption_purpose IS NOT NULL))
+  );
+
+  ${["models", "projects", "conversations", "temporary_documents", "experiment_configurations"].map((table) => SQL`
+    INSERT INTO product_schema_v2_guard(valid)
+    SELECT 0 WHERE EXISTS (
+      SELECT 1 FROM ${table}
+      WHERE NOT (
+        (lifecycle_state = 'active' AND archived_at IS NULL AND trashed_at IS NULL AND pre_trash_state IS NULL)
+        OR (lifecycle_state = 'archived' AND archived_at IS NOT NULL AND trashed_at IS NULL AND pre_trash_state IS NULL)
+        OR (lifecycle_state = 'trashed' AND trashed_at IS NOT NULL AND pre_trash_state = 'active' AND archived_at IS NULL)
+        OR (lifecycle_state = 'trashed' AND trashed_at IS NOT NULL AND pre_trash_state = 'archived' AND archived_at IS NOT NULL)
+      )
+    );
+  `).join("\n")}
+
+  DROP TABLE product_schema_v2_guard;
+
+  CREATE TRIGGER object_file_kind_owner_v2_insert
+  BEFORE INSERT ON object_files
+  WHEN (NEW.kind = 'project_model_snapshot' AND NEW.owner_project_id IS NULL)
+    OR (NEW.kind = 'adopted_attachment' AND (
+      NEW.source_attachment_id IS NULL OR NEW.adoption_purpose IS NULL OR length(trim(NEW.adoption_purpose)) = 0
+    ))
+    OR (NEW.kind != 'adopted_attachment' AND (NEW.source_attachment_id IS NOT NULL OR NEW.adoption_purpose IS NOT NULL))
+  BEGIN
+    SELECT RAISE(ABORT, 'object file kind ownership or adoption metadata mismatch');
+  END;
+
+  CREATE TRIGGER adopted_attachment_scope_v2_insert
+  BEFORE INSERT ON object_files WHEN NEW.kind = 'adopted_attachment' AND NEW.source_attachment_id IS NOT NULL
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM attachments a
+      JOIN conversations c ON c.id = a.conversation_id
+      WHERE a.id = NEW.source_attachment_id
+        AND ((NEW.owner_model_id IS NOT NULL AND c.model_id = NEW.owner_model_id)
+          OR (NEW.owner_project_id IS NOT NULL AND c.project_id = NEW.owner_project_id))
+    ) THEN RAISE(ABORT, 'adopted attachment owner does not match source conversation owner') END;
+  END;
+
+  CREATE TRIGGER object_file_adoption_purpose_immutable_v2
+  BEFORE UPDATE OF adoption_purpose ON object_files
+  BEGIN
+    SELECT RAISE(ABORT, 'object file adoption purpose is immutable');
+  END;
+
+  ${lifecycleIntegrityTriggers("models")}
+  ${lifecycleIntegrityTriggers("projects")}
+  ${lifecycleIntegrityTriggers("conversations")}
+  ${lifecycleIntegrityTriggers("temporary_documents")}
+  ${lifecycleIntegrityTriggers("experiment_configurations")}
+`;
+
+export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
+  Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
+  Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
+]);
