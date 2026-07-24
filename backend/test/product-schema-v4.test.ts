@@ -10,6 +10,7 @@ import {
   PRODUCT_SCHEMA_V2_SQL,
   PRODUCT_SCHEMA_V3_SQL,
   PRODUCT_SCHEMA_V4_SQL,
+  withAtomicBatchSuccessRunContext,
 } from "../src/product-schema.ts";
 
 const NOW = "2026-07-24T00:00:00.000Z";
@@ -309,36 +310,45 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
     insertV4Run(database);
     assert.throws(() => database.prepare("UPDATE runs SET sample_plan_sha256 = ? WHERE id = 'run_alpha'").run(DIGEST_B),
       /run frozen contract is immutable/u);
+    assert.throws(() => database.prepare(
+      "UPDATE runs SET terminal_code = 'premature' WHERE id = 'run_alpha'",
+    ).run(), /v4 run (?:evidence does not match status|terminal evidence requires one terminal transition)/u);
     assert.throws(() => database.prepare("UPDATE runs SET status = 'succeeded' WHERE id = 'run_alpha'").run(),
-      /invalid v4 run status transition|v4 run timestamps do not match status/u);
-    database.prepare(`INSERT INTO object_files
+      /v4 run success requires atomic batch success context/u);
+    assert.throws(() => database.prepare(`INSERT INTO object_files
       (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
       VALUES ('file_output_v4', 'run_alpha', 'run_file', 'result.csv', 'text/csv', 1, ?, ?)`
-    ).run(DIGEST_A, NOW);
-    assert.throws(() => database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, contract_version,
-        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
-      VALUES ('output_bad_sample', 'run_alpha', 'file_output_v4', 'result', 'table', 4, 0, ?, 'table', ?, ?)`
-    ).run(DIGEST_B, outputContractDigest(DIGEST_B), NOW), /new output requires v4 run contract/u);
-    database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, contract_version,
-        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
-      VALUES ('output_v4', 'run_alpha', 'file_output_v4', 'result', 'table', 4, 0, ?, 'table', ?, ?)`
-    ).run(DIGEST_A, outputContractDigest(DIGEST_A), NOW);
-    for (const statement of [
-      "UPDATE output_indexes SET logical_name = 'changed' WHERE id = 'output_v4'",
-      "UPDATE output_indexes SET output_type = 'document' WHERE id = 'output_v4'",
-      "UPDATE output_indexes SET declared_role = 'document' WHERE id = 'output_v4'",
-    ]) assert.throws(() => database.prepare(statement).run(), /output binding is immutable/u);
+    ).run(DIGEST_A, NOW), /v4 run output object requires atomic successful terminal context/u);
 
+    database.prepare("INSERT INTO dispatcher_state (singleton, generation, activated_at) VALUES (1, ?, ?)")
+      .run(DIGEST_A, NOW);
     database.prepare(`INSERT INTO run_attempts
       (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
       VALUES ('attempt_alpha', 'run_alpha', 1, ?, 'claimed', ?, ?)`
     ).run(DIGEST_A, NOW, NOW);
     assert.throws(() => database.prepare(`INSERT INTO run_attempts
+      (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at,
+        lease_expires_at, finished_at)
+      VALUES ('attempt_terminal_insert', 'run_alpha', 2, ?, 'failed', ?, ?, ?)`
+    ).run(DIGEST_A, NOW, NOW, NOW), /new run attempt requires claimed evidence shape|UNIQUE constraint failed/u);
+    assert.throws(() => database.prepare(`INSERT INTO run_attempts
       (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
       VALUES ('attempt_duplicate', 'run_alpha', 2, ?, 'claimed', ?, ?)`
-    ).run(DIGEST_B, NOW, NOW), /UNIQUE constraint failed/u);
+    ).run(DIGEST_A, NOW, NOW), /UNIQUE constraint failed/u);
+    database.prepare(
+      "UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = 'run_alpha'",
+    ).run(NOW, NOW);
+    database.prepare(
+      "UPDATE run_attempts SET state = 'starting', started_at = ? WHERE id = 'attempt_alpha'",
+    ).run(NOW);
+    database.prepare(
+      "UPDATE run_attempts SET state = 'running', heartbeat_at = ? WHERE id = 'attempt_alpha'",
+    ).run(NOW);
+    assert.throws(() => database.prepare(`INSERT INTO object_files
+      (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
+      VALUES ('file_running_raw', 'run_alpha', 'run_file', 'running-raw.json',
+        'application/json', 1, ?, ?)`
+    ).run(DIGEST_A, NOW), /v4 run output object requires atomic successful terminal context/u);
 
     database.prepare(`INSERT INTO process_attempts
       (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
@@ -350,8 +360,161 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
         process_group_id, launch_gate_state, state, launched_at)
       VALUES ('process_bad_sample', 'attempt_alpha', 'batch', 0, ?, 102, 'start-102', 102, 'blocked', 'blocked', ?)`
     ).run(DIGEST_B, NOW), /process attempt run or sample mismatch|UNIQUE constraint failed/u);
+    assert.throws(() => database.prepare(`INSERT INTO process_attempts
+      (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
+        process_group_id, launch_gate_state, state, launched_at, exited_at, exit_code)
+      VALUES ('process_prefilled_exit', 'attempt_alpha', 'batch', 0, ?, 102, 'start-102', 102,
+        'blocked', 'blocked', ?, ?, 0)`
+    ).run(DIGEST_A, NOW, NOW), /new process attempt requires blocked evidence shape|UNIQUE constraint failed/u);
     assert.throws(() => database.prepare("UPDATE process_attempts SET pid = 999 WHERE id = 'process_alpha'").run(),
       /process attempt identity is immutable/u);
+    assert.throws(() => database.prepare(
+      "UPDATE process_attempts SET state = 'released' WHERE id = 'process_alpha'",
+    ).run(), /process attempt evidence does not match gate and state|CHECK constraint failed/u);
+    assert.throws(() => database.prepare(
+      "UPDATE process_attempts SET exited_at = ?, exit_code = 0 WHERE id = 'process_alpha'",
+    ).run(NOW), /process exit evidence requires one exited transition|process attempt evidence does not match gate and state/u);
+    database.prepare(
+      `UPDATE process_attempts
+        SET launch_gate_state = 'released', state = 'released', started_at = ?
+        WHERE id = 'process_alpha'`,
+    ).run(NOW);
+    database.prepare(
+      "UPDATE process_attempts SET state = 'running', heartbeat_at = ? WHERE id = 'process_alpha'",
+    ).run(NOW);
+    database.prepare(
+      "UPDATE process_attempts SET state = 'exited', exited_at = ?, exit_code = 0 WHERE id = 'process_alpha'",
+    ).run(NOW);
+    assert.throws(() => database.prepare(
+      "UPDATE process_attempts SET exit_code = 1 WHERE id = 'process_alpha'",
+    ).run(), /process exit evidence requires one exited transition/u);
+    database.prepare(
+      "UPDATE process_attempts SET state = 'cleanup_complete', cleanup_receipt_sha256 = ? WHERE id = 'process_alpha'",
+    ).run(DIGEST_A);
+    assert.throws(() => database.prepare(
+      "UPDATE process_attempts SET heartbeat_at = ? WHERE id = 'process_alpha'",
+    ).run(DIGEST_B), /terminal process attempt is immutable/u);
+
+    insertModelAndProject(database, "unverified");
+    insertV4Experiment(database, "unverified");
+    insertV4Run(database, "unverified");
+    database.prepare(`INSERT INTO run_attempts
+      (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
+      VALUES ('attempt_unverified', 'run_unverified', 1, ?, 'claimed', ?, ?)`
+    ).run(DIGEST_A, NOW, NOW);
+    database.prepare(
+      "UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = 'run_unverified'",
+    ).run(NOW, NOW);
+    database.prepare(
+      "UPDATE run_attempts SET state = 'starting', started_at = ? WHERE id = 'attempt_unverified'",
+    ).run(NOW);
+    database.prepare(
+      "UPDATE run_attempts SET state = 'running', heartbeat_at = ? WHERE id = 'attempt_unverified'",
+    ).run(NOW);
+    database.prepare(`INSERT INTO process_attempts
+      (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
+        process_group_id, launch_gate_state, state, launched_at)
+      VALUES ('process_unverified', 'attempt_unverified', 'batch', 0, ?, 202, 'start-202',
+        202, 'blocked', 'blocked', ?)`
+    ).run(DIGEST_A, NOW);
+    database.prepare(`UPDATE process_attempts
+      SET launch_gate_state = 'released', state = 'released', started_at = ?
+      WHERE id = 'process_unverified'`
+    ).run(NOW);
+    database.prepare(
+      "UPDATE process_attempts SET state = 'running', heartbeat_at = ? WHERE id = 'process_unverified'",
+    ).run(NOW);
+    database.prepare(`UPDATE process_attempts
+      SET state = 'exited', exited_at = ?, exit_code = NULL, exit_signal = 'SIGKILL'
+      WHERE id = 'process_unverified'`
+    ).run(NOW);
+    database.prepare(
+      "UPDATE process_attempts SET state = 'cleanup_unverified' WHERE id = 'process_unverified'",
+    ).run();
+    for (const statement of [
+      "UPDATE process_attempts SET heartbeat_at = 'later' WHERE id = 'process_unverified'",
+      "UPDATE process_attempts SET started_at = 'later' WHERE id = 'process_unverified'",
+      "UPDATE process_attempts SET launch_gate_state = 'timed_out' WHERE id = 'process_unverified'",
+      "UPDATE process_attempts SET exit_signal = 'SIGTERM' WHERE id = 'process_unverified'",
+      `UPDATE process_attempts SET cleanup_receipt_sha256 = '${DIGEST_B}' WHERE id = 'process_unverified'`,
+    ]) assert.throws(() => database.prepare(statement).run(), /terminal process attempt is immutable/u);
+
+    assert.throws(() => database.prepare(`UPDATE runs
+      SET terminal_code = 'premature', terminal_diagnostics_json = '{}',
+        resource_overview_json = '{}', finished_at = ?
+      WHERE id = 'run_alpha'`
+    ).run(NOW), /v4 run terminal evidence requires one terminal transition|v4 run evidence does not match status/u);
+    withAtomicBatchSuccessRunContext(database, "run_alpha", () => {
+      database.prepare(
+        `UPDATE run_attempts
+          SET state = 'succeeded', finished_at = ?, heartbeat_at = ?
+          WHERE id = 'attempt_alpha'`,
+      ).run(NOW, NOW);
+      database.prepare(`UPDATE runs
+        SET status = 'succeeded', terminal_code = 'run_succeeded',
+          terminal_diagnostics_json = '{}', resource_overview_json = '{}',
+          finished_at = ?, updated_at = ?
+        WHERE id = 'run_alpha'`
+      ).run(NOW, NOW);
+      database.prepare(`INSERT INTO object_files
+        (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
+        VALUES ('file_output_v4', 'run_alpha', 'run_file', 'result.csv', 'text/csv', 1, ?, ?)`
+      ).run(DIGEST_A, NOW);
+      assert.throws(() => database.prepare(`INSERT INTO output_indexes
+        (id, run_id, object_file_id, logical_name, output_type, contract_version,
+          sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+        VALUES ('output_bad_sample', 'run_alpha', 'file_output_v4', 'result', 'table', 4, 0, ?, 'table', ?, ?)`
+      ).run(DIGEST_B, outputContractDigest(DIGEST_B), NOW), /new output requires atomic v4 run success/u);
+      database.prepare(`INSERT INTO output_indexes
+        (id, run_id, object_file_id, logical_name, output_type, contract_version,
+          sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+        VALUES ('output_v4', 'run_alpha', 'file_output_v4', 'result', 'table', 4, 0, ?, 'table', ?, ?)`
+      ).run(DIGEST_A, outputContractDigest(DIGEST_A), NOW);
+    });
+    assert.throws(() => database.prepare(`INSERT INTO output_indexes
+      (id, run_id, object_file_id, logical_name, output_type, contract_version,
+        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+      VALUES ('output_after_commit', 'run_alpha', 'file_output_v4', 'result-2', 'table', 4, 0, ?, 'table', ?, ?)`
+    ).run(DIGEST_A, outputContractDigest(DIGEST_A, "result-2"), NOW), /new output requires atomic v4 run success/u);
+    for (const statement of [
+      "UPDATE output_indexes SET logical_name = 'changed' WHERE id = 'output_v4'",
+      "UPDATE output_indexes SET output_type = 'document' WHERE id = 'output_v4'",
+      "UPDATE output_indexes SET declared_role = 'document' WHERE id = 'output_v4'",
+    ]) assert.throws(() => database.prepare(statement).run(), /output binding is immutable/u);
+    assert.throws(() => database.prepare(
+      "UPDATE runs SET terminal_code = 'changed' WHERE id = 'run_alpha'",
+    ).run(), /v4 run terminal evidence is immutable/u);
+    assert.throws(() => database.prepare(
+      "UPDATE run_attempts SET heartbeat_at = ? WHERE id = 'attempt_alpha'",
+    ).run(DIGEST_B), /terminal run attempt is immutable/u);
+
+    insertModelAndProject(database, "failed");
+    insertV4Experiment(database, "failed");
+    insertV4Run(database, "failed");
+    database.prepare(`UPDATE runs
+      SET status = 'failed', terminal_code = 'admission_failed',
+        terminal_diagnostics_json = '{}', resource_overview_json = '{}',
+        finished_at = ?, updated_at = ?
+      WHERE id = 'run_failed'`
+    ).run(NOW, NOW);
+    assert.throws(() => database.prepare(`INSERT INTO object_files
+      (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
+      VALUES ('file_failed_raw', 'run_failed', 'run_file', 'failed-raw.json',
+        'application/json', 1, ?, ?)`
+    ).run(DIGEST_A, NOW), /v4 run output object requires atomic successful terminal context/u);
+    assert.throws(() => database.prepare(`INSERT INTO output_indexes
+      (id, run_id, object_file_id, logical_name, output_type, contract_version,
+        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+      VALUES ('output_failed_raw', 'run_failed', 'file_output_v4', 'result', 'table',
+        4, 0, ?, 'table', ?, ?)`
+    ).run(DIGEST_A, canonicalDigest({
+      runId: "run_failed",
+      logicalName: "result",
+      outputType: "table",
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      declaredRole: "table",
+    }), NOW), /new output requires atomic v4 run success|output object ownership mismatch/u);
 
     database.prepare(`INSERT INTO run_commands
       (id, run_id, command_kind, request_key, intent_sha256, state, outcome_json, created_at, updated_at)
@@ -367,6 +530,13 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
     ).run(DIGEST_A, NOW), /run receipt payload digest mismatch/u);
     assert.throws(() => database.prepare("UPDATE run_command_receipts SET receipt_kind = 'changed' WHERE id = 'receipt_alpha'").run(),
       /run receipt is immutable/u);
+    database.prepare(`UPDATE runs
+      SET status = 'trashed', pre_trash_status = 'succeeded', trashed_at = ?
+      WHERE id = 'run_alpha'`
+    ).run(NOW);
+    assert.throws(() => database.prepare(
+      "UPDATE runs SET terminal_diagnostics_json = '{\"changed\":true}' WHERE id = 'run_alpha'",
+    ).run(), /v4 run terminal evidence is immutable/u);
   } finally {
     database.close();
   }

@@ -19,14 +19,17 @@
 > [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 > The first foundation slice landed the fixed-copy Project/workspace. A3-1a
 > adds schema v4, canonical deterministic sample planning, experiment
-> configuration/record digest CAS with immutable historical receipts, Store-only
-> execution-description-v2
-> admission, and an atomic frozen queued-run receipt. The generic Stage 2
-> scaffold remains execution-description v1 and still needs an explicit
-> upgrade. Public run start, dispatch, batch/visual execution, cancellation,
-> outputs/events, completion cards, scoped Playwright access, and ordinary wind
-> import remain unimplemented. #15 owns the final shared shell and browser
-> acceptance.
+> configuration/record digest CAS with immutable historical receipts,
+> execution-description-v2 admission, and an atomic frozen queued-run receipt.
+> A3-1b adds the public run start/read routes, durable dispatch, a real generic
+> batch process per sample, hard enforcement of the currently supported
+> server-owned limits, and atomic successful output publication. The official
+> generic scaffold now emits execution-description v2 and declares batch only;
+> v1 Models are not silently upgraded. Visual and batch `domainEvents` are
+> explicit current rejections. Cross-restart attempt/scratch recovery,
+> user-cancel races, and exactly-once completion cards remain A3-1c, followed by
+> visual, Playwright, and ordinary wind slices. This is not completion evidence
+> for Stage 3. #15 owns the final shared shell and browser acceptance.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

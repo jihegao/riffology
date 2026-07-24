@@ -4,13 +4,19 @@ Status: active Stage 3 contract for Issue #14. The first foundation slice
 implemented fixed-copy Project creation and the Project workspace projection.
 A3-1a adds schema v4, the closed canonical input-schema profile, deterministic
 experiment/sample planning, configuration-and-record digest compare-and-set
-with immutable historical command receipts, Store-only execution-description-v2 admission, and
-atomic creation/replay of a frozen `queued` run/start receipt. The generic Stage
-2 scaffold remains execution-description v1 and is not silently upgraded. A3-1a
-does not expose a public run-start route or launch model code. Dispatch, batch or
-visual process launch, cancellation races,
-output/event ingestion, completion cards, Playwright access, and the ordinary
-wind import remain gated by the contracts and evidence in this document.
+with immutable historical command receipts, execution-description-v2
+admission, and atomic creation/replay of a frozen `queued` run/start receipt.
+A3-1b adds the public run start/read routes, durable dispatch, a real generic
+batch process per sample, hard enforcement of the currently supported
+server-owned limits, and atomic successful output publication. The official
+generic scaffold now emits execution-description v2 and declares batch only;
+existing v1 Models are not silently upgraded.
+
+Visual starts and batch `domainEvents` are explicit current rejections.
+Cross-restart attempt/scratch recovery, the user-cancel race and receipts, and
+exactly-once completion-card delivery remain A3-1c work. Visual execution,
+Playwright access, and ordinary wind import remain later Stage 3 slices. This
+document therefore does not claim that Stage 3 is complete.
 
 This document is subordinate to the
 [Milestone A product contract](milestone-a-product-contract.md), builds on the
@@ -21,7 +27,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented foundation boundary is intentionally narrow:
+The implemented A3-1a/A3-1b boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -37,30 +43,55 @@ The implemented foundation boundary is intentionally narrow:
   rejects stale configuration or metadata updates, and preserves exact
   historical update responses on command replay;
 - schema v4 migrates v3 experiment/run/output rows to permanent read-only
-  records, stores canonical digests, and introduces frozen run, command,
-  receipt, and unified process-attempt identities without implementing their
-  runtime producer;
-- the Store-only start admission requires a copied execution-description v2,
+  records, stores canonical digests, and constrains frozen run, command,
+  receipt, and unified process-attempt identities;
+- public start admission requires a copied execution-description v2,
   validates its schema profile, smoke input, output/cancellation declarations,
   requested run capability, and replans against the copied input schema;
-- the Store can atomically create and replay a contract-v4 `queued` run with
-  copied Project/execution/configuration/sample-plan/limits digests; and
+- `POST /api/projects/{projectId}/runs` atomically creates or replays the exact
+  contract-v4 `queued` run receipt with copied
+  Project/execution/configuration/sample-plan/limits digests;
+- the durable dispatcher claims an eligible queue generation, verifies the
+  exact copied Project execution root, and starts the real generic batch
+  supervisor;
+- the supervisor launches one restricted `riff-batch-v1` process per sample
+  behind a durable launch gate, records process identity, enforces the currently
+  supported hard limits, and atomically publishes successful output bytes,
+  indexes, process state, and run state;
+- database triggers close queued/running/terminal run evidence, one-time process
+  exit and terminal cleanup evidence, gate/state combinations, and the internal
+  atomic-success context required for v4 output objects/indexes;
+- dispatcher heartbeat, capability, supervision, consumption, and publication
+  exceptions share one best-effort unwind; only durably exited and cleaned
+  processes can reach a failed terminal, otherwise the run remains
+  recovery-required;
+- `GET /api/projects/{projectId}/runs/{runId}` returns only the bounded run and
+  checked-output projection; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
 The product database is schema v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
-canonical configuration and sample-plan digests. The Store start primitive is
-not a public process-launch API.
+canonical configuration and sample-plan digests. The generic scaffold is now
+execution-description v2 and batch-only; v1 Models require an explicit reviewed
+re-scaffold/upgrade path.
 
-The following are not implemented by the current A3-1a boundary and must not be
+The following are not implemented by the current A3-1b boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- execution-description-v2 scaffold migration or a public upgrade command;
-- a public run-start/cancel API, dispatcher, supervisor, or recovery loop;
-- atomic result/event ingestion and completion cards;
+- a public cancel API, cancel-versus-terminal receipt race, or full
+  cross-restart attempt/scratch recovery;
+- exactly-once completion-card publication;
+- batch domain-event ingestion or public output list/download routes;
 - a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
 - a versioned wind installation manifest or example Project.
+
+Same-process shutdown does abort verified processes, clean owned scratch, and
+persist `dispatcher_shutdown`. Startup with prior unresolved live attempts
+fails closed with `dispatcher_recovery_required`; that is not the A3-1c
+cross-restart recovery implementation. Visual starts fail with
+`capability_not_available`, and batch descriptions that declare
+`domainEvents` fail with `domain_events_not_supported`.
 
 ## Outcome and stage boundary
 
@@ -388,8 +419,15 @@ admission/proxy errors include `visual_websocket_not_declared`,
 
 ### Official scaffold migration
 
-Execution v1 is never guessed into v2. The server owns a checked-in canonical
-manifest with:
+New Models created from the current server-owned generic scaffold receive an
+execution-description v2 Python contract with only `riff-batch-v1`, canonical
+input-schema profile, smoke input, cancellation declaration, and declared
+outputs. This is the A3-1b runnable generic fixture; it does not declare visual
+or `domainEvents`.
+
+Execution v1 is never guessed into v2. A reviewed migration/upgrade command is
+still future work. Its target contract uses a checked-in canonical manifest
+with:
 
 ```text
 manifestId = "riff-python-execution-v2"
@@ -397,14 +435,14 @@ manifestVersion = 1
 manifestDigest = sha256(canonical JSON of the manifest excluding manifestDigest)
 ```
 
-The manifest pins every generated file path, size, digest, execution
+That future manifest pins every generated file path, size, digest, execution
 description, and predecessor scaffold identity/digest. Automatic upgrade is
 allowed only when the Model records the exact allowlisted predecessor
 `manifestId`, version, and digest and every generated byte still matches that
 predecessor. Any edit, missing identity, or digest drift returns
 `execution_protocol_upgrade_required`; no user-authored Model or existing
-Project snapshot is rewritten. The implementation PR must check in the manifest
-and its concrete digest so tests can detect drift.
+Project snapshot is rewritten. The upgrade slice must check in the manifest and
+its concrete digest so tests can detect drift.
 
 Existing schema-v1 Models created before scaffold manifest metadata was stored
 have no provable predecessor identity and are never auto-upgraded, even if their
@@ -434,6 +472,14 @@ type RunLimitsV1 = {
 };
 ```
 
+A3-1b freezes these current server defaults: `wallTimeMs: 300000`,
+`startupTimeMs: 30000`, `terminationGraceMs: 5000`,
+`maxStdoutBytes: 1000000`, `maxStderrBytes: 1000000`,
+`maxOutputFiles: 256`, `maxOutputBytes: 64000000`,
+`maxEventCount: 10000`, `maxEventBytes: 16000000`,
+`maxSamples: 1000`, and `maxConcurrency: 4`. They are backend authority and
+cannot be overridden by the public start request.
+
 | Field | Scope, clock, aggregation, and terminal code |
 | --- | --- |
 | `wallTimeMs` | One run-attempt budget starting at committed dispatcher claim and ending at terminal commit. All batch samples share the remaining clock; visual startup and serving consume the same budget. Expiry terminates every verified process group with `run_wall_timeout`. |
@@ -445,28 +491,36 @@ type RunLimitsV1 = {
 | `maxSamples` | Admission-time exact frozen-plan length. Excess fails before queueing with `sample_limit_exceeded`. |
 | `maxConcurrency` | Per-run maximum platform-launched batch process groups. It is additionally bounded by a server-global dispatcher ceiling; unused capacity in one run cannot increase another run's frozen value. |
 
-The current macOS implementation may claim hard enforcement only for:
+The current A3-1b batch implementation may claim hard enforcement only for:
 
 - dispatcher admission of `maxSamples` and simultaneous platform-launched
   sample processes up to `maxConcurrency`;
-- monotonic wall/startup timers followed by exact process-group termination;
+- the monotonic batch `wallTimeMs` budget followed by verified process-group
+  termination;
 - bytes consumed from the platform-owned stdout/stderr pipes;
-- output/event file count and total bytes verified during ingestion; and
+- output file count and total bytes verified during atomic ingestion; and
 - bounded termination grace followed by a verified process-group kill and
   cleanup receipt.
 
+`startupTimeMs`, `maxEventCount`, and `maxEventBytes` are frozen reserved fields
+in A3-1b, not current enforcement claims: visual starts fail with
+`capability_not_available`, and batch `domainEvents` fail with
+`domain_events_not_supported`.
+
 Cross-limit precedence is deterministic by the first committed terminal receipt,
-not by which observer logged first. Output/event bytes beyond a limit are never
+not by which observer logged first. Output bytes beyond a limit are never
 published or silently truncated. Bounded diagnostic tails may be retained
 separately and are marked truncated.
 
 `cpuTimeMs`, `memoryBytes`, `maxProcesses`, and similar fields are not members of
 `RunLimitsV1`. The current host cannot prove hard CPU, resident-memory, or
-model-spawned child-process counts, so requests or execution descriptions that
-try to set them fail with `unsupported_run_limit`. Telemetry may report
-best-effort CPU or memory observations as `advisory`, but admission, success, and
-trust claims cannot depend on them. `sandbox-exec` filesystem/network policy is
-an access boundary, not a resource-limit implementation.
+model-spawned child-process counts. The A3-1b public request has no caller-limit
+fields, and the exact execution-v2 parser rejects extra description fields;
+future APIs must use `unsupported_run_limit` if they introduce an explicit
+request for one of these unsupported limits. Telemetry may report best-effort
+CPU or memory observations as `advisory`, but admission, success, and trust
+claims cannot depend on them. `sandbox-exec` filesystem/network policy is an
+access boundary, not a resource-limit implementation.
 
 ## Experiment configuration contract
 
@@ -827,7 +881,8 @@ chooses metrics, interprets results, ranks scenarios, or recommends a decision.
 ## HTTP API target
 
 Existing names remain canonical; implementation must not introduce a parallel
-`/experiments` resource:
+`/experiments` resource. A3-1b implements the two run routes marked current;
+the remaining run-control/output/event/visual routes stay target-only:
 
 ```text
 POST   /api/projects
@@ -836,34 +891,54 @@ GET    /api/projects/:projectId/workspace
 POST   /api/projects/:projectId/experiment-configs
 PATCH  /api/projects/:projectId/experiment-configs/:configId
 
-POST   /api/projects/:projectId/runs
-GET    /api/projects/:projectId/runs/:runId
-POST   /api/projects/:projectId/runs/:runId/cancel
-POST   /api/projects/:projectId/runs/:runId/trash
-POST   /api/projects/:projectId/runs/:runId/restore
+POST   /api/projects/:projectId/runs                 # current A3-1b
+GET    /api/projects/:projectId/runs/:runId          # current A3-1b
+POST   /api/projects/:projectId/runs/:runId/cancel   # target A3-1c
+POST   /api/projects/:projectId/runs/:runId/trash    # target
+POST   /api/projects/:projectId/runs/:runId/restore  # target
 
-POST   /api/browser-session/bootstrap
-GET    /api/projects/:projectId/runs/:runId/outputs
+POST   /api/browser-session/bootstrap                              # target
+GET    /api/projects/:projectId/runs/:runId/outputs                # target
 GET    /api/projects/:projectId/runs/:runId/outputs/:outputId/download
-GET    /api/projects/:projectId/runs/:runId/events
-POST   /api/projects/:projectId/runs/:runId/visual-frame-session
+GET    /api/projects/:projectId/runs/:runId/events                 # target
+POST   /api/projects/:projectId/runs/:runId/visual-frame-session   # target
 GET|WS /api/projects/:projectId/runs/:runId/visual/<server-scoped-path>
 ```
 
-Create/update/start/cancel/trash/restore require command or expected-state keys
-as appropriate. All nested IDs are checked against the route Project. Bodies,
-JSON depth, names, lists, samples, logs, downloads, and event pages are bounded.
-Public DTOs omit attempts, commands, environment, paths, child ports, raw logs,
-proxy/Playwright capabilities, and OpenCode internals.
+The exact current start request is `{commandId, experimentConfigId,
+completionConversationId?}`. It returns `201` with
+`{schemaVersion: 1, commandId, runId, projectId, experimentConfigId,
+completionConversationId: string|null, status: "queued", runKind,
+sampleCount, createdAt}`. Same-command replay returns this exact receipt even
+after completion. Unknown fields, including caller-supplied limits or paths,
+fail with `422 unknown_field`.
 
-Stable error codes include `model_not_executable`,
-`execution_protocol_upgrade_required`, `project_snapshot_corrupt`,
-`capability_not_declared`, `stale_configuration`,
-`overlapping_sweep_pointer`, `duplicate_sample_seed`,
-`duplicate_sweep_value`, `invalid_sample_plan`, `sample_limit_exceeded`,
-`run_already_terminal`, `run_timeout`, `run_resource_limit`,
-`run_output_invalid`, `visual_unavailable`, and the WebSocket codes defined
-above.
+The current read response is the exact `ProjectRunDto` documented in
+[`backend-api.md`](backend-api.md): identity/ownership, status/timestamps,
+contract/read-only fields, `runKind`, cancel/terminal/card dispositions, and
+`outputs`. Each output contains only identity, logical/type/role/sample fields,
+contract/read-only fields, media type, size, SHA-256, and creation time.
+Non-succeeded runs return `outputs: []`.
+
+Create/update/start and later cancel/trash/restore require command or
+expected-state keys as appropriate. All nested IDs are checked against the route
+Project. Public DTOs omit attempts, commands, environment, paths, child ports,
+raw logs, proxy/Playwright capabilities, and OpenCode internals.
+
+Current admission/request codes include `unknown_field`, `invalid_request`,
+`resource_not_found`, `state_conflict`, `idempotency_conflict`,
+`legacy_contract_read_only`, `execution_protocol_upgrade_required`,
+`project_snapshot_corrupt`, `capability_not_declared`,
+`capability_not_available`, `domain_events_not_supported`,
+`invalid_sample_plan`, and `sample_limit_exceeded`. Current batch terminal
+codes are `batch_run_succeeded`, `batch_process_failed`,
+`run_wall_timeout`, `run_stdout_limit`, `run_stderr_limit`,
+`run_output_file_limit`, `run_output_byte_limit`, `run_output_invalid`,
+`process_cleanup_unverified`, `dispatcher_shutdown`,
+`dispatcher_heartbeat_failed`, `batch_publication_failed`, and the internal
+`batch_supervisor_failed`. Cancellation, visual, WebSocket, and event-specific
+codes elsewhere in this document remain target contracts until their slices
+land.
 
 ## Wind Model and example Project manifest
 
@@ -909,8 +984,14 @@ capabilities.
 
 ## Failure, restart, and cleanup
 
-Startup completes Stage 1/2 mutation/action recovery before dispatch and then
-reconciles v4 execution state:
+Current A3-1b same-process shutdown aborts active supervision, terminates the
+verified process group, removes only the owned scratch path, and records the run
+failed with `dispatcher_shutdown`. On startup it does not guess that a prior
+live attempt is dead or recovered: unresolved attempt/process state fails
+closed with `dispatcher_recovery_required`.
+
+A3-1c must implement and prove the following cross-restart reconciliation
+target after Stage 1/2 mutation/action recovery and before dispatch:
 
 - every contract-version-3 experiment/run/output remains read-only and outside
   dispatch, mutation, template, cleanup, and trash graphs regardless of status;
@@ -939,19 +1020,23 @@ Output indexes never resolve outside the owning Project/run object root.
 
 1. **Foundation — implemented before A3-1a:** fixed-copy Project API/workspace
    projection. This is not run evidence.
-2. **A3-1a frozen planning — implemented by the current change:** schema v4,
+2. **A3-1a frozen planning — implemented:** schema v4,
    public experiment create/update with configuration/record digest CAS and
-   exact replay, canonical
-   schema validator and sample planner, Store-only execution-v2 admission, and
-   an atomic frozen queued-run receipt. There is no public start or process
-   launch, and the generic scaffold remains v1.
-3. **Batch runtime:** durable queue, real generic batch subprocess, cancellation
-   and limits, atomic outputs/events, overview, recovery, and exactly-once cards.
-4. **Visual runtime:** real local visual process, health, scoped proxy/frame and
+   exact replay, canonical schema validator and sample planner, execution-v2
+   admission, and an atomic frozen queued-run receipt.
+3. **A3-1b generic batch runtime — implemented:** execution-v2 batch-only
+   scaffold, public start/read, durable dispatcher, real generic batch
+   subprocesses, currently supported hard limits, same-process shutdown
+   cleanup, and atomic successful output publication. Visual and
+   `domainEvents` are explicit rejections.
+4. **A3-1c batch lifecycle — pending:** cross-restart attempt/scratch recovery,
+   public user cancellation with committed race receipts, and exactly-once
+   completion cards.
+5. **Visual runtime — pending:** real local visual process, health, scoped proxy/frame and
    WebSocket limits, cancellation, recovery, and Playwright audit.
-5. **Wind import:** versioned manifest, normal technical check, example Project
+6. **Wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-6. **Integration:** focused/full suites, independent contract/security review,
+7. **Integration — pending:** focused/full suites, independent contract/security review,
    narrow Stage 3 browser evidence, documentation sync, PR merge, Issue #14
    closure, and local `main` synchronization.
 
@@ -960,6 +1045,18 @@ the historical wind-specific UI as proof of the full contract. Stage 4 / #15
 does not begin until Stage 3 is merged and accepted.
 
 ## Verification and acceptance matrix
+
+The final integrated A3-1b full backend run passed 256 tests with zero failures
+and one optional installed-OpenCode smoke skipped. Current evidence covers the foundation/schema/experiment
+rows, the batch portion of exact input freezing, v3 read-only behavior, public
+start/read, real generic batch launch/claim/process identity, supported hard
+batch limits, atomic successful outputs, negative visual/event admission, and
+same-process shutdown cleanup. It does not cover the pending A3-1c restart,
+cancel, or card requirements, nor the later visual, Playwright, wind, download,
+event, and browser rows.
+
+The matrix below remains the complete Stage 3 exit target; a row is not marked
+implemented merely because part of it is exercised by A3-1b:
 
 | Contract | Required evidence |
 | --- | --- |

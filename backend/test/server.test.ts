@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HttpOpenCodeAdapter, type OpenCodeAdapter, type OpenCodePrompt, type OpenCodeReadiness } from "../src/opencode-adapter.ts";
-import { BackendApp } from "../src/server.ts";
+import { BackendApp, configuredBatchPythonExecutable } from "../src/server.ts";
 import { HttpMesaAdapter } from "../src/mesa-adapter.ts";
 import { ApiError } from "../src/errors.ts";
 import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
@@ -42,6 +42,24 @@ class FakeMesa implements MesaAdapter {
     };
   }
 }
+
+test("batch Python configuration prefers an explicit option, then RIFF_MODEL_PYTHON", () => {
+  const previous = process.env.RIFF_MODEL_PYTHON;
+  try {
+    process.env.RIFF_MODEL_PYTHON = "/bin/sh";
+    assert.equal(configuredBatchPythonExecutable(), "/bin/sh");
+    assert.equal(configuredBatchPythonExecutable("/bin/bash"), "/bin/bash");
+    assert.throws(
+      () => configuredBatchPythonExecutable("/definitely/missing/riff-python"),
+      /configured batch Python is unavailable/u,
+    );
+    delete process.env.RIFF_MODEL_PYTHON;
+    assert.match(configuredBatchPythonExecutable(), /mesa_service\/\.venv\/bin\/python$/u);
+  } finally {
+    if (previous === undefined) delete process.env.RIFF_MODEL_PYTHON;
+    else process.env.RIFF_MODEL_PYTHON = previous;
+  }
+});
 
 class FakeOpenCode implements OpenCodeAdapter {
   prompts: OpenCodePrompt[] = [];

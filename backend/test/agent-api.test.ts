@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BackendApp } from "../src/server.ts";
-import { canonicalDigest } from "../src/canonical-json-v2.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { UnavailableMesaAdapter } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel, OpenCodeReadiness } from "../src/opencode-adapter.ts";
@@ -90,7 +89,11 @@ class ApiTechnicalChecker implements ModelTechnicalCheckerPort {
   }
 }
 
-const start = async (base: string, openCode: ApiOpenCode, technicalChecker: ModelTechnicalCheckerPort = new ApiTechnicalChecker()) => {
+const start = async (
+  base: string,
+  openCode: ApiOpenCode,
+  technicalChecker: ModelTechnicalCheckerPort = new ApiTechnicalChecker(),
+) => {
   await mkdir(join(base, "legacy"), { mode: 0o700, recursive: true });
   const app = new BackendApp({
     mesa: new UnavailableMesaAdapter(),
@@ -597,13 +600,43 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
     runMode: "batch",
     executionDescription: outputExecutionDescription,
     createdAt: "2026-07-24T04:00:00.000Z",
-    files: [{
-      id: "file_public_run_model",
-      kind: "model_code",
-      relativePath: "model.py",
-      mediaType: "text/x-python",
-      bytes: Buffer.from("print('projection')\n"),
-    }],
+    files: [
+      {
+        id: "file_public_run_model",
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        bytes: Buffer.from(`from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--riff-input", required=True, type=Path)
+parser.add_argument("--riff-output-dir", required=True, type=Path)
+args = parser.parse_args()
+envelope = json.loads(args.riff_input.read_text(encoding="utf-8"))
+target = args.riff_output_dir / "outputs" / "result.json"
+target.parent.mkdir(parents=True, exist_ok=True)
+payload = {
+    "sampleIndex": envelope["sampleIndex"],
+    "sampleId": envelope["sampleId"],
+    "seed": envelope["seed"],
+}
+target.write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\\n",
+    encoding="utf-8",
+)
+`),
+      },
+      {
+        id: "file_public_run_environment",
+        kind: "model_environment",
+        relativePath: "requirements.txt",
+        mediaType: "text/plain",
+        bytes: Buffer.from("# no external dependencies\n"),
+      },
+    ],
   });
   const outputProject = app.productStore!.createProjectFromModel({
     projectId: "project_public_run_projection",
@@ -629,54 +662,167 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
     plan: outputPlan,
     createdAt: "2026-07-24T04:00:00.000Z",
   });
-  app.productStore!.createFrozenRun({
-    commandId: "command_public_run_start",
-    runId: "run_public_projection",
-    projectId: outputProject.id,
-    experimentConfigId: "experiment_public_run_projection",
-    completionConversationId: null,
-    expectedConfigurationDigest: outputPlan.configurationDigest,
+  const eventExecutionDescription = structuredClone(outputExecutionDescription) as any;
+  eventExecutionDescription.batch.domainEvents = {
+    relativePath: "events.ndjson",
+    mediaType: "application/x-ndjson",
+    role: "diagnostic",
+  };
+  app.productStore!.createModel({
+    id: "model_domain_events_rejected",
+    name: "Domain events rejected",
+    technicalStatus: "executable",
+    runMode: "batch",
+    executionDescription: eventExecutionDescription,
+    createdAt: "2026-07-24T04:00:01.000Z",
+    files: [
+      {
+        id: "file_domain_events_model",
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        bytes: Buffer.from("raise SystemExit(0)\n"),
+      },
+      {
+        id: "file_domain_events_environment",
+        kind: "model_environment",
+        relativePath: "requirements.txt",
+        mediaType: "text/plain",
+        bytes: Buffer.from("# no external dependencies\n"),
+      },
+    ],
+  });
+  const eventProject = app.productStore!.createProjectFromModel({
+    projectId: "project_domain_events_rejected",
+    projectName: "Domain events rejected",
+    sourceModelId: "model_domain_events_rejected",
+    createdAt: "2026-07-24T04:00:01.000Z",
+  });
+  app.productStore!.createExperimentV4({
+    commandId: "command_domain_events_experiment",
+    id: "experiment_domain_events_rejected",
+    projectId: eventProject.id,
+    name: "Domain events rejected",
     plan: outputPlan,
-    projectSnapshotDigest: outputProject.modelSnapshotDigest,
-    executionDescriptionDigest: canonicalDigest(outputProject.executionDescription),
-    limits: {
+    createdAt: "2026-07-24T04:00:01.000Z",
+  });
+  const rejectedDomainEvents = await post(`${baseUrl}/api/projects/${eventProject.id}/runs`, {
+    commandId: "command_domain_events_run",
+    experimentConfigId: "experiment_domain_events_rejected",
+  });
+  assert.equal(rejectedDomainEvents.status, 409);
+  assert.equal((await rejectedDomainEvents.json() as any).error.code, "domain_events_not_supported");
+  assert.deepEqual(app.productStore!.listRuns(eventProject.id), []);
+  const visualExecutionDescription = structuredClone(outputExecutionDescription) as any;
+  visualExecutionDescription.runMode = "visual";
+  delete visualExecutionDescription.batch;
+  visualExecutionDescription.visual = {
+    entryPoint: "code/app.py",
+    protocol: "riff-visual-v1",
+    healthPath: "/health",
+  };
+  app.productStore!.createModel({
+    id: "model_visual_run_rejected",
+    name: "Visual run rejected",
+    technicalStatus: "executable",
+    runMode: "visual",
+    executionDescription: visualExecutionDescription,
+    createdAt: "2026-07-24T04:00:02.000Z",
+    files: [
+      {
+        id: "file_visual_run_model",
+        kind: "model_code",
+        relativePath: "app.py",
+        mediaType: "text/x-python",
+        bytes: Buffer.from("raise SystemExit(0)\n"),
+      },
+      {
+        id: "file_visual_run_environment",
+        kind: "model_environment",
+        relativePath: "requirements.txt",
+        mediaType: "text/plain",
+        bytes: Buffer.from("# no external dependencies\n"),
+      },
+    ],
+  });
+  const visualProject = app.productStore!.createProjectFromModel({
+    projectId: "project_visual_run_rejected",
+    projectName: "Visual run rejected",
+    sourceModelId: "model_visual_run_rejected",
+    createdAt: "2026-07-24T04:00:02.000Z",
+  });
+  const visualPlan = planExperiment({
+    configuration: {
       schemaVersion: 1,
-      wallTimeMs: 10_000,
-      startupTimeMs: 1_000,
-      terminationGraceMs: 500,
-      maxStdoutBytes: 10_000,
-      maxStderrBytes: 10_000,
-      maxOutputFiles: 2,
-      maxOutputBytes: 10_000,
-      maxEventCount: 10,
-      maxEventBytes: 10_000,
-      maxSamples: 1,
-      maxConcurrency: 1,
+      runKind: "visual",
+      parameters: { seed: 1 },
+      sampling: { kind: "single" },
     },
-    createdAt: "2026-07-24T04:00:00.000Z",
+    inputSchema: outputSchema,
+    maxSamples: 1,
   });
-  app.productStore!.createOutput({
-    id: "output_public_projection",
-    objectFileId: "file_output_public_projection",
-    runId: "run_public_projection",
-    relativePath: "result.json",
-    logicalName: "result",
-    outputType: "data",
-    sampleIndex: outputPlan.samples[0]!.sampleIndex,
-    sampleId: outputPlan.samples[0]!.sampleId,
-    declaredRole: "data",
-    mediaType: "application/json",
-    bytes: Buffer.from("{}"),
-    createdAt: "2026-07-24T04:00:00.000Z",
+  app.productStore!.createExperimentV4({
+    commandId: "command_visual_run_experiment",
+    id: "experiment_visual_run_rejected",
+    projectId: visualProject.id,
+    name: "Visual run rejected",
+    plan: visualPlan,
+    createdAt: "2026-07-24T04:00:02.000Z",
   });
+  const rejectedVisualRun = await post(`${baseUrl}/api/projects/${visualProject.id}/runs`, {
+    commandId: "command_visual_run",
+    experimentConfigId: "experiment_visual_run_rejected",
+  });
+  assert.equal(rejectedVisualRun.status, 409);
+  assert.equal((await rejectedVisualRun.json() as any).error.code, "capability_not_available");
+  assert.deepEqual(app.productStore!.listRuns(visualProject.id), []);
+  const rejectedRunAuthority = await post(`${baseUrl}/api/projects/${outputProject.id}/runs`, {
+    commandId: "command_rejected_run_authority",
+    experimentConfigId: "experiment_public_run_projection",
+    limits: { maxSamples: 99 },
+  });
+  assert.equal(rejectedRunAuthority.status, 422);
+  assert.equal((await rejectedRunAuthority.json() as any).error.code, "unknown_field");
+  const publicStartResponse = await post(`${baseUrl}/api/projects/${outputProject.id}/runs`, {
+    commandId: "command_public_api_start",
+    experimentConfigId: "experiment_public_run_projection",
+  });
+  assert.equal(publicStartResponse.status, 201, await publicStartResponse.clone().text());
+  const publicStart = await publicStartResponse.json() as any;
+  assert.deepEqual(Object.keys(publicStart).sort(), [
+    "commandId", "completionConversationId", "createdAt", "experimentConfigId", "projectId",
+    "runId", "runKind", "sampleCount", "schemaVersion", "status",
+  ]);
+  assert.equal(publicStart.status, "queued");
+  assert.equal(publicStart.sampleCount, 1);
+  const publicStartRetry = await post(`${baseUrl}/api/projects/${outputProject.id}/runs`, {
+    commandId: "command_public_api_start",
+    experimentConfigId: "experiment_public_run_projection",
+  });
+  assert.equal(publicStartRetry.status, 201);
+  assert.deepEqual(await publicStartRetry.json(), publicStart);
+  let publicRun: any;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const publicRunRead = await fetch(`${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}`);
+    assert.equal(publicRunRead.status, 200);
+    publicRun = await publicRunRead.json() as any;
+    if (publicRun.status === "succeeded") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(publicRun.id, publicStart.runId);
+  assert.equal(publicRun.status, "succeeded");
+  assert.notEqual(app.productStore!.listRunAttempts(publicStart.runId)[0]!.heartbeatAt, null);
+  assert.equal("samplePlan" in publicRun, false);
+  assert.equal("limits" in publicRun, false);
   const outputWorkspace = await (await fetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
-  assert.deepEqual(Object.keys(outputWorkspace.runs[0]).sort(), [
+  const projectedRunWithOutput = outputWorkspace.runs.find((run: any) => run.id === publicStart.runId);
+  assert.deepEqual(Object.keys(projectedRunWithOutput).sort(), [
     "cancelRequestedAt", "completionCardDisposition", "contractVersion", "createdAt",
     "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "outputs",
     "projectId", "readOnly", "requestedSampleCount", "runKind", "startedAt", "status",
     "terminalCode", "updatedAt",
   ]);
-  assert.deepEqual(Object.keys(outputWorkspace.runs[0].outputs[0]).sort(), [
+  assert.deepEqual(Object.keys(projectedRunWithOutput.outputs[0]).sort(), [
     "contractVersion", "createdAt", "declaredRole", "id", "legacyDigest", "logicalName",
     "mediaType", "outputType", "readOnly", "runId", "sampleId", "sampleIndex", "sha256",
     "sizeBytes",

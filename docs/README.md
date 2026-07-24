@@ -16,19 +16,25 @@ completed the real-provider, same-session, two-turn browser rerun with OpenCode
 `1.18.4`. Legacy Gate and queue code still coexist and are not silently retired
 by Stage 2.
 
-Stage 3 / #14 is in progress through
+Stage 3 / #14 remains in progress through
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 The first foundation slice implemented fixed-copy Project creation and the
 Project workspace projection. A3-1a adds schema v4, the closed canonical
 input-schema profile, deterministic sample planning, experiment configuration
 and record digest CAS with immutable historical receipts, Store-only
 execution-description-v2 admission,
-and atomic frozen queued-run/start receipts. The generic Stage 2 scaffold still
-emits execution-description v1 and requires a future explicit upgrade before
-that internal run gate can accept it.
-The public start route, dispatcher, batch/visual execution, cancellation,
-outputs/events, completion cards, Playwright access, and ordinary wind import
-remain target contracts, not implementation evidence.
+and atomic frozen queued-run/start receipts. A3-1b adds the public run
+start/read routes, durable dispatch, a real generic batch subprocess,
+hard-enforced currently supported limits, and atomic successful output
+publication. The official generic scaffold now emits execution-description v2
+and declares only batch execution; existing v1 Models are not silently
+upgraded.
+
+Visual starts and batch `domainEvents` are explicit current rejections, not
+partial implementations. Cross-restart attempt/scratch recovery, user-cancel
+races, and exactly-once completion cards remain A3-1c; visual execution,
+Playwright access, and ordinary wind import remain later #14 slices. A3-1b is
+therefore not completion evidence for Stage 3.
 
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
@@ -54,9 +60,9 @@ product.
   explicitly out of scope.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
   active Stage 3 / #14 contract and implementation ledger. It distinguishes the
-  landed Project foundation and A3-1a frozen-planning boundary from pending
-  dispatch, batch/visual supervision, outputs/events, scoped Playwright access,
-  and the ordinary wind import.
+  landed Project foundation, A3-1a frozen-planning boundary, and A3-1b generic
+  batch execution from pending recovery/cancellation/completion-card work,
+  visual supervision, scoped Playwright access, and the ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
@@ -71,7 +77,7 @@ product.
 - [`mesa-service.md`](mesa-service.md): target Mesa model, event, revision, and artifact contract.
 - [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
   OpenCode/session/context contract followed by the legacy Gate contract.
-- [`backend-api.md`](backend-api.md): current Stage 2 API integration boundary
-  followed by the legacy Gate project API target.
-- [`test-plan.md`](test-plan.md): current Stage 2 acceptance, Stage 3 foundation
-  evidence and pending gates, plus retained legacy Gate test history.
+- [`backend-api.md`](backend-api.md): current Stage 2 and A3-1b API integration
+  boundary followed by the legacy Gate project API target.
+- [`test-plan.md`](test-plan.md): current Stage 2 acceptance, A3-1a/A3-1b
+  evidence and pending Stage 3 gates, plus retained legacy Gate test history.

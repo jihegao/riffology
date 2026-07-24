@@ -86,40 +86,61 @@ const fixture = (): { parent: string; store: ProductStoreV2 } => {
     limits: LIMITS,
     createdAt: NOW,
   });
-  store.close();
-  const database = openProductDatabase(join(parent, "store", "product.sqlite3"));
-  database.prepare(`INSERT INTO run_attempts
-    (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
-    VALUES ('attempt_preview', 'run_alpha', 1, ?, 'claimed', ?, ?)`
-  ).run("a".repeat(64), NOW, NOW);
-  database.prepare(`INSERT INTO process_attempts
-    (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
-      process_group_id, launch_gate_state, state, launched_at)
-    VALUES ('process_preview', 'attempt_preview', 'batch', 0, ?, 101, 'start-101', 101, 'blocked', 'blocked', ?)`
-  ).run(plan.samples[0]!.sampleId, NOW);
-  database.prepare("UPDATE process_attempts SET launch_gate_state = 'timed_out' WHERE id = 'process_preview'").run();
-  database.prepare("UPDATE process_attempts SET state = 'exited', exited_at = ? WHERE id = 'process_preview'").run(NOW);
-  database.prepare("UPDATE process_attempts SET state = 'cleanup_complete', cleanup_receipt_sha256 = ? WHERE id = 'process_preview'")
-    .run("b".repeat(64));
-  database.prepare("UPDATE run_attempts SET state = 'interrupted', finished_at = ? WHERE id = 'attempt_preview'").run(NOW);
-  database.prepare("UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = 'run_alpha' AND status = 'queued'").run(NOW, NOW);
-  database.prepare("UPDATE runs SET status = 'succeeded', finished_at = ?, updated_at = ? WHERE id = 'run_alpha' AND status = 'running'").run(NOW, NOW);
-  database.close();
-  store = ProductStoreV2.open(join(parent, "store"));
-  store.createOutput({
-    id: "output_alpha",
-    objectFileId: "file_output",
-    runId: "run_alpha",
-    relativePath: "result.csv",
-    logicalName: "result.csv",
-    outputType: "table",
-    sampleIndex: plan.samples[0]!.sampleIndex,
-    sampleId: plan.samples[0]!.sampleId,
-    declaredRole: "table",
-    mediaType: "text/csv",
-    bytes: Buffer.from("metric\n1\n"),
-    createdAt: NOW,
+  const dispatcherGeneration = "a".repeat(64);
+  store.activateDispatcherGeneration({ generation: dispatcherGeneration, activatedAt: NOW });
+  const claim = store.claimNextQueuedBatchRun({
+    dispatcherGeneration,
+    claimedAt: NOW,
+    leaseExpiresAt: NOW,
+  })!;
+  const attempt = {
+    runId: claim.run.id,
+    attemptId: claim.attempt.id,
+    attemptGeneration: claim.attempt.attemptGeneration,
+    dispatcherGeneration,
+  };
+  store.markRunAttemptStarting({ ...attempt, startedAt: NOW });
+  store.markRunAttemptRunning({ ...attempt, startedAt: NOW, leaseExpiresAt: NOW });
+  const sample = plan.samples[0]!;
+  const process = {
+    ...attempt,
+    processAttemptId: "process_preview",
+    sampleIndex: sample.sampleIndex,
+    sampleId: sample.sampleId,
+    pid: 101,
+    processStartToken: "start-101",
+    processGroupId: 101,
+  };
+  store.registerBatchProcessAttempt({ ...process, launchedAt: NOW });
+  store.markBatchProcessGateReleased({ ...process, startedAt: NOW });
+  store.markBatchProcessStarted({ ...process, startedAt: NOW });
+  store.recordBatchProcessExit({
+    ...process,
+    expectedState: "running",
+    exitedAt: NOW,
+    exitCode: 0,
+    exitSignal: null,
   });
+  store.finalizeBatchProcessCleanup({
+    ...process,
+    cleanupVerified: true,
+    cleanupReceiptDigest: "b".repeat(64),
+  });
+  store.commitBatchRunSuccess({
+    ...attempt,
+    outputs: [{
+      sampleIndex: sample.sampleIndex,
+      sampleId: sample.sampleId,
+      logicalName: "result.csv",
+      outputType: "table",
+      bytes: Buffer.from("metric\n1\n"),
+    }],
+    terminalDiagnostics: {},
+    resourceOverview: {},
+    finishedAt: NOW,
+  });
+  store.close();
+  store = ProductStoreV2.open(join(parent, "store"));
   return { parent, store };
 };
 
@@ -138,16 +159,16 @@ test("permanent-delete previews are deterministic exact closures with composite 
 
     const project = store.previewPermanentDelete("project", "project_alpha");
     assert.ok(project.records.some((item) => item.table === "runs" && item.key.id === "run_alpha"));
-    assert.ok(project.records.some((item) => item.table === "output_indexes" && item.key.id === "output_alpha"));
+    assert.ok(project.records.some((item) => item.table === "output_indexes"));
     for (const [table, key, id] of [
       ["experiment_command_receipts", "command_id", "command_create_preview"],
       ["run_commands", "id", "command_start_preview"],
       ["run_command_receipts", "id", `receipt_${canonicalDigest("command_start_preview").slice(0, 32)}`],
-      ["run_attempts", "id", "attempt_preview"],
       ["process_attempts", "id", "process_preview"],
     ] as const) {
       assert.ok(project.records.some((item) => item.table === table && item.key[key] === id), `${table} is in the Project purge closure`);
     }
+    assert.ok(project.records.some((item) => item.table === "run_attempts"), "run_attempts is in the Project purge closure");
     assert.ok(project.exclusions.some((item) => item.kind === "model" && item.id === "model_alpha"));
 
     const conversation = store.previewPermanentDelete("conversation", "conversation_model");
@@ -174,7 +195,7 @@ test("permanent-delete previews are deterministic exact closures with composite 
     assert.ok(run.records.some((item) => item.table === "output_indexes"));
     assert.ok(run.records.some((item) => item.table === "run_commands" && item.key.id === "command_start_preview"));
     assert.ok(run.records.some((item) => item.table === "run_command_receipts"));
-    assert.ok(run.records.some((item) => item.table === "run_attempts" && item.key.id === "attempt_preview"));
+    assert.ok(run.records.some((item) => item.table === "run_attempts"));
     assert.ok(run.records.some((item) => item.table === "process_attempts" && item.key.id === "process_preview"));
     assert.ok(run.exclusions.some((item) => item.kind === "experiment"));
     assert.equal(store.listModels({ includeArchived: true, includeTrashed: true }).length, 1, "preview never purges");
@@ -194,7 +215,7 @@ test("preview fails closed on digest drift, symlinks, and owner/path mismatches 
     try {
       if (mode === "digest") {
         writeFileSync(join(store.root, "objects/models/model_alpha/code/model.py"), "changed");
-        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /digest drift/u);
+        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /metadata or bytes drifted|digest drift/u);
         assert.throws(() => store.createModel({ id: "model_alpha", name: "Alpha", technicalStatus: "executable", runMode: "batch", executionDescription: { entryPoint: "model.py" }, createdAt: NOW,
           files: [{ id: "file_model", kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('alpha')\n") }] }), /drift/u);
       } else if (mode === "symlink") {
@@ -211,7 +232,7 @@ test("preview fails closed on digest drift, symlinks, and owner/path mismatches 
         ).run("a".repeat(64), NOW);
         database.close();
         store = ProductStoreV2.open(join(parent, "store"));
-        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /digest drift/u);
+        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /metadata or bytes drifted|digest drift/u);
       } else {
         store.close();
         const database = openProductDatabase(join(store.root, "product.sqlite3"));

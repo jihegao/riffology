@@ -229,7 +229,7 @@ test("ProductStoreV2 v4 CAS freezes a queued run and replays its immutable start
     assert.equal(frozen.resourceOverview, null);
     assert.equal(frozen.completionCardDisposition, "pending");
 
-    store.createOutput({
+    assert.throws(() => store.createOutput({
       id: "output_v4",
       objectFileId: "file_output_v4",
       runId: "run_v4",
@@ -242,22 +242,8 @@ test("ProductStoreV2 v4 CAS freezes a queued run and replays its immutable start
       mediaType: "application/json",
       bytes: Buffer.from("{}"),
       createdAt: LATER,
-    });
-    const output = store.listRunOutputs("run_v4")[0] as any;
-    assert.equal(output.contractVersion, 4);
-    assert.equal(output.readOnly, false);
-    assert.equal(output.legacyDigest, null);
-    assert.equal(output.sampleIndex, planned.samples[0]!.sampleIndex);
-    assert.equal(output.sampleId, planned.samples[0]!.sampleId);
-    assert.equal(output.declaredRole, "data");
-    assert.equal(output.outputContractDigest, canonicalDigest({
-      runId: "run_v4",
-      logicalName: "result",
-      outputType: "data",
-      sampleIndex: planned.samples[0]!.sampleIndex,
-      sampleId: planned.samples[0]!.sampleId,
-      declaredRole: "data",
-    }));
+    }), /atomic_batch_output_required/u);
+    assert.deepEqual(store.listRunOutputs("run_v4"), []);
 
     const changedAgain = store.updateExperimentV4({
       commandId: "command_update_v4_second",

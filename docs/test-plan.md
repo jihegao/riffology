@@ -85,7 +85,7 @@ or trust.
 Legacy Gate/queue tests remain present while the implementations coexist. #14
 Project execution/wind import and #15 final-shell E2E are non-scope for A2.
 
-## Milestone A3 foundations and pending gates
+## Milestone A3-1a planning and A3-1b batch execution
 
 The first foundation slice implemented Project fixed-copy creation and its
 workspace projection. A3-1a adds focused coverage in
@@ -112,51 +112,76 @@ workspace projection. A3-1a adds focused coverage in
 - experiment create/update command replay returns the exact historical response,
   changed intent conflicts, stale configuration or record digests fail
   compare-and-set, and restart preserves the receipts;
-- a Store-only frozen run start atomically persists the `queued` run, command,
+- a frozen run start atomically persists the `queued` run, command,
   immutable receipt, copied Project/execution/configuration/sample-plan/limits
   digests, rejects non-v2 copied execution descriptions or undeclared run
   capability, replans against the copied profiled schema, and replays the exact
   receipt across restart; and
 - Project-scoped conversations remain available through the Stage 2 contract.
 
-Claims remain limited to the explicit fixtures and Store boundary above. They
-do not prove that model code starts, outputs are ingested, cancellation races
-resolve, or a browser can start a run.
+A3-1b adds coverage in `test/execution-protocol-v2.test.ts`,
+`test/generic-batch-supervisor.test.ts`,
+`test/product-store-orchestration.test.ts`, `test/agent-api.test.ts`, and
+`test/server.test.ts`. Together with the v4 Store tests, it proves:
 
-Run the focused foundation checks with:
+- the official generic scaffold emits execution-description v2 with batch-only
+  capability and a generic scaffold can run through the real batch protocol;
+- `POST /api/projects/{projectId}/runs` returns/replays the exact durable `201`
+  start receipt, rejects caller-supplied authority, replans current experiment
+  content, and freezes server-owned limits;
+- `GET /api/projects/{projectId}/runs/{runId}` returns the bounded run DTO and
+  exposes only checked, atomically published output indexes after success;
+- dispatcher generations and queue claims feed a real `riff-batch-v1`
+  supervisor with one restricted process per sample, a durable launch gate,
+  process identity checks, bounded concurrency, and deterministic terminal
+  codes;
+- current hard batch limits cover sample count, concurrency, wall time,
+  termination grace, stdout/stderr, output file count/bytes, and owned
+  scratch/Project integrity;
+- partial, failed, timed-out, over-limit, undeclared, path-unsafe, or
+  digest-invalid outputs never appear as successful results; and
+- dispatcher heartbeat, Project-capability, supervisor, output-consumption, and
+  atomic-publication exceptions take one best-effort unwind path; verified
+  exits/cleanup become a durable failed run, while unprovable cleanup remains
+  live and reports `dispatcher_recovery_required`; and
+- same-process shutdown sends the abort signal, terminates the verified process
+  group, cleans owned scratch, and persists `dispatcher_shutdown`. Direct SQL
+  tests also close run terminal evidence, process exit/cleanup immutability,
+  gate/state shape, and same-transaction successful output publication.
+
+Visual starts fail with `capability_not_available`. Batch descriptions that
+declare `domainEvents` fail with `domain_events_not_supported`. These are
+explicit negative gates, not visual/event implementation evidence.
+
+Run the focused A3-1a/A3-1b checks with:
 
 ```bash
 cd backend
 node --experimental-strip-types --test \
+  test/execution-protocol-v2.test.ts \
   test/experiment-planner.test.ts \
+  test/generic-batch-supervisor.test.ts \
   test/product-schema.test.ts \
   test/product-schema-v4.test.ts \
   test/product-store-v4.test.ts \
+  test/product-store-orchestration.test.ts \
   test/product-store-v2.test.ts \
-  test/agent-api.test.ts
+  test/agent-api.test.ts \
+  test/server.test.ts
 ```
 
-On 2026-07-24 after the final review fixes, the complete backend suite ran 213
-tests: 212 passed, zero failed, and one optional installed-OpenCode smoke was
-skipped. The web suite passed 104/104 and its production build succeeded.
+The final integrated A3-1b complete backend run was 256 passed, zero failed,
+and one optional installed-OpenCode smoke skipped. The previously recorded web suite
+passed 104/104 and its production build succeeded; no new browser acceptance is
+claimed by this backend batch slice.
 
-These checks do not prove execution-description-v2 scaffold migration, a public
-run-start route, dispatch, cancellation, output/event ingestion, completion
-cards, visual proxying, Playwright access, or wind installation. The generic
-Stage 2 scaffold remains v1. Those gates are defined in
-[`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
+A3-1c must still prove cross-restart attempt/scratch reconciliation,
+cancel-versus-terminal commit precedence and receipts, and exactly-once
+completion-card delivery. A3-1b currently fails startup closed with
+`dispatcher_recovery_required` when prior live attempts need reconciliation;
+that diagnostic is not a recovery implementation.
 
-Before the batch-runtime slice merges, automated tests must additionally prove
-duplicate seed/value rejection, normalized JSON Pointer overlap rejection,
-the common schema validator at technical-check/save/run-start, default/ref/
-additional-property/numeric/format/no-coercion semantics, deterministic sample
-ordering/IDs including `seed: null`, frozen digests, cancel-versus-terminal
-commit precedence, dispatcher/process identity, illegal-state/nonterminal-trash
-rejection, all-status v3 read-only migration, unified batch/visual launch-gate
-attempts, symlink/hardlink/inode-race and secret counterexamples, every
-`RunLimitsV1` scope/code, exactly-once completion cards, and restart-safe atomic
-outputs.
-Visual tests must prove exact WebSocket path/subprotocol enforcement plus
+Later visual tests must prove exact WebSocket path/subprotocol enforcement plus
 frame-size, connection-count, and idle-time limits, as well as the same-origin
 local bootstrap plus isolated-broker HttpOnly one-use frame-session boundary,
 Origin/CORS rules, and parent DOM isolation in a real browser. Installer tests
@@ -164,10 +189,10 @@ must pin and verify the
 execution-v2 scaffold and wind manifest IDs, versions, and concrete digests,
 including same-ID conflicts and mandatory re-scaffolding for unproven v1 Models.
 
-Mocks cover fault branches only. Batch acceptance requires a real generic
-subprocess, visual acceptance requires a real local visual process, and final
-Stage 3 acceptance requires a narrow browser Project/run flow. None of those
-pending gates may be claimed from the foundation tests.
+Mocks cover fault branches only. A3-1b batch acceptance uses a real generic
+subprocess. Visual acceptance still requires a real local visual process, and
+final Stage 3 acceptance still requires the narrow browser Project/run flow.
+The current green backend evidence does not complete Stage 3.
 
 ---
 

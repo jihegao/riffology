@@ -13,6 +13,7 @@ import {
   PRODUCT_SCHEMA_MIGRATIONS,
   PRODUCT_SCHEMA_SQL,
   PRODUCT_SCHEMA_V2_SQL,
+  withAtomicBatchSuccessRunContext,
 } from "../src/product-schema.ts";
 
 const NOW = "2026-07-22T00:00:00.000Z";
@@ -78,9 +79,17 @@ const insertV4Run = (database: DatabaseSync, id: string, projectId: string, expe
     SAMPLE_PLAN, digest(SAMPLE_PLAN), LIMITS, digest(LIMITS), DIGEST_B);
 };
 
-const finishV4Run = (database: DatabaseSync, id: string): void => {
+const withFinishedV4Run = (database: DatabaseSync, id: string, body: () => void): void => {
   database.prepare("UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?").run(NOW, NOW, id);
-  database.prepare("UPDATE runs SET status = 'succeeded', finished_at = ?, updated_at = ? WHERE id = ?").run(NOW, NOW, id);
+  withAtomicBatchSuccessRunContext(database, id, () => {
+    database.prepare(`UPDATE runs
+      SET status = 'succeeded', terminal_code = 'run_succeeded',
+        terminal_diagnostics_json = '{}', resource_overview_json = '{}',
+        finished_at = ?, updated_at = ?
+      WHERE id = ?`
+    ).run(NOW, NOW, id);
+    body();
+  });
 };
 
 test("fresh product storage initializes with durable SQLite policy and survives restart", () => {
@@ -117,16 +126,17 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     ).run(NOW, NOW);
     insertV4Experiment(database, "experiment_alpha", "project_alpha");
     insertV4Run(database, "run_alpha", "project_alpha", "experiment_alpha");
-    finishV4Run(database, "run_alpha");
-    database.prepare(`INSERT INTO object_files
-      (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
-      VALUES ('file_output', 'run_alpha', 'run_file', 'result.csv', 'text/csv', 10, ?, ?)`
-    ).run(DIGEST_B, NOW);
-    database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, contract_version,
-        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
-      VALUES ('output_alpha', 'run_alpha', 'file_output', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
-    ).run(DIGEST_A, outputContractDigest("run_alpha", "result.csv"), NOW);
+    withFinishedV4Run(database, "run_alpha", () => {
+      database.prepare(`INSERT INTO object_files
+        (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
+        VALUES ('file_output', 'run_alpha', 'run_file', 'result.csv', 'text/csv', 10, ?, ?)`
+      ).run(DIGEST_B, NOW);
+      database.prepare(`INSERT INTO output_indexes
+        (id, run_id, object_file_id, logical_name, output_type, contract_version,
+          sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+        VALUES ('output_alpha', 'run_alpha', 'file_output', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
+      ).run(DIGEST_A, outputContractDigest("run_alpha", "result.csv"), NOW);
+    });
     database.prepare(`INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at)
       VALUES ('mutation_alpha', ?, ?)`
     ).run(DIGEST_A, NOW);
@@ -145,7 +155,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
       assert.equal((reopened.prepare(`SELECT count(*) AS count FROM ${table}`).get() as { count: number }).count > 0, true, table);
     }
     for (const table of ["conversation_summaries", "agent_sessions", "agent_turns", "skill_uses", "action_records", "temporary_document_adoptions",
-      "model_technical_checks", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
+      "model_technical_checks", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
       "experiment_command_receipts"]) {
       assert.equal(Boolean(reopened.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
@@ -165,7 +175,7 @@ test("schema migrations advance sequentially from v1 through v4 and expose Agent
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 4);
     const columns = database.prepare("PRAGMA table_info(object_files)").all() as Array<{ name: string }>;
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
-    for (const table of ["agent_turns", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
+    for (const table of ["agent_turns", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
       "experiment_command_receipts"]) {
       assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
@@ -448,16 +458,17 @@ test("attachment, message, document and output links cannot cross ownership boun
 
     insertV4Experiment(database, "experiment_a", "project_alpha");
     insertV4Run(database, "run_a", "project_alpha", "experiment_a");
-    finishV4Run(database, "run_a");
     database.prepare(`INSERT INTO object_files
       (id, owner_project_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
       VALUES ('file_not_run', 'project_alpha', 'project_model_snapshot', 'result.csv', 'text/csv', 10, ?, ?)`
     ).run(DIGEST_A, NOW);
-    assert.throws(() => database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, contract_version,
-        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
-      VALUES ('output_wrong', 'run_a', 'file_not_run', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
-    ).run(DIGEST_A, outputContractDigest("run_a", "result.csv"), NOW), /output object ownership mismatch/u);
+    withFinishedV4Run(database, "run_a", () => {
+      assert.throws(() => database.prepare(`INSERT INTO output_indexes
+        (id, run_id, object_file_id, logical_name, output_type, contract_version,
+          sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+        VALUES ('output_wrong', 'run_a', 'file_not_run', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
+      ).run(DIGEST_A, outputContractDigest("run_a", "result.csv"), NOW), /output object ownership mismatch/u);
+    });
   } finally {
     database.close();
   }

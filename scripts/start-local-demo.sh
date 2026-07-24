@@ -17,7 +17,14 @@ export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$ROOT_DIR/.riff-workspaces}"
 export MESA_SERVICE_URL="${MESA_SERVICE_URL:-http://127.0.0.1:8091}"
 export RIFF_SKIP_OPENCODE="${RIFF_SKIP_OPENCODE:-true}"
 export PORT="${PORT:-8787}"
+export RIFF_MODEL_PYTHON="${RIFF_MODEL_PYTHON:-$ROOT_DIR/mesa_service/.venv/bin/python}"
 WEB_PORT="${WEB_PORT:-5173}"
+
+if [[ ! -x "$RIFF_MODEL_PYTHON" ]]; then
+  echo "Riff Demo requires an executable approved Model runtime at $RIFF_MODEL_PYTHON" >&2
+  echo "Create mesa_service/.venv or set RIFF_MODEL_PYTHON explicitly." >&2
+  exit 1
+fi
 
 cleanup() {
   for child_pid in "${PIDS[@]:-}"; do
@@ -35,7 +42,7 @@ PIDS+=("$!")
 
 (
   cd "$ROOT_DIR/backend"
-  MESA_SERVICE_URL="$MESA_SERVICE_URL" WORKSPACE_ROOT="$WORKSPACE_ROOT" RIFF_SKIP_OPENCODE="$RIFF_SKIP_OPENCODE" PORT="$PORT" npm start
+  MESA_SERVICE_URL="$MESA_SERVICE_URL" WORKSPACE_ROOT="$WORKSPACE_ROOT" RIFF_SKIP_OPENCODE="$RIFF_SKIP_OPENCODE" RIFF_MODEL_PYTHON="$RIFF_MODEL_PYTHON" PORT="$PORT" npm start
 ) &
 PIDS+=("$!")
 

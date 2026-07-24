@@ -28,3 +28,20 @@ const app = new BackendApp({
 await app.initialize();
 const address = await app.listen(port);
 console.log(`Riff demo backend listening at http://${address.host}:${address.port}`);
+
+let shutdownStarted = false;
+const shutdown = (signal: "SIGINT" | "SIGTERM"): void => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  void (async () => {
+    try {
+      await app.close();
+      process.exit(0);
+    } catch (error) {
+      console.error(`Riff demo backend failed to close after ${signal}.`, error);
+      process.exit(1);
+    }
+  })();
+};
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));

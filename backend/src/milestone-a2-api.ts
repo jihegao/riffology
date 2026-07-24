@@ -52,6 +52,29 @@ export class MilestoneA2Api {
       json(response, 200, this.service.projectWorkspace(parts[2]));
       return true;
     }
+    if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "runs") {
+      const projectId = parts[2];
+      if (request.method === "POST" && parts.length === 4) {
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "experimentConfigId", "completionConversationId"],
+          ["completionConversationId"],
+        );
+        json(response, 201, this.service.startRun({
+          projectId,
+          commandId: requiredString(body.commandId, "commandId"),
+          experimentConfigId: requiredString(body.experimentConfigId, "experimentConfigId"),
+          ...(body.completionConversationId === undefined
+            ? {}
+            : { completionConversationId: requiredString(body.completionConversationId, "completionConversationId") }),
+        }));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 5) {
+        json(response, 200, this.service.getRun(projectId, parts[4]));
+        return true;
+      }
+    }
     if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "experiment-configs") {
       const projectId = parts[2];
       if (request.method === "POST" && parts.length === 4) {

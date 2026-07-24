@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { accessSync, constants, mkdirSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { ApiError, asApiError } from "./errors.ts";
 import { canonicalJsonV2, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import { DurableProjectStore } from "./durable-project-store.ts";
@@ -17,11 +18,28 @@ import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2 } from "./product-store-v2.ts";
+import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
+import { ProductRunDispatcher, type BatchSupervisorPort } from "./product-run-dispatcher.ts";
 import { SimulationSkillCatalog } from "./simulation-skill-catalog.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
 import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
+
+export const configuredBatchPythonExecutable = (explicit?: string): string => {
+  const executable = explicit
+    ?? process.env.RIFF_MODEL_PYTHON
+    ?? resolve(import.meta.dirname, "../../mesa_service/.venv/bin/python");
+  try {
+    accessSync(executable, constants.X_OK);
+  } catch (error) {
+    throw new Error(
+      `The configured batch Python is unavailable or not executable: ${executable}. Set RIFF_MODEL_PYTHON to the approved runtime.`,
+      { cause: error },
+    );
+  }
+  return executable;
+};
 
 export type BackendOptions = {
   mesa: MesaAdapter;
@@ -40,6 +58,11 @@ export type BackendOptions = {
   a2TechnicalChecker?: ModelTechnicalCheckerPort;
   a2SkillRoot?: string;
   a2AllowedSkills?: string[];
+  a3BatchSupervisor?: BatchSupervisorPort;
+  a3BatchOutputConsumer?: (candidate: BatchOutputCandidate) => Buffer;
+  a3PythonExecutable?: string;
+  a3ScratchRoot?: string;
+  a3DispatcherLeaseMs?: number;
 };
 
 export class BackendApp {
@@ -49,6 +72,7 @@ export class BackendApp {
   readonly gate2: Gate2Runtime;
   readonly gate3: Gate3Runtime;
   readonly productStore?: ProductStoreV2;
+  readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
@@ -68,6 +92,18 @@ export class BackendApp {
     if (options.productStore || options.a2ProductRoot) {
       const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
+      const scratchRoot = options.a3ScratchRoot ?? join(options.workspaceRoot, ".riff-batch-scratch");
+      mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+      const batchSupervisor = options.a3BatchSupervisor ?? new GenericBatchSupervisor({
+        pythonExecutable: configuredBatchPythonExecutable(options.a3PythonExecutable),
+        scratchRoot,
+      });
+      this.productRunDispatcher = new ProductRunDispatcher({
+        store: this.productStore,
+        supervisor: batchSupervisor,
+        ...(options.a3DispatcherLeaseMs ? { leaseMs: options.a3DispatcherLeaseMs } : {}),
+        ...(options.a3BatchOutputConsumer ? { consumeOutput: options.a3BatchOutputConsumer } : {}),
+      });
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
       const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
       this.a2 = new MilestoneA2Api(new AgentWorkspaceService(
@@ -77,6 +113,7 @@ export class BackendApp {
         options.a2TechnicalChecker,
         turnRuntime,
         (capability) => this.#a2McpUrl(capability),
+        () => this.productRunDispatcher?.notify(),
       ));
     }
   }
@@ -84,6 +121,7 @@ export class BackendApp {
   async initialize(): Promise<ProjectState> {
     await this.gate3.recover();
     this.gate2.start();
+    await this.productRunDispatcher?.start();
     this.#readiness = await this.options.openCode.initialize();
     if (this.#readiness.status === "ready" && this.options.openCode.subscribeEvents) {
       try {
@@ -136,6 +174,7 @@ export class BackendApp {
       await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
       this.#server = undefined;
     }
+    await this.productRunDispatcher?.stop();
     this.productStore?.close();
   }
 
