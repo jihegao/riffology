@@ -42,9 +42,20 @@ handoff. A3-1c-c adds schema migration v7 and exactly-once terminal batch
 completion cards: the Store atomically records a deterministic platform system
 message or a permanent skip disposition, and startup reconciles older pending
 terminal runs before serving reads.
-Visual execution, scoped Playwright
-access, and ordinary wind import are later #14 slices. Their active contract and
-negative-test gates are in
+A3-2a1 implementation is now complete behind the still-closed public visual
+boundary. Schema migration v8 adds immutable, launch-bound visual port evidence
+and an atomic one-time visual health receipt/CAS; the private Store now records
+the visual launch, scratch, process identity, gate, running, health, heartbeat,
+exit, and cleanup checkpoints. Public visual starts remain unavailable:
+requests without a completion conversation still fail with
+`capability_not_available`, while requests that supply
+`completionConversationId` fail earlier with HTTP `422` and
+`visual_completion_not_supported`. Cross-restart visual reconciliation is
+implemented and its focused fake-supervisor suite passes 29/29. This slice
+starts no real visual child and opens no listener. Its recovery review and full
+backend/web test gates pass; merge and publication remain pending.
+Real visual execution, scoped Playwright access, and ordinary wind import are
+later #14 slices. Their active contract and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
@@ -171,9 +182,20 @@ The final integrated A3-1b backend run passed 256 tests with 0 failures and
 validation, real generic batch supervision, durable dispatch/orchestration,
 public run start/read, server-owned limits, terminal/process/output database
 invariants, output integrity, error unwind, and shutdown cleanup.
-The current A3-1c-c backend run contains 295 tests: 294 passed, zero failed,
-and one optional smoke was skipped. The web TypeScript check and production
-build also pass; this backend slice adds no browser-acceptance claim.
+The prior A3-1c-c branch's full backend run contained 295 tests: 294 passed,
+zero failed, and one optional smoke was skipped. Its web TypeScript check and
+production build also passed; this is historical A3-1 evidence, not the current
+A3-2a1 full-suite gate.
+Focused A3-2a1 tests now cover schema-v8 migration/rollback and visual
+health-receipt invariants, the stable public visual-admission rejection, the
+private Store visual process-evidence lifecycle, and cross-restart recovery.
+The focused recovery suite passes 29/29 using a fake supervisor. It starts no
+real visual child and opens no listener. The broader focused root gate passes
+62/62, the independent reviewer gate passes 81/81, and independent recovery
+review is PASS. The full backend gate reports 314 total: 313 passed, zero
+failed, and one optional installed-OpenCode smoke skipped. Web tests pass
+104/104 and the production build succeeds. A3-2a1 is not yet merged or
+published.
 
 Focused Milestone A2 verification:
 
@@ -195,9 +217,9 @@ node --experimental-strip-types --test \
   test/model-technical-checker.test.ts
 ```
 
-The latest full backend suite passed, with only the optional smoke against an
-installed OpenCode instance skipped. The latest web evidence is 104 passing
-tests plus a successful production build. API tests cover provider discovery,
+The prior integrated A3-1 full backend suite passed, with only the optional
+smoke against an installed OpenCode instance skipped. Its web evidence was 104
+passing tests plus a successful production build. API tests cover provider discovery,
 atomic generic Model creation, independent/rebuilt conversations, idempotent
 turns, attachment and temporary-document projection, scoped MCP
 mutation/revocation, read-only failure, workspace secrecy, and technical-check

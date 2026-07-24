@@ -149,9 +149,12 @@ A3-1b adds coverage in `test/execution-protocol-v2.test.ts`,
   tests also close run terminal evidence, process exit/cleanup immutability,
   gate/state shape, and same-transaction successful output publication.
 
-Visual starts fail with `capability_not_available`. Batch descriptions that
-declare `domainEvents` fail with `domain_events_not_supported`. These are
-explicit negative gates, not visual/event implementation evidence.
+Visual starts without `completionConversationId` fail with HTTP `409`
+`capability_not_available`. If `completionConversationId` is present, that
+field-specific gate takes precedence and fails with HTTP `422`
+`visual_completion_not_supported`. Batch descriptions that declare
+`domainEvents` fail with `domain_events_not_supported`. These are explicit
+negative gates, not visual/event implementation evidence.
 
 Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c checks with:
 
@@ -183,8 +186,9 @@ immediate active abort, cleanup verification, cancel-first output exclusion,
 terminal-first preservation, and exact HTTP replay tests. The previously recorded web suite
 passed 104/104 and its production build succeeded; no new browser acceptance is
 claimed by this backend batch slice.
-The current A3-1c-c full backend run contains 295 tests: 294 passed, zero
-failed, and one optional smoke was skipped.
+The prior A3-1c-c branch's full backend run contained 295 tests: 294 passed,
+zero failed, and one optional smoke was skipped. That historical count is
+superseded for A3-2a1 by the final 314-test full gate recorded below.
 The A3-1 API vertical acceptance is intentionally narrower than a browser user
 flow: it starts from a production-Store executable Model fixture, then uses only
 the public Project, conversation, experiment, run, cancel, and transcript APIs.
@@ -213,15 +217,25 @@ closure. The dispatcher still fails closed with
 `dispatcher_recovery_required` when evidence is absent or contradictory; that
 diagnostic is the intended safety boundary, not proof of cleanup.
 
-### Planned A3-2 visual gates
+### A3-2 visual gates
 
 A3-2a is split into two separately merged gates:
 
-- **A3-2a1 schema-v8/Store/recovery contract:** migration and rollback tests
-  must preserve every v3-v7 batch row, trigger, completion-card receipt, and
-  recovery invariant while extending schema-v6 scratch/launch/recovery evidence
-  to the existing schema-v4 visual process shape. Tests must not treat its
-  current `loopback_port` or `health_at` as immutable: v8 adds the missing
+- **A3-2a1 schema-v8/Store/recovery contract:** current focused tests cover the
+  schema-v8 migration/rollback boundary, visual health-receipt invariants,
+  stable public admission rejection, and private Store process-evidence
+  lifecycle. Cross-restart visual reconciliation is implemented; its focused
+  fake-supervisor suite passes 29/29 without starting a real visual child or
+  opening a listener. The broader focused root gate passes 62/62, the
+  independent reviewer gate passes 81/81, and independent recovery review is
+  PASS. The full backend gate reports 314 total: 313 passed, zero failed, and
+  one optional installed-OpenCode smoke skipped; web tests pass 104/104 and the
+  production build succeeds. Merge and publication remain pending.
+  Migration and rollback tests cover schema-v8 migration/rollback plus a
+  representative schema-v7 batch sentinel and preservation of the relevant
+  legacy triggers while extending schema-v6 scratch/launch/recovery evidence to
+  the existing schema-v4 visual process shape. Tests must not treat its
+  pre-v8 `loopback_port` or `health_at` as immutable: v8 adds the missing
   triggers. Direct SQL covers a port update, `health_at`-only write,
   receipt-only insert, receipt/timestamp mismatch, second health update, second
   receipt, duplicate, cross-run, cross-attempt, wrong-port, wrong-path, and
@@ -237,11 +251,14 @@ A3-2a is split into two separately merged gates:
   fail closed because public visual dispatch was never available and the
   evidence cannot be proven; migration never auto-adopts it as healthy.
   Recovery tests cover planned/created/receipt-before-adoption/registered/
-  released/running/healthy checkpoints and exact cleanup, but the public visual
-  start without completion-card input must still return
-  `capability_not_available`. A request with `completionConversationId` returns
-  `visual_completion_not_supported`. This gate runs no visual model and claims
-  no browser behavior.
+  released/running/healthy checkpoints and exact cleanup. They also exercise
+  production `GenericBatchSupervisor` parsing of an exact durable visual launch
+  receipt, while coordinated health-receipt/manifest corruption fails before
+  supervisor inspection or signalling. The current public visual start without
+  `completionConversationId` returns HTTP `409`
+  `capability_not_available`; when that field is present, its earlier gate
+  returns HTTP `422` `visual_completion_not_supported`. This gate runs no
+  visual model, opens no listener, and claims no browser behavior.
 - **A3-2a2 real visual lifecycle:** a real `riff-visual-v1` child must receive
   the canonical single-sample envelope through `--riff-input`, its assigned
   `--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and the frozen assigned

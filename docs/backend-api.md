@@ -5,7 +5,7 @@
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` schema migration v7, execution
+Gate API retained below. `ProductStoreV2` schema migration v8, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -215,8 +215,11 @@ wall time, termination grace, stdout bytes, stderr bytes, output file count,
 output bytes, and scratch/Project integrity. CPU time, resident memory, and
 model-spawned process-count limits are not accepted as supported limits.
 `startupTimeMs` and event count/byte fields remain frozen reserved fields:
-visual starts currently fail with `capability_not_available`, and batch
-`domainEvents` fail with `domain_events_not_supported`.
+visual starts without a completion conversation currently fail with
+`capability_not_available`; visual starts that supply
+`completionConversationId` fail earlier with HTTP `422` and
+`visual_completion_not_supported`; and batch `domainEvents` fail with
+`domain_events_not_supported`.
 
 Admission and request failures use stable codes including `unknown_field`,
 `invalid_request`, `resource_not_found`, `state_conflict`,
@@ -264,19 +267,33 @@ Visual supervision, output downloads, events, wind migration, and final shell
 routes remain later #14/#15 work. The legacy Gate API below still coexists
 until separately reviewed retirement.
 
-### Planned A3-2 visual API/runtime gates
+### A3-2 visual API/runtime gates
 
-These are target contracts, not current routes or acceptance evidence:
+The A3-2a1 schema, admission, private Store primitives, and cross-restart visual
+reconciliation described below are current implementation. Its focused
+fake-supervisor recovery suite passes 29/29 without starting a real visual
+child or opening a listener. Production `GenericBatchSupervisor` reads the
+exact durable visual launch receipt and the recovery path adopts it;
+coordinated health-receipt/manifest corruption fails before process inspection
+or signalling. The broader focused root gate passes 62/62, the independent
+reviewer gate passes 81/81, independent recovery review is PASS, the full
+backend gate reports 314 total with 313 passed, zero failed, and one optional
+installed-OpenCode smoke skipped, and web passes 104/104 plus its production
+build. Merge and publication remain pending. A3-2a2, A3-2b, and A3-2c remain
+target contracts, not current routes or acceptance evidence:
 
-1. **A3-2a1 schema-v8/Store/recovery:** extend schema-v6 scratch,
-   launch-receipt, manifest, and recovery evidence to visual; bind it to the
-   existing schema-v4 visual process shape; make its launch-bound port
-   immutable; and add an atomic one-time `health_at` plus separate immutable
-   health receipt. The public start route
-   continues to return `capability_not_available` for a visual experiment
-   without completion-card input, and returns
-   `visual_completion_not_supported` if `completionConversationId` was
-   supplied.
+1. **A3-2a1 schema-v8/Store/recovery:** schema v8 now extends schema-v6 scratch
+   and launch evidence to the existing schema-v4 visual process shape, makes
+   its launch-bound port immutable, and adds an atomic one-time `health_at`
+   plus separate immutable health receipt. Private Store methods now preserve
+   exact visual run/attempt/generation/process/PID/start-token/process-group/
+   port/scratch identity through launch, registration, gate release, running,
+   health, heartbeat, exit, and cleanup. Cross-restart reconciliation now
+   validates and adopts only exact durable visual evidence before any
+   inspection or signalling. The public start route
+   continues to return HTTP `409` `capability_not_available` for a visual
+   experiment without `completionConversationId`; if that field is supplied,
+   its earlier gate returns HTTP `422` `visual_completion_not_supported`.
 2. **A3-2a2 real visual lifecycle:** only after real-process and restart gates
    pass, the existing Project run route may accept a visual experiment. It
    remains the same `/api/projects/{projectId}/runs` resource and returns the
@@ -311,10 +328,11 @@ retains `completionCardDisposition: "not_requested"`, and terminalization does
 not create a `run_completion_cards` receipt or transcript message. The Store
 and Project API, not page state or Agent prose, remain lifecycle authority.
 
-Schema v4 already has visual `process_kind`, `loopback_port`, `health_at`, and
-the one-live-process index, but the port can currently be updated and health
-lacks a complete one-write/receipt CAS. Schema v8 does not add those fields.
-It rejects every port update and permits health only as one same-transaction
+Schema v4 already supplied visual `process_kind`, `loopback_port`, `health_at`,
+and the one-live-process index, but before v8 the port could be updated and
+health lacked a complete one-write/receipt CAS. Schema v8 does not add those
+fields again. The current v8 triggers reject every port update and permit
+health only as one same-transaction
 null-to-receipt-timestamp `health_at` update plus unique receipt for the exact
 running visual process with matching launch/port/path/run/attempt/process
 identity. Health-only, receipt-only, timestamp mismatch, later update, and

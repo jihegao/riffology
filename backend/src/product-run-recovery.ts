@@ -1,5 +1,6 @@
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import type {
+  BatchLaunchManifestBinding,
   BatchLaunchReceipt,
   BatchProcessIdentity,
   BatchScratchPlan,
@@ -10,9 +11,13 @@ import type {
 } from "./generic-batch-supervisor.ts";
 import {
   ProductStoreV2,
+  type BatchRecoveryProcessRecord,
+  type PendingLaunchRecoveryRecord,
   type PriorDispatcherRecoveryUnit,
   type RecoveryProcessRecord,
   type RunAttemptIdentity,
+  type VisualLaunchReceipt,
+  type VisualRecoveryProcessRecord,
 } from "./product-store-v2.ts";
 
 export type ProductRunRecoverySupervisorPort = Pick<
@@ -20,10 +25,15 @@ export type ProductRunRecoverySupervisorPort = Pick<
   | "inspectRecordedProcess"
   | "terminateRecordedProcess"
   | "verifyRecordedProcessGroupGone"
-  | "readDurableLaunchReceipt"
   | "cleanupDurableScratch"
   | "cleanupPlannedScratch"
->;
+> & Readonly<{
+  readDurableLaunchReceipt(
+    lease: DurableBatchScratchLease,
+    manifest: BatchLaunchManifestBinding,
+    processKind?: "batch" | "visual",
+  ): BatchLaunchReceipt | VisualLaunchReceipt | null;
+}>;
 
 export type ProductRunRecoveryOptions = Readonly<{
   store: ProductStoreV2;
@@ -113,11 +123,18 @@ export class ProductRunRecovery {
         const launchReceipt = supervisor.readDurableLaunchReceipt(
           durableLease,
           pending.launchManifest,
+          pending.processKind,
         );
         if (!launchReceipt) {
           throw new ProductRunRecoveryError(
             "dispatcher_recovery_required",
             "A created scratch lease has no durable launch receipt; spawn cannot be excluded.",
+          );
+        }
+        if ((pending.processKind === "visual") !== ("loopbackHost" in launchReceipt)) {
+          throw new ProductRunRecoveryError(
+            "dispatcher_recovery_required",
+            "A durable launch receipt has the wrong process kind.",
           );
         }
         const processAttemptId = processAttemptIdFor(attempt, launchReceipt.sampleIndex);
@@ -127,7 +144,13 @@ export class ProductRunRecovery {
           launchReceipt,
           launchedAt: launchReceipt.createdAt,
         });
-        processes.push(recoveryProcessFromReceipt(unit, launchReceipt, processAttemptId, durableLease, pending.launchManifest));
+        processes.push(recoveryProcessFromReceipt(
+          unit,
+          pending,
+          launchReceipt,
+          processAttemptId,
+          durableLease,
+        ));
       }
 
       for (const process of processes) {
@@ -150,7 +173,7 @@ export class ProductRunRecovery {
         supervisor.verifyRecordedProcessGroupGone(identity);
         processReceipts.push(termination);
         if (process.state !== "exited") {
-          this.#store.recordBatchProcessExit({
+          const exit = {
             ...process,
             expectedState: process.state,
             exitedAt: termination.observedAt,
@@ -160,19 +183,29 @@ export class ProductRunRecovery {
               : termination.termSent
                 ? "SIGTERM"
                 : "recovery_observed_gone",
-          });
+          } as const;
+          if (process.processKind === "visual") {
+            this.#store.recordVisualProcessExit(exit);
+          } else {
+            this.#store.recordBatchProcessExit(exit);
+          }
         }
         const scratch = supervisor.cleanupDurableScratch(
           process.scratchLease,
           this.#now().toISOString(),
         );
         scratchReceipts.push(scratch);
-        this.#store.finalizeBatchProcessCleanup({
+        const cleanup = {
           ...process,
           cleanupVerified: true,
           cleanupReceiptDigest: scratch.receiptDigest,
           cleanedAt: scratch.cleanedAt,
-        });
+        } as const;
+        if (process.processKind === "visual") {
+          this.#store.finalizeVisualProcessCleanup(cleanup);
+        } else {
+          this.#store.finalizeBatchProcessCleanup(cleanup);
+        }
       }
 
       const disposition = unit.run.cancelRequestedAt === null ? "interrupted" : "cancelled";
@@ -265,8 +298,12 @@ const durableLeaseOf = (
 
 const supervisorIdentity = (process: RecoveryProcessRecord): BatchProcessIdentity => ({
   runId: process.runId,
-  sampleIndex: process.sampleIndex,
-  sampleId: process.sampleId,
+  sampleIndex: process.processKind === "batch"
+    ? process.sampleIndex
+    : process.scratchLease.sampleIndex,
+  sampleId: process.processKind === "batch"
+    ? process.sampleId
+    : process.scratchLease.sampleId,
   scratchId: process.scratchId,
   pid: process.pid,
   processGroupId: process.processGroupId,
@@ -275,25 +312,50 @@ const supervisorIdentity = (process: RecoveryProcessRecord): BatchProcessIdentit
 
 const recoveryProcessFromReceipt = (
   unit: PriorDispatcherRecoveryUnit,
-  receipt: BatchLaunchReceipt,
+  pending: PendingLaunchRecoveryRecord,
+  receipt: BatchLaunchReceipt | VisualLaunchReceipt,
   processAttemptId: string,
   scratchLease: DurableBatchScratchLease,
-  launchManifest: RecoveryProcessRecord["launchManifest"],
-): RecoveryProcessRecord => Object.freeze({
-  runId: unit.run.id,
-  attemptId: unit.attempt.id,
-  attemptGeneration: unit.attempt.attemptGeneration,
-  dispatcherGeneration: unit.attempt.dispatcherGeneration,
-  processAttemptId,
-  sampleIndex: receipt.sampleIndex,
-  sampleId: receipt.sampleId,
-  pid: receipt.pid,
-  processStartToken: receipt.processStartToken,
-  processGroupId: receipt.processGroupId,
-  scratchId: receipt.scratchId,
-  scratchLease,
-  launchManifest,
-  state: "blocked",
-  exitCode: null,
-  exitSignal: null,
-});
+): RecoveryProcessRecord => {
+  const common = {
+    runId: unit.run.id,
+    attemptId: unit.attempt.id,
+    attemptGeneration: unit.attempt.attemptGeneration,
+    dispatcherGeneration: unit.attempt.dispatcherGeneration,
+    processAttemptId,
+    pid: receipt.pid,
+    processStartToken: receipt.processStartToken,
+    processGroupId: receipt.processGroupId,
+    scratchId: receipt.scratchId,
+    scratchLease,
+    launchManifest: pending.launchManifest,
+    state: "blocked" as const,
+    exitCode: null,
+    exitSignal: null,
+  };
+  if (pending.processKind === "visual" && "loopbackHost" in receipt) {
+    const process: VisualRecoveryProcessRecord = {
+      ...common,
+      processKind: "visual",
+      launchManifest: pending.launchManifest,
+      loopbackPort: receipt.loopbackPort,
+      healthPath: receipt.healthPath,
+      healthReceipt: null,
+    };
+    return Object.freeze(process);
+  }
+  if (pending.processKind === "batch" && !("loopbackHost" in receipt)) {
+    const process: BatchRecoveryProcessRecord = {
+      ...common,
+      processKind: "batch",
+      launchManifest: pending.launchManifest,
+      sampleIndex: receipt.sampleIndex,
+      sampleId: receipt.sampleId,
+    };
+    return Object.freeze(process);
+  }
+  throw new ProductRunRecoveryError(
+    "dispatcher_recovery_required",
+    "Recovered launch receipt kind changed during adoption.",
+  );
+};
