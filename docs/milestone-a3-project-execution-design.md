@@ -1,7 +1,13 @@
 # Milestone A3 project execution design
 
-Status: active Stage 3 contract for Issue #14. The first foundation slice
-implemented fixed-copy Project creation and the Project workspace projection.
+- Status: active
+- Role: active design
+- Scope: Stage 3 Project execution contract and implementation ledger for Issue #14
+- Source of truth: Milestone A product contract; merged code and PRs for implementation status
+- Last reviewed: 2026-07-25
+
+The first foundation slice implemented fixed-copy Project creation and the
+Project workspace projection.
 A3-1a adds execution contract v4, the closed canonical input-schema profile, deterministic
 experiment/sample planning, configuration-and-record digest compare-and-set
 with immutable historical command receipts, execution-description-v2
@@ -12,7 +18,9 @@ server-owned limits, and atomic successful output publication. The official
 generic scaffold now emits execution-description v2 and declares batch only;
 existing v1 Models are not silently upgraded.
 
-Visual starts and batch `domainEvents` are explicit current rejections.
+Visual completion and batch `domainEvents` are explicit current rejections;
+published A3-2a2c admits eligible visual starts through the existing
+Project-run API.
 A3-1c-a adds schema migration v5, the strict public cancel command/receipt, queued no-launch and
 running abort behavior, public `cancelling` projection, and SQLite commit-order
 precedence against every terminal transition. A3-1c-b adds schema migration v6,
@@ -41,13 +49,14 @@ A3-2a2b was merged and published through PR #30 at merge commit `9f23f61`.
 Its generic single-attempt visual supervisor and launch-gate, sandbox, exact
 process/listener, one-shot health, bounded output, and cleanup safety primitives
 run a real `riff-visual-v1` child.
-A3-2a2c is implemented on the current branch. One dispatcher generation owns
+A3-2a2c was merged and published through PR #31 at merge commit `361b36f`.
+One dispatcher generation owns
 independent batch and one-slot visual lanes; exact-generation heartbeat,
 cancellation, and finalization, a fatal-error latch, stop/join, and
 generation-fenced cleanup of unlaunched visual scratch preserve the shared
 lifecycle boundary. Existing Project-run admission now accepts visual work,
 restart audit validates exact visual success evidence, and the real-process
-public vertical plus DTO/error/log secrecy gate pass. Current evidence is a
+public vertical plus DTO/error/log secrecy gate pass. Its publication evidence is a
 final full backend gate of 385 tests with 384 passed, zero failed, and one
 optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; the real public vertical passed; web passes 104/104 and
@@ -69,7 +78,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 ## Current implementation boundary
 
 The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c/A3-2a1/A3-2a2a/
-A3-2a2b plus current A3-2a2c branch boundary is intentionally narrow:
+A3-2a2b/A3-2a2c boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -188,7 +197,7 @@ Project-run route; visual starts with `completionConversationId` fail with
 `visual_completion_not_supported`; and batch descriptions that
 declare `domainEvents` fail with `domain_events_not_supported`.
 
-The published A3-2a1/A3-2a2a/A3-2a2b contracts plus current A3-2a2c
+The published A3-2a1/A3-2a2a/A3-2a2b/A3-2a2c contracts
 dispatcher/public admission implementation preserve this public boundary:
 visual runs share the existing Project-run resource, child ports remain
 private, and the `completionConversationId` negative gate remains HTTP `422`
@@ -634,7 +643,7 @@ The current A3-1b batch implementation may claim hard enforcement only for:
 
 In the historical A3-1b batch-only boundary, `startupTimeMs`,
 `maxEventCount`, and `maxEventBytes` were frozen reserved fields and visual
-starts failed with `capability_not_available`. Current A3-2a2c enforces the
+starts failed with `capability_not_available`. Published A3-2a2c enforces the
 visual startup budget and admits eligible visual starts; batch `domainEvents`
 remain unsupported with `domain_events_not_supported`.
 
@@ -950,7 +959,7 @@ write the same exact-identity process checkpoints while public visual dispatch
 remains closed. Cross-restart recovery now validates those exact checkpoints
 before any inspection or signalling; focused tests use a fake supervisor and
 start no real visual child or listener. Published A3-2a2b adds the real generic
-single-attempt supervisor and process-safety primitives. Current A3-2a2c
+single-attempt supervisor and process-safety primitives. Published A3-2a2c
 integrates that supervisor with the dispatcher and existing Project-run
 admission after its scheduling, terminalization, restart-audit, real-process
 vertical, and secrecy gates pass.
@@ -1334,9 +1343,9 @@ Output indexes never resolve outside the owning Project/run object root.
    public admission/API, broker, frame, WebSocket, Playwright, or browser claim.
    Public visual remains HTTP `409` `capability_not_available`, and the
    completion negative gate is unchanged.
-8. **A3-2a2c dispatcher and public admission — implemented on the current
-   branch:** one shared generation owns independent batch and one-slot visual
-   lanes, with exact heartbeat/cancel/finalize identity, a fatal-error latch,
+8. **A3-2a2c dispatcher and public admission — merged and published through
+   PR #31 at merge commit `361b36f`:** one shared generation owns independent
+   batch and one-slot visual lanes, with exact heartbeat/cancel/finalize identity, a fatal-error latch,
    stop join, and generation-fenced unlaunched-scratch cleanup. Startup audits
    exact visual success evidence. The existing Project-run route now admits
    eligible visual work; a real-process public vertical and child-port secrecy
@@ -1389,7 +1398,8 @@ signalling. No real visual child or listener is started, and later visual,
 Playwright, wind, download, event, and browser rows remain unclaimed.
 
 A3-2a2a is published through PR #29 at merge commit `1584e39`. A3-2a2b is
-published through PR #30 at merge commit `9f23f61`. Current A3-2a2c integrates
+published through PR #30 at merge commit `9f23f61`. A3-2a2c is published
+through PR #31 at merge commit `361b36f` and integrates
 the supervisor into one shared-generation dispatcher with independent
 batch/visual lanes, exact heartbeat/cancel/finalize authority, fatal latch,
 stop join, generation-fenced unlaunched-scratch cleanup, and exact visual

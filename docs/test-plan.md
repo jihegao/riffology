@@ -1,5 +1,11 @@
 # Delivery test plan
 
+- Status: active
+- Role: implementation record
+- Scope: Milestone A acceptance gates, revision-scoped evidence, and retained legacy test history
+- Source of truth: recorded commands/results for their named revisions and merged test implementation
+- Last reviewed: 2026-07-25
+
 ## Milestone A2 accepted verification
 
 Stage 2 verification is governed by
@@ -151,7 +157,7 @@ A3-1b adds coverage in `test/execution-protocol-v2.test.ts`,
 
 At the A3-1 batch-only boundary, visual starts without
 `completionConversationId` failed with HTTP `409`
-`capability_not_available`. Current A3-2a2c admits eligible visual starts
+`capability_not_available`. Published A3-2a2c admits eligible visual starts
 through the existing Project-run route. If `completionConversationId` is
 present, that field-specific gate still fails with HTTP `422`
 `visual_completion_not_supported`. Batch descriptions that declare
@@ -288,7 +294,8 @@ A3-2a is delivered through separately reviewed gates:
   and one optional installed-OpenCode smoke skipped; the 102/102 focused
   concurrency combination passed three consecutive runs; web passed 104/104
   and the production build succeeded.
-- **A3-2a2c dispatcher/public admission — current branch:** one dispatcher
+- **A3-2a2c dispatcher/public admission — merged and published through PR #31
+  at merge commit `361b36f`:** one dispatcher
   generation owns independent batch and one-slot visual lanes. Tests cover
   exact-generation heartbeat/cancel/finalize, the fatal-error latch, stop
   join, generation-fenced cleanup of unlaunched visual scratch, and exact
@@ -353,7 +360,7 @@ Visual completion is a negative contract. A public visual start containing
 timeout, cancellation, and restart, with no `run_completion_cards` row and no
 platform message. Project run reads remain authoritative.
 
-A3-2a1, published A3-2a2a/A3-2a2b, and current A3-2a2c expose visual
+A3-2a1 and the published A3-2a2a/A3-2a2b/A3-2a2c slices expose visual
 admission only through the existing Project-run API. They expose no child
 port, proxy, frame, WebSocket, Playwright authority, or real-browser acceptance
 row. The HTTP `422` `visual_completion_not_supported` negative gate remains.
