@@ -1,19 +1,25 @@
 # Backend API contracts
 
-## Milestone A2 authority and A3-1b batch execution
+- Status: active
+- Role: normative contract
+- Scope: implemented Stage 2 and Stage 3 HTTP/API boundaries plus retained legacy API history
+- Source of truth: merged server/Store implementation and the Milestone A product contract
+- Last reviewed: 2026-07-25
+
+## Milestone A2 authority and current A3 execution
 
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` schema migration v8, execution
+Gate API retained below. `ProductStoreV2` through schema migration v9, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
 technical status.
 
-The implemented Stage 2 routes are:
+The implemented Stage 2 and Stage 3 routes are:
 
-| Route family | Current Stage 2 contract |
+| Route family | Current implemented contract |
 | --- | --- |
 | `GET /api/providers` | Discover backend-validated OpenCode provider/model pairs; return no credentials or upstream session IDs. |
 | `POST /api/models` | Accept a name and initial provider/model, then atomically create a generic Model, its first conversation, and server-owned scaffold. |
@@ -31,7 +37,7 @@ The implemented Stage 2 routes are:
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
 | `POST /api/projects/{projectId}/experiment-configs` | Validate and canonicalize `ExperimentConfigurationV1`, expand its exact plan, and persist an immutable create-command response receipt. |
 | `PATCH /api/projects/{projectId}/experiment-configs/{configId}` | Require `commandId`, `expectedConfigurationDigest`, and `expectedRecordDigest`; apply both CAS guards and preserve exact historical response replay. |
-| `POST /api/projects/{projectId}/runs` | Replan and freeze the named experiment, apply server-owned limits, atomically create/replay the queued run receipt, and make it eligible for the A3-1b batch dispatcher. |
+| `POST /api/projects/{projectId}/runs` | Replan and freeze the named experiment, apply server-owned limits, atomically create/replay the queued run receipt, and admit its declared supported batch or visual run kind to the shared dispatcher. |
 | `GET /api/projects/{projectId}/runs/{runId}` | Return the bounded run projection and, only after atomic success, its checked output-index projections. |
 
 The implemented experiment request fields are exact:
@@ -214,7 +220,7 @@ currently supported hard limits, and atomically publishes successful outputs.
 wall time, termination grace, stdout bytes, stderr bytes, output file count,
 output bytes, and scratch/Project integrity. CPU time, resident memory, and
 model-spawned process-count limits are not accepted as supported limits.
-Current A3-2a2c enforces `startupTimeMs` for admitted visual work. Event
+Published A3-2a2c enforces `startupTimeMs` for admitted visual work. Event
 count/byte fields remain frozen reserved fields: visual starts that supply
 `completionConversationId` fail with HTTP `422` and
 `visual_completion_not_supported`, and batch `domainEvents` fail with
@@ -276,8 +282,8 @@ schema-v9 and private Store visual authority. A3-2a2b was merged and published
 through PR #30 at merge commit `9f23f61`; its generic single-attempt supervisor
 starts a real child behind the durable gate and enforces the visual sandbox,
 exact process/listener identity, bounded health, output, and cleanup.
-A3-2a2c is implemented on the current branch: one shared dispatcher generation
-owns independent batch and one-slot visual lanes, exact-generation
+A3-2a2c was merged and published through PR #31 at merge commit `361b36f`.
+One shared dispatcher generation owns independent batch and one-slot visual lanes, exact-generation
 heartbeat/cancel/finalize, a fatal-error latch, stop join, and
 generation-fenced cleanup of unlaunched visual scratch. Existing Project-run
 admission accepts visual experiments, restart audit requires exact visual
@@ -316,7 +322,8 @@ target contracts, not current routes or acceptance evidence:
    PID/start-token/process-group and listener checks, one-shot health, bounded
    output validation, and exact cleanup. They do not claim queue dispatch,
    public admission/API, broker, frame, WebSocket, or browser behavior.
-4. **A3-2a2c dispatcher/public admission — current branch:** the one-slot
+4. **A3-2a2c dispatcher/public admission — merged and published through PR #31
+   at `361b36f`:** the one-slot
    visual scheduler continues independent batch dispatch under one shared
    generation and exact heartbeat/cancel/finalize authority. Its fatal latch,
    stop join, generation-fenced unlaunched-scratch cleanup, and exact visual
@@ -392,7 +399,7 @@ its claim dispatcher generation for heartbeat/finalize; the slot is released
 only after exact terminal commit and verified process/scratch cleanup.
 Dispatcher stop aborts and awaits all active lanes before returning. These
 rules do not weaken cancellation precedence, timeouts, or restart cleanup.
-The published A3-2a1/A3-2a2a/A3-2a2b slices plus current A3-2a2c expose
+The published A3-2a1/A3-2a2a/A3-2a2b/A3-2a2c slices expose
 dispatcher-backed visual admission only through the existing Project-run API.
 They expose no child port, proxy, frame, WebSocket, Playwright capability, or
 positive browser claim. Supplying `completionConversationId` still fails with
