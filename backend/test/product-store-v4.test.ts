@@ -392,7 +392,7 @@ test("ProductStoreV2 v4 CAS freezes a queued run and replays its immutable start
       experimentConfigId: "experiment_visual_on_batch",
       expectedConfigurationDigest: visualPlan.configurationDigest,
       plan: visualPlan,
-    }), /capability_not_declared/u);
+    }), /visual_completion_not_supported/u);
 
     store.close();
     store = ProductStoreV2.open(root);

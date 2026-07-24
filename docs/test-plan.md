@@ -219,18 +219,19 @@ diagnostic is the intended safety boundary, not proof of cleanup.
 
 ### A3-2 visual gates
 
-A3-2a is split into two separately merged gates:
+A3-2a is delivered through separately reviewed gates:
 
-- **A3-2a1 schema-v8/Store/recovery contract:** current focused tests cover the
+- **A3-2a1 schema-v8/Store/recovery contract — merged and published in PR #28:**
+  focused tests cover the
   schema-v8 migration/rollback boundary, visual health-receipt invariants,
   stable public admission rejection, and private Store process-evidence
   lifecycle. Cross-restart visual reconciliation is implemented; its focused
   fake-supervisor suite passes 29/29 without starting a real visual child or
   opening a listener. The broader focused root gate passes 62/62, the
   independent reviewer gate passes 81/81, and independent recovery review is
-  PASS. The full backend gate reports 314 total: 313 passed, zero failed, and
-  one optional installed-OpenCode smoke skipped; web tests pass 104/104 and the
-  production build succeeds. Merge and publication remain pending.
+  PASS. Its historical full backend gate reported 314 total: 313 passed, zero
+  failed, and one optional installed-OpenCode smoke skipped; web tests passed
+  104/104 and the production build succeeded.
   Migration and rollback tests cover schema-v8 migration/rollback plus a
   representative schema-v7 batch sentinel and preservation of the relevant
   legacy triggers while extending schema-v6 scratch/launch/recovery evidence to
@@ -259,7 +260,22 @@ A3-2a is split into two separately merged gates:
   `capability_not_available`; when that field is present, its earlier gate
   returns HTTP `422` `visual_completion_not_supported`. This gate runs no
   visual model, opens no listener, and claims no browser behavior.
-- **A3-2a2 real visual lifecycle:** a real `riff-visual-v1` child must receive
+- **A3-2a2a schema-v9/Store visual authority — current branch, merge pending:**
+  commit `215cbcf` upgrades product-database authority to v9 because the former
+  atomic success/output triggers admitted only batch publication. The v9
+  replacement binds atomic success to `runId` plus `runKind`, preserves batch
+  behavior, rejects visual completion state including `NULL` disposition, and
+  requires the matching visual health/launch/scratch/exit-zero/cleanup evidence.
+  Store tests cover generation-fenced claim, queued cancellation with no card,
+  terminal cancellation precedence, required output validation, atomic
+  publication/rollback, and rejection of an extra live attempt/process. Two
+  independent reviews are PASS; focused root tests pass 78/78; the final backend
+  gate reports 325 total, 324 passed, zero failed, and one optional
+  installed-OpenCode smoke skipped; web tests pass 104/104 and the production
+  build succeeds. Public visual admission remains HTTP `409`
+  `capability_not_available`. This gate has no dispatcher, supervisor, real
+  child, listener, or browser claim and is not yet merged or published.
+- **A3-2a2b/c real visual lifecycle — pending:** a real `riff-visual-v1` child must receive
   the canonical single-sample envelope through `--riff-input`, its assigned
   `--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and the frozen assigned
   `--riff-port`. Tests compare the input to the planner/sample-ID preimage and
@@ -322,8 +338,9 @@ Visual completion is a negative contract. A public visual start containing
 timeout, cancellation, and restart, with no `run_completion_cards` row and no
 platform message. Project run reads remain authoritative.
 
-A3-2a1 and A3-2a2 have no proxy, frame, WebSocket, Playwright, or real-browser
-acceptance row. Those claims begin only in the later gates:
+A3-2a1 and the current A3-2a2a branch have no proxy, frame, WebSocket,
+Playwright, or real-browser acceptance row. Those claims begin only in the
+later gates:
 
 - **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
   enforcement, frame-size, connection-count, and idle-time limits, plus the

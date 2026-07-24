@@ -163,7 +163,7 @@ test("schema v6 preserves a legal live v4 attempt for recovery and keeps executi
     installV5(database);
     insertClaimedV4Run(database);
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.deepEqual({ ...database.prepare(
       "SELECT contract_version, status FROM runs WHERE id = 'run_recovery'",
     ).get() as object }, { contract_version: 4, status: "running" });
@@ -189,6 +189,7 @@ test("schema v6 migration failure rolls back every recovery table and version ma
       { version: 6, sql: `${PRODUCT_SCHEMA_V6_SQL}\nSELECT * FROM missing_v6_guard;` },
       PRODUCT_SCHEMA_MIGRATIONS[6]!,
       PRODUCT_SCHEMA_MIGRATIONS[7]!,
+      PRODUCT_SCHEMA_MIGRATIONS[8]!,
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v6_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
@@ -371,7 +372,7 @@ test("a real v6 terminal pending run migrates to v7, publishes once, and survive
 
     const inspected = new DatabaseSync(join(root, "product.sqlite3"), { open: true });
     configureProductDatabase(inspected);
-    assert.equal((inspected.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((inspected.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.throws(() => inspected.prepare(
       "UPDATE runs SET completion_card_disposition = 'conversation_unavailable' WHERE id = 'run_completion'",
     ).run(), /terminal run completion disposition is immutable/u);

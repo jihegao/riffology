@@ -90,7 +90,7 @@ test("v3 execution rows migrate transactionally to read-only version-3 contracts
     ).run(NOW);
 
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     const expectedDigests = new Map([
       ["experiment_configurations", canonicalDigest({
         contractVersion: 3,
@@ -222,6 +222,7 @@ test("a failed v4 migration rolls back columns, tables, legacy markers, and vers
       { version: 6, sql: PRODUCT_SCHEMA_V6_SQL },
       PRODUCT_SCHEMA_MIGRATIONS[6],
       PRODUCT_SCHEMA_MIGRATIONS[7],
+      PRODUCT_SCHEMA_MIGRATIONS[8],
     ]), /missing_v4_table/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
