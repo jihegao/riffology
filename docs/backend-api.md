@@ -1,6 +1,6 @@
 # Backend API contracts
 
-## Milestone A2 authority and A3 foundation
+## Milestone A2 authority and A3-1b batch execution
 
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
@@ -30,6 +30,8 @@ The implemented Stage 2 routes are:
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
 | `POST /api/projects/{projectId}/experiment-configs` | Validate and canonicalize `ExperimentConfigurationV1`, expand its exact plan, and persist an immutable create-command response receipt. |
 | `PATCH /api/projects/{projectId}/experiment-configs/{configId}` | Require `commandId`, `expectedConfigurationDigest`, and `expectedRecordDigest`; apply both CAS guards and preserve exact historical response replay. |
+| `POST /api/projects/{projectId}/runs` | Replan and freeze the named experiment, apply server-owned limits, atomically create/replay the queued run receipt, and make it eligible for the A3-1b batch dispatcher. |
+| `GET /api/projects/{projectId}/runs/{runId}` | Return the bounded run projection and, only after atomic success, its checked output-index projections. |
 
 The implemented experiment request fields are exact:
 
@@ -71,6 +73,81 @@ canonical `configuration`, `lifecycleState`, `createdAt`, `updatedAt`,
 compatibility alias. Callers do not send `sampleCount`, expanded samples,
 server-derived IDs, sample-plan digests, or timestamps.
 
+The A3-1b public start request is exact:
+
+```ts
+type StartProjectRunRequest = {
+  commandId: string;
+  experimentConfigId: string;
+  completionConversationId?: string;
+};
+
+type RunStartDto = {
+  schemaVersion: 1;
+  commandId: string;
+  runId: string;
+  projectId: string;
+  experimentConfigId: string;
+  completionConversationId: string | null;
+  status: "queued";
+  runKind: "batch";
+  sampleCount: number;
+  createdAt: string;
+};
+```
+
+Accepted starts return `201` and the exact durable receipt. Reusing the same
+`commandId` with the same intent returns that same receipt, including after the
+run has completed; changed intent fails idempotency. The route owns
+`projectId`. Callers cannot provide a Project path, execution root, snapshot or
+plan digest, sample expansion, limits, process command, attempt identity, or
+output metadata. Unknown fields fail with `422 unknown_field`.
+
+The public read DTOs are allowlisted:
+
+```ts
+type ProjectRunDto = {
+  id: string;
+  projectId: string;
+  experimentConfigurationId: string;
+  status: string;
+  requestedSampleCount: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  contractVersion: 3 | 4;
+  readOnly: boolean;
+  legacyDigest: string | null;
+  runKind: "batch" | "visual" | null;
+  cancelRequestedAt: string | null;
+  terminalCode: string | null;
+  completionCardDisposition: string | null;
+  outputs: ProjectOutputDto[];
+};
+
+type ProjectOutputDto = {
+  id: string;
+  runId: string;
+  logicalName: string;
+  outputType: string;
+  contractVersion: 3 | 4;
+  readOnly: boolean;
+  legacyDigest: string | null;
+  sampleIndex: number | null;
+  sampleId: string | null;
+  declaredRole: string | null;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+};
+```
+
+Non-succeeded run projections return `outputs: []`. A succeeded run exposes
+only atomically published indexes whose bytes, size, and SHA-256 were rechecked;
+there is not yet a public list/download endpoint in A3-1b.
+
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
 canned Agent response. Model mutation is limited to typed current-Model tools;
@@ -86,16 +163,48 @@ sibling paths remain denied. It is not hostile-code containment.
 `technicalStatus: "executable"` means the thin technical checks passed; it is
 not a scientific-validity, calibration, trust, or recommendation field.
 
-The Store has an internal atomic frozen-run start primitive. It accepts only a
-copied execution-description v2 with
+The run boundary accepts only a copied execution-description v2 with
 `inputs.schemaProfile: "riff-json-schema-2020-12-v1"`, required smoke input,
 declared outputs/cancellation, and the matching batch or visual protocol. It
-revalidates the frozen plan against the copied schema. This is not a public
-run-start/cancel API and launches no model process. The generic Stage 2 scaffold
-still emits execution-description v1, so scaffold migration is also pending.
-Dispatch, supervision, outputs/events, wind migration, and final shell routes
-remain #14/#15 work. The legacy Gate API below still coexists in tracked code
-and documentation until its separately reviewed retirement.
+revalidates the frozen plan against the copied schema. The official generic
+scaffold now emits v2 with batch capability only. A3-1b publicly starts and
+reads runs, dispatches a real `riff-batch-v1` process per sample, enforces the
+currently supported hard limits, and atomically publishes successful outputs.
+
+`RunLimitsV1` is server-owned. A3-1b hard-enforces sample count, concurrency,
+wall time, termination grace, stdout bytes, stderr bytes, output file count,
+output bytes, and scratch/Project integrity. CPU time, resident memory, and
+model-spawned process-count limits are not accepted as supported limits.
+`startupTimeMs` and event count/byte fields remain frozen reserved fields:
+visual starts currently fail with `capability_not_available`, and batch
+`domainEvents` fail with `domain_events_not_supported`.
+
+Admission and request failures use stable codes including `unknown_field`,
+`invalid_request`, `resource_not_found`, `state_conflict`,
+`idempotency_conflict`, `legacy_contract_read_only`,
+`execution_protocol_upgrade_required`, `capability_not_declared`,
+`capability_not_available`, `domain_events_not_supported`,
+`project_snapshot_corrupt`, `invalid_sample_plan`, and
+`sample_limit_exceeded`. Batch terminal codes include
+`batch_run_succeeded`, `batch_process_failed`, `run_wall_timeout`,
+`run_stdout_limit`, `run_stderr_limit`, `run_output_file_limit`,
+`run_output_byte_limit`, `run_output_invalid`,
+`process_cleanup_unverified`, `dispatcher_shutdown`,
+`dispatcher_heartbeat_failed`, and `batch_publication_failed`; an unexpected
+supervisor failure records `batch_supervisor_failed`.
+
+The dispatcher shuts down in-process work through an abort signal, verified
+process-group termination, owned-scratch cleanup, and a durable failure.
+Heartbeat, capability, supervisor, output-consumption, and publication
+exceptions use the same best-effort unwind. A run terminalizes only after every
+registered process has durable exit and cleanup evidence; otherwise it stays
+live and recovery-required rather than publishing a false failure/success.
+Startup refuses unresolved prior live attempts with
+`dispatcher_recovery_required`; cross-restart attempt/scratch recovery is not
+yet implemented. The user-cancel API/race, completion-card exactly-once
+delivery, visual supervision, output downloads, events, wind migration, and
+final shell routes remain later #14/#15 work. The legacy Gate API below still
+coexists until separately reviewed retirement.
 
 ---
 

@@ -20,22 +20,25 @@ restricted macOS Model process, digest-bound technical checks, and the narrow
 HTTP/API acceptance surface. API integration and the real-provider two-turn
 browser closure are complete; the live evidence is described under Verification.
 
-Stage 3 / #14 is in progress. The first foundation slice implemented fixed-copy
-Project creation and its workspace projection. The current A3-1a slice adds the
-schema-v4 migration, the closed canonical input-schema profile, deterministic
-experiment/sample planning, configuration-and-record digest compare-and-set
-with immutable historical command receipts, execution-description-v2 admission at the
-Store-only run boundary, and an atomic frozen `queued` run/start receipt.
-The generic Stage 2 scaffold remains execution-description v1, so existing
-scaffolded Models require an explicit future upgrade before they can satisfy
-that internal admission gate.
-The public run-start route, dispatcher, generic batch and visual supervisors,
-cancellation races, output/event ingestion, completion cards, scoped Playwright
-access, and ordinary wind import remain unimplemented. Their active contract and
+Stage 3 / #14 is in progress. The Project foundation and A3-1a frozen-planning
+slice implemented fixed-copy Projects, schema v4, the closed canonical
+input-schema profile, deterministic experiment/sample planning, digest
+compare-and-set, immutable command receipts, and execution-description-v2
+admission. A3-1b now adds the public run start/read routes, a durable dispatcher,
+a real generic batch supervisor, hard enforcement of the currently supported
+process limits, and atomic publication of successful output bytes and indexes.
+The official generic Model scaffold now emits execution-description v2 with a
+batch-only capability; existing v1 Models are not silently upgraded.
+
+A3-1b explicitly rejects visual runs with `capability_not_available` and batch
+`domainEvents` with `domain_events_not_supported`. Cross-restart
+attempt/scratch recovery, the user-cancel race and receipts, and exactly-once
+completion-card delivery remain A3-1c work. Visual execution, scoped Playwright
+access, and ordinary wind import are later #14 slices. Their active contract and
 negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
-No process execution, visual, wind-import, or final browser acceptance is
-claimed from these foundations alone.
+This batch slice is not completion evidence for Stage 3, visual execution, wind
+import, or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
@@ -150,6 +153,12 @@ interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 deterministic mode.
 
 ## Verification
+
+The final integrated A3-1b backend run passed 256 tests with 0 failures and
+1 optional installed-OpenCode smoke skipped. Focused A3-1b coverage includes execution-protocol-v2
+validation, real generic batch supervision, durable dispatch/orchestration,
+public run start/read, server-owned limits, terminal/process/output database
+invariants, output integrity, error unwind, and shutdown cleanup.
 
 Focused Milestone A2 verification:
 

@@ -7,6 +7,25 @@ const SQL = String.raw;
 export type ProductDatabase = DatabaseSync;
 export type ProductSchemaMigration = Readonly<{ version: number; sql: string }>;
 
+const atomicBatchSuccessRunContexts = new WeakMap<ProductDatabase, string>();
+
+/** @internal ProductStoreV2-only capability; direct callers are limited to schema tests. */
+export const withAtomicBatchSuccessRunContext = <T>(
+  database: ProductDatabase,
+  runId: string,
+  body: () => T,
+): T => {
+  if (atomicBatchSuccessRunContexts.has(database)) {
+    throw new Error("An atomic batch success context is already active.");
+  }
+  atomicBatchSuccessRunContexts.set(database, runId);
+  try {
+    return body();
+  } finally {
+    atomicBatchSuccessRunContexts.delete(database);
+  }
+};
+
 export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
   foreignKeys: true,
   journalMode: "WAL",
@@ -19,6 +38,8 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
     if (typeof value !== "string") throw new TypeError("canonical SHA-256 input must be JSON text");
     return canonicalDigest(parseCanonicalJsonV2(value));
   });
+  database.function("riff_atomic_batch_success_context", (runId: string) =>
+    atomicBatchSuccessRunContexts.get(database) === runId ? 1 : 0);
   database.exec(SQL`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
@@ -885,6 +906,12 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
   );
   DROP TABLE product_schema_v4_guard;
 
+  CREATE TABLE dispatcher_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    generation TEXT NOT NULL CHECK (length(generation) = 64 AND generation NOT GLOB '*[^0-9a-f]*'),
+    activated_at TEXT NOT NULL
+  ) STRICT;
+
   CREATE TABLE run_attempts (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
     run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -925,8 +952,13 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
     cleanup_receipt_sha256 TEXT CHECK (cleanup_receipt_sha256 IS NULL OR (length(cleanup_receipt_sha256) = 64 AND cleanup_receipt_sha256 NOT GLOB '*[^0-9a-f]*')),
     CHECK ((process_kind = 'batch' AND sample_index IS NOT NULL AND sample_id IS NOT NULL AND loopback_port IS NULL)
       OR (process_kind = 'visual' AND sample_index IS NULL AND sample_id IS NULL AND loopback_port IS NOT NULL)),
+    CHECK ((state = 'blocked' AND launch_gate_state IN ('blocked', 'timed_out'))
+      OR (state IN ('released', 'running') AND launch_gate_state = 'released')
+      OR state IN ('exited', 'cleanup_complete', 'cleanup_unverified')),
+    CHECK ((state IN ('exited', 'cleanup_complete', 'cleanup_unverified') AND exited_at IS NOT NULL)
+      OR (state NOT IN ('exited', 'cleanup_complete', 'cleanup_unverified') AND exited_at IS NULL)),
     CHECK ((state = 'cleanup_complete' AND cleanup_receipt_sha256 IS NOT NULL)
-      OR state != 'cleanup_complete')
+      OR (state != 'cleanup_complete' AND cleanup_receipt_sha256 IS NULL))
   ) STRICT;
   CREATE UNIQUE INDEX one_batch_process_attempt_v4 ON process_attempts(run_attempt_id, sample_index)
     WHERE process_kind = 'batch' AND state NOT IN ('cleanup_complete', 'cleanup_unverified');
@@ -1049,6 +1081,10 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
     OR NEW.started_at IS NOT NULL
     OR NEW.finished_at IS NOT NULL
     OR NEW.trashed_at IS NOT NULL
+    OR NEW.cancel_requested_at IS NOT NULL
+    OR NEW.terminal_code IS NOT NULL
+    OR NEW.terminal_diagnostics_json IS NOT NULL
+    OR NEW.resource_overview_json IS NOT NULL
   BEGIN SELECT RAISE(ABORT, 'new run requires a queued v4 frozen contract'); END;
 
   CREATE TRIGGER run_v4_project_digests_insert
@@ -1106,14 +1142,73 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
   )
   BEGIN SELECT RAISE(ABORT, 'invalid v4 run cancellation intent'); END;
 
-  CREATE TRIGGER run_timestamp_state_v4
-  BEFORE UPDATE OF status, started_at, finished_at ON runs WHEN OLD.contract_version = 4 AND NOT (
-    (NEW.status = 'queued' AND NEW.started_at IS NULL AND NEW.finished_at IS NULL)
-    OR (NEW.status = 'running' AND NEW.started_at IS NOT NULL AND NEW.finished_at IS NULL)
+  CREATE TRIGGER run_evidence_shape_v4
+  BEFORE UPDATE OF status, started_at, finished_at, terminal_code,
+    terminal_diagnostics_json, resource_overview_json
+  ON runs WHEN OLD.contract_version = 4 AND NOT (
+    (NEW.status = 'queued'
+      AND NEW.started_at IS NULL
+      AND NEW.finished_at IS NULL
+      AND NEW.terminal_code IS NULL
+      AND NEW.terminal_diagnostics_json IS NULL
+      AND NEW.resource_overview_json IS NULL)
+    OR (NEW.status = 'running'
+      AND NEW.started_at IS NOT NULL
+      AND NEW.finished_at IS NULL
+      AND NEW.terminal_code IS NULL
+      AND NEW.terminal_diagnostics_json IS NULL
+      AND NEW.resource_overview_json IS NULL)
     OR (NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
-      AND NEW.finished_at IS NOT NULL)
+      AND NEW.finished_at IS NOT NULL
+      AND NEW.terminal_code IS NOT NULL
+      AND NEW.terminal_diagnostics_json IS NOT NULL
+      AND json_type(NEW.terminal_diagnostics_json) = 'object'
+      AND NEW.resource_overview_json IS NOT NULL
+      AND json_type(NEW.resource_overview_json) = 'object')
   )
-  BEGIN SELECT RAISE(ABORT, 'v4 run timestamps do not match status'); END;
+  BEGIN SELECT RAISE(ABORT, 'v4 run evidence does not match status'); END;
+  CREATE TRIGGER run_terminal_evidence_transition_v4
+  BEFORE UPDATE OF terminal_code, terminal_diagnostics_json, resource_overview_json, finished_at
+  ON runs
+  WHEN OLD.contract_version = 4
+    AND (
+      NEW.terminal_code IS NOT OLD.terminal_code
+      OR NEW.terminal_diagnostics_json IS NOT OLD.terminal_diagnostics_json
+      OR NEW.resource_overview_json IS NOT OLD.resource_overview_json
+      OR NEW.finished_at IS NOT OLD.finished_at
+    )
+    AND NOT (
+      OLD.status IN ('queued', 'running')
+      AND NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out')
+      AND OLD.finished_at IS NULL
+      AND OLD.terminal_code IS NULL
+      AND OLD.terminal_diagnostics_json IS NULL
+      AND OLD.resource_overview_json IS NULL
+      AND NEW.finished_at IS NOT NULL
+      AND NEW.terminal_code IS NOT NULL
+      AND NEW.terminal_diagnostics_json IS NOT NULL
+      AND NEW.resource_overview_json IS NOT NULL
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run terminal evidence requires one terminal transition'); END;
+  CREATE TRIGGER run_terminal_evidence_immutable_v4
+  BEFORE UPDATE OF terminal_code, terminal_diagnostics_json, resource_overview_json,
+    started_at, finished_at ON runs
+  WHEN OLD.contract_version = 4
+    AND OLD.finished_at IS NOT NULL
+    AND (
+      NEW.terminal_code IS NOT OLD.terminal_code
+      OR NEW.terminal_diagnostics_json IS NOT OLD.terminal_diagnostics_json
+      OR NEW.resource_overview_json IS NOT OLD.resource_overview_json
+      OR NEW.started_at IS NOT OLD.started_at
+      OR NEW.finished_at IS NOT OLD.finished_at
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run terminal evidence is immutable'); END;
+  CREATE TRIGGER run_success_atomic_context_v4
+  BEFORE UPDATE OF status ON runs
+  WHEN OLD.contract_version = 4
+    AND NEW.status = 'succeeded'
+    AND riff_atomic_batch_success_context(NEW.id) != 1
+  BEGIN SELECT RAISE(ABORT, 'v4 run success requires atomic batch success context'); END;
 
   CREATE TRIGGER output_file_owner_insert_v4
   BEFORE INSERT ON output_indexes
@@ -1125,7 +1220,8 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
   CREATE TRIGGER output_v4_run_contract_insert
   BEFORE INSERT ON output_indexes
   BEGIN
-    SELECT CASE WHEN NEW.contract_version != 4
+    SELECT CASE WHEN riff_atomic_batch_success_context(NEW.run_id) != 1
+      OR NEW.contract_version != 4
       OR NEW.legacy_digest IS NOT NULL
       OR NEW.output_contract_sha256 != riff_canonical_sha256(json_object(
         'runId', NEW.run_id,
@@ -1139,10 +1235,12 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
       SELECT 1 FROM runs
       WHERE id = NEW.run_id
         AND contract_version = 4
+        AND status = 'succeeded'
+        AND terminal_code = 'run_succeeded'
         AND NEW.sample_index < requested_sample_count
         AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleIndex') = NEW.sample_index
         AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleId') = NEW.sample_id
-    ) THEN RAISE(ABORT, 'new output requires v4 run contract') END;
+    ) THEN RAISE(ABORT, 'new output requires atomic v4 run success') END;
   END;
   CREATE TRIGGER output_legacy_read_only_v4
   BEFORE UPDATE ON output_indexes WHEN OLD.contract_version = 3
@@ -1162,6 +1260,29 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
       SELECT 1 FROM runs WHERE id = NEW.run_id AND contract_version = 4 AND status IN ('queued', 'running')
     ) THEN RAISE(ABORT, 'run attempt requires nonterminal v4 run') END;
   END;
+  CREATE TRIGGER run_attempt_shape_insert_v4
+  BEFORE INSERT ON run_attempts
+  WHEN NEW.state != 'claimed'
+    OR NEW.heartbeat_at IS NOT NULL
+    OR NEW.started_at IS NOT NULL
+    OR NEW.finished_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'new run attempt requires claimed evidence shape'); END;
+  CREATE TRIGGER run_attempt_dispatcher_generation_insert_v4
+  BEFORE INSERT ON run_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM dispatcher_state
+      WHERE singleton = 1 AND generation = NEW.dispatcher_generation
+    ) THEN RAISE(ABORT, 'stale dispatcher generation') END;
+  END;
+  CREATE TRIGGER run_attempt_dispatcher_generation_update_v4
+  BEFORE UPDATE OF state, lease_expires_at, heartbeat_at, started_at, finished_at ON run_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM dispatcher_state
+      WHERE singleton = 1 AND generation = OLD.dispatcher_generation
+    ) THEN RAISE(ABORT, 'stale dispatcher generation') END;
+  END;
   CREATE TRIGGER run_attempt_binding_immutable_v4
   BEFORE UPDATE OF run_id, attempt_generation, dispatcher_generation ON run_attempts
   BEGIN SELECT RAISE(ABORT, 'run attempt binding is immutable'); END;
@@ -1172,6 +1293,20 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
     OR (OLD.state = 'running' AND NEW.state IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'))
   )
   BEGIN SELECT RAISE(ABORT, 'invalid run attempt transition'); END;
+  CREATE TRIGGER run_attempt_evidence_shape_v4
+  BEFORE UPDATE OF state, started_at, finished_at ON run_attempts
+  WHEN NOT (
+    (NEW.state = 'claimed' AND NEW.started_at IS NULL AND NEW.finished_at IS NULL)
+    OR (NEW.state IN ('starting', 'running') AND NEW.started_at IS NOT NULL AND NEW.finished_at IS NULL)
+    OR (NEW.state IN ('failed', 'timed_out', 'succeeded')
+      AND NEW.started_at IS NOT NULL AND NEW.finished_at IS NOT NULL)
+    OR (NEW.state IN ('cancelled', 'interrupted') AND NEW.finished_at IS NOT NULL)
+  )
+  BEGIN SELECT RAISE(ABORT, 'run attempt evidence does not match state'); END;
+  CREATE TRIGGER run_attempt_terminal_immutable_v4
+  BEFORE UPDATE ON run_attempts
+  WHEN OLD.state IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted')
+  BEGIN SELECT RAISE(ABORT, 'terminal run attempt is immutable'); END;
 
   CREATE TRIGGER process_attempt_v4_owner
   BEFORE INSERT ON process_attempts
@@ -1187,15 +1322,48 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
         ))
     ) THEN RAISE(ABORT, 'process attempt run or sample mismatch') END;
   END;
+  CREATE TRIGGER process_attempt_shape_insert_v4
+  BEFORE INSERT ON process_attempts
+  WHEN NEW.launch_gate_state != 'blocked'
+    OR NEW.state != 'blocked'
+    OR NEW.started_at IS NOT NULL
+    OR NEW.health_at IS NOT NULL
+    OR NEW.heartbeat_at IS NOT NULL
+    OR NEW.exited_at IS NOT NULL
+    OR NEW.exit_code IS NOT NULL
+    OR NEW.exit_signal IS NOT NULL
+    OR NEW.cleanup_receipt_sha256 IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'new process attempt requires blocked evidence shape'); END;
+  CREATE TRIGGER process_attempt_dispatcher_generation_insert_v4
+  BEFORE INSERT ON process_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM run_attempts a
+      JOIN dispatcher_state d ON d.singleton = 1
+      WHERE a.id = NEW.run_attempt_id AND a.dispatcher_generation = d.generation
+    ) THEN RAISE(ABORT, 'stale dispatcher generation') END;
+  END;
+  CREATE TRIGGER process_attempt_dispatcher_generation_update_v4
+  BEFORE UPDATE OF launch_gate_state, state, started_at, health_at, heartbeat_at,
+    exited_at, exit_code, exit_signal, cleanup_receipt_sha256 ON process_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM run_attempts a
+      JOIN dispatcher_state d ON d.singleton = 1
+      WHERE a.id = OLD.run_attempt_id AND a.dispatcher_generation = d.generation
+    ) THEN RAISE(ABORT, 'stale dispatcher generation') END;
+  END;
   CREATE TRIGGER process_attempt_binding_immutable_v4
   BEFORE UPDATE OF run_attempt_id, process_kind, sample_index, sample_id,
     pid, process_start_token, process_group_id ON process_attempts
   BEGIN SELECT RAISE(ABORT, 'process attempt identity is immutable'); END;
   CREATE TRIGGER process_attempt_transition_v4
   BEFORE UPDATE OF state ON process_attempts WHEN NOT (
-    (OLD.state = 'blocked' AND NEW.state IN ('released', 'exited', 'cleanup_unverified'))
-    OR (OLD.state = 'released' AND NEW.state IN ('running', 'exited', 'cleanup_unverified'))
-    OR (OLD.state = 'running' AND NEW.state IN ('exited', 'cleanup_unverified'))
+    (OLD.state = 'blocked' AND NEW.state IN ('released', 'exited'))
+    OR (OLD.state = 'released' AND NEW.state IN ('running', 'exited'))
+    OR (OLD.state = 'running' AND NEW.state = 'exited')
     OR (OLD.state = 'exited' AND NEW.state IN ('cleanup_complete', 'cleanup_unverified'))
   )
   BEGIN SELECT RAISE(ABORT, 'invalid process attempt transition'); END;
@@ -1203,6 +1371,78 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
   BEFORE UPDATE OF launch_gate_state ON process_attempts
   WHEN OLD.launch_gate_state != 'blocked' OR NEW.launch_gate_state NOT IN ('released', 'timed_out')
   BEGIN SELECT RAISE(ABORT, 'invalid process launch gate transition'); END;
+  CREATE TRIGGER process_attempt_evidence_shape_v4
+  BEFORE UPDATE OF launch_gate_state, state, started_at, exited_at,
+    exit_code, exit_signal, cleanup_receipt_sha256 ON process_attempts
+  WHEN NOT (
+    (NEW.state = 'blocked'
+      AND NEW.launch_gate_state IN ('blocked', 'timed_out')
+      AND NEW.started_at IS NULL
+      AND NEW.exited_at IS NULL
+      AND NEW.exit_code IS NULL
+      AND NEW.exit_signal IS NULL
+      AND NEW.cleanup_receipt_sha256 IS NULL)
+    OR (NEW.state IN ('released', 'running')
+      AND NEW.launch_gate_state = 'released'
+      AND NEW.started_at IS NOT NULL
+      AND NEW.exited_at IS NULL
+      AND NEW.exit_code IS NULL
+      AND NEW.exit_signal IS NULL
+      AND NEW.cleanup_receipt_sha256 IS NULL)
+    OR (NEW.state = 'exited'
+      AND NEW.exited_at IS NOT NULL
+      AND ((NEW.exit_code IS NOT NULL AND NEW.exit_signal IS NULL)
+        OR (NEW.exit_code IS NULL AND NEW.exit_signal IS NOT NULL))
+      AND NEW.cleanup_receipt_sha256 IS NULL)
+    OR (NEW.state = 'cleanup_complete'
+      AND NEW.exited_at IS NOT NULL
+      AND ((NEW.exit_code IS NOT NULL AND NEW.exit_signal IS NULL)
+        OR (NEW.exit_code IS NULL AND NEW.exit_signal IS NOT NULL))
+      AND NEW.cleanup_receipt_sha256 IS NOT NULL)
+    OR (NEW.state = 'cleanup_unverified'
+      AND NEW.exited_at IS NOT NULL
+      AND ((NEW.exit_code IS NOT NULL AND NEW.exit_signal IS NULL)
+        OR (NEW.exit_code IS NULL AND NEW.exit_signal IS NOT NULL))
+      AND NEW.cleanup_receipt_sha256 IS NULL)
+  )
+  BEGIN SELECT RAISE(ABORT, 'process attempt evidence does not match gate and state'); END;
+  CREATE TRIGGER process_exit_evidence_transition_v4
+  BEFORE UPDATE OF exited_at, exit_code, exit_signal ON process_attempts
+  WHEN (
+    NEW.exited_at IS NOT OLD.exited_at
+    OR NEW.exit_code IS NOT OLD.exit_code
+    OR NEW.exit_signal IS NOT OLD.exit_signal
+  )
+  AND NOT (
+    OLD.state IN ('blocked', 'released', 'running')
+    AND NEW.state = 'exited'
+    AND OLD.exited_at IS NULL
+    AND OLD.exit_code IS NULL
+    AND OLD.exit_signal IS NULL
+    AND NEW.exited_at IS NOT NULL
+    AND ((NEW.exit_code IS NOT NULL AND NEW.exit_signal IS NULL)
+      OR (NEW.exit_code IS NULL AND NEW.exit_signal IS NOT NULL))
+  )
+  BEGIN SELECT RAISE(ABORT, 'process exit evidence requires one exited transition'); END;
+  CREATE TRIGGER process_terminal_immutable_v4
+  BEFORE UPDATE ON process_attempts
+  WHEN OLD.state IN ('cleanup_complete', 'cleanup_unverified')
+  BEGIN SELECT RAISE(ABORT, 'terminal process attempt is immutable'); END;
+
+  CREATE TRIGGER run_output_object_atomic_success_v4
+  BEFORE INSERT ON object_files
+  WHEN NEW.kind = 'run_file'
+    AND EXISTS (SELECT 1 FROM runs WHERE id = NEW.owner_run_id AND contract_version = 4)
+    AND (
+      riff_atomic_batch_success_context(NEW.owner_run_id) != 1
+      OR NOT EXISTS (
+        SELECT 1 FROM runs
+        WHERE id = NEW.owner_run_id
+          AND status = 'succeeded'
+          AND terminal_code = 'run_succeeded'
+      )
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run output object requires atomic successful terminal context'); END;
 
   CREATE TRIGGER run_command_v4_owner
   BEFORE INSERT ON run_commands

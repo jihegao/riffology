@@ -195,7 +195,7 @@ export class RestrictedProcessRunner {
     if (process.platform !== "darwin") {
       throw new RestrictedProcessError("network_isolation_unavailable", "Restricted Model execution is supported only by the macOS network-denying boundary.");
     }
-    const sandbox = canonicalExecutable(this.#isolation.sandboxExecutable ?? "/usr/bin/sandbox-exec");
+    const sandbox = canonicalRestrictedExecutable(this.#isolation.sandboxExecutable ?? "/usr/bin/sandbox-exec");
     const readRoots = (this.#isolation.runtimeReadRoots ?? []).map((root) => canonicalRuntimeRoot(root, this.#workspace.root));
     const profile = macosSandboxProfile(this.#workspace.root, this.#command.executable, readRoots);
     return {
@@ -207,7 +207,7 @@ export class RestrictedProcessRunner {
 }
 
 const resolveCommand = (command: RestrictedProcessCommand): RestrictedProcessCommand => {
-  const executable = canonicalExecutable(command.executable);
+  const executable = canonicalRestrictedExecutable(command.executable);
   const argv = command.argv.map((value) => {
     if (typeof value !== "string" || value.includes("\0") || value.length > 8_192) throw new RestrictedProcessError("invalid_command", "A restricted process argument is invalid.");
     return value;
@@ -216,7 +216,7 @@ const resolveCommand = (command: RestrictedProcessCommand): RestrictedProcessCom
   return Object.freeze({ executable, argv: Object.freeze(argv) });
 };
 
-const canonicalExecutable = (input: string): string => {
+export const canonicalRestrictedExecutable = (input: string): string => {
   if (!isAbsolute(input)) throw new RestrictedProcessError("invalid_executable", "The restricted executable must be an absolute path.");
   let executable: string;
   try {
@@ -252,7 +252,7 @@ const canonicalRuntimeRoot = (input: string, workspace: string): string => {
   return root;
 };
 
-const trustedPythonRuntimeRoots = (requestedExecutable: string, canonical: string): string[] => {
+export const trustedPythonRuntimeRoots = (requestedExecutable: string, canonical: string): string[] => {
   const roots: string[] = [];
   const requestedVenv = resolve(requestedExecutable, "../..");
   if (existsSync(join(requestedVenv, "pyvenv.cfg"))) roots.push(requestedVenv);
@@ -304,27 +304,61 @@ const killProcessGroup = (child: ChildProcessWithoutNullStreams, signal: NodeJS.
   }
 };
 
-export const macosSandboxProfile = (workspace: string, executable: string, runtimeReadRoots: readonly string[]): string => {
+export const macosSandboxProfile = (workspace: string, executable: string, runtimeReadRoots: readonly string[]): string =>
+  macosSandboxProfileForRoots({
+    readableRoots: [workspace],
+    writableRoots: [workspace],
+    executable,
+    runtimeReadRoots,
+  });
+
+export const macosBatchSandboxProfile = (input: Readonly<{
+  projectRoot: string;
+  inputPath: string;
+  outputRoot: string;
+  tempRoot: string;
+  executable: string;
+  runtimeReadRoots: readonly string[];
+}>): string => macosSandboxProfileForRoots({
+  readableRoots: [input.projectRoot, input.inputPath, input.outputRoot, input.tempRoot],
+  writableRoots: [input.outputRoot, input.tempRoot],
+  executable: input.executable,
+  runtimeReadRoots: input.runtimeReadRoots,
+});
+
+const macosSandboxProfileForRoots = (input: Readonly<{
+  readableRoots: readonly string[];
+  writableRoots: readonly string[];
+  executable: string;
+  runtimeReadRoots: readonly string[];
+}>): string => {
   const literal = (value: string): string => `\"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}\"`;
-  const executableTarget = realpathSync(executable);
-  const roots = [...new Set([workspace, dirname(executable), dirname(executableTarget), ...runtimeReadRoots])];
+  const executableTarget = realpathSync(input.executable);
+  const roots = [...new Set([
+    ...input.readableRoots,
+    dirname(input.executable),
+    dirname(executableTarget),
+    ...input.runtimeReadRoots,
+  ])];
   const reads = roots.map((root) => `(literal ${literal(root)}) (subpath ${literal(root)})`).join(" ");
-  const runtimeMetadata = [...new Set(runtimeReadRoots.flatMap(pathAncestors))]
+  const runtimeMetadata = [...new Set([...input.readableRoots, ...input.runtimeReadRoots].flatMap(pathAncestors))]
     .map((root) => `(literal ${literal(root)})`).join(" ");
+  const writes = [...new Set(input.writableRoots)]
+    .map((root) => `(literal ${literal(root)}) (subpath ${literal(root)})`).join(" ");
   const applePythonFramework = "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework";
   const applePython = executableTarget.startsWith(`${applePythonFramework}/`);
   const versionedFramework = versionedPythonFrameworkRoot(executableTarget);
   const userRoots = ["/Users"];
   try { userRoots.push(realpathSync("/Users")); } catch { /* fail-closed rules still include /Users */ }
-  const readableUserRoots = [workspace, ...runtimeReadRoots].filter((root) => root === "/Users" || root.startsWith("/Users/"));
+  const readableUserRoots = [...input.readableRoots, ...input.runtimeReadRoots]
+    .filter((root) => root === "/Users" || root.startsWith("/Users/"));
   const readExclusions = readableUserRoots.map((root) => `(require-not (subpath ${literal(root)}))`).join(" ");
   const denyUserReads = [...new Set(userRoots)].map((root) => `(deny file-read-data (require-all (subpath ${literal(root)}) ${readExclusions}))`);
-  const denyUserWrites = [...new Set(userRoots)].map((root) => `(deny file-write* (require-all (subpath ${literal(root)}) (require-not (subpath ${literal(workspace)}))))`);
   return [
     "(version 1)",
     "(deny default)",
     "(allow process-fork)",
-    `(allow process-exec (literal ${literal(executable)}) (literal ${literal(executableTarget)})${versionedFramework ? ` (subpath ${literal(versionedFramework)})` : ""}${applePython ? ` (subpath ${literal(applePythonFramework)})` : ""})`,
+    `(allow process-exec (literal ${literal(input.executable)}) (literal ${literal(executableTarget)})${versionedFramework ? ` (subpath ${literal(versionedFramework)})` : ""}${applePython ? ` (subpath ${literal(applePythonFramework)})` : ""})`,
     "(allow sysctl-read)",
     "(allow mach-lookup)",
     `(allow file-read-metadata ${reads} ${runtimeMetadata} (subpath \"/System\") (subpath \"/usr\")${applePython ? ` (literal \"/Library\") (literal \"/Library/Developer\") (subpath \"/Library/Developer/CommandLineTools\")` : ""} (subpath \"/private/var/db/timezone\") (literal \"/dev/null\") (literal \"/dev/urandom\"))`,
@@ -334,9 +368,8 @@ export const macosSandboxProfile = (workspace: string, executable: string, runti
     `(allow file-read-data ${reads} (subpath \"/System\") (subpath \"/usr/lib\")${applePython ? ` (subpath \"/Library/Developer/CommandLineTools\")` : ""} (subpath \"/private/var/db/timezone\") (literal \"/dev/null\") (literal \"/dev/urandom\"))`,
     "(allow file-write-data (require-not (vnode-type REGULAR-FILE)))",
     ...denyUserReads,
-    ...denyUserWrites,
     `(allow file-read* ${reads} (subpath \"/System\") (subpath \"/usr/lib\")${applePython ? ` (subpath \"/Library/Developer/CommandLineTools\")` : ""} (subpath \"/private/var/db/timezone\") (literal \"/dev/null\") (literal \"/dev/urandom\"))`,
-    `(allow file-write* (subpath ${literal(workspace)}) (literal \"/dev/null\"))`,
+    `(allow file-write* ${writes} (literal \"/dev/null\"))`,
     // No network rule is present: deny-default rejects inbound and outbound
     // sockets, including direct connections that ignore proxy variables.
   ].join("\n");

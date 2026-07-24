@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -10,6 +10,12 @@ import {
   type GenericExecutionDescription,
   type WorkspaceDigestSnapshot,
 } from "./model-workspace.ts";
+import { canonicalJsonV2 } from "./canonical-json-v2.ts";
+import {
+  batchProcessArguments,
+  createBatchInputV1,
+  resolveBatchOutputPathsV1,
+} from "./execution-protocol-v2.ts";
 import {
   createModelWorkspaceCapability,
   RestrictedProcessRunner,
@@ -123,7 +129,11 @@ export class ModelTechnicalChecker {
       description = validateExecutionDescription(input.executionDescription);
       descriptionDigest = executionDescriptionDigest(description);
       checks.push(pass("interface", "execution_description_valid", "The thin execution description is valid."));
-      const required = [description.entryPoint, description.dependencyFile];
+      const required = [
+        description.dependencyFile,
+        ...(description.batch ? [description.batch.entryPoint] : []),
+        ...(description.visual ? [description.visual.entryPoint] : []),
+      ];
       for (const path of required) if (!snapshot.files.some((file) => file.relativePath === path)) throw checkFailure("declared_file_missing", `Declared file ${path} is missing.`);
 
       const dependencyBytes = readFileSync(resolveOwned(input.workspace.root, description.dependencyFile));
@@ -151,25 +161,48 @@ export class ModelTechnicalChecker {
       if (!succeeded(dependency)) throw processFailure("dependency_unavailable", "The isolated interpreter cannot resolve all declared dependencies.", dependency);
       checks.push(pass("dependency", "dependencies_resolved", `${dependencies.length} dependency imports resolved in environment ${environmentKey}.`));
 
-      const smoke = await this.#execute("smoke", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), description.entryPoint, "--riff-smoke"], JSON.stringify(description.inputs.smoke), input.signal);
-      recordProcess(logs, "smoke", smoke);
-      if (!succeeded(smoke)) throw processFailure("smoke_failed", "The bounded Model smoke execution failed.", smoke);
-      checks.push(pass("smoke", "smoke_passed", "The bounded smoke process completed."));
-      checks.push(pass("resource", "resource_limits_respected", "The smoke process stayed within time and output limits."));
+      if (description.batch) {
+        const technicalRoot = join(checkWorkspace.root, ".riff-technical-check");
+        const inputPath = join(technicalRoot, "input.json");
+        const outputDirectory = join(technicalRoot, "outputs");
+        mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+        const batchInput = createBatchInputV1({
+          runId: "technical_check",
+          sampleIndex: 0,
+          parameters: description.inputs.smoke,
+          seed: null,
+        });
+        writeFileSync(inputPath, `${canonicalJsonV2(batchInput)}\n`, { mode: 0o600 });
+        const smoke = await this.#execute("smoke", checkWorkspace, [
+          "-I",
+          "-c",
+          pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT),
+          ...batchProcessArguments(description, inputPath, outputDirectory),
+        ], undefined, input.signal);
+        recordProcess(logs, "smoke", smoke);
+        if (!succeeded(smoke)) throw processFailure("smoke_failed", "The bounded Model smoke execution failed.", smoke);
+        checks.push(pass("smoke", "smoke_passed", "The bounded riff-batch-v1 smoke process completed."));
+        checks.push(pass("resource", "resource_limits_respected", "The smoke process stayed within time and output limits."));
 
-      for (const output of description.outputs) {
-        const path = resolveOwned(checkWorkspace.root, output.relativePath);
-        if (output.required && (!statSafe(path)?.isFile())) throw checkFailure("required_output_missing", `Required output ${output.logicalName} was not created.`);
-        if (statSafe(path)?.isFile() && statSync(path).size > this.#limits.maxWorkspaceBytes) throw checkFailure("output_too_large", `Output ${output.logicalName} exceeds its bound.`);
+        for (const output of resolveBatchOutputPathsV1(description, outputDirectory)) {
+          const path = output.absolutePath;
+          if (output.required && (!statSafe(path)?.isFile())) throw checkFailure("required_output_missing", `Required output ${output.logicalName} was not created.`);
+          if (statSafe(path)?.isFile() && statSync(path).size > this.#limits.maxWorkspaceBytes) throw checkFailure("output_too_large", `Output ${output.logicalName} exceeds its bound.`);
+        }
+        checks.push(pass("output", "declared_outputs_valid", "Required declared outputs were created inside the assigned output directory."));
+      } else {
+        checks.push(Object.freeze({ name: "smoke", state: "skipped", code: "visual_only", detail: "The Model does not declare batch capability." }));
+        checks.push(Object.freeze({ name: "resource", state: "skipped", code: "visual_only", detail: "Batch smoke resource checks do not apply." }));
+        checks.push(Object.freeze({ name: "output", state: "skipped", code: "visual_only", detail: "Batch output checks do not apply." }));
       }
-      checks.push(pass("output", "declared_outputs_valid", "Required declared outputs were created inside the check workspace."));
 
       const cancellationController = new AbortController();
       const forwardAbort = (): void => cancellationController.abort();
       input.signal?.addEventListener("abort", forwardAbort, { once: true });
       const cancelTimer = setTimeout(() => cancellationController.abort(), this.#cancellationProbeDelayMs);
       cancelTimer.unref?.();
-      const cancellation = await this.#execute("cancellation", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), description.entryPoint, "--riff-cancellation-probe"], undefined, cancellationController.signal);
+      const cancellationEntryPoint = description.batch?.entryPoint ?? description.visual!.entryPoint;
+      const cancellation = await this.#execute("cancellation", checkWorkspace, ["-I", "-c", pythonWithImportRoots(this.#pythonImportRoots, PYTHON_RUN_SCRIPT), cancellationEntryPoint, "--riff-cancellation-probe"], undefined, cancellationController.signal);
       clearTimeout(cancelTimer);
       input.signal?.removeEventListener("abort", forwardAbort);
       recordProcess(logs, "cancellation", cancellation);

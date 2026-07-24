@@ -2,20 +2,16 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { posix, relative, resolve, sep } from "node:path";
 import { canonicalJsonV2 } from "./canonical-json-v2.ts";
+import {
+  ExecutionProtocolV2Error,
+  INPUT_SCHEMA_PROFILE,
+  validateExecutionDescriptionV2,
+  type ExecutionDescriptionV2,
+} from "./execution-protocol-v2.ts";
 import type { InitialModelFile } from "./product-store-v2.ts";
 import { createModelWorkspaceCapability, RestrictedProcessError, type ModelWorkspaceCapability } from "./restricted-process.ts";
 
-export type GenericExecutionDescription = Readonly<{
-  schemaVersion: 1;
-  runtime: "python";
-  runMode: "batch" | "visual" | "both";
-  entryPoint: string;
-  dependencyFile: string;
-  inputs: Readonly<{ schema: Record<string, unknown>; smoke: Record<string, unknown> }>;
-  outputs: readonly Readonly<{ logicalName: string; relativePath: string; mediaType: string; required: boolean }>[];
-  cancellation: Readonly<{ signal: "SIGTERM"; graceMs: number }>;
-  visual?: Readonly<{ entryPoint: string; healthPath: string }>;
-}>;
+export type GenericExecutionDescription = ExecutionDescriptionV2;
 
 export type GenericModelScaffold = Readonly<{
   files: readonly InitialModelFile[];
@@ -44,7 +40,6 @@ const ENTRY_POINT = `from __future__ import annotations
 import argparse
 import json
 import signal
-import sys
 import time
 from pathlib import Path
 
@@ -56,22 +51,47 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
 
 
-def _read_parameters() -> tuple[int, float]:
-    value = json.load(sys.stdin)
-    if not isinstance(value, dict) or set(value) != {"stepLimit", "demand"}:
-        raise ValueError("input must contain exactly stepLimit and demand")
-    step_limit = value["stepLimit"]
-    demand = value["demand"]
+def _read_input(path: Path) -> tuple[int, float, int | None]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion", "runId", "sampleIndex", "sampleId", "parameters", "seed"
+    }:
+        raise ValueError("input must be a riff-batch-v1 envelope")
+    run_id = value["runId"]
+    if (
+        value["schemaVersion"] != 1
+        or not isinstance(run_id, str)
+        or not 3 <= len(run_id) <= 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in run_id)
+    ):
+        raise ValueError("input identity is invalid")
+    if type(value["sampleIndex"]) is not int or value["sampleIndex"] < 0:
+        raise ValueError("sampleIndex must be a non-negative integer")
+    if (
+        not isinstance(value["sampleId"], str)
+        or len(value["sampleId"]) != 64
+        or any(char not in "0123456789abcdef" for char in value["sampleId"])
+    ):
+        raise ValueError("sampleId must be a sha256 digest")
+    parameters = value["parameters"]
+    if not isinstance(parameters, dict) or set(parameters) != {"stepLimit", "demand"}:
+        raise ValueError("parameters must contain exactly stepLimit and demand")
+    seed = value["seed"]
+    if seed is not None and (type(seed) is not int or abs(seed) > 9_007_199_254_740_991):
+        raise ValueError("seed must be an integer or null")
+    step_limit = parameters["stepLimit"]
+    demand = parameters["demand"]
     if type(step_limit) is not int or not 1 <= step_limit <= 10_000:
         raise ValueError("stepLimit must be an integer from 1 through 10000")
     if isinstance(demand, bool) or not isinstance(demand, (int, float)) or not 0 <= demand <= 1_000_000:
         raise ValueError("demand must be a finite number from 0 through 1000000")
-    return step_limit, float(demand)
+    return step_limit, float(demand), seed
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--riff-smoke", action="store_true")
+    parser.add_argument("--riff-input", type=Path)
+    parser.add_argument("--riff-output-dir", type=Path)
     parser.add_argument("--riff-cancellation-probe", action="store_true")
     args = parser.parse_args()
     if args.riff_cancellation_probe:
@@ -79,11 +99,13 @@ def main() -> int:
         print("RIFF_CANCELLATION_READY", flush=True)
         while True:
             time.sleep(0.05)
-    step_limit, demand = _read_parameters()
-    model = GenericSimulationModel(step_limit=step_limit, demand=demand)
+    if args.riff_input is None or args.riff_output_dir is None:
+        parser.error("--riff-input and --riff-output-dir are required")
+    step_limit, demand, seed = _read_input(args.riff_input)
+    model = GenericSimulationModel(step_limit=step_limit, demand=demand, seed=seed)
     while model.running:
         model.step()
-    _write_json(Path("outputs/summary.json"), model.summary())
+    _write_json(args.riff_output_dir / "summary.json", model.summary())
     return 0
 
 
@@ -113,6 +135,7 @@ class GenericSimulationModel(Model):
             raise ValueError("demand must be a finite non-negative number")
         self.step_limit = step_limit
         self.demand = float(demand)
+        self.input_seed = seed
         self.completed_steps = 0
         self.running = True
 
@@ -120,12 +143,13 @@ class GenericSimulationModel(Model):
         self.completed_steps += 1
         self.running = self.completed_steps < self.step_limit
 
-    def summary(self) -> dict[str, int | float | str]:
+    def summary(self) -> dict[str, int | float | str | None]:
         return {
             "status": "complete",
             "completed_steps": self.completed_steps,
             "demand": self.demand,
             "processed_demand": self.completed_steps * self.demand,
+            "seed": self.input_seed,
         }
 `;
 
@@ -135,15 +159,18 @@ This is a domain-neutral Python/Mesa starting point. Edit the declared code,
 inputs, outputs, and documents for the problem being modeled. Passing Riff's
 technical checks means only that the thin execution contract works; it is not
 evidence of scientific validity, calibration, safety, or a recommendation.
+
+The batch entry follows riff-batch-v1. Riff supplies one frozen input envelope
+with --riff-input and one application-owned directory with --riff-output-dir.
 `;
 
 export const genericModelExecutionDescription = (): GenericExecutionDescription => Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   runtime: "python",
   runMode: "batch",
-  entryPoint: "code/riff_entry.py",
   dependencyFile: "environment/requirements.txt",
   inputs: Object.freeze({
+    schemaProfile: INPUT_SCHEMA_PROFILE,
     schema: Object.freeze({
       $schema: "https://json-schema.org/draft/2020-12/schema",
       type: "object",
@@ -157,8 +184,15 @@ export const genericModelExecutionDescription = (): GenericExecutionDescription 
     smoke: Object.freeze({ stepLimit: 2, demand: 1 }),
   }),
   outputs: Object.freeze([
-    Object.freeze({ logicalName: "summary", relativePath: "outputs/summary.json", mediaType: "application/json", required: true }),
+    Object.freeze({
+      logicalName: "summary",
+      relativePath: "summary.json",
+      mediaType: "application/json",
+      required: true,
+      role: "data",
+    }),
   ]),
+  batch: Object.freeze({ entryPoint: "code/riff_entry.py", protocol: "riff-batch-v1" }),
   cancellation: Object.freeze({ signal: "SIGTERM", graceMs: 500 }),
 });
 
@@ -230,38 +264,14 @@ export const assertLogicalWorkspacePath = (input: string): string => {
 };
 
 export const validateExecutionDescription = (value: unknown): GenericExecutionDescription => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ModelWorkspaceError("invalid_execution_description", "The execution description must be an object.");
-  const description = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "runtime", "runMode", "entryPoint", "dependencyFile", "inputs", "outputs", "cancellation", "visual"]);
-  if (Object.keys(description).some((key) => !allowed.has(key))) throw new ModelWorkspaceError("invalid_execution_description", "The execution description contains unsupported fields.");
-  if (description.schemaVersion !== 1 || description.runtime !== "python" || !["batch", "visual", "both"].includes(String(description.runMode))) throw new ModelWorkspaceError("invalid_execution_description", "The execution description has an unsupported runtime contract.");
-  assertLogicalWorkspacePath(String(description.entryPoint));
-  assertLogicalWorkspacePath(String(description.dependencyFile));
-  if (!String(description.entryPoint).startsWith("code/") || !String(description.dependencyFile).startsWith("environment/")) throw new ModelWorkspaceError("invalid_execution_description", "Declared code and dependency files are outside their owned sections.");
-  const inputs = description.inputs as Record<string, unknown>;
-  if (!inputs || typeof inputs !== "object" || Array.isArray(inputs) || !isPlainObject(inputs.schema) || !isPlainObject(inputs.smoke)) throw new ModelWorkspaceError("invalid_execution_description", "Declared inputs are invalid.");
-  if (!Array.isArray(description.outputs) || description.outputs.length < 1 || description.outputs.length > 64) throw new ModelWorkspaceError("invalid_execution_description", "At least one bounded output declaration is required.");
-  const names = new Set<string>();
-  const paths = new Set<string>();
-  for (const raw of description.outputs) {
-    if (!isPlainObject(raw)) throw new ModelWorkspaceError("invalid_execution_description", "An output declaration is invalid.");
-    const output = raw as Record<string, unknown>;
-    if (Object.keys(output).some((key) => !["logicalName", "relativePath", "mediaType", "required"].includes(key)) || typeof output.logicalName !== "string" || !output.logicalName.trim() || typeof output.mediaType !== "string" || !output.mediaType.trim() || typeof output.required !== "boolean") throw new ModelWorkspaceError("invalid_execution_description", "An output declaration is invalid.");
-    const path = assertLogicalWorkspacePath(String(output.relativePath));
-    if (!path.startsWith("outputs/") || names.has(output.logicalName) || paths.has(path)) throw new ModelWorkspaceError("invalid_execution_description", "Output declarations must have unique logical names and owned output paths.");
-    names.add(output.logicalName); paths.add(path);
+  try {
+    return validateExecutionDescriptionV2(value);
+  } catch (error) {
+    if (error instanceof ExecutionProtocolV2Error) {
+      throw new ModelWorkspaceError(error.code, error.message, { cause: error });
+    }
+    throw error;
   }
-  const cancellation = description.cancellation as Record<string, unknown>;
-  if (!isPlainObject(cancellation) || cancellation.signal !== "SIGTERM" || !Number.isSafeInteger(cancellation.graceMs) || Number(cancellation.graceMs) < 1 || Number(cancellation.graceMs) > 10_000) throw new ModelWorkspaceError("invalid_execution_description", "The cancellation declaration is invalid.");
-  if (description.runMode === "visual" || description.runMode === "both") {
-    const visual = description.visual as Record<string, unknown>;
-    if (!isPlainObject(visual) || typeof visual.entryPoint !== "string" || typeof visual.healthPath !== "string" || !visual.healthPath.startsWith("/") || visual.healthPath.includes("//")) throw new ModelWorkspaceError("invalid_execution_description", "Visual Models require a bounded local health declaration.");
-    assertLogicalWorkspacePath(visual.entryPoint);
-  } else if (description.visual !== undefined) {
-    throw new ModelWorkspaceError("invalid_execution_description", "Batch-only Models cannot declare a visual entry point.");
-  }
-  return value as GenericExecutionDescription;
 };
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");

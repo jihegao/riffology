@@ -5,12 +5,20 @@ import { AgentConversationSessionManager, type AgentReadOnlyReason } from "./age
 import type { AgentTurnDto, ConversationDto, ConversationMessageDto, ConversationOwner } from "./agent-domain.ts";
 import { createGenericModelScaffold } from "./model-workspace.ts";
 import type { OpenCodeConversationPort, OpenCodeProviderModel } from "./opencode-adapter.ts";
+import { canonicalDigest } from "./canonical-json-v2.ts";
 import {
   experimentConfigurationRecordDigest,
   ProductStoreV2,
   ProductStoreV2Error,
+  type FrozenRunStartReceipt,
+  type RunLimitsV1,
 } from "./product-store-v2.ts";
 import { planExperiment } from "./experiment-planner.ts";
+import {
+  assertRunCapabilityV2,
+  ExecutionProtocolV2Error,
+  validateExecutionDescriptionV2,
+} from "./execution-protocol-v2.ts";
 import type {
   ExperimentConfigurationRecord,
   ModelRecord,
@@ -84,6 +92,19 @@ export type ProjectRunDto = {
   outputs: ProjectOutputDto[];
 };
 
+export type RunStartDto = {
+  schemaVersion: 1;
+  commandId: string;
+  runId: string;
+  projectId: string;
+  experimentConfigId: string;
+  completionConversationId: string | null;
+  status: "queued";
+  runKind: "batch" | "visual";
+  sampleCount: number;
+  createdAt: string;
+};
+
 export type AgentTurnResult =
   | { mode: "live"; turn: AgentTurnDto; messages: ConversationMessageDto[] }
   | { mode: "read_only"; reason: AgentReadOnlyReason | "agent_failed"; turn: AgentTurnDto; messages: ConversationMessageDto[] };
@@ -95,6 +116,7 @@ export class AgentWorkspaceService {
   readonly #conversationTurnTails = new Map<string, Promise<void>>();
   #scopedMcpTail: Promise<void> = Promise.resolve();
   readonly #scopedMcpUrl?: (capability: string) => string;
+  readonly #onRunQueued?: () => void;
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
   readonly technicalChecks: ModelTechnicalCheckService;
@@ -107,6 +129,7 @@ export class AgentWorkspaceService {
     technicalChecker?: ModelTechnicalCheckerPort,
     turnRuntime?: AgentTurnRuntime,
     scopedMcpUrl?: (capability: string) => string,
+    onRunQueued?: () => void,
   ) {
     this.store = store;
     this.openCode = openCode;
@@ -115,6 +138,7 @@ export class AgentWorkspaceService {
     this.technicalChecks = new ModelTechnicalCheckService(store, technicalChecker, now);
     this.turnRuntime = turnRuntime;
     this.#scopedMcpUrl = scopedMcpUrl;
+    this.#onRunQueued = onRunQueued;
   }
 
   handleAgentMcp(capability: string | undefined, request: unknown) {
@@ -201,8 +225,100 @@ export class AgentWorkspaceService {
         files: this.store.listObjectFiles({ kind: "project", id }).filter((file) => file.kind === "project_model_snapshot").map(publicFile),
         conversations: this.store.listConversations({ kind: "project", id }),
         experimentConfigurations: this.store.listExperimentConfigurations(id).map(publicExperimentConfiguration),
-        runs: this.store.listRuns(id).map((run) => publicRun(run, this.store.listRunOutputs(run.id))),
+        runs: this.store.listRuns(id).map((run) =>
+          publicRun(run, run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [])),
       };
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  getRun(projectIdInput: string, runIdInput: string): ProjectRunDto {
+    const projectId = boundedId(projectIdInput);
+    const runId = boundedId(runIdInput);
+    try {
+      const run = this.store.getRun(projectId, runId);
+      return publicRun(run, run.status === "succeeded" ? this.store.listRunOutputs(run.id) : []);
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  startRun(input: {
+    projectId: string;
+    commandId: string;
+    experimentConfigId: string;
+    completionConversationId?: string;
+  }): RunStartDto {
+    const projectId = boundedId(input.projectId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const experimentConfigId = boundedId(input.experimentConfigId);
+    const completionConversationId = input.completionConversationId === undefined
+      ? null
+      : boundedId(input.completionConversationId);
+    const intent = { commandId, projectId, experimentConfigId, completionConversationId };
+    try {
+      const replayed = this.store.getFrozenRunStartReceipt(intent);
+      if (replayed) {
+        this.#onRunQueued?.();
+        return publicRunStart(replayed);
+      }
+    } catch (error) { throw storeApiError(error); }
+
+    let project: ProjectRecord;
+    let experiment: ExperimentConfigurationRecord;
+    try {
+      project = this.store.getProject(projectId);
+      const found = this.store.listExperimentConfigurations(projectId, {
+        includeArchived: true,
+        includeTrashed: true,
+      }).find((candidate) => candidate.id === experimentConfigId);
+      if (!found) throw new ProductStoreV2Error("Experiment configuration does not exist.");
+      experiment = found;
+    } catch (error) { throw storeApiError(error); }
+    if (experiment.contractVersion !== 4) {
+      throw new ApiError(409, "legacy_contract_read_only", "Legacy experiment configurations cannot start version-4 runs.");
+    }
+    if (experiment.lifecycleState !== "active") {
+      throw new ApiError(409, "state_conflict", "Only an active experiment configuration can start a run.");
+    }
+    if (experiment.configuration.runKind === "visual") {
+      throw new ApiError(
+        409,
+        "capability_not_available",
+        "Visual run dispatch is not available in this milestone.",
+      );
+    }
+
+    let description;
+    try {
+      description = validateExecutionDescriptionV2(project.executionDescription);
+      assertRunCapabilityV2(description, experiment.configuration.runKind as "batch" | "visual");
+    } catch (error) {
+      if (error instanceof ExecutionProtocolV2Error) throw new ApiError(409, error.code, error.message);
+      throw error;
+    }
+    if (description.batch?.domainEvents) {
+      throw new ApiError(
+        409,
+        "domain_events_not_supported",
+        "Batch domain events are not supported by this run dispatcher.",
+      );
+    }
+    const plan = planExperiment({
+      configuration: experiment.configuration,
+      inputSchema: description.inputs.schema,
+      maxSamples: SERVER_RUN_LIMITS.maxSamples,
+    });
+    try {
+      const receipt = this.store.createFrozenRun({
+        ...intent,
+        runId: stableId("run", `${projectId}:${commandId}`),
+        expectedConfigurationDigest: experiment.configurationDigest,
+        plan,
+        projectSnapshotDigest: project.modelSnapshotDigest,
+        executionDescriptionDigest: canonicalDigest(project.executionDescription),
+        limits: SERVER_RUN_LIMITS,
+        createdAt: this.#now(),
+      });
+      this.#onRunQueued?.();
+      return publicRunStart(receipt);
     } catch (error) { throw storeApiError(error); }
   }
 
@@ -622,8 +738,35 @@ const publicRun = (record: RunRecord, outputs: OutputIndexRecord[]): ProjectRunD
   outputs: outputs.map(publicOutput),
 });
 
+const publicRunStart = (receipt: FrozenRunStartReceipt): RunStartDto => ({
+  schemaVersion: 1,
+  commandId: receipt.commandId,
+  runId: receipt.runId,
+  projectId: receipt.projectId,
+  experimentConfigId: receipt.experimentConfigId,
+  completionConversationId: receipt.completionConversationId,
+  status: receipt.status,
+  runKind: receipt.runKind,
+  sampleCount: receipt.sampleCount,
+  createdAt: receipt.createdAt,
+});
+
 const stableId = (prefix: string, value: string): string => `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 const MAX_EXPERIMENT_SAMPLES = 10_000;
+const SERVER_RUN_LIMITS: RunLimitsV1 = Object.freeze({
+  schemaVersion: 1,
+  wallTimeMs: 300_000,
+  startupTimeMs: 30_000,
+  terminationGraceMs: 5_000,
+  maxStdoutBytes: 1_000_000,
+  maxStderrBytes: 1_000_000,
+  maxOutputFiles: 256,
+  maxOutputBytes: 64_000_000,
+  maxEventCount: 10_000,
+  maxEventBytes: 16_000_000,
+  maxSamples: 1_000,
+  maxConcurrency: 4,
+});
 const boundedKey = (value: string, name: string): string => {
   if (typeof value !== "string" || !value.trim() || value.length > 300 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ApiError(422, "invalid_request", `${name} is invalid.`);
   return value;
@@ -685,6 +828,12 @@ const storeApiError = (error: unknown): ApiError => {
   if (error instanceof ApiError) return error;
   if (!(error instanceof ProductStoreV2Error)) return new ApiError(500, "internal_error", "The Agent workspace could not complete the request.");
   if (/does not exist/u.test(error.message)) return new ApiError(404, "resource_not_found", "The requested resource does not exist.");
+  if (/^legacy_contract_read_only:/u.test(error.message)) return new ApiError(409, "legacy_contract_read_only", "The legacy execution contract is read-only.");
+  if (/^execution_protocol_upgrade_required:/u.test(error.message)) return new ApiError(409, "execution_protocol_upgrade_required", "The copied Project does not have an accepted execution-description v2 contract.");
+  if (/^capability_not_declared:/u.test(error.message)) return new ApiError(409, "capability_not_declared", "The copied Project does not declare the requested run capability.");
+  if (/^capability_not_available:/u.test(error.message)) return new ApiError(409, "capability_not_available", "The requested run capability is not available in this milestone.");
+  if (/^domain_events_not_supported:/u.test(error.message)) return new ApiError(409, "domain_events_not_supported", "Batch domain events are not supported by this run dispatcher.");
+  if (/^project_snapshot_corrupt:/u.test(error.message)) return new ApiError(409, "project_snapshot_corrupt", "The copied Project snapshot failed its integrity check.");
   if (/^stale_configuration:/u.test(error.message)) return new ApiError(409, "stale_configuration", "The experiment configuration changed after it was observed.");
   if (/^stale_record:/u.test(error.message)) return new ApiError(409, "stale_record", "The experiment record changed after it was observed.");
   if (/command already exists with a different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with different experiment intent.");

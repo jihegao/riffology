@@ -1,6 +1,6 @@
 # Architecture contracts
 
-## Milestone A2 authority and A3 foundation architecture
+## Milestone A2 authority and A3 execution architecture
 
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md), the
@@ -25,7 +25,7 @@ Narrow A2 HTTP/API acceptance surface
             -> restricted macOS process + digest-bound technical checker
 ```
 
-A3-1a extends only the durable planning boundary:
+A3-1a established the durable planning boundary:
 
 ```text
 copied Project input schema
@@ -37,14 +37,44 @@ copied Project input schema
        -> copied Project / execution / configuration / sample-plan / limits digests
 ```
 
-Schema-v3 experiment/run/output records migrate to deterministic read-only v3
-projections. Schema-v4 commands, receipts, run/process-attempt identities,
-ownership, and canonical digests are database constrained, but the attempt
-tables have no runtime producer in A3-1a. The frozen `queued` run is an admission
-record only: no dispatcher, supervisor, model process, output ingestor,
-completion card, or public start route is implemented by A3-1a. The generic
-Stage 2 scaffold remains execution-description v1 and therefore requires an
-explicit later re-scaffold/upgrade before this Store-only v2 admission can pass.
+A3-1b connects that frozen record to a real, batch-only execution path:
+
+```text
+POST /api/projects/:projectId/runs
+  -> replan and freeze server-owned RunLimitsV1
+  -> durable dispatcher generation + one queue claim
+  -> exact copied Project execution-root capability/digest verification
+  -> GenericBatchSupervisor
+       -> one restricted riff-batch-v1 process per sample
+       -> persisted launch gate and process identity
+       -> supported hard-limit enforcement and process-group cleanup
+       -> closed terminal/process evidence and best-effort error unwind
+       -> atomic successful object bytes + output indexes + terminal state
+GET /api/projects/:projectId/runs/:runId
+  -> bounded run/output projection with no paths, commands, or process identity
+```
+
+Schema-v3 experiment/run/output records still migrate to deterministic
+read-only v3 projections. The A3-1b dispatcher is now the runtime producer for
+v4 batch attempts. It admits only copied execution-description v2 batch
+capability and rechecks the exact Project-owned root before launch. Successful
+outputs become visible only after byte, size, media, and digest validation and
+one atomic publication transaction. Database triggers require the same internal
+atomic-success context for both v4 run output objects and indexes, and make
+terminal run/process evidence immutable. Dispatcher errors can terminalize only
+after registered processes have durable exit and cleanup evidence; otherwise
+the live attempt stays fail-closed for A3-1c recovery.
+
+The official generic scaffold now emits execution-description v2 and declares
+batch only. Visual starts fail with `capability_not_available`; batch
+`domainEvents` fail with `domain_events_not_supported`. Same-process backend
+shutdown aborts the supervisor, terminates the verified process group, cleans
+owned scratch, and records `dispatcher_shutdown`. Startup with unresolved
+prior live attempts fails closed with `dispatcher_recovery_required`; full
+cross-restart attempt/scratch recovery, user-cancel races/receipts, and
+exactly-once completion cards remain A3-1c rather than current recovery claims.
+Visual supervision, scoped browser/Playwright access, and wind import also
+remain later Stage 3 slices.
 
 One conversation owns one provider/model lock and at most one nonterminal
 backend-only external session generation. Its turns are serialized; the scoped
@@ -71,7 +101,8 @@ executability is digest-bound evidence that a thin interface runs; it is not
 scientific validity, calibration, trust, or decision suitability.
 
 Legacy Gate/wind and queue components still coexist and are retired only by an
-explicit later audit. #14 owns Project execution and wind migration; #15 owns
+explicit later audit. A3-1b is not completion evidence for Stage 3. #14 still
+owns the remaining recovery/cancellation/card, visual, and wind work; #15 owns
 the final Models/Projects home and shared two-pane browser shell.
 
 ---
