@@ -9,10 +9,10 @@
 > The legacy runtime described below predates that contract and still coexists
 > while the sequential Milestone A stages replace it.
 
-## Milestone A2 implementation status
+## Milestone A implementation status
 
 Stage 1's `ProductStoreV2` foundation is implemented and Stage 2 / #13 is the
-current implementation authority. The Stage 2 branch now wires schema v3,
+completed Agent/Model-workspace authority. Stage 2 wires schema v3,
 durable per-conversation Agent state, bounded OpenCode context/session recovery,
 per-turn capability-scoped MCP tools, progressive simulation-skill audit,
 conversation attachments and temporary documents, a generic Model scaffold, a
@@ -20,11 +20,21 @@ restricted macOS Model process, digest-bound technical checks, and the narrow
 HTTP/API acceptance surface. API integration and the real-provider two-turn
 browser closure are complete; the live evidence is described under Verification.
 
+Stage 3 / #14 is in progress. Commit `843cf1c` implemented only its
+Project/experiment foundation: fixed-copy Project creation, a Project workspace
+projection, and bounded experiment-configuration create/update APIs. The
+deterministic run plan, generic batch and visual supervisors, cancellation,
+outputs/events, scoped Playwright access, and ordinary wind import remain
+unimplemented. Their active contract and negative-test gates are in
+[`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
+No Stage 3 runtime, visual, wind-import, or final browser acceptance is claimed
+from the foundation alone.
+
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
-They remain runnable history, not the Milestone A2 product authority, and this
-stage does not authorize their deletion. Project experiment/execution and wind
-import belong to #14; the final Models/Projects home and two-pane shell belong
-to #15.
+They remain runnable history, not current Milestone A product authority, and
+Stage 3 does not authorize their deletion. Remaining Project execution and wind
+import belong to #14; the final Models/Projects home and shared two-pane shell
+belong to #15.
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed

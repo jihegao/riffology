@@ -5,7 +5,8 @@ directory. Gate 0 is a design baseline: it approves the target but is not proof
 that Gates 1-4 are implemented. Technical owners must document public
 interfaces, test expectations, and assumptions before implementation.
 
-Stage 2 / #13 is the current implementation stage. Its authority is the
+Stages 1 and 2 are implemented, and Stage 2 / #13 remains the completed
+Agent/Model-workspace authority. Its contract is the
 Milestone A product contract plus
 [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
 Schema v3/store, conversation/OpenCode context, scoped MCP/skills, attachments,
@@ -14,6 +15,13 @@ checker, and the narrow HTTP/API surface are implemented. Final acceptance has
 completed the real-provider, same-session, two-turn browser rerun with OpenCode
 `1.18.4`. Legacy Gate and queue code still coexist and are not silently retired
 by Stage 2.
+
+Stage 3 / #14 is in progress through
+[`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
+Commit `843cf1c` implemented fixed-copy Project creation, the Project workspace
+projection, and bounded experiment create/update APIs. Schema-v4 run planning,
+batch/visual execution, cancellation, outputs/events, Playwright access, and the
+ordinary wind import remain target contracts, not implementation evidence.
 
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
@@ -38,9 +46,10 @@ product.
   complete as documented in the test plan. Stage 3/4 behavior remains
   explicitly out of scope.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
-  proposed Stage 3 Project execution contract after A2 acceptance, covering New
-  project, experiments, visual/batch runs, outputs, events, Playwright
-  inspection, and wind import.
+  active Stage 3 / #14 contract and implementation ledger. It distinguishes the
+  landed Project/experiment foundation from pending deterministic run planning,
+  batch/visual supervision, outputs/events, scoped Playwright access, and the
+  ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
@@ -48,7 +57,8 @@ product.
   identities, ProductStoreV2 authority, Stage 2 process boundaries, and the
   legacy/current distinction.
 - [`product-roadmap.md`](product-roadmap.md): legacy long-term roadmap retained
-  as history, with the current Milestone A2 boundary called out explicitly.
+  as history, with the current Milestone A3 foundation boundary called out
+  explicitly.
 - [`ui-workflow.md`](ui-workflow.md): minimal Stage 2 acceptance surface and the
   legacy/future browser workflow boundaries.
 - [`mesa-service.md`](mesa-service.md): target Mesa model, event, revision, and artifact contract.
@@ -56,5 +66,5 @@ product.
   OpenCode/session/context contract followed by the legacy Gate contract.
 - [`backend-api.md`](backend-api.md): current Stage 2 API integration boundary
   followed by the legacy Gate project API target.
-- [`test-plan.md`](test-plan.md): current Stage 2 focused/full verification
-  commands and acceptance, plus retained legacy Gate test history.
+- [`test-plan.md`](test-plan.md): current Stage 2 acceptance, Stage 3 foundation
+  evidence and pending gates, plus retained legacy Gate test history.
