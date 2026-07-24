@@ -65,11 +65,17 @@ export class MilestoneA2Api {
         return true;
       }
       if (request.method === "PATCH" && parts.length === 5) {
-        const body = await strictJsonBody(request, ["commandId", "name", "configuration"], ["name", "configuration"]);
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "expectedConfigurationDigest", "expectedRecordDigest", "name", "configuration"],
+          ["name", "configuration"],
+        );
         json(response, 200, this.service.updateExperimentConfiguration({
           projectId,
           configId: parts[4],
           commandId: requiredString(body.commandId, "commandId"),
+          expectedConfigurationDigest: requiredString(body.expectedConfigurationDigest, "expectedConfigurationDigest"),
+          expectedRecordDigest: requiredString(body.expectedRecordDigest, "expectedRecordDigest"),
           ...(body.name === undefined ? {} : { name: requiredString(body.name, "name") }),
           ...(body.configuration === undefined ? {} : { configuration: requiredObject(body.configuration, "configuration") }),
         }));

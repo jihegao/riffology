@@ -85,11 +85,13 @@ or trust.
 Legacy Gate/queue tests remain present while the implementations coexist. #14
 Project execution/wind import and #15 final-shell E2E are non-scope for A2.
 
-## Milestone A3 foundation and pending gates
+## Milestone A3 foundations and pending gates
 
-Commit `843cf1c` implements only the Stage 3 Project/experiment foundation.
-Current focused coverage in `test/product-store-v2.test.ts` and
-`test/agent-api.test.ts` currently proves only:
+The first foundation slice implemented Project fixed-copy creation and its
+workspace projection. A3-1a adds focused coverage in
+`test/experiment-planner.test.ts`, `test/product-schema-v4.test.ts`,
+`test/product-store-v4.test.ts`, `test/product-schema.test.ts`,
+`test/product-store-v2.test.ts`, and `test/agent-api.test.ts`. It proves:
 
 - a draft Model is rejected by the Project API, and a Model whose stubbed
   technical check publishes `executable` can create a Project;
@@ -100,29 +102,48 @@ Current focused coverage in `test/product-store-v2.test.ts` and
   empty run/configuration projection, then the created conversation and
   experiment; the serialized fixture does not contain the tested path/session/
   capability/process marker strings;
-- the current preliminary experiment shape calculates the tested seed/sweep
-  cardinalities, rejects an empty sweep axis, replays identical create/update
-  commands, and rejects reuse with changed intent; and
+- the closed JSON Schema 2020-12 profile, defaults without coercion, local
+  acyclic references, additional-property/numeric/format rejection, normalized
+  JSON Pointers, duplicate seed/value rejection, exact sample ordering/IDs,
+  `seed: null`, visual-single enforcement, and frozen planner digests;
+- transactional schema-v3-to-v4 migration, canonical backfill/digest checks,
+  strict legacy run lifecycle rollback, permanent v3 read-only records, Project
+  frozen-copy immutability, and v4 ownership/immutability constraints;
+- experiment create/update command replay returns the exact historical response,
+  changed intent conflicts, stale configuration or record digests fail
+  compare-and-set, and restart preserves the receipts;
+- a Store-only frozen run start atomically persists the `queued` run, command,
+  immutable receipt, copied Project/execution/configuration/sample-plan/limits
+  digests, rejects non-v2 copied execution descriptions or undeclared run
+  capability, replans against the copied profiled schema, and replays the exact
+  receipt across restart; and
 - Project-scoped conversations remain available through the Stage 2 contract.
 
-These tests do not yet prove general malformed/non-finite JSON handling, the
-canonical schema profile, unknown-property/default/ref semantics, arbitrary
-secret absence, populated run/output workspace DTOs, or concurrent experiment
-compare-and-set. Claims remain limited to the explicit fixtures above.
+Claims remain limited to the explicit fixtures and Store boundary above. They
+do not prove that model code starts, outputs are ingested, cancellation races
+resolve, or a browser can start a run.
 
 Run the focused foundation checks with:
 
 ```bash
 cd backend
 node --experimental-strip-types --test \
+  test/experiment-planner.test.ts \
+  test/product-schema.test.ts \
+  test/product-schema-v4.test.ts \
+  test/product-store-v4.test.ts \
   test/product-store-v2.test.ts \
   test/agent-api.test.ts
 ```
 
-These checks do not prove execution-description v2, exact sample planning,
-schema v4, run dispatch, cancellation, output/event ingestion, completion cards,
-visual proxying, Playwright access, or wind installation. Those gates are
-defined in
+On 2026-07-24 after the final review fixes, the complete backend suite ran 213
+tests: 212 passed, zero failed, and one optional installed-OpenCode smoke was
+skipped. The web suite passed 104/104 and its production build succeeded.
+
+These checks do not prove execution-description-v2 scaffold migration, a public
+run-start route, dispatch, cancellation, output/event ingestion, completion
+cards, visual proxying, Playwright access, or wind installation. The generic
+Stage 2 scaffold remains v1. Those gates are defined in
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 
 Before the batch-runtime slice merges, automated tests must additionally prove

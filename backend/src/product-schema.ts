@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { canonicalDigest, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import { PRODUCT_SCHEMA_VERSION } from "./product-domain.ts";
 
 const SQL = String.raw;
@@ -14,6 +15,10 @@ export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
 } as const);
 
 export const configureProductDatabase = (database: ProductDatabase): void => {
+  database.function("riff_canonical_sha256", { deterministic: true }, (value: string) => {
+    if (typeof value !== "string") throw new TypeError("canonical SHA-256 input must be JSON text");
+    return canonicalDigest(parseCanonicalJsonV2(value));
+  });
   database.exec(SQL`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
@@ -740,8 +745,502 @@ export const PRODUCT_SCHEMA_V3_SQL = SQL`
   END;
 `;
 
+export const PRODUCT_SCHEMA_V4_SQL = SQL`
+  ALTER TABLE experiment_configurations
+    ADD COLUMN contract_version INTEGER NOT NULL DEFAULT 4 CHECK (contract_version IN (3, 4));
+  ALTER TABLE experiment_configurations
+    ADD COLUMN legacy_digest TEXT CHECK (legacy_digest IS NULL OR (length(legacy_digest) = 64 AND legacy_digest NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE experiment_configurations
+    ADD COLUMN configuration_sha256 TEXT CHECK (configuration_sha256 IS NULL OR (length(configuration_sha256) = 64 AND configuration_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE experiment_configurations
+    ADD COLUMN sample_count INTEGER CHECK (sample_count IS NULL OR sample_count >= 1);
+
+  ALTER TABLE runs
+    ADD COLUMN contract_version INTEGER NOT NULL DEFAULT 4 CHECK (contract_version IN (3, 4));
+  ALTER TABLE runs
+    ADD COLUMN legacy_digest TEXT CHECK (legacy_digest IS NULL OR (length(legacy_digest) = 64 AND legacy_digest NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs ADD COLUMN run_kind TEXT CHECK (run_kind IS NULL OR run_kind IN ('batch', 'visual'));
+  ALTER TABLE runs ADD COLUMN completion_conversation_id TEXT REFERENCES conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+  ALTER TABLE runs
+    ADD COLUMN execution_description_sha256 TEXT CHECK (execution_description_sha256 IS NULL OR (length(execution_description_sha256) = 64 AND execution_description_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs
+    ADD COLUMN project_snapshot_sha256 TEXT CHECK (project_snapshot_sha256 IS NULL OR (length(project_snapshot_sha256) = 64 AND project_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs
+    ADD COLUMN frozen_configuration_sha256 TEXT CHECK (frozen_configuration_sha256 IS NULL OR (length(frozen_configuration_sha256) = 64 AND frozen_configuration_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs ADD COLUMN sample_plan_json TEXT CHECK (sample_plan_json IS NULL OR (json_valid(sample_plan_json) AND json_type(sample_plan_json) = 'array'));
+  ALTER TABLE runs
+    ADD COLUMN sample_plan_sha256 TEXT CHECK (sample_plan_sha256 IS NULL OR (length(sample_plan_sha256) = 64 AND sample_plan_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs ADD COLUMN limits_json TEXT CHECK (limits_json IS NULL OR (json_valid(limits_json) AND json_type(limits_json) = 'object'));
+  ALTER TABLE runs
+    ADD COLUMN limits_sha256 TEXT CHECK (limits_sha256 IS NULL OR (length(limits_sha256) = 64 AND limits_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs
+    ADD COLUMN start_receipt_sha256 TEXT CHECK (start_receipt_sha256 IS NULL OR (length(start_receipt_sha256) = 64 AND start_receipt_sha256 NOT GLOB '*[^0-9a-f]*'));
+  ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
+  ALTER TABLE runs ADD COLUMN terminal_code TEXT CHECK (terminal_code IS NULL OR length(terminal_code) BETWEEN 1 AND 200);
+  ALTER TABLE runs ADD COLUMN terminal_diagnostics_json TEXT CHECK (terminal_diagnostics_json IS NULL OR json_valid(terminal_diagnostics_json));
+  ALTER TABLE runs ADD COLUMN resource_overview_json TEXT CHECK (resource_overview_json IS NULL OR (json_valid(resource_overview_json) AND json_type(resource_overview_json) = 'object'));
+  ALTER TABLE runs ADD COLUMN completion_card_disposition TEXT
+    CHECK (completion_card_disposition IS NULL OR completion_card_disposition IN ('not_requested', 'pending', 'published', 'conversation_unavailable'));
+
+  CREATE TEMP TABLE product_schema_v4_run_lifecycle_guard (
+    valid INTEGER NOT NULL
+  ) STRICT;
+  CREATE TEMP TRIGGER product_schema_v4_run_lifecycle_guard_reject
+  BEFORE INSERT ON product_schema_v4_run_lifecycle_guard
+  WHEN NEW.valid != 1
+  BEGIN SELECT RAISE(ABORT, 'legacy run lifecycle is ambiguous'); END;
+  INSERT INTO product_schema_v4_run_lifecycle_guard (valid)
+  SELECT 0
+  FROM runs
+  WHERE NOT (
+    (status IN ('configured', 'queued') AND started_at IS NULL AND finished_at IS NULL)
+    OR (status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL)
+    OR (status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+      AND started_at IS NOT NULL AND finished_at IS NOT NULL)
+  );
+  DROP TRIGGER product_schema_v4_run_lifecycle_guard_reject;
+  DROP TABLE product_schema_v4_run_lifecycle_guard;
+
+  UPDATE experiment_configurations
+  SET contract_version = 3,
+      legacy_digest = riff_canonical_sha256(json_object(
+        'contractVersion', 3,
+        'id', id,
+        'projectId', project_id,
+        'name', name,
+        'configuration', json(configuration_json),
+        'estimatedSampleCount', estimated_sample_count,
+        'lifecycleState', lifecycle_state,
+        'createdAt', created_at,
+        'updatedAt', updated_at
+      ));
+
+  UPDATE runs
+  SET contract_version = 3,
+      legacy_digest = riff_canonical_sha256(json_object(
+        'contractVersion', 3,
+        'id', id,
+        'projectId', project_id,
+        'experimentConfigurationId', experiment_configuration_id,
+        'status', status,
+        'frozenConfiguration', json(frozen_configuration_json),
+        'requestedSampleCount', requested_sample_count,
+        'createdAt', created_at,
+        'updatedAt', updated_at,
+        'startedAt', started_at,
+        'finishedAt', finished_at
+      ));
+
+  ALTER TABLE output_indexes RENAME TO output_indexes_v3;
+  CREATE TABLE output_indexes (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    object_file_id TEXT NOT NULL UNIQUE REFERENCES object_files(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    logical_name TEXT NOT NULL CHECK (length(trim(logical_name)) BETWEEN 1 AND 500),
+    output_type TEXT NOT NULL CHECK (length(trim(output_type)) BETWEEN 1 AND 200),
+    contract_version INTEGER NOT NULL DEFAULT 4 CHECK (contract_version IN (3, 4)),
+    legacy_digest TEXT CHECK (legacy_digest IS NULL OR (length(legacy_digest) = 64 AND legacy_digest NOT GLOB '*[^0-9a-f]*')),
+    sample_index INTEGER CHECK (sample_index IS NULL OR sample_index >= 0),
+    sample_id TEXT CHECK (sample_id IS NULL OR (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*')),
+    declared_role TEXT CHECK (declared_role IS NULL OR declared_role IN ('metric', 'table', 'document', 'data', 'diagnostic')),
+    output_contract_sha256 TEXT CHECK (output_contract_sha256 IS NULL OR (length(output_contract_sha256) = 64 AND output_contract_sha256 NOT GLOB '*[^0-9a-f]*')),
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, sample_index, logical_name),
+    CHECK ((contract_version = 3 AND legacy_digest IS NOT NULL AND sample_index IS NULL AND sample_id IS NULL)
+      OR (contract_version = 4 AND legacy_digest IS NULL AND sample_index IS NOT NULL AND sample_id IS NOT NULL
+        AND declared_role IS NOT NULL AND output_contract_sha256 IS NOT NULL))
+  ) STRICT;
+
+  INSERT INTO output_indexes
+    (id, run_id, object_file_id, logical_name, output_type, contract_version, legacy_digest, created_at)
+  SELECT id, run_id, object_file_id, logical_name, output_type, 3,
+    riff_canonical_sha256(json_object(
+      'contractVersion', 3,
+      'id', id,
+      'runId', run_id,
+      'objectFileId', object_file_id,
+      'logicalName', logical_name,
+      'outputType', output_type,
+      'createdAt', created_at
+    )),
+    created_at
+  FROM output_indexes_v3;
+  DROP TABLE output_indexes_v3;
+
+  CREATE TEMP TABLE product_schema_v4_guard (valid INTEGER NOT NULL CHECK (valid = 1)) STRICT;
+  INSERT INTO product_schema_v4_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM experiment_configurations
+    WHERE contract_version != 3 OR legacy_digest IS NULL
+  );
+  INSERT INTO product_schema_v4_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM runs
+    WHERE contract_version != 3 OR legacy_digest IS NULL
+  );
+  INSERT INTO product_schema_v4_guard(valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1 FROM output_indexes
+    WHERE contract_version != 3 OR legacy_digest IS NULL
+  );
+  DROP TABLE product_schema_v4_guard;
+
+  CREATE TABLE run_attempts (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    attempt_generation INTEGER NOT NULL CHECK (attempt_generation >= 1),
+    dispatcher_generation TEXT NOT NULL CHECK (length(dispatcher_generation) = 64 AND dispatcher_generation NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK (state IN ('claimed', 'starting', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted')),
+    claimed_at TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    heartbeat_at TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE (run_id, attempt_generation),
+    CHECK ((state IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted') AND finished_at IS NOT NULL)
+      OR (state NOT IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted') AND finished_at IS NULL))
+  ) STRICT;
+  CREATE UNIQUE INDEX one_nonterminal_run_attempt_v4 ON run_attempts(run_id)
+    WHERE state IN ('claimed', 'starting', 'running');
+
+  CREATE TABLE process_attempts (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    process_kind TEXT NOT NULL CHECK (process_kind IN ('batch', 'visual')),
+    sample_index INTEGER CHECK (sample_index IS NULL OR sample_index >= 0),
+    sample_id TEXT CHECK (sample_id IS NULL OR (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*')),
+    pid INTEGER NOT NULL CHECK (pid >= 1),
+    process_start_token TEXT NOT NULL CHECK (length(process_start_token) BETWEEN 1 AND 300),
+    process_group_id INTEGER NOT NULL CHECK (process_group_id >= 1),
+    launch_gate_state TEXT NOT NULL CHECK (launch_gate_state IN ('blocked', 'released', 'timed_out')),
+    state TEXT NOT NULL CHECK (state IN ('blocked', 'released', 'running', 'exited', 'cleanup_complete', 'cleanup_unverified')),
+    loopback_port INTEGER CHECK (loopback_port IS NULL OR loopback_port BETWEEN 1 AND 65535),
+    launched_at TEXT NOT NULL,
+    started_at TEXT,
+    health_at TEXT,
+    heartbeat_at TEXT,
+    exited_at TEXT,
+    exit_code INTEGER,
+    exit_signal TEXT CHECK (exit_signal IS NULL OR length(exit_signal) BETWEEN 1 AND 100),
+    cleanup_receipt_sha256 TEXT CHECK (cleanup_receipt_sha256 IS NULL OR (length(cleanup_receipt_sha256) = 64 AND cleanup_receipt_sha256 NOT GLOB '*[^0-9a-f]*')),
+    CHECK ((process_kind = 'batch' AND sample_index IS NOT NULL AND sample_id IS NOT NULL AND loopback_port IS NULL)
+      OR (process_kind = 'visual' AND sample_index IS NULL AND sample_id IS NULL AND loopback_port IS NOT NULL)),
+    CHECK ((state = 'cleanup_complete' AND cleanup_receipt_sha256 IS NOT NULL)
+      OR state != 'cleanup_complete')
+  ) STRICT;
+  CREATE UNIQUE INDEX one_batch_process_attempt_v4 ON process_attempts(run_attempt_id, sample_index)
+    WHERE process_kind = 'batch' AND state NOT IN ('cleanup_complete', 'cleanup_unverified');
+  CREATE UNIQUE INDEX one_visual_process_attempt_v4 ON process_attempts(run_attempt_id)
+    WHERE process_kind = 'visual' AND state NOT IN ('cleanup_complete', 'cleanup_unverified');
+
+  CREATE TABLE run_commands (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    command_kind TEXT NOT NULL CHECK (command_kind IN ('start', 'cancel', 'trash', 'restore')),
+    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 300),
+    intent_sha256 TEXT NOT NULL CHECK (length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'committed', 'rejected')),
+    outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json) AND json_type(outcome_json) = 'object'),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (run_id, request_key)
+  ) STRICT;
+
+  CREATE TABLE run_command_receipts (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    command_id TEXT NOT NULL UNIQUE REFERENCES run_commands(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    receipt_kind TEXT NOT NULL CHECK (length(receipt_kind) BETWEEN 1 AND 100),
+    payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+    committed_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE experiment_command_receipts (
+    command_id TEXT PRIMARY KEY CHECK (length(command_id) BETWEEN 3 AND 128),
+    command_kind TEXT NOT NULL CHECK (command_kind IN ('create', 'update')),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    experiment_id TEXT NOT NULL REFERENCES experiment_configurations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    intent_sha256 TEXT NOT NULL CHECK (length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'),
+    response_json TEXT NOT NULL CHECK (json_valid(response_json) AND json_type(response_json) = 'object'),
+    response_sha256 TEXT NOT NULL CHECK (length(response_sha256) = 64 AND response_sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TRIGGER project_frozen_copy_immutable_v4
+  BEFORE UPDATE OF model_snapshot_digest, execution_description_json ON projects
+  BEGIN SELECT RAISE(ABORT, 'project frozen copy is immutable'); END;
+
+  CREATE TRIGGER project_snapshot_metadata_immutable_v4
+  BEFORE UPDATE OF id, relative_path, media_type, size_bytes, sha256, created_at ON object_files
+  WHEN OLD.kind = 'project_model_snapshot' OR NEW.kind = 'project_model_snapshot'
+  BEGIN SELECT RAISE(ABORT, 'project snapshot metadata is immutable'); END;
+
+  CREATE TRIGGER experiment_v4_shape_insert
+  BEFORE INSERT ON experiment_configurations
+  WHEN NEW.contract_version != 4
+    OR NEW.legacy_digest IS NOT NULL
+    OR NEW.configuration_sha256 IS NULL
+    OR NEW.configuration_sha256 != riff_canonical_sha256(NEW.configuration_json)
+    OR NEW.sample_count IS NULL
+    OR NEW.sample_count != NEW.estimated_sample_count
+  BEGIN SELECT RAISE(ABORT, 'new experiment requires v4 contract fields'); END;
+  CREATE TRIGGER experiment_v4_shape_update
+  BEFORE UPDATE OF configuration_json, configuration_sha256, sample_count, estimated_sample_count
+    ON experiment_configurations
+  WHEN OLD.contract_version = 4 AND (
+    NEW.configuration_sha256 IS NULL
+    OR NEW.configuration_sha256 != riff_canonical_sha256(NEW.configuration_json)
+    OR NEW.sample_count IS NULL
+    OR NEW.sample_count != NEW.estimated_sample_count
+  )
+  BEGIN SELECT RAISE(ABORT, 'updated experiment requires matching v4 contract fields'); END;
+
+  CREATE TRIGGER experiment_legacy_read_only_v4
+  BEFORE UPDATE ON experiment_configurations WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy experiment contract is read only'); END;
+  CREATE TRIGGER experiment_legacy_delete_v4
+  BEFORE DELETE ON experiment_configurations WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy experiment contract is read only'); END;
+  CREATE TRIGGER experiment_contract_immutable_v4
+  BEFORE UPDATE OF contract_version, legacy_digest ON experiment_configurations
+  BEGIN SELECT RAISE(ABORT, 'experiment contract identity is immutable'); END;
+
+  CREATE TRIGGER experiment_receipt_owner_v4
+  BEFORE INSERT ON experiment_command_receipts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM experiment_configurations
+      WHERE id = NEW.experiment_id
+        AND project_id = NEW.project_id
+        AND contract_version = 4
+    ) THEN RAISE(ABORT, 'experiment receipt project or experiment mismatch') END;
+  END;
+  CREATE TRIGGER experiment_receipt_digest_v4
+  BEFORE INSERT ON experiment_command_receipts
+  WHEN NEW.response_sha256 != riff_canonical_sha256(NEW.response_json)
+  BEGIN SELECT RAISE(ABORT, 'experiment receipt response digest mismatch'); END;
+  CREATE TRIGGER experiment_receipt_immutable_v4
+  BEFORE UPDATE ON experiment_command_receipts
+  BEGIN SELECT RAISE(ABORT, 'experiment receipt is immutable'); END;
+  CREATE TRIGGER experiment_receipt_delete_v4
+  BEFORE DELETE ON experiment_command_receipts
+  BEGIN SELECT RAISE(ABORT, 'experiment receipt is immutable'); END;
+
+  CREATE TRIGGER run_v4_shape_insert
+  BEFORE INSERT ON runs
+  WHEN NEW.contract_version != 4
+    OR NEW.legacy_digest IS NOT NULL
+    OR NEW.status != 'queued'
+    OR NEW.run_kind IS NULL
+    OR NEW.execution_description_sha256 IS NULL
+    OR NEW.project_snapshot_sha256 IS NULL
+    OR NEW.frozen_configuration_sha256 IS NULL
+    OR NEW.sample_plan_json IS NULL
+    OR NEW.sample_plan_sha256 IS NULL
+    OR NEW.limits_json IS NULL
+    OR NEW.limits_sha256 IS NULL
+    OR NEW.start_receipt_sha256 IS NULL
+    OR NEW.frozen_configuration_sha256 != riff_canonical_sha256(NEW.frozen_configuration_json)
+    OR NEW.sample_plan_sha256 != riff_canonical_sha256(NEW.sample_plan_json)
+    OR NEW.limits_sha256 != riff_canonical_sha256(NEW.limits_json)
+    OR json_array_length(NEW.sample_plan_json) != NEW.requested_sample_count
+    OR (NEW.run_kind = 'visual' AND NEW.requested_sample_count != 1)
+    OR NEW.started_at IS NOT NULL
+    OR NEW.finished_at IS NOT NULL
+    OR NEW.trashed_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'new run requires a queued v4 frozen contract'); END;
+
+  CREATE TRIGGER run_v4_project_digests_insert
+  BEFORE INSERT ON runs WHEN NEW.contract_version = 4
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM projects
+      WHERE id = NEW.project_id
+        AND model_snapshot_digest = NEW.project_snapshot_sha256
+        AND riff_canonical_sha256(execution_description_json) = NEW.execution_description_sha256
+    ) THEN RAISE(ABORT, 'run frozen Project digests mismatch') END;
+  END;
+
+  CREATE TRIGGER run_completion_conversation_owner_v4
+  BEFORE INSERT ON runs WHEN NEW.completion_conversation_id IS NOT NULL
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM conversations
+      WHERE id = NEW.completion_conversation_id AND project_id = NEW.project_id
+    ) THEN RAISE(ABORT, 'run completion conversation project mismatch') END;
+  END;
+
+  CREATE TRIGGER run_legacy_read_only_v4
+  BEFORE UPDATE ON runs WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy run contract is read only'); END;
+  CREATE TRIGGER run_legacy_delete_v4
+  BEFORE DELETE ON runs WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy run contract is read only'); END;
+  CREATE TRIGGER run_frozen_contract_immutable_v4
+  BEFORE UPDATE OF contract_version, legacy_digest, run_kind, execution_description_sha256,
+    project_snapshot_sha256, frozen_configuration_json, frozen_configuration_sha256,
+    requested_sample_count, sample_plan_json, sample_plan_sha256, limits_json, limits_sha256,
+    start_receipt_sha256,
+    completion_conversation_id ON runs
+  WHEN OLD.contract_version = 4
+  BEGIN SELECT RAISE(ABORT, 'run frozen contract is immutable'); END;
+
+  CREATE TRIGGER run_status_transition_v4
+  BEFORE UPDATE OF status ON runs WHEN OLD.contract_version = 4 AND NOT (
+    (OLD.status = 'queued' AND NEW.status IN ('running', 'failed', 'cancelled'))
+    OR (OLD.status = 'running' AND NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out'))
+    OR (OLD.status IN ('succeeded', 'failed', 'cancelled', 'timed_out') AND NEW.status = 'trashed'
+      AND NEW.pre_trash_status = OLD.status AND NEW.trashed_at IS NOT NULL)
+    OR (OLD.status = 'trashed' AND NEW.status = OLD.pre_trash_status
+      AND OLD.pre_trash_status IN ('succeeded', 'failed', 'cancelled', 'timed_out')
+      AND NEW.pre_trash_status IS NULL AND NEW.trashed_at IS NULL)
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid v4 run status transition'); END;
+
+  CREATE TRIGGER run_cancel_intent_v4
+  BEFORE UPDATE OF cancel_requested_at ON runs WHEN OLD.contract_version = 4 AND (
+    OLD.cancel_requested_at IS NOT NULL
+    OR NEW.cancel_requested_at IS NULL
+    OR OLD.status NOT IN ('queued', 'running')
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid v4 run cancellation intent'); END;
+
+  CREATE TRIGGER run_timestamp_state_v4
+  BEFORE UPDATE OF status, started_at, finished_at ON runs WHEN OLD.contract_version = 4 AND NOT (
+    (NEW.status = 'queued' AND NEW.started_at IS NULL AND NEW.finished_at IS NULL)
+    OR (NEW.status = 'running' AND NEW.started_at IS NOT NULL AND NEW.finished_at IS NULL)
+    OR (NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+      AND NEW.finished_at IS NOT NULL)
+  )
+  BEGIN SELECT RAISE(ABORT, 'v4 run timestamps do not match status'); END;
+
+  CREATE TRIGGER output_file_owner_insert_v4
+  BEFORE INSERT ON output_indexes
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM object_files WHERE id = NEW.object_file_id AND owner_run_id = NEW.run_id AND kind = 'run_file'
+    ) THEN RAISE(ABORT, 'output object ownership mismatch') END;
+  END;
+  CREATE TRIGGER output_v4_run_contract_insert
+  BEFORE INSERT ON output_indexes
+  BEGIN
+    SELECT CASE WHEN NEW.contract_version != 4
+      OR NEW.legacy_digest IS NOT NULL
+      OR NEW.output_contract_sha256 != riff_canonical_sha256(json_object(
+        'runId', NEW.run_id,
+        'logicalName', NEW.logical_name,
+        'outputType', NEW.output_type,
+        'sampleIndex', NEW.sample_index,
+        'sampleId', NEW.sample_id,
+        'declaredRole', NEW.declared_role
+      ))
+      OR NOT EXISTS (
+      SELECT 1 FROM runs
+      WHERE id = NEW.run_id
+        AND contract_version = 4
+        AND NEW.sample_index < requested_sample_count
+        AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleIndex') = NEW.sample_index
+        AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleId') = NEW.sample_id
+    ) THEN RAISE(ABORT, 'new output requires v4 run contract') END;
+  END;
+  CREATE TRIGGER output_legacy_read_only_v4
+  BEFORE UPDATE ON output_indexes WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy output contract is read only'); END;
+  CREATE TRIGGER output_legacy_delete_v4
+  BEFORE DELETE ON output_indexes WHEN OLD.contract_version = 3
+  BEGIN SELECT RAISE(ABORT, 'legacy output contract is read only'); END;
+  CREATE TRIGGER output_binding_immutable_v4
+  BEFORE UPDATE OF run_id, object_file_id, logical_name, output_type, contract_version, legacy_digest,
+    sample_index, sample_id, declared_role, output_contract_sha256 ON output_indexes
+  BEGIN SELECT RAISE(ABORT, 'output binding is immutable'); END;
+
+  CREATE TRIGGER run_attempt_v4_owner
+  BEFORE INSERT ON run_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM runs WHERE id = NEW.run_id AND contract_version = 4 AND status IN ('queued', 'running')
+    ) THEN RAISE(ABORT, 'run attempt requires nonterminal v4 run') END;
+  END;
+  CREATE TRIGGER run_attempt_binding_immutable_v4
+  BEFORE UPDATE OF run_id, attempt_generation, dispatcher_generation ON run_attempts
+  BEGIN SELECT RAISE(ABORT, 'run attempt binding is immutable'); END;
+  CREATE TRIGGER run_attempt_transition_v4
+  BEFORE UPDATE OF state ON run_attempts WHEN NOT (
+    (OLD.state = 'claimed' AND NEW.state IN ('starting', 'cancelled', 'interrupted'))
+    OR (OLD.state = 'starting' AND NEW.state IN ('running', 'failed', 'cancelled', 'timed_out', 'interrupted'))
+    OR (OLD.state = 'running' AND NEW.state IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'))
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid run attempt transition'); END;
+
+  CREATE TRIGGER process_attempt_v4_owner
+  BEFORE INSERT ON process_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM run_attempts a
+      JOIN runs r ON r.id = a.run_id
+      WHERE a.id = NEW.run_attempt_id AND r.contract_version = 4
+        AND NEW.process_kind = r.run_kind
+        AND (NEW.process_kind = 'visual' OR (
+          NEW.sample_index < r.requested_sample_count
+          AND json_extract(r.sample_plan_json, '$[' || NEW.sample_index || '].sampleId') = NEW.sample_id
+        ))
+    ) THEN RAISE(ABORT, 'process attempt run or sample mismatch') END;
+  END;
+  CREATE TRIGGER process_attempt_binding_immutable_v4
+  BEFORE UPDATE OF run_attempt_id, process_kind, sample_index, sample_id,
+    pid, process_start_token, process_group_id ON process_attempts
+  BEGIN SELECT RAISE(ABORT, 'process attempt identity is immutable'); END;
+  CREATE TRIGGER process_attempt_transition_v4
+  BEFORE UPDATE OF state ON process_attempts WHEN NOT (
+    (OLD.state = 'blocked' AND NEW.state IN ('released', 'exited', 'cleanup_unverified'))
+    OR (OLD.state = 'released' AND NEW.state IN ('running', 'exited', 'cleanup_unverified'))
+    OR (OLD.state = 'running' AND NEW.state IN ('exited', 'cleanup_unverified'))
+    OR (OLD.state = 'exited' AND NEW.state IN ('cleanup_complete', 'cleanup_unverified'))
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid process attempt transition'); END;
+  CREATE TRIGGER process_launch_gate_transition_v4
+  BEFORE UPDATE OF launch_gate_state ON process_attempts
+  WHEN OLD.launch_gate_state != 'blocked' OR NEW.launch_gate_state NOT IN ('released', 'timed_out')
+  BEGIN SELECT RAISE(ABORT, 'invalid process launch gate transition'); END;
+
+  CREATE TRIGGER run_command_v4_owner
+  BEFORE INSERT ON run_commands
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM runs WHERE id = NEW.run_id AND contract_version = 4
+    ) THEN RAISE(ABORT, 'run command requires v4 run') END;
+  END;
+  CREATE TRIGGER run_command_binding_immutable_v4
+  BEFORE UPDATE OF run_id, command_kind, request_key, intent_sha256 ON run_commands
+  BEGIN SELECT RAISE(ABORT, 'run command identity is immutable'); END;
+  CREATE TRIGGER run_command_transition_v4
+  BEFORE UPDATE OF state ON run_commands
+  WHEN OLD.state != 'accepted' OR NEW.state NOT IN ('committed', 'rejected')
+  BEGIN SELECT RAISE(ABORT, 'invalid run command transition'); END;
+
+  CREATE TRIGGER run_receipt_owner_v4
+  BEFORE INSERT ON run_command_receipts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM run_commands WHERE id = NEW.command_id AND run_id = NEW.run_id AND state = 'committed'
+    ) THEN RAISE(ABORT, 'run receipt command mismatch') END;
+  END;
+  CREATE TRIGGER run_receipt_digest_v4
+  BEFORE INSERT ON run_command_receipts
+  WHEN NEW.payload_sha256 != riff_canonical_sha256(NEW.payload_json)
+  BEGIN SELECT RAISE(ABORT, 'run receipt payload digest mismatch'); END;
+  CREATE TRIGGER run_receipt_immutable_v4
+  BEFORE UPDATE ON run_command_receipts
+  BEGIN SELECT RAISE(ABORT, 'run receipt is immutable'); END;
+  CREATE TRIGGER run_receipt_delete_v4
+  BEFORE DELETE ON run_command_receipts
+  BEGIN SELECT RAISE(ABORT, 'run receipt is immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
   Object.freeze({ version: 3, sql: PRODUCT_SCHEMA_V3_SQL }),
+  Object.freeze({ version: 4, sql: PRODUCT_SCHEMA_V4_SQL }),
 ]);

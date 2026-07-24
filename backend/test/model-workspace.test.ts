@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -20,6 +21,19 @@ test("generic scaffold is domain-neutral, deterministic per Model, and IDs do no
   assert.doesNotMatch(text, /wind|turbine|queue|depot|crew|farm/u);
   assert.equal(first.executionDescription.entryPoint, "code/riff_entry.py");
   assert.equal(first.executionDescription.runMode, "batch");
+  assert.deepEqual(first.executionDescription.inputs, {
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      additionalProperties: false,
+      required: ["stepLimit", "demand"],
+      properties: {
+        stepLimit: { type: "integer", minimum: 1, maximum: 10_000, default: 10 },
+        demand: { type: "number", minimum: 0, maximum: 1_000_000, default: 1 },
+      },
+    },
+    smoke: { stepLimit: 2, demand: 1 },
+  });
   assert.match(Buffer.from(first.files.find((file) => file.relativePath === "README.md")!.bytes).toString("utf8"), /not\s+evidence of scientific validity/u);
 });
 
@@ -29,6 +43,30 @@ test("execution description rejects path escape, duplicate outputs, and undeclar
   assert.throws(() => validateExecutionDescription({ ...valid, entryPoint: "../secret.py" }), /path is invalid/u);
   assert.throws(() => validateExecutionDescription({ ...valid, outputs: [...valid.outputs, { ...valid.outputs[0] }] }), /unique logical names/u);
   assert.throws(() => validateExecutionDescription({ ...valid, visual: { entryPoint: "code/page.py", healthPath: "/health" } }), /Batch-only/u);
+});
+
+test("generic scaffold entry consumes declared stepLimit and demand parameters", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "riff-model-entry-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  materializeScaffold(root, "model_entry_behavior");
+  writeFileSync(join(root, "code/mesa.py"), [
+    "class Model:",
+    "    def __init__(self, seed=None):",
+    "        self.seed = seed",
+    "",
+  ].join("\n"));
+  const executed = spawnSync("/usr/bin/python3", ["code/riff_entry.py"], {
+    cwd: root,
+    input: JSON.stringify({ stepLimit: 3, demand: 4.5 }),
+    encoding: "utf8",
+  });
+  assert.equal(executed.status, 0, executed.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, "outputs/summary.json"), "utf8")), {
+    completed_steps: 3,
+    demand: 4.5,
+    processed_demand: 13.5,
+    status: "complete",
+  });
 });
 
 test("workspace digest is ordered, byte-bound, rejects symlinks, and changes with content", (t) => {

@@ -3,10 +3,33 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ProductStoreV2 } from "../src/product-store-v2.ts";
+import { canonicalDigest } from "../src/canonical-json-v2.ts";
+import { planExperiment } from "../src/experiment-planner.ts";
+import { experimentConfigurationRecordDigest, ProductStoreV2 } from "../src/product-store-v2.ts";
 
 const NOW = "2026-07-22T01:00:00.000Z";
 const LATER = "2026-07-22T02:00:00.000Z";
+const INPUT_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: { seed: { type: "integer" } },
+  required: [],
+  additionalProperties: false,
+};
+const RUN_LIMITS = {
+  schemaVersion: 1 as const,
+  wallTimeMs: 60_000,
+  startupTimeMs: 10_000,
+  terminationGraceMs: 1_000,
+  maxStdoutBytes: 100_000,
+  maxStderrBytes: 100_000,
+  maxOutputFiles: 10,
+  maxOutputBytes: 1_000_000,
+  maxEventCount: 1_000,
+  maxEventBytes: 1_000_000,
+  maxSamples: 10,
+  maxConcurrency: 2,
+};
 
 test("fresh ProductStoreV2 atomically initializes and round-trips the complete Stage 1 graph", () => {
   const parent = mkdtempSync(join(tmpdir(), "riff-product-v2-"));
@@ -25,7 +48,26 @@ test("fresh ProductStoreV2 atomically initializes and round-trips the complete S
       name: "Alpha",
       technicalStatus: "executable",
       runMode: "both",
-      executionDescription: { entryPoint: "model.py", modes: ["batch"] },
+      executionDescription: {
+        schemaVersion: 2,
+        runtime: "python",
+        runMode: "batch",
+        dependencyFile: "environment/requirements.txt",
+        inputs: {
+          schemaProfile: "riff-json-schema-2020-12-v1",
+          schema: INPUT_SCHEMA,
+          smoke: { seed: 7 },
+        },
+        outputs: [{
+          logicalName: "result",
+          relativePath: "outputs/result.json",
+          mediaType: "application/json",
+          required: true,
+          role: "data",
+        }],
+        batch: { entryPoint: "code/model.py", protocol: "riff-batch-v1" },
+        cancellation: { signal: "SIGTERM", graceMs: 1_000 },
+      },
       createdAt: NOW,
       files: [
         { id: "file_model_code", kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('alpha')\n") },
@@ -60,26 +102,56 @@ test("fresh ProductStoreV2 atomically initializes and round-trips the complete S
 
     store.createConversation({ id: "conversation_project", owner: { kind: "project", id: project.id }, name: "Analyze", providerId: "provider", providerModelId: "model", createdAt: NOW });
     store.createMessage({ id: "message_project", conversationId: "conversation_project", ordinal: 0, role: "assistant", status: "complete", text: "Ready", content: { ok: true }, createdAt: NOW });
-    store.createExperiment({ id: "experiment_alpha", projectId: project.id, name: "Base", configuration: { seed: 7 }, estimatedSampleCount: 1, createdAt: NOW });
-    assert.throws(() => store.createExperiment({ id: "experiment_alpha", projectId: project.id, name: "Changed", configuration: { seed: 7 }, estimatedSampleCount: 1, createdAt: NOW }), /different creation intent/u);
-    const renamed = store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Renamed", configuration: { seeds: [1, 2] }, estimatedSampleCount: 2, transactionId: "mutation_update_experiment_alpha", intentDigest: "a".repeat(64), updatedAt: LATER });
+    const basePlan = planExperiment({ configuration: {
+      schemaVersion: 1, runKind: "batch", parameters: { seed: 7 }, sampling: { kind: "single" },
+    }, inputSchema: INPUT_SCHEMA, maxSamples: RUN_LIMITS.maxSamples });
+    const createdExperiment = store.createExperimentV4({
+      commandId: "command_create_experiment_alpha",
+      id: "experiment_alpha",
+      projectId: project.id,
+      name: "Base",
+      plan: basePlan,
+      createdAt: NOW,
+    });
+    assert.throws(() => store.createExperimentV4({ commandId: "command_create_experiment_alpha", id: "experiment_alpha", projectId: project.id, name: "Changed", plan: basePlan, createdAt: NOW }), /different intent/u);
+    const updatedPlan = planExperiment({ configuration: {
+      schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "multiple-seeds", seeds: [1, 2] },
+    }, inputSchema: INPUT_SCHEMA, maxSamples: RUN_LIMITS.maxSamples });
+    const renamed = store.updateExperimentV4({ commandId: "command_update_experiment_alpha", id: "experiment_alpha", projectId: project.id,
+      name: "Renamed", expectedConfigurationDigest: basePlan.configurationDigest,
+      expectedRecordDigest: experimentConfigurationRecordDigest(createdExperiment),
+      configuration: updatedPlan.configuration, plan: updatedPlan, updatedAt: LATER });
     assert.equal(renamed.name, "Renamed");
     assert.equal(renamed.estimatedSampleCount, 2);
-    assert.equal(store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Renamed", configuration: { seeds: [1, 2] }, estimatedSampleCount: 2, transactionId: "mutation_update_experiment_alpha", intentDigest: "a".repeat(64), updatedAt: LATER }).configuration.seeds instanceof Array, true);
-    assert.throws(() => store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Other", configuration: { seed: 3 }, estimatedSampleCount: 1, transactionId: "mutation_update_experiment_alpha", intentDigest: "b".repeat(64), updatedAt: LATER }), /different intent/u);
-    store.createRun({ id: "run_alpha", projectId: project.id, experimentId: "experiment_alpha", status: "succeeded", frozenConfiguration: { seed: 7 }, requestedSampleCount: 1, createdAt: NOW });
-    store.createOutput({ id: "output_alpha", objectFileId: "file_output_alpha", runId: "run_alpha", relativePath: "result.csv", logicalName: "result.csv", outputType: "table", mediaType: "text/csv", bytes: Buffer.from("metric\n1\n"), createdAt: NOW });
+    assert.equal(store.updateExperimentV4({ commandId: "command_update_experiment_alpha", id: "experiment_alpha", projectId: project.id,
+      name: "Renamed", expectedConfigurationDigest: basePlan.configurationDigest,
+      expectedRecordDigest: experimentConfigurationRecordDigest(createdExperiment),
+      configuration: updatedPlan.configuration, plan: updatedPlan, updatedAt: LATER }).sampleCount, 2);
+    assert.throws(() => store.updateExperimentV4({ commandId: "command_update_experiment_alpha", id: "experiment_alpha", projectId: project.id,
+      name: "Other", expectedConfigurationDigest: updatedPlan.configurationDigest,
+      expectedRecordDigest: experimentConfigurationRecordDigest(renamed),
+      configuration: basePlan.configuration, plan: basePlan, updatedAt: LATER }), /different intent/u);
+    store.createFrozenRun({
+      commandId: "command_start_run_alpha",
+      runId: "run_alpha",
+      projectId: project.id,
+      experimentConfigId: "experiment_alpha",
+      completionConversationId: "conversation_project",
+      expectedConfigurationDigest: updatedPlan.configurationDigest,
+      plan: updatedPlan,
+      projectSnapshotDigest: project.modelSnapshotDigest,
+      executionDescriptionDigest: canonicalDigest(project.executionDescription),
+      limits: RUN_LIMITS,
+      createdAt: NOW,
+    });
     assert.deepEqual(store.listExperimentConfigurations(project.id).map((item) => item.id), ["experiment_alpha"]);
     assert.deepEqual(store.listRuns(project.id).map((item) => item.id), ["run_alpha"]);
-    assert.deepEqual(store.listRunOutputs("run_alpha").map((item) => ({ id: item.id, runId: item.runId, fileId: item.file.id })), [
-      { id: "output_alpha", runId: "run_alpha", fileId: "file_output_alpha" },
-    ]);
+    assert.deepEqual(store.listRunOutputs("run_alpha"), []);
 
     store.renameResource("temporary_document", "document_model", "Updated plan", LATER);
     store.archiveResource("experiment", "experiment_alpha", LATER);
     store.restoreResource("experiment", "experiment_alpha", LATER);
-    store.trashResource("run", "run_alpha", LATER);
-    store.restoreResource("run", "run_alpha", LATER);
+    assert.throws(() => store.trashResource("run", "run_alpha", LATER), /Product database mutation failed/u);
     store.archiveResource("model", model.id, LATER);
     assert.throws(() => store.createProjectFromModel({ projectId: "project_gamma", projectName: "Rejected", sourceModelId: model.id, createdAt: LATER }), /not active and technically executable/u);
     store.trashResource("model", model.id, LATER);
@@ -96,7 +168,7 @@ test("fresh ProductStoreV2 atomically initializes and round-trips the complete S
       ...reopened.previewPermanentDelete("model", "model_alpha").records,
       ...reopened.previewPermanentDelete("project", "project_alpha").records,
     ].map((record) => record.table));
-    for (const table of ["models", "projects", "conversations", "messages", "temporary_documents", "attachments", "message_attachments", "experiment_configurations", "runs", "output_indexes", "trash_entries"]) assert.equal(recordTables.has(table), true, table);
+    for (const table of ["models", "projects", "conversations", "messages", "temporary_documents", "attachments", "message_attachments", "experiment_configurations", "runs", "trash_entries"]) assert.equal(recordTables.has(table), true, table);
     assert.equal(reopened.listObjectFiles({ kind: "project", id: "project_alpha" }).length > 0, true);
     assert.equal(reopened.readObjectFile(snapshotRows.find((row) => row.relativePath.endsWith("code/model.py"))!.id).equals(frozenCode), true);
     assert.equal(readFileSync(sentinel, "utf8"), "do not touch");
@@ -119,6 +191,10 @@ test("child creation guards reject trashed parents and trashed attachment source
 
     store.createProjectFromModel({ projectId: "project_guard", projectName: "Guard", sourceModelId: "model_guard", createdAt: NOW });
     store.trashResource("project", "project_guard", LATER);
-    assert.throws(() => store.createExperiment({ id: "experiment_rejected", projectId: "project_guard", name: "No", configuration: {}, estimatedSampleCount: 1, createdAt: LATER }), /unexpected number of rows/u);
+    const rejectedPlan = planExperiment({ configuration: {
+      schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" },
+    }, inputSchema: INPUT_SCHEMA, maxSamples: RUN_LIMITS.maxSamples });
+    assert.throws(() => store.createExperimentV4({ commandId: "command_rejected_experiment", id: "experiment_rejected",
+      projectId: "project_guard", name: "No", plan: rejectedPlan, createdAt: LATER }), /unexpected number of rows/u);
   } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
 });

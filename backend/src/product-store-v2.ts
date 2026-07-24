@@ -14,6 +14,13 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { canonicalDigest, canonicalJsonV2 } from "./canonical-json-v2.ts";
+import {
+  assertExperimentPlan as assertPlannerPlan,
+  INPUT_SCHEMA_PROFILE,
+  normalizeInputParameters,
+  planExperiment,
+  type ExperimentPlan,
+} from "./experiment-planner.ts";
 import type {
   ActionRecordDto,
   AgentTurnDto,
@@ -210,6 +217,102 @@ export type CreateRunInput = {
   createdAt: IsoTimestamp;
 };
 
+export type ExperimentConfigurationRecordV4 = ExperimentConfigurationRecord & {
+  contractVersion: 4;
+  readOnly: false;
+  configurationDigest: string;
+  sampleCount: number;
+};
+
+export const experimentConfigurationRecordDigest = (record: ExperimentConfigurationRecordV4): string => canonicalDigest({
+  contractVersion: 4,
+  id: record.id,
+  projectId: record.projectId,
+  name: record.name,
+  configurationDigest: record.configurationDigest,
+  sampleCount: record.sampleCount,
+  lifecycleState: record.lifecycleState,
+  createdAt: record.createdAt,
+  updatedAt: record.updatedAt,
+});
+
+export type CreateExperimentV4Input = {
+  commandId: string;
+  id: string;
+  projectId: string;
+  name: string;
+  plan: ExperimentPlan;
+  createdAt: IsoTimestamp;
+};
+
+export type UpdateExperimentV4Input = {
+  commandId: string;
+  id: string;
+  projectId: string;
+  expectedConfigurationDigest: string;
+  expectedRecordDigest: string;
+  name?: string;
+  configuration?: Record<string, unknown>;
+  plan?: ExperimentPlan;
+  updatedAt: IsoTimestamp;
+};
+
+export type ExperimentUpdateIntentV4 = Pick<
+  UpdateExperimentV4Input,
+  "commandId" | "id" | "projectId" | "expectedConfigurationDigest" | "expectedRecordDigest" | "name" | "configuration"
+>;
+
+export type RunLimitsV1 = Readonly<{
+  schemaVersion: 1;
+  wallTimeMs: number;
+  startupTimeMs: number;
+  terminationGraceMs: number;
+  maxStdoutBytes: number;
+  maxStderrBytes: number;
+  maxOutputFiles: number;
+  maxOutputBytes: number;
+  maxEventCount: number;
+  maxEventBytes: number;
+  maxSamples: number;
+  maxConcurrency: number;
+}>;
+
+export type StartRunIntent = Readonly<{
+  commandId: string;
+  projectId: string;
+  experimentConfigId: string;
+  completionConversationId: string | null;
+}>;
+
+export type CreateFrozenRunInput = StartRunIntent & Readonly<{
+  runId: string;
+  expectedConfigurationDigest: string;
+  plan: ExperimentPlan;
+  projectSnapshotDigest: string;
+  executionDescriptionDigest: string;
+  limits: RunLimitsV1;
+  createdAt: IsoTimestamp;
+}>;
+
+export type FrozenRunStartReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  intentDigest: string;
+  runId: string;
+  projectId: string;
+  experimentConfigId: string;
+  completionConversationId: string | null;
+  status: "queued";
+  runKind: "batch" | "visual";
+  frozenConfigurationDigest: string;
+  samplePlanDigest: string;
+  sampleCount: number;
+  projectSnapshotDigest: string;
+  executionDescriptionDigest: string;
+  limitsDigest: string;
+  createdAt: IsoTimestamp;
+}>;
+
 export type CreateOutputInput = {
   id: string;
   objectFileId: string;
@@ -217,6 +320,9 @@ export type CreateOutputInput = {
   relativePath: string;
   logicalName: string;
   outputType: string;
+  sampleIndex?: number;
+  sampleId?: string;
+  declaredRole?: "metric" | "table" | "document" | "data" | "diagnostic";
   mediaType: string;
   bytes: Uint8Array;
   createdAt: IsoTimestamp;
@@ -237,6 +343,10 @@ type ObjectRow = {
   adoption_purpose: string | null;
   created_at: string;
   run_project_id?: string | null;
+};
+
+type ProductDatabaseMutationStatement = DatabaseMutationStatement & {
+  mismatchMessage?: string;
 };
 
 export class ProductStoreV2Error extends Error {
@@ -822,66 +932,369 @@ export class ProductStoreV2 {
   }
 
   createExperiment(input: CreateExperimentInput): ExperimentConfigurationRecord {
-    const existing = this.#database.prepare("SELECT * FROM experiment_configurations WHERE id = ?").get(input.id) as any;
-    if (existing) {
-      const matches = existing.project_id === input.projectId && existing.name === input.name
-        && existing.configuration_json === json(input.configuration) && existing.estimated_sample_count === input.estimatedSampleCount;
-      if (!matches) throw new ProductStoreV2Error("Experiment configuration ID already exists with a different creation intent.");
-      return experimentConfigurationRecord(existing);
+    throw new ProductStoreV2Error("Version-3 experiment creation is unavailable after schema v4; use createExperimentV4.");
+  }
+
+  createExperimentV4(input: CreateExperimentV4Input): ExperimentConfigurationRecordV4 {
+    assertCommandId(input.commandId);
+    assertId(input.id);
+    assertId(input.projectId);
+    assertPlannerPlan(input.plan);
+    const configurationJson = json(input.plan.configuration);
+    const intentDigest = canonicalDigest({
+      schemaVersion: 1,
+      commandKind: "experiment.create",
+      id: input.id,
+      projectId: input.projectId,
+      name: input.name,
+      configuration: input.plan.configuration,
+    });
+    return this.#withImmediateTransaction(() => {
+      const replayed = this.#experimentCommandReceipt(
+        input.commandId, "create", input.projectId, input.id, intentDigest,
+      );
+      if (replayed) return replayed;
+      this.#executeDatabaseStatements([
+        activeLifecycleGuard("projects", input.projectId),
+        {
+          sql: `INSERT INTO experiment_configurations
+            (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at,
+              contract_version, legacy_digest, configuration_sha256, sample_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 4, NULL, ?, ?)`,
+          params: [
+            input.id,
+            input.projectId,
+            input.name,
+            configurationJson,
+            input.plan.sampleCount,
+            input.createdAt,
+            input.createdAt,
+            input.plan.configurationDigest,
+            input.plan.sampleCount,
+          ],
+          expectedChanges: 1,
+          },
+      ]);
+      const response = this.#experimentConfiguration(input.projectId, input.id) as ExperimentConfigurationRecordV4;
+      const responseJson = json(response);
+      this.#executeDatabaseStatements([{
+        sql: `INSERT INTO experiment_command_receipts
+          (command_id, command_kind, project_id, experiment_id, intent_sha256,
+            response_json, response_sha256, created_at)
+          VALUES (?, 'create', ?, ?, ?, ?, ?, ?)`,
+        params: [input.commandId, input.projectId, input.id, intentDigest,
+          responseJson, canonicalDigest(response), input.createdAt],
+        expectedChanges: 1,
+      }]);
+      return response;
+    });
+  }
+
+  updateExperimentV4(input: UpdateExperimentV4Input): ExperimentConfigurationRecordV4 {
+    assertCommandId(input.commandId);
+    assertId(input.id);
+    assertId(input.projectId);
+    assertDigest(input.expectedConfigurationDigest, "Expected experiment configuration digest");
+    assertDigest(input.expectedRecordDigest, "Expected experiment record digest");
+    if (input.name === undefined && input.configuration === undefined) {
+      throw new ProductStoreV2Error("Experiment update must contain a name or configuration patch.");
     }
-    this.#databaseMutation([activeLifecycleGuard("projects", input.projectId), { sql: `INSERT INTO experiment_configurations
-      (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.projectId, input.name, json(input.configuration), input.estimatedSampleCount, input.createdAt, input.createdAt], expectedChanges: 1 },
-      ...(input.transactionId ? [commandReceiptInsert(input.transactionId, canonicalDigest({ id: input.id, projectId: input.projectId, name: input.name, configuration: input.configuration, estimatedSampleCount: input.estimatedSampleCount }))] : []),
-    ]);
-    return this.#experimentConfiguration(input.projectId, input.id);
+    if ((input.configuration === undefined) !== (input.plan === undefined)) {
+      throw new ProductStoreV2Error("Experiment configuration patch and validated plan must be supplied together.");
+    }
+    if (input.name !== undefined && (!input.name.trim() || input.name.length > 200)) {
+      throw new ProductStoreV2Error("Experiment configuration name is invalid.");
+    }
+    if (input.plan !== undefined) assertPlannerPlan(input.plan);
+    const intentDigest = experimentUpdateIntentDigest(input);
+    return this.#withImmediateTransaction(() => {
+      const replayed = this.#experimentCommandReceipt(
+        input.commandId, "update", input.projectId, input.id, intentDigest,
+      );
+      if (replayed) return replayed;
+      const current = this.#experimentConfiguration(input.projectId, input.id);
+      if (current.contractVersion !== 4) throw legacyReadOnlyError("experiment");
+      if (current.configurationDigest !== input.expectedConfigurationDigest) {
+        throw new ProductStoreV2Error("stale_configuration: the observed experiment configuration digest is no longer current.");
+      }
+      if (experimentConfigurationRecordDigest(current as ExperimentConfigurationRecordV4) !== input.expectedRecordDigest) {
+        throw new ProductStoreV2Error("stale_record: the observed experiment record is no longer current.");
+      }
+      const nextName = input.name ?? current.name;
+      const nextConfiguration = input.plan?.configuration ?? current.configuration;
+      const nextConfigurationDigest = input.plan?.configurationDigest ?? current.configurationDigest;
+      const nextSampleCount = input.plan?.sampleCount ?? current.sampleCount;
+      this.#executeDatabaseStatements([
+        activeLifecycleGuard("projects", input.projectId),
+        {
+          sql: `UPDATE experiment_configurations
+            SET name = ?, configuration_json = ?, estimated_sample_count = ?,
+              configuration_sha256 = ?, sample_count = ?, updated_at = ?
+            WHERE id = ? AND project_id = ? AND contract_version = 4
+              AND lifecycle_state = 'active' AND configuration_sha256 = ?
+              AND name = ? AND updated_at = ?`,
+          params: [
+            nextName,
+            json(nextConfiguration),
+            nextSampleCount,
+            nextConfigurationDigest,
+            nextSampleCount,
+            input.updatedAt,
+            input.id,
+            input.projectId,
+            input.expectedConfigurationDigest,
+            current.name,
+            current.updatedAt,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "stale_record: the observed experiment record is no longer current.",
+        },
+      ]);
+      const response = this.#experimentConfiguration(input.projectId, input.id) as ExperimentConfigurationRecordV4;
+      const responseJson = json(response);
+      this.#executeDatabaseStatements([{
+        sql: `INSERT INTO experiment_command_receipts
+          (command_id, command_kind, project_id, experiment_id, intent_sha256,
+            response_json, response_sha256, created_at)
+          VALUES (?, 'update', ?, ?, ?, ?, ?, ?)`,
+        params: [input.commandId, input.projectId, input.id, intentDigest,
+          responseJson, canonicalDigest(response), input.updatedAt],
+        expectedChanges: 1,
+      }]);
+      return response;
+    });
+  }
+
+  getExperimentUpdateReceipt(input: ExperimentUpdateIntentV4): ExperimentConfigurationRecordV4 | null {
+    assertCommandId(input.commandId);
+    assertId(input.id);
+    assertId(input.projectId);
+    assertDigest(input.expectedConfigurationDigest, "Expected experiment configuration digest");
+    assertDigest(input.expectedRecordDigest, "Expected experiment record digest");
+    if (input.name === undefined && input.configuration === undefined) {
+      throw new ProductStoreV2Error("Experiment update must contain a name or configuration patch.");
+    }
+    return this.#experimentCommandReceipt(
+      input.commandId,
+      "update",
+      input.projectId,
+      input.id,
+      experimentUpdateIntentDigest(input),
+    );
   }
 
   updateExperiment(input: UpdateExperimentInput): ExperimentConfigurationRecord {
-    const existingReceipt = this.#database.prepare("SELECT manifest_sha256 FROM committed_mutations WHERE transaction_id = ?").get(input.transactionId) as { manifest_sha256: string } | undefined;
-    if (existingReceipt) {
-      if (existingReceipt.manifest_sha256 !== input.intentDigest) throw new ProductStoreV2Error("Experiment configuration command already exists with a different intent.");
-      const current = this.#experimentConfiguration(input.projectId, input.id);
-      if (current.name !== input.name || canonicalDigest(current.configuration) !== canonicalDigest(input.configuration)
-        || current.estimatedSampleCount !== input.estimatedSampleCount) {
-        throw new ProductStoreV2Error("Experiment configuration command was already committed but current state changed.");
-      }
-      return current;
+    const row = this.#database.prepare(
+      "SELECT contract_version FROM experiment_configurations WHERE id = ? AND project_id = ?",
+    ).get(input.id, input.projectId) as { contract_version: number } | undefined;
+    if (row?.contract_version === 3) throw legacyReadOnlyError("experiment");
+    if (row?.contract_version === 4) {
+      throw new ProductStoreV2Error("Version-4 experiments require updateExperimentV4 compare-and-set.");
     }
-    this.#databaseMutation([
-      activeLifecycleGuard("projects", input.projectId),
-      { sql: `UPDATE experiment_configurations SET name = ?, configuration_json = ?, estimated_sample_count = ?, updated_at = ?
-        WHERE id = ? AND project_id = ? AND lifecycle_state = 'active'`,
-      params: [input.name, json(input.configuration), input.estimatedSampleCount, input.updatedAt, input.id, input.projectId], expectedChanges: 1 },
-      commandReceiptInsert(input.transactionId, input.intentDigest),
-    ]);
-    return this.#experimentConfiguration(input.projectId, input.id);
+    throw new ProductStoreV2Error("Experiment configuration does not exist.");
   }
 
   createRun(input: CreateRunInput): void {
-    this.#databaseMutation([
-      activeLifecycleGuard("projects", input.projectId),
-      { sql: `UPDATE experiment_configurations SET updated_at = updated_at WHERE id = ? AND project_id = ? AND lifecycle_state = 'active'`, params: [input.experimentId, input.projectId], expectedChanges: 1 },
-      { sql: `INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json, requested_sample_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.projectId, input.experimentId, input.status, json(input.frozenConfiguration), input.requestedSampleCount, input.createdAt, input.createdAt], expectedChanges: 1 },
-    ]);
+    throw new ProductStoreV2Error("Arbitrary run creation is unavailable after schema v4; use createFrozenRun.");
+  }
+
+  getFrozenRunStartReceipt(intent: StartRunIntent): FrozenRunStartReceipt | null {
+    assertStartRunIntent(intent);
+    return this.#frozenRunStartReceipt(intent, startRunIntentDigest(intent));
+  }
+
+  createFrozenRun(input: CreateFrozenRunInput): FrozenRunStartReceipt {
+    assertStartRunIntent(input);
+    const intentDigest = startRunIntentDigest(input);
+    const replayed = this.#frozenRunStartReceipt(input, intentDigest);
+    if (replayed) return replayed;
+
+    assertId(input.runId);
+    assertDigest(input.expectedConfigurationDigest, "Expected experiment configuration digest");
+    assertDigest(input.projectSnapshotDigest, "Project snapshot digest");
+    assertDigest(input.executionDescriptionDigest, "Execution description digest");
+    assertRunLimits(input.limits);
+    assertPlannerPlan(input.plan, input.limits.maxSamples);
+    if (input.expectedConfigurationDigest !== input.plan.configurationDigest) {
+      throw new ProductStoreV2Error("stale_configuration: the planned configuration differs from the expected digest.");
+    }
+    const limitsDigest = canonicalDigest(input.limits);
+    const receipt: FrozenRunStartReceipt = Object.freeze({
+      schemaVersion: 1,
+      commandId: input.commandId,
+      intentDigest,
+      runId: input.runId,
+      projectId: input.projectId,
+      experimentConfigId: input.experimentConfigId,
+      completionConversationId: input.completionConversationId,
+      status: "queued",
+      runKind: input.plan.configuration.runKind,
+      frozenConfigurationDigest: input.plan.configurationDigest,
+      samplePlanDigest: input.plan.samplePlanDigest,
+      sampleCount: input.plan.sampleCount,
+      projectSnapshotDigest: input.projectSnapshotDigest,
+      executionDescriptionDigest: input.executionDescriptionDigest,
+      limitsDigest,
+      createdAt: input.createdAt,
+    });
+    const receiptJson = json(receipt);
+    const receiptDigest = canonicalDigest(receipt);
+
+    return this.#withImmediateTransaction(() => {
+      const committed = this.#frozenRunStartReceipt(input, intentDigest);
+      if (committed) return committed;
+      const project = this.#database.prepare(`SELECT lifecycle_state, model_snapshot_digest, execution_description_json
+        FROM projects WHERE id = ?`).get(input.projectId) as {
+          lifecycle_state: LifecycleState;
+          model_snapshot_digest: string;
+          execution_description_json: string;
+        } | undefined;
+      if (!project || project.lifecycle_state !== "active"
+        || project.model_snapshot_digest !== input.projectSnapshotDigest
+        || canonicalDigest(JSON.parse(project.execution_description_json)) !== input.executionDescriptionDigest) {
+        throw new ProductStoreV2Error("project_snapshot_corrupt: the active Project does not match the verified frozen digests.");
+      }
+      assertRunnableExecutionDescription(
+        JSON.parse(project.execution_description_json),
+        input.plan,
+        input.limits.maxSamples,
+      );
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE projects SET updated_at = updated_at
+            WHERE id = ? AND lifecycle_state = 'active'
+              AND model_snapshot_digest = ?
+              AND riff_canonical_sha256(execution_description_json) = ?`,
+          params: [input.projectId, input.projectSnapshotDigest, input.executionDescriptionDigest],
+          expectedChanges: 1,
+          mismatchMessage: "project_snapshot_corrupt: the active Project does not match the verified frozen digests.",
+        },
+        {
+          sql: `UPDATE experiment_configurations SET updated_at = updated_at
+            WHERE id = ? AND project_id = ? AND contract_version = 4
+              AND lifecycle_state = 'active' AND configuration_sha256 = ?
+              AND configuration_json = ? AND sample_count = ?`,
+          params: [
+            input.experimentConfigId,
+            input.projectId,
+            input.expectedConfigurationDigest,
+            json(input.plan.configuration),
+            input.plan.sampleCount,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "stale_configuration: the experiment changed before the run snapshot committed.",
+        },
+        ...(input.completionConversationId === null ? [] : [{
+          sql: `UPDATE conversations SET updated_at = updated_at
+            WHERE id = ? AND project_id = ?`,
+          params: [input.completionConversationId, input.projectId],
+          expectedChanges: 1,
+          mismatchMessage: "completion_conversation_project_mismatch: the completion conversation does not belong to the Project.",
+        }]),
+        {
+          sql: `INSERT INTO runs
+            (id, project_id, experiment_configuration_id, status,
+              frozen_configuration_json, requested_sample_count, created_at, updated_at,
+              contract_version, legacy_digest, run_kind, completion_conversation_id,
+              execution_description_sha256, project_snapshot_sha256,
+              frozen_configuration_sha256, sample_plan_json, sample_plan_sha256,
+              limits_json, limits_sha256, start_receipt_sha256, completion_card_disposition)
+            VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, 4, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          params: [
+            input.runId,
+            input.projectId,
+            input.experimentConfigId,
+            json(input.plan.configuration),
+            input.plan.sampleCount,
+            input.createdAt,
+            input.createdAt,
+            input.plan.configuration.runKind,
+            input.completionConversationId,
+            input.executionDescriptionDigest,
+            input.projectSnapshotDigest,
+            input.plan.configurationDigest,
+            json(input.plan.samples),
+            input.plan.samplePlanDigest,
+            json(input.limits),
+            limitsDigest,
+            receiptDigest,
+            input.completionConversationId === null ? "not_requested" : "pending",
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `INSERT INTO run_commands
+            (id, run_id, command_kind, request_key, intent_sha256, state, outcome_json, created_at, updated_at)
+            VALUES (?, ?, 'start', ?, ?, 'committed', ?, ?, ?)`,
+          params: [
+            input.commandId,
+            input.runId,
+            input.commandId,
+            intentDigest,
+            receiptJson,
+            input.createdAt,
+            input.createdAt,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `INSERT INTO run_command_receipts
+            (id, run_id, command_id, receipt_kind, payload_sha256, payload_json, committed_at)
+            VALUES (?, ?, ?, 'run.start.v1', ?, ?, ?)`,
+          params: [
+            `receipt_${canonicalDigest(input.commandId).slice(0, 32)}`,
+            input.runId,
+            input.commandId,
+            receiptDigest,
+            receiptJson,
+            input.createdAt,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+      return receipt;
+    });
   }
 
   createOutput(input: CreateOutputInput): StoredObjectMetadata {
-    const run = this.#database.prepare("SELECT project_id FROM runs WHERE id = ?").get(input.runId) as { project_id: string } | undefined;
+    const run = this.#database.prepare(
+      "SELECT project_id, contract_version, sample_plan_json FROM runs WHERE id = ?",
+    ).get(input.runId) as { project_id: string; contract_version: number; sample_plan_json: string | null } | undefined;
     if (!run) throw new ProductStoreV2Error("Run does not exist.");
+    if (run.contract_version === 3) throw legacyReadOnlyError("run");
+    if (run.contract_version !== 4 || !Number.isSafeInteger(input.sampleIndex) || input.sampleIndex! < 0
+      || !DIGEST.test(input.sampleId ?? "") || !input.declaredRole) {
+      throw new ProductStoreV2Error("Version-4 output creation requires an exact sample identity and declared role.");
+    }
+    const samples = JSON.parse(run.sample_plan_json ?? "null") as Array<{ sampleIndex: number; sampleId: string }> | null;
+    if (!Array.isArray(samples)
+      || samples[input.sampleIndex!]?.sampleIndex !== input.sampleIndex
+      || samples[input.sampleIndex!]?.sampleId !== input.sampleId) {
+      throw new ProductStoreV2Error("Output sample identity does not match the frozen run plan.");
+    }
     const owner = { kind: "run" as const, id: input.runId };
     const relativePath = `outputs/${input.relativePath}`;
     const target: OwnerPath = { owner, runProjectId: run.project_id, relativePath };
     const bytes = Buffer.from(input.bytes);
     const digest = sha256(bytes);
+    const outputContractDigest = canonicalDigest({
+      runId: input.runId,
+      logicalName: input.logicalName,
+      outputType: input.outputType,
+      sampleIndex: input.sampleIndex,
+      sampleId: input.sampleId,
+      declaredRole: input.declaredRole,
+    });
     this.#coordinator.execute({ files: [{ operation: "write", target, bytes, expectedPriorSha256: null }], statements: [
       activeLifecycleGuard("projects", run.project_id),
       { sql: "UPDATE runs SET updated_at = updated_at WHERE id = ? AND project_id = ? AND status != 'trashed'", params: [input.runId, run.project_id], expectedChanges: 1 },
       objectInsert({ id: input.objectFileId, owner, kind: "run_file", relativePath, mediaType: input.mediaType, sizeBytes: bytes.byteLength, digest, createdAt: input.createdAt }),
-      { sql: `INSERT INTO output_indexes (id, run_id, object_file_id, logical_name, output_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)`, params: [input.id, input.runId, input.objectFileId, input.logicalName, input.outputType, input.createdAt], expectedChanges: 1 },
+      { sql: `INSERT INTO output_indexes
+        (id, run_id, object_file_id, logical_name, output_type, contract_version, legacy_digest,
+          sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+        VALUES (?, ?, ?, ?, ?, 4, NULL, ?, ?, ?, ?, ?)`,
+      params: [input.id, input.runId, input.objectFileId, input.logicalName, input.outputType,
+        input.sampleIndex, input.sampleId, input.declaredRole, outputContractDigest, input.createdAt], expectedChanges: 1 },
     ] });
     return this.#file(input.objectFileId);
   }
@@ -919,18 +1332,22 @@ export class ProductStoreV2 {
     assertId(runId);
     return (this.#database.prepare(`SELECT
         o.id AS output_index_id, o.run_id AS output_run_id, o.object_file_id AS output_object_file_id,
-        o.logical_name, o.output_type, o.created_at AS output_created_at,
+        o.logical_name, o.output_type, o.contract_version AS output_contract_version,
+        o.legacy_digest AS output_legacy_digest, o.sample_index, o.sample_id, o.declared_role,
+        o.output_contract_sha256,
+        o.created_at AS output_created_at,
         f.*, r.project_id AS run_project_id
       FROM output_indexes o
       JOIN object_files f ON f.id = o.object_file_id
       JOIN runs r ON r.id = o.run_id
       WHERE o.run_id = ?
-      ORDER BY o.logical_name, o.id`).all(runId) as any[]).map((row) => ({
-      id: row.output_index_id,
-      runId: row.output_run_id,
-      logicalName: row.logical_name,
-      outputType: row.output_type,
-      file: metadata({
+      ORDER BY o.logical_name, o.id`).all(runId) as any[]).map((row) => {
+      const record = {
+        id: row.output_index_id,
+        runId: row.output_run_id,
+        logicalName: row.logical_name,
+        outputType: row.output_type,
+        file: metadata({
         id: row.output_object_file_id,
         owner_model_id: row.owner_model_id,
         owner_project_id: row.owner_project_id,
@@ -945,23 +1362,42 @@ export class ProductStoreV2 {
         adoption_purpose: row.adoption_purpose,
         created_at: row.created_at,
         run_project_id: row.run_project_id,
-      }),
-      createdAt: row.output_created_at,
-    }));
+        }),
+        createdAt: row.output_created_at,
+      };
+      return row.output_contract_version === 3
+        ? Object.assign(record, {
+          contractVersion: 3 as const,
+          readOnly: true as const,
+          legacyDigest: row.output_legacy_digest,
+        })
+        : Object.assign(record, {
+          contractVersion: 4 as const,
+          readOnly: false as const,
+          legacyDigest: null,
+          sampleIndex: row.sample_index,
+          sampleId: row.sample_id,
+          declaredRole: row.declared_role,
+          outputContractDigest: row.output_contract_sha256,
+        });
+    });
   }
 
   renameResource(kind: NamedManagedResourceKind, id: string, name: string, updatedAt: IsoTimestamp): void {
+    this.#assertMutableExecutionContract(kind, id);
     const { table } = managedTable(kind);
     this.#databaseMutation([{ sql: `UPDATE ${table} SET name = ?, updated_at = ? WHERE id = ? AND lifecycle_state != 'trashed'`, params: [name, updatedAt, id], expectedChanges: 1 }]);
   }
 
   archiveResource(kind: NamedManagedResourceKind, id: string, at: IsoTimestamp): void {
+    this.#assertMutableExecutionContract(kind, id);
     const { table } = managedTable(kind);
     this.#databaseMutation([{ sql: `UPDATE ${table} SET lifecycle_state = 'archived', archived_at = ?, updated_at = ?
       WHERE id = ? AND lifecycle_state = 'active'`, params: [at, at, id], expectedChanges: 1 }]);
   }
 
   restoreResource(kind: ManagedResourceKind, id: string, at: IsoTimestamp): void {
+    this.#assertMutableExecutionContract(kind, id);
     if (kind === "run") {
       const row = this.#database.prepare("SELECT status, pre_trash_status FROM runs WHERE id = ?").get(id) as { status: RunStatus; pre_trash_status: RunStatus | null } | undefined;
       if (!row || row.status !== "trashed" || !row.pre_trash_status) throw new ProductStoreV2Error("Run is not restorable from trash.");
@@ -986,6 +1422,7 @@ export class ProductStoreV2 {
   }
 
   trashResource(kind: ManagedResourceKind, id: string, at: IsoTimestamp): void {
+    this.#assertMutableExecutionContract(kind, id);
     const trashId = `trash_${randomUUID().replaceAll("-", "")}`;
     if (kind === "run") {
       const row = this.#database.prepare("SELECT status FROM runs WHERE id = ?").get(id) as { status: RunStatus } | undefined;
@@ -1031,25 +1468,32 @@ export class ProductStoreV2 {
         for (const project of this.#database.prepare("SELECT id FROM projects WHERE source_model_id = ? ORDER BY id").all(id) as Array<{ id: string }>) blockers.push({ kind: "project_lineage", id: project.id });
       } else {
         exclusions.push({ kind: "model", id: row.source_model_id, reason: "source lineage outside project closure" });
-        for (const experiment of this.#database.prepare("SELECT * FROM experiment_configurations WHERE project_id = ? ORDER BY id").all(id) as any[]) addRows("experiment_configurations", [experiment]);
-        for (const run of this.#database.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY id").all(id) as any[]) {
-          addRows("runs", [run]);
-          fileRows.push(...this.#objectRows("owner_run_id = ?", [run.id]));
-          addRows("output_indexes", this.#database.prepare("SELECT * FROM output_indexes WHERE run_id = ? ORDER BY id").all(run.id) as any[]);
-        }
+        const experiments = this.#database.prepare("SELECT * FROM experiment_configurations WHERE project_id = ? ORDER BY id").all(id) as any[];
+        addRows("experiment_configurations", experiments);
+        addRows("experiment_command_receipts",
+          this.#database.prepare("SELECT * FROM experiment_command_receipts WHERE project_id = ? ORDER BY command_id").all(id) as any[],
+          (receipt) => ({ command_id: receipt.command_id }));
+        const runs = this.#database.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY id").all(id) as any[];
+        addRows("runs", runs);
+        this.#collectRunExecutionClosure(runs.map((run) => run.id), addRows, fileRows);
       }
     } else if (kind === "conversation") {
       this.#collectConversationClosure([id], addRows, fileRows, blockers, exclusions);
+      for (const run of this.#database.prepare(
+        "SELECT id FROM runs WHERE completion_conversation_id = ? ORDER BY id",
+      ).all(id) as Array<{ id: string }>) blockers.push({ kind: "run_completion_conversation", id: run.id });
     } else if (kind === "temporary_document") {
       exclusions.push({ kind: "conversation", id: row.conversation_id, reason: "owner outside temporary-document closure" });
       if (row.source_message_id) exclusions.push({ kind: "message", id: row.source_message_id, reason: "source reference outside temporary-document closure" });
     } else if (kind === "experiment") {
       const runs = this.#database.prepare("SELECT id FROM runs WHERE experiment_configuration_id = ? ORDER BY id").all(id) as Array<{ id: string }>;
       blockers.push(...runs.map((run) => ({ kind: "run", id: run.id })));
+      addRows("experiment_command_receipts",
+        this.#database.prepare("SELECT * FROM experiment_command_receipts WHERE experiment_id = ? ORDER BY command_id").all(id) as any[],
+        (receipt) => ({ command_id: receipt.command_id }));
       exclusions.push({ kind: "project", id: row.project_id, reason: "owner outside experiment closure" });
     } else {
-      fileRows.push(...this.#objectRows("owner_run_id = ?", [id]));
-      addRows("output_indexes", this.#database.prepare("SELECT * FROM output_indexes WHERE run_id = ? ORDER BY id").all(id) as any[]);
+      this.#collectRunExecutionClosure([id], addRows, fileRows);
       exclusions.push({ kind: "experiment", id: row.experiment_configuration_id, reason: "configuration outside run closure" });
       exclusions.push({ kind: "project", id: row.project_id, reason: "owner outside run closure" });
     }
@@ -1087,6 +1531,27 @@ export class ProductStoreV2 {
     exclusions.sort(compareKindId);
     const payload = { target, records, files, totalBytes, blockingReferences: blockers, exclusions };
     return { ...payload, previewToken: canonicalDigest(payload), stateToken: canonicalDigest({ target, stateRows, files, blockers, exclusions }) };
+  }
+
+  #collectRunExecutionClosure(
+    runIds: readonly string[],
+    addRows: (table: string, rows: any[], key?: (row: any) => Record<string, string | number>) => void,
+    fileRows: ObjectRow[],
+  ): void {
+    for (const runId of runIds) {
+      fileRows.push(...this.#objectRows("owner_run_id = ?", [runId]));
+      addRows("output_indexes", this.#database.prepare("SELECT * FROM output_indexes WHERE run_id = ? ORDER BY id").all(runId) as any[]);
+      const attempts = this.#database.prepare("SELECT * FROM run_attempts WHERE run_id = ? ORDER BY id").all(runId) as any[];
+      addRows("run_attempts", attempts);
+      for (const attempt of attempts) {
+        addRows("process_attempts",
+          this.#database.prepare("SELECT * FROM process_attempts WHERE run_attempt_id = ? ORDER BY id").all(attempt.id) as any[]);
+      }
+      const commands = this.#database.prepare("SELECT * FROM run_commands WHERE run_id = ? ORDER BY id").all(runId) as any[];
+      addRows("run_commands", commands);
+      addRows("run_command_receipts",
+        this.#database.prepare("SELECT * FROM run_command_receipts WHERE run_id = ? ORDER BY id").all(runId) as any[]);
+    }
   }
 
   listObjectFiles(owner: ResourceOwner): StoredObjectMetadata[] {
@@ -1306,16 +1771,29 @@ export class ProductStoreV2 {
     return metadata(row);
   }
 
-  #databaseMutation(statements: DatabaseMutationStatement[]): void {
+  #databaseMutation(statements: ProductDatabaseMutationStatement[]): void {
+    this.#withImmediateTransaction(() => {
+      this.#executeDatabaseStatements(statements);
+    });
+  }
+
+  #executeDatabaseStatements(statements: ProductDatabaseMutationStatement[]): void {
+    for (const statement of statements) {
+      if (!Number.isSafeInteger(statement.expectedChanges)) throw new ProductStoreV2Error("Every database mutation requires expectedChanges.");
+      const result = this.#database.prepare(statement.sql).run(...(statement.params ?? []));
+      if (Number(result.changes) !== statement.expectedChanges) {
+        throw new ProductStoreV2Error(statement.mismatchMessage ?? "Database mutation affected an unexpected number of rows.");
+      }
+    }
+  }
+
+  #withImmediateTransaction<T>(body: () => T): T {
     this.#assertOpen();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      for (const statement of statements) {
-        if (!Number.isSafeInteger(statement.expectedChanges)) throw new ProductStoreV2Error("Every database mutation requires expectedChanges.");
-        const result = this.#database.prepare(statement.sql).run(...(statement.params ?? []));
-        if (Number(result.changes) !== statement.expectedChanges) throw new ProductStoreV2Error("Database mutation affected an unexpected number of rows.");
-      }
+      const result = body();
       this.#database.exec("COMMIT");
+      return result;
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); }
       catch (rollbackError) {
@@ -1372,6 +1850,121 @@ export class ProductStoreV2 {
     const row = this.#database.prepare("SELECT * FROM experiment_configurations WHERE id = ? AND project_id = ?").get(id, projectId) as any;
     if (!row) throw new ProductStoreV2Error("Experiment configuration does not exist.");
     return experimentConfigurationRecord(row);
+  }
+
+  #experimentCommandReceipt(
+    commandId: string,
+    commandKind: "create" | "update",
+    projectId: string,
+    experimentId: string,
+    intentDigest: string,
+  ): ExperimentConfigurationRecordV4 | null {
+    const row = this.#database.prepare(
+      `SELECT command_kind, project_id, experiment_id, intent_sha256, response_json, response_sha256
+       FROM experiment_command_receipts WHERE command_id = ?`,
+    ).get(commandId) as {
+      command_kind: string;
+      project_id: string;
+      experiment_id: string;
+      intent_sha256: string;
+      response_json: string;
+      response_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.command_kind !== commandKind || row.project_id !== projectId
+      || row.experiment_id !== experimentId || row.intent_sha256 !== intentDigest) {
+      throw new ProductStoreV2Error("Experiment configuration command already exists with a different intent.");
+    }
+    let response: unknown;
+    try { response = JSON.parse(row.response_json); }
+    catch (error) {
+      throw new ProductStoreV2Error("Experiment command receipt contains invalid JSON.", { cause: error });
+    }
+    assertExperimentV4Response(response);
+    if (canonicalDigest(response) !== row.response_sha256
+      || response.id !== experimentId || response.projectId !== projectId) {
+      throw new ProductStoreV2Error("Experiment command receipt digest or resource binding is corrupt.");
+    }
+    return response;
+  }
+
+  #assertMutableExecutionContract(kind: ManagedResourceKind, id: string): void {
+    if (kind !== "experiment" && kind !== "run") return;
+    const table = kind === "experiment" ? "experiment_configurations" : "runs";
+    const row = this.#database.prepare(`SELECT contract_version FROM ${table} WHERE id = ?`).get(id) as {
+      contract_version: number;
+    } | undefined;
+    if (row?.contract_version === 3) throw legacyReadOnlyError(kind);
+  }
+
+  #frozenRunStartReceipt(intent: StartRunIntent, intentDigest: string): FrozenRunStartReceipt | null {
+    const row = this.#database.prepare(`SELECT
+        c.run_id AS command_run_id, c.command_kind, c.request_key, c.intent_sha256,
+        c.state AS command_state, c.outcome_json,
+        q.receipt_kind, q.payload_sha256, q.payload_json,
+        r.project_id, r.experiment_configuration_id, r.contract_version, r.status,
+        r.run_kind, r.completion_conversation_id, r.execution_description_sha256,
+        r.project_snapshot_sha256, r.frozen_configuration_json,
+        r.frozen_configuration_sha256, r.sample_plan_json, r.sample_plan_sha256,
+        r.requested_sample_count, r.limits_json, r.limits_sha256,
+        r.start_receipt_sha256, r.created_at
+      FROM run_commands c
+      LEFT JOIN run_command_receipts q ON q.command_id = c.id AND q.run_id = c.run_id
+      LEFT JOIN runs r ON r.id = c.run_id
+      WHERE c.id = ?`).get(intent.commandId) as any;
+    if (!row) return null;
+    if (row.command_kind !== "start" || row.request_key !== intent.commandId || row.intent_sha256 !== intentDigest) {
+      throw new ProductStoreV2Error("Run command already exists with a different intent.");
+    }
+    if (row.command_state !== "committed" || row.receipt_kind !== "run.start.v1"
+      || typeof row.payload_json !== "string" || typeof row.outcome_json !== "string") {
+      throw new ProductStoreV2Error("Committed run-start receipt is incomplete.");
+    }
+    let payload: unknown;
+    let outcome: unknown;
+    let limits: unknown;
+    let frozenConfiguration: unknown;
+    let samplePlan: unknown;
+    try {
+      payload = JSON.parse(row.payload_json);
+      outcome = JSON.parse(row.outcome_json);
+      limits = JSON.parse(row.limits_json);
+      frozenConfiguration = JSON.parse(row.frozen_configuration_json);
+      samplePlan = JSON.parse(row.sample_plan_json);
+    } catch (error) {
+      throw new ProductStoreV2Error("Committed run-start receipt contains invalid JSON.", { cause: error });
+    }
+    assertFrozenRunStartReceipt(payload);
+    if (canonicalDigest(payload) !== row.payload_sha256
+      || !canonicalJsonV2(payload).equals(canonicalJsonV2(outcome))) {
+      throw new ProductStoreV2Error("Committed run-start receipt digest or outcome does not match.");
+    }
+    const receipt = payload as FrozenRunStartReceipt;
+    if (receipt.commandId !== intent.commandId
+      || receipt.intentDigest !== intentDigest
+      || receipt.projectId !== intent.projectId
+      || receipt.experimentConfigId !== intent.experimentConfigId
+      || receipt.completionConversationId !== intent.completionConversationId
+      || receipt.runId !== row.command_run_id
+      || row.contract_version !== 4
+      || row.project_id !== receipt.projectId
+      || row.experiment_configuration_id !== receipt.experimentConfigId
+      || row.run_kind !== receipt.runKind
+      || row.completion_conversation_id !== receipt.completionConversationId
+      || row.execution_description_sha256 !== receipt.executionDescriptionDigest
+      || row.project_snapshot_sha256 !== receipt.projectSnapshotDigest
+      || row.frozen_configuration_sha256 !== receipt.frozenConfigurationDigest
+      || row.sample_plan_sha256 !== receipt.samplePlanDigest
+      || row.requested_sample_count !== receipt.sampleCount
+      || row.created_at !== receipt.createdAt
+      || row.limits_sha256 !== receipt.limitsDigest
+      || row.start_receipt_sha256 !== row.payload_sha256
+      || canonicalDigest(frozenConfiguration) !== receipt.frozenConfigurationDigest
+      || canonicalDigest(samplePlan) !== receipt.samplePlanDigest
+      || canonicalDigest(limits) !== receipt.limitsDigest) {
+      throw new ProductStoreV2Error("Committed run-start receipt no longer matches its immutable run.");
+    }
+    return Object.freeze({ ...receipt });
   }
 
   #verifyFrozenProject(project: any): void {
@@ -1467,29 +2060,64 @@ const projectRecord = (row: any): ProjectRecord => ({
   createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at, trashedAt: row.trashed_at,
 });
 
-const experimentConfigurationRecord = (row: any): ExperimentConfigurationRecord => ({
-  id: row.id,
-  projectId: row.project_id,
-  name: row.name,
-  configuration: JSON.parse(row.configuration_json),
-  estimatedSampleCount: row.estimated_sample_count,
-  lifecycleState: row.lifecycle_state,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-});
+const experimentConfigurationRecord = (row: any): ExperimentConfigurationRecord => {
+  const record = {
+    id: row.id,
+    projectId: row.project_id,
+    name: row.name,
+    configuration: JSON.parse(row.configuration_json),
+    estimatedSampleCount: row.estimated_sample_count,
+    lifecycleState: row.lifecycle_state,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+  return row.contract_version === 3
+    ? Object.assign(record, { contractVersion: 3 as const, readOnly: true as const, legacyDigest: row.legacy_digest })
+    : Object.assign(record, {
+      contractVersion: 4 as const,
+      readOnly: false as const,
+      legacyDigest: null,
+      configurationDigest: row.configuration_sha256,
+      sampleCount: row.sample_count,
+    });
+};
 
-const runRecord = (row: any): RunRecord => ({
-  id: row.id,
-  projectId: row.project_id,
-  experimentConfigurationId: row.experiment_configuration_id,
-  status: row.status,
-  frozenConfiguration: JSON.parse(row.frozen_configuration_json),
-  requestedSampleCount: row.requested_sample_count,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  startedAt: row.started_at,
-  finishedAt: row.finished_at,
-});
+const runRecord = (row: any): RunRecord => {
+  const record = {
+    id: row.id,
+    projectId: row.project_id,
+    experimentConfigurationId: row.experiment_configuration_id,
+    status: row.status,
+    frozenConfiguration: JSON.parse(row.frozen_configuration_json),
+    requestedSampleCount: row.requested_sample_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  };
+  return row.contract_version === 3
+    ? Object.assign(record, { contractVersion: 3 as const, readOnly: true as const, legacyDigest: row.legacy_digest })
+    : Object.assign(record, {
+      contractVersion: 4 as const,
+      readOnly: false as const,
+      legacyDigest: null,
+      runKind: row.run_kind,
+      completionConversationId: row.completion_conversation_id,
+      executionDescriptionDigest: row.execution_description_sha256,
+      projectSnapshotDigest: row.project_snapshot_sha256,
+      frozenConfigurationDigest: row.frozen_configuration_sha256,
+      samplePlan: JSON.parse(row.sample_plan_json),
+      samplePlanDigest: row.sample_plan_sha256,
+      limits: JSON.parse(row.limits_json),
+      limitsDigest: row.limits_sha256,
+      startReceiptDigest: row.start_receipt_sha256,
+      cancelRequestedAt: row.cancel_requested_at,
+      terminalCode: row.terminal_code,
+      terminalDiagnostics: row.terminal_diagnostics_json === null ? null : JSON.parse(row.terminal_diagnostics_json),
+      resourceOverview: row.resource_overview_json === null ? null : JSON.parse(row.resource_overview_json),
+      completionCardDisposition: row.completion_card_disposition,
+    });
+};
 
 const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: string } => {
   switch (kind) {
@@ -1512,6 +2140,230 @@ const compareKindId = (left: { kind: string; id: string }, right: { kind: string
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const visible = (state: LifecycleState, options: { includeArchived?: boolean; includeTrashed?: boolean }): boolean => state === "active" || state === "archived" && Boolean(options.includeArchived) || state === "trashed" && Boolean(options.includeTrashed);
 const json = (value: unknown): string => canonicalJsonV2(value).toString("utf8");
+const DIGEST = /^[0-9a-f]{64}$/u;
+
+const assertDigest = (value: string, label: string): void => {
+  if (!DIGEST.test(value)) throw new ProductStoreV2Error(`${label} must be a lowercase SHA-256 digest.`);
+};
+
+const assertCommandId = (id: string): void => {
+  if (!SAFE_ID.test(id) || id.length < 8) throw new ProductStoreV2Error("Command ID is invalid.");
+};
+
+const assertStartRunIntent = (intent: StartRunIntent): void => {
+  assertCommandId(intent.commandId);
+  assertId(intent.projectId);
+  assertId(intent.experimentConfigId);
+  if (intent.completionConversationId !== null) assertId(intent.completionConversationId);
+};
+
+const startRunIntentDigest = (intent: StartRunIntent): string => canonicalDigest({
+  schemaVersion: 1,
+  commandKind: "run.start",
+  projectId: intent.projectId,
+  experimentConfigId: intent.experimentConfigId,
+  completionConversationId: intent.completionConversationId,
+});
+
+const experimentUpdateIntentDigest = (input: ExperimentUpdateIntentV4): string => canonicalDigest({
+  schemaVersion: 1,
+  commandKind: "experiment.update",
+  id: input.id,
+  projectId: input.projectId,
+  expectedConfigurationDigest: input.expectedConfigurationDigest,
+  expectedRecordDigest: input.expectedRecordDigest,
+  patch: {
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(input.configuration === undefined ? {} : { configuration: input.configuration }),
+  },
+});
+
+const RUN_LIMIT_KEYS = Object.freeze([
+  "schemaVersion",
+  "wallTimeMs",
+  "startupTimeMs",
+  "terminationGraceMs",
+  "maxStdoutBytes",
+  "maxStderrBytes",
+  "maxOutputFiles",
+  "maxOutputBytes",
+  "maxEventCount",
+  "maxEventBytes",
+  "maxSamples",
+  "maxConcurrency",
+].sort());
+
+const assertRunLimits = (limits: RunLimitsV1): void => {
+  if (!limits || typeof limits !== "object" || Array.isArray(limits)
+    || Object.keys(limits).sort().join("\n") !== RUN_LIMIT_KEYS.join("\n")
+    || limits.schemaVersion !== 1) {
+    throw new ProductStoreV2Error("RunLimitsV1 is invalid.");
+  }
+  for (const key of RUN_LIMIT_KEYS) {
+    if (key === "schemaVersion") continue;
+    const value = limits[key as keyof RunLimitsV1];
+    if (!Number.isSafeInteger(value) || value < 1) throw new ProductStoreV2Error(`RunLimitsV1.${key} is invalid.`);
+  }
+};
+
+const assertRunnableExecutionDescription = (
+  input: unknown,
+  plan: ExperimentPlan,
+  maxSamples: number,
+): void => {
+  if (!plainRecord(input)) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied execution description is not version 2.");
+  }
+  const description = input as Record<string, unknown>;
+  if (description.schemaVersion !== 2 || description.runtime !== "python"
+    || !["batch", "visual", "both"].includes(String(description.runMode))
+    || typeof description.dependencyFile !== "string"
+    || !description.dependencyFile) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied execution description is not version 2.");
+  }
+  const inputs = description.inputs;
+  if (!plainRecord(inputs) || inputs.schemaProfile !== INPUT_SCHEMA_PROFILE
+    || !Object.hasOwn(inputs, "schema") || !plainRecord(inputs.smoke)) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied input schema profile is unsupported.");
+  }
+  const batch = description.batch;
+  const visual = description.visual;
+  const needsBatch = description.runMode === "batch" || description.runMode === "both";
+  const needsVisual = description.runMode === "visual" || description.runMode === "both";
+  if (needsBatch !== plainRecord(batch)
+    || needsVisual !== plainRecord(visual)
+    || plainRecord(batch) && (batch.protocol !== "riff-batch-v1" || typeof batch.entryPoint !== "string" || !batch.entryPoint)
+    || plainRecord(visual) && (visual.protocol !== "riff-visual-v1" || typeof visual.entryPoint !== "string"
+      || !visual.entryPoint || typeof visual.healthPath !== "string" || !visual.healthPath.startsWith("/"))) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied execution capability declaration is invalid.");
+  }
+  if (plan.configuration.runKind === "batch" ? !needsBatch : !needsVisual) {
+    throw new ProductStoreV2Error("capability_not_declared: the Project does not declare the requested run kind.");
+  }
+  if (!Array.isArray(description.outputs) || description.outputs.length < 1 || description.outputs.length > 64
+    || description.outputs.some((output) => !plainRecord(output)
+      || typeof output.logicalName !== "string" || !output.logicalName
+      || typeof output.relativePath !== "string" || !output.relativePath
+      || typeof output.mediaType !== "string" || !output.mediaType
+      || typeof output.required !== "boolean"
+      || !["metric", "table", "document", "data", "diagnostic"].includes(String(output.role)))) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied output declaration is invalid.");
+  }
+  const cancellation = description.cancellation;
+  if (!plainRecord(cancellation) || cancellation.signal !== "SIGTERM"
+    || !Number.isSafeInteger(cancellation.graceMs) || Number(cancellation.graceMs) < 1) {
+    throw new ProductStoreV2Error("execution_protocol_upgrade_required: the copied cancellation declaration is invalid.");
+  }
+  normalizeInputParameters(inputs.schema, inputs.smoke);
+  const replanned = planExperiment({
+    configuration: plan.configuration,
+    inputSchema: inputs.schema,
+    maxSamples,
+  });
+  if (canonicalDigest(replanned) !== canonicalDigest(plan)) {
+    throw new ProductStoreV2Error("invalid_sample_plan: the supplied plan does not match the copied Project input schema.");
+  }
+};
+
+const plainRecord = (value: unknown): value is Record<string, any> =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+const FROZEN_RUN_RECEIPT_KEYS = Object.freeze([
+  "schemaVersion",
+  "commandId",
+  "intentDigest",
+  "runId",
+  "projectId",
+  "experimentConfigId",
+  "completionConversationId",
+  "status",
+  "runKind",
+  "frozenConfigurationDigest",
+  "samplePlanDigest",
+  "sampleCount",
+  "projectSnapshotDigest",
+  "executionDescriptionDigest",
+  "limitsDigest",
+  "createdAt",
+].sort());
+
+const EXPERIMENT_V4_RESPONSE_KEYS = Object.freeze([
+  "id",
+  "projectId",
+  "name",
+  "configuration",
+  "estimatedSampleCount",
+  "lifecycleState",
+  "createdAt",
+  "updatedAt",
+  "contractVersion",
+  "readOnly",
+  "legacyDigest",
+  "configurationDigest",
+  "sampleCount",
+].sort());
+
+const assertExperimentV4Response: (value: unknown) => asserts value is ExperimentConfigurationRecordV4 = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProductStoreV2Error("Experiment command receipt has an invalid response shape.");
+  }
+  const response = value as Record<string, unknown>;
+  if (Object.keys(response).sort().join("\n") !== EXPERIMENT_V4_RESPONSE_KEYS.join("\n")
+    || response.contractVersion !== 4
+    || response.readOnly !== false
+    || response.legacyDigest !== null
+    || typeof response.id !== "string"
+    || typeof response.projectId !== "string"
+    || typeof response.name !== "string"
+    || !response.configuration
+    || typeof response.configuration !== "object"
+    || Array.isArray(response.configuration)
+    || !Number.isSafeInteger(response.sampleCount)
+    || response.sampleCount !== response.estimatedSampleCount
+    || typeof response.configurationDigest !== "string"
+    || !DIGEST.test(response.configurationDigest)
+    || canonicalDigest(response.configuration) !== response.configurationDigest) {
+    throw new ProductStoreV2Error("Experiment command receipt has an invalid response shape.");
+  }
+};
+
+const assertFrozenRunStartReceipt: (value: unknown) => asserts value is FrozenRunStartReceipt = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProductStoreV2Error("Committed run-start receipt has an invalid shape.");
+  }
+  const receipt = value as Record<string, unknown>;
+  if (Object.keys(receipt).sort().join("\n") !== FROZEN_RUN_RECEIPT_KEYS.join("\n")
+    || receipt.schemaVersion !== 1
+    || receipt.status !== "queued"
+    || !["batch", "visual"].includes(String(receipt.runKind))
+    || !Number.isSafeInteger(receipt.sampleCount)
+    || Number(receipt.sampleCount) < 1
+    || typeof receipt.createdAt !== "string"
+    || typeof receipt.commandId !== "string"
+    || typeof receipt.runId !== "string"
+    || typeof receipt.projectId !== "string"
+    || typeof receipt.experimentConfigId !== "string"
+    || !(receipt.completionConversationId === null || typeof receipt.completionConversationId === "string")) {
+    throw new ProductStoreV2Error("Committed run-start receipt has an invalid shape.");
+  }
+  for (const field of [
+    "intentDigest",
+    "frozenConfigurationDigest",
+    "samplePlanDigest",
+    "projectSnapshotDigest",
+    "executionDescriptionDigest",
+    "limitsDigest",
+  ]) {
+    if (typeof receipt[field] !== "string" || !DIGEST.test(receipt[field])) {
+      throw new ProductStoreV2Error("Committed run-start receipt has an invalid digest.");
+    }
+  }
+};
+
+const legacyReadOnlyError = (kind: "experiment" | "run"): ProductStoreV2Error =>
+  new ProductStoreV2Error(`legacy_configured_read_only: version-3 ${kind} records are permanently read only.`);
+
 const stableTransactionId = (operation: string, id: string): string => `mutation_${operation}_${canonicalDigest(id).slice(0, 32)}`;
 const activeLifecycleGuard = (table: "models" | "projects" | "conversations", id: string): DatabaseMutationStatement => ({
   sql: `UPDATE ${table} SET updated_at = updated_at WHERE id = ? AND lifecycle_state = 'active'`, params: [id], expectedChanges: 1,

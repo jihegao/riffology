@@ -1,12 +1,12 @@
 # Backend API contracts
 
-## Milestone A2 current authority
+## Milestone A2 authority and A3 foundation
 
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` and schema v3 are implemented as the
-only durable authority. Browser/API callers cannot supply ownership, workspace
+Gate API retained below. `ProductStoreV2` schema v4 and checked object bytes are
+the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
 technical status.
 
@@ -26,6 +26,50 @@ The implemented Stage 2 routes are:
 | `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
 | `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. |
 | `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
+| `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
+| `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
+| `POST /api/projects/{projectId}/experiment-configs` | Validate and canonicalize `ExperimentConfigurationV1`, expand its exact plan, and persist an immutable create-command response receipt. |
+| `PATCH /api/projects/{projectId}/experiment-configs/{configId}` | Require `commandId`, `expectedConfigurationDigest`, and `expectedRecordDigest`; apply both CAS guards and preserve exact historical response replay. |
+
+The implemented experiment request fields are exact:
+
+```ts
+type ExperimentConfigurationV1 = {
+  schemaVersion: 1;
+  runKind: "batch" | "visual";
+  parameters: JsonObject;
+  sampling:
+    | { kind: "single"; seed?: SafeInteger }
+    | { kind: "multiple-seeds"; seeds: SafeInteger[] }
+    | {
+        kind: "cartesian-sweep";
+        axes: Array<{ pointer: JsonPointer; values: JsonValue[] }>;
+        seeds?: SafeInteger[];
+      };
+};
+
+type CreateExperimentConfigurationRequest = {
+  commandId: string;
+  name: string;
+  configuration: ExperimentConfigurationV1;
+};
+
+type UpdateExperimentConfigurationRequest = {
+  commandId: string;
+  expectedConfigurationDigest: string;
+  expectedRecordDigest: string;
+  name?: string;
+  configuration?: ExperimentConfigurationV1;
+}; // at least one of name/configuration is required
+```
+
+Both routes return the version-4 experiment DTO with `id`, `projectId`, `name`,
+canonical `configuration`, `lifecycleState`, `createdAt`, `updatedAt`,
+`contractVersion: 4`, `readOnly: false`, `legacyDigest: null`,
+`configurationDigest`, `recordDigest`, and exact `sampleCount`.
+`estimatedSampleCount` remains in the public DTO only as an equal-valued
+compatibility alias. Callers do not send `sampleCount`, expanded samples,
+server-derived IDs, sample-plan digests, or timestamps.
 
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
@@ -42,9 +86,16 @@ sibling paths remain denied. It is not hostile-code containment.
 `technicalStatus: "executable"` means the thin technical checks passed; it is
 not a scientific-validity, calibration, trust, or recommendation field.
 
-Project experiment/run APIs, wind migration, and final shell routes remain
-#14/#15 non-scope. The legacy Gate API below still coexists in tracked code and
-documentation until its separately reviewed retirement.
+The Store has an internal atomic frozen-run start primitive. It accepts only a
+copied execution-description v2 with
+`inputs.schemaProfile: "riff-json-schema-2020-12-v1"`, required smoke input,
+declared outputs/cancellation, and the matching batch or visual protocol. It
+revalidates the frozen plan against the copied schema. This is not a public
+run-start/cancel API and launches no model process. The generic Stage 2 scaffold
+still emits execution-description v1, so scaffold migration is also pending.
+Dispatch, supervision, outputs/events, wind migration, and final shell routes
+remain #14/#15 work. The legacy Gate API below still coexists in tracked code
+and documentation until its separately reviewed retirement.
 
 ---
 

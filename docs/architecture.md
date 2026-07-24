@@ -1,12 +1,12 @@
 # Architecture contracts
 
-## Milestone A2 current architecture
+## Milestone A2 authority and A3 foundation architecture
 
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md), the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
-`ProductStoreV2` over SQLite schema v3 and checked object bytes is the system of
+`ProductStoreV2` over SQLite schema v4 and checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
 write around that store or become authoritative state.
@@ -24,6 +24,27 @@ Narrow A2 HTTP/API acceptance surface
        -> generic Model workspace
             -> restricted macOS process + digest-bound technical checker
 ```
+
+A3-1a extends only the durable planning boundary:
+
+```text
+copied Project input schema
+  -> closed canonical schema validator
+  -> deterministic ExperimentConfigurationV1 sample planner
+  -> configuration + record digest CAS + immutable historical command receipt
+  -> Store-only execution-description-v2 admission
+  -> atomic frozen queued Run + immutable start receipt
+       -> copied Project / execution / configuration / sample-plan / limits digests
+```
+
+Schema-v3 experiment/run/output records migrate to deterministic read-only v3
+projections. Schema-v4 commands, receipts, run/process-attempt identities,
+ownership, and canonical digests are database constrained, but the attempt
+tables have no runtime producer in A3-1a. The frozen `queued` run is an admission
+record only: no dispatcher, supervisor, model process, output ingestor,
+completion card, or public start route is implemented by A3-1a. The generic
+Stage 2 scaffold remains execution-description v1 and therefore requires an
+explicit later re-scaffold/upgrade before this Store-only v2 admission can pass.
 
 One conversation owns one provider/model lock and at most one nonterminal
 backend-only external session generation. Its turns are serialized; the scoped

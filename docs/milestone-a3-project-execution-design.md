@@ -1,12 +1,16 @@
 # Milestone A3 project execution design
 
-Status: active Stage 3 contract for Issue #14. Commit `843cf1c` implemented the
-Project and experiment foundation described below: fixed-copy Project creation,
-the Project workspace projection, and bounded create/update operations for
-experiment configurations. It did not implement run planning, batch or visual
-process launch, cancellation, output/event ingestion, Playwright access, or the
-ordinary wind import. Those capabilities remain gated by the deterministic
-contracts and evidence in this document.
+Status: active Stage 3 contract for Issue #14. The first foundation slice
+implemented fixed-copy Project creation and the Project workspace projection.
+A3-1a adds schema v4, the closed canonical input-schema profile, deterministic
+experiment/sample planning, configuration-and-record digest compare-and-set
+with immutable historical command receipts, Store-only execution-description-v2 admission, and
+atomic creation/replay of a frozen `queued` run/start receipt. The generic Stage
+2 scaffold remains execution-description v1 and is not silently upgraded. A3-1a
+does not expose a public run-start route or launch model code. Dispatch, batch or
+visual process launch, cancellation races,
+output/event ingestion, completion cards, Playwright access, and the ordinary
+wind import remain gated by the contracts and evidence in this document.
 
 This document is subordinate to the
 [Milestone A product contract](milestone-a-product-contract.md), builds on the
@@ -17,7 +21,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The current `main` boundary is intentionally narrow:
+The implemented foundation boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -25,24 +29,34 @@ The current `main` boundary is intentionally narrow:
   description, copied-file metadata, conversations, experiment configurations,
   existing run records, and indexed outputs without exposing process commands or
   workspace roots;
-- `POST /api/projects/{projectId}/experiment-configs` and
-  `PATCH /api/projects/{projectId}/experiment-configs/{configId}` provide
-  bounded JSON persistence, command-id replay protection, finite-number checks,
-  and a preliminary sample-count calculation; and
+- `POST /api/projects/{projectId}/experiment-configs` canonicalizes the copied
+  Project input schema and configuration, expands the exact sample plan, and
+  stores immutable create-command response receipts;
+- `PATCH /api/projects/{projectId}/experiment-configs/{configId}` requires the
+  last observed `expectedConfigurationDigest` and `expectedRecordDigest`,
+  rejects stale configuration or metadata updates, and preserves exact
+  historical update responses on command replay;
+- schema v4 migrates v3 experiment/run/output rows to permanent read-only
+  records, stores canonical digests, and introduces frozen run, command,
+  receipt, and unified process-attempt identities without implementing their
+  runtime producer;
+- the Store-only start admission requires a copied execution-description v2,
+  validates its schema profile, smoke input, output/cancellation declarations,
+  requested run capability, and replans against the copied input schema;
+- the Store can atomically create and replay a contract-v4 `queued` run with
+  copied Project/execution/configuration/sample-plan/limits digests; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is still schema v3. The current experiment payload and
-`estimatedSampleCount` field are foundation representations, not an approved
-run-planning protocol. Before a public run-start route may launch a process,
-schema v4 and the canonical experiment/run contracts below must be implemented,
-existing rows must be validated or explicitly migrated, and negative tests must
-pass.
+The product database is schema v4. Version-3 experiment/run/output rows remain
+readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
+only as a compatibility projection; v4 authority is `sampleCount` plus the
+canonical configuration and sample-plan digests. The Store start primitive is
+not a public process-launch API.
 
-The following are not implemented by `843cf1c` and must not be inferred from
-workspace DTOs or pre-existing Stage 1 tables:
+The following are not implemented by the current A3-1a boundary and must not be
+inferred from workspace DTOs or schema-v4 tables:
 
-- execution-description v2 admission or scaffold migration;
-- exact sample-plan expansion, `sampleId`, or frozen run digests;
+- execution-description-v2 scaffold migration or a public upgrade command;
 - a public run-start/cancel API, dispatcher, supervisor, or recovery loop;
 - atomic result/event ingestion and completion cards;
 - a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
@@ -182,16 +196,17 @@ receipt first.
 ### Schema-v3 legacy records
 
 The v4 migration adds a mandatory `contract_version` discriminator to every
-experiment, run, and output index. In one exclusive transaction the migration
-adds nullable discriminator/digest columns, reads and strictly parses every v3
-row, computes `legacy_digest` from a documented canonical projection, writes
-`contract_version = 3` plus that digest, verifies row counts and foreign-key
-ownership, then makes the discriminator non-null through the rebuilt-table
-copy/swap before advancing `user_version` to 4. Any parse, digest, ownership, or
-count failure rolls back the entire migration.
+experiment, run, and output index. In one exclusive transaction it rejects
+ambiguous run status/start/finish timestamp combinations, computes each
+`legacy_digest` from a documented canonical projection, writes
+`contract_version = 3` plus that digest, rebuilds the output-index projection,
+and verifies the resulting legacy markers and database integrity before
+advancing `user_version` to 4. Any lifecycle, parse, digest, ownership, count,
+or integrity failure rolls back columns, rows, tables, and version markers.
 
-All version-3 experiments, runs in every status, and their output indexes remain
-read-only legacy DTOs with `contractVersion: 3`, `readOnly: true`, and
+All unambiguous version-3 experiments, runs in supported lifecycle states, and
+their output indexes remain read-only legacy DTOs with `contractVersion: 3`,
+`readOnly: true`, and
 `legacyDigest`. They cannot be edited, copied as templates, dispatched,
 cancelled, retried, converted in place, trashed, restored, or attached to a new
 run. Downloads may remain available only through their existing same-owner
@@ -208,8 +223,9 @@ evidence and are never made executable or inserted into the v4 state graph.
 Every public mutation uses a command/idempotency key. A retry with the same key
 and canonical intent digest returns the same durable resource and receipt. The
 same key with changed intent fails before mutation. Experiment update also
-requires the configuration digest observed by the caller; stale content fails
-with `stale_configuration`.
+requires both the configuration digest and complete public record digest
+observed by the caller. Stale configuration fails with `stale_configuration`;
+a concurrent rename or other record change fails with `stale_record`.
 
 ## Fixed-copy Project creation
 
@@ -921,11 +937,14 @@ Output indexes never resolve outside the owning Project/run object root.
 
 ## Implementation slices and review gates
 
-1. **Foundation — implemented by `843cf1c`:** fixed-copy Project API/workspace
-   projection and bounded experiment create/update. This is not run evidence.
-2. **Contract reconciliation — current:** schema-v4 decisions, canonical
-   experiment validator, exact run planner, negative tests, and documentation;
-   no process launch.
+1. **Foundation — implemented before A3-1a:** fixed-copy Project API/workspace
+   projection. This is not run evidence.
+2. **A3-1a frozen planning — implemented by the current change:** schema v4,
+   public experiment create/update with configuration/record digest CAS and
+   exact replay, canonical
+   schema validator and sample planner, Store-only execution-v2 admission, and
+   an atomic frozen queued-run receipt. There is no public start or process
+   launch, and the generic scaffold remains v1.
 3. **Batch runtime:** durable queue, real generic batch subprocess, cancellation
    and limits, atomic outputs/events, overview, recovery, and exactly-once cards.
 4. **Visual runtime:** real local visual process, health, scoped proxy/frame and

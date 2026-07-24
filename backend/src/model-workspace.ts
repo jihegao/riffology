@@ -44,6 +44,7 @@ const ENTRY_POINT = `from __future__ import annotations
 import argparse
 import json
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -53,6 +54,19 @@ from model import GenericSimulationModel
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+
+
+def _read_parameters() -> tuple[int, float]:
+    value = json.load(sys.stdin)
+    if not isinstance(value, dict) or set(value) != {"stepLimit", "demand"}:
+        raise ValueError("input must contain exactly stepLimit and demand")
+    step_limit = value["stepLimit"]
+    demand = value["demand"]
+    if type(step_limit) is not int or not 1 <= step_limit <= 10_000:
+        raise ValueError("stepLimit must be an integer from 1 through 10000")
+    if isinstance(demand, bool) or not isinstance(demand, (int, float)) or not 0 <= demand <= 1_000_000:
+        raise ValueError("demand must be a finite number from 0 through 1000000")
+    return step_limit, float(demand)
 
 
 def main() -> int:
@@ -65,7 +79,8 @@ def main() -> int:
         print("RIFF_CANCELLATION_READY", flush=True)
         while True:
             time.sleep(0.05)
-    model = GenericSimulationModel(step_limit=2 if args.riff_smoke else 10)
+    step_limit, demand = _read_parameters()
+    model = GenericSimulationModel(step_limit=step_limit, demand=demand)
     while model.running:
         model.step()
     _write_json(Path("outputs/summary.json"), model.summary())
@@ -82,17 +97,22 @@ if __name__ == "__main__":
 
 const MODEL = `from __future__ import annotations
 
+import math
+
 from mesa import Model
 
 
 class GenericSimulationModel(Model):
     """Minimal domain-neutral Mesa model used as an editable starting point."""
 
-    def __init__(self, step_limit: int = 10, seed: int | None = None) -> None:
+    def __init__(self, step_limit: int = 10, demand: float = 1, seed: int | None = None) -> None:
         super().__init__(seed=seed)
-        if not isinstance(step_limit, int) or step_limit < 1:
+        if type(step_limit) is not int or step_limit < 1:
             raise ValueError("step_limit must be a positive integer")
+        if isinstance(demand, bool) or not isinstance(demand, (int, float)) or not math.isfinite(demand) or demand < 0:
+            raise ValueError("demand must be a finite non-negative number")
         self.step_limit = step_limit
+        self.demand = float(demand)
         self.completed_steps = 0
         self.running = True
 
@@ -100,8 +120,13 @@ class GenericSimulationModel(Model):
         self.completed_steps += 1
         self.running = self.completed_steps < self.step_limit
 
-    def summary(self) -> dict[str, int | str]:
-        return {"status": "complete", "completed_steps": self.completed_steps}
+    def summary(self) -> dict[str, int | float | str]:
+        return {
+            "status": "complete",
+            "completed_steps": self.completed_steps,
+            "demand": self.demand,
+            "processed_demand": self.completed_steps * self.demand,
+        }
 `;
 
 const README = `# Generic simulation model
@@ -119,8 +144,17 @@ export const genericModelExecutionDescription = (): GenericExecutionDescription 
   entryPoint: "code/riff_entry.py",
   dependencyFile: "environment/requirements.txt",
   inputs: Object.freeze({
-    schema: Object.freeze({ type: "object", additionalProperties: false, properties: {} }),
-    smoke: Object.freeze({}),
+    schema: Object.freeze({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      additionalProperties: false,
+      required: Object.freeze(["stepLimit", "demand"]),
+      properties: Object.freeze({
+        stepLimit: Object.freeze({ type: "integer", minimum: 1, maximum: 10_000, default: 10 }),
+        demand: Object.freeze({ type: "number", minimum: 0, maximum: 1_000_000, default: 1 }),
+      }),
+    }),
+    smoke: Object.freeze({ stepLimit: 2, demand: 1 }),
   }),
   outputs: Object.freeze([
     Object.freeze({ logicalName: "summary", relativePath: "outputs/summary.json", mediaType: "application/json", required: true }),
