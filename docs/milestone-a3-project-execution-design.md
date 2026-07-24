@@ -2,7 +2,7 @@
 
 Status: active Stage 3 contract for Issue #14. The first foundation slice
 implemented fixed-copy Project creation and the Project workspace projection.
-A3-1a adds schema v4, the closed canonical input-schema profile, deterministic
+A3-1a adds execution contract v4, the closed canonical input-schema profile, deterministic
 experiment/sample planning, configuration-and-record digest compare-and-set
 with immutable historical command receipts, execution-description-v2
 admission, and atomic creation/replay of a frozen `queued` run/start receipt.
@@ -13,8 +13,11 @@ generic scaffold now emits execution-description v2 and declares batch only;
 existing v1 Models are not silently upgraded.
 
 Visual starts and batch `domainEvents` are explicit current rejections.
-Cross-restart attempt/scratch recovery, the user-cancel race and receipts, and
-exactly-once completion-card delivery remain A3-1c work. Visual execution,
+A3-1c-a adds schema migration v5, the strict public cancel command/receipt, queued no-launch and
+running abort behavior, public `cancelling` projection, and SQLite commit-order
+precedence against every terminal transition. Cross-restart attempt/scratch
+recovery and exactly-once completion-card delivery remain later A3-1c work.
+Visual execution,
 Playwright access, and ordinary wind import remain later Stage 3 slices. This
 document therefore does not claim that Stage 3 is complete.
 
@@ -27,7 +30,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b boundary is intentionally narrow:
+The implemented A3-1a/A3-1b/A3-1c-a boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -42,7 +45,7 @@ The implemented A3-1a/A3-1b boundary is intentionally narrow:
   last observed `expectedConfigurationDigest` and `expectedRecordDigest`,
   rejects stale configuration or metadata updates, and preserves exact
   historical update responses on command replay;
-- schema v4 migrates v3 experiment/run/output rows to permanent read-only
+- execution contract v4 migrates v3 experiment/run/output rows to permanent read-only
   records, stores canonical digests, and constrains frozen run, command,
   receipt, and unified process-attempt identities;
 - public start admission requires a copied execution-description v2,
@@ -60,27 +63,34 @@ The implemented A3-1a/A3-1b boundary is intentionally narrow:
   indexes, process state, and run state;
 - database triggers close queued/running/terminal run evidence, one-time process
   exit and terminal cleanup evidence, gate/state combinations, and the internal
-  atomic-success context required for v4 output objects/indexes;
+  atomic-success context required for v4 output objects/indexes; schema
+  migration v5 additionally binds first-cancel state to its exact committed
+  receipt and requires every registered process to be `cleanup_complete` before
+  run terminalization;
 - dispatcher heartbeat, capability, supervision, consumption, and publication
   exceptions share one best-effort unwind; only durably exited and cleaned
   processes can reach a failed terminal, otherwise the run remains
   recovery-required;
 - `GET /api/projects/{projectId}/runs/{runId}` returns only the bounded run and
   checked-output projection; and
+- `POST /api/projects/{projectId}/runs/{runId}/cancel` atomically creates or
+  replays a strict receipt, prevents a cancelled queued run from launching,
+  aborts active in-process supervision, and makes cancel-first terminalize as
+  `cancelled` without successful outputs; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema v4. Version-3 experiment/run/output rows remain
+The product database is schema migration v5 while the current execution
+contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
 canonical configuration and sample-plan digests. The generic scaffold is now
 execution-description v2 and batch-only; v1 Models require an explicit reviewed
 re-scaffold/upgrade path.
 
-The following are not implemented by the current A3-1b boundary and must not be
+The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- a public cancel API, cancel-versus-terminal receipt race, or full
-  cross-restart attempt/scratch recovery;
+- full cross-restart attempt/process/scratch recovery;
 - exactly-once completion-card publication;
 - batch domain-event ingestion or public output list/download routes;
 - a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
@@ -893,7 +903,7 @@ PATCH  /api/projects/:projectId/experiment-configs/:configId
 
 POST   /api/projects/:projectId/runs                 # current A3-1b
 GET    /api/projects/:projectId/runs/:runId          # current A3-1b
-POST   /api/projects/:projectId/runs/:runId/cancel   # target A3-1c
+POST   /api/projects/:projectId/runs/:runId/cancel   # current A3-1c-a
 POST   /api/projects/:projectId/runs/:runId/trash    # target
 POST   /api/projects/:projectId/runs/:runId/restore  # target
 
@@ -1020,7 +1030,7 @@ Output indexes never resolve outside the owning Project/run object root.
 
 1. **Foundation — implemented before A3-1a:** fixed-copy Project API/workspace
    projection. This is not run evidence.
-2. **A3-1a frozen planning — implemented:** schema v4,
+2. **A3-1a frozen planning — implemented:** execution contract v4,
    public experiment create/update with configuration/record digest CAS and
    exact replay, canonical schema validator and sample planner, execution-v2
    admission, and an atomic frozen queued-run receipt.
@@ -1029,9 +1039,10 @@ Output indexes never resolve outside the owning Project/run object root.
    subprocesses, currently supported hard limits, same-process shutdown
    cleanup, and atomic successful output publication. Visual and
    `domainEvents` are explicit rejections.
-4. **A3-1c batch lifecycle — pending:** cross-restart attempt/scratch recovery,
-   public user cancellation with committed race receipts, and exactly-once
-   completion cards.
+4. **A3-1c batch lifecycle — partial:** A3-1c-a implements public user
+   cancellation with committed race receipts and same-process queued/running
+   enforcement. Cross-restart attempt/scratch recovery and exactly-once
+   completion cards remain pending sub-slices.
 5. **Visual runtime — pending:** real local visual process, health, scoped proxy/frame and
    WebSocket limits, cancellation, recovery, and Playwright audit.
 6. **Wind import — pending:** versioned manifest, normal technical check, example Project
@@ -1051,8 +1062,8 @@ and one optional installed-OpenCode smoke skipped. Current evidence covers the f
 rows, the batch portion of exact input freezing, v3 read-only behavior, public
 start/read, real generic batch launch/claim/process identity, supported hard
 batch limits, atomic successful outputs, negative visual/event admission, and
-same-process shutdown cleanup. It does not cover the pending A3-1c restart,
-cancel, or card requirements, nor the later visual, Playwright, wind, download,
+same-process shutdown cleanup, and A3-1c-a cancellation precedence/receipts. It
+does not cover the pending A3-1c restart or card requirements, nor the later visual, Playwright, wind, download,
 event, and browser rows.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked

@@ -6,7 +6,8 @@ The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md), the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
-`ProductStoreV2` over SQLite schema v4 and checked object bytes is the system of
+`ProductStoreV2` over SQLite schema migration v5, execution contract v4, and
+checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
 write around that store or become authoritative state.
@@ -54,15 +55,18 @@ GET /api/projects/:projectId/runs/:runId
   -> bounded run/output projection with no paths, commands, or process identity
 ```
 
-Schema-v3 experiment/run/output records still migrate to deterministic
+Execution-contract-v3 experiment/run/output records still migrate to deterministic
 read-only v3 projections. The A3-1b dispatcher is now the runtime producer for
-v4 batch attempts. It admits only copied execution-description v2 batch
+contract-v4 batch attempts. It admits only copied execution-description v2 batch
 capability and rechecks the exact Project-owned root before launch. Successful
 outputs become visible only after byte, size, media, and digest validation and
 one atomic publication transaction. Database triggers require the same internal
 atomic-success context for both v4 run output objects and indexes, and make
-terminal run/process evidence immutable. Dispatcher errors can terminalize only
-after registered processes have durable exit and cleanup evidence; otherwise
+terminal run/process evidence immutable. Schema migration v5 binds the first
+cancel timestamp to one exact committed `run.cancel.v1` receipt and requires
+every registered process to have `cleanup_complete` before run terminalization.
+Dispatcher errors can terminalize only after registered processes have durable
+exit and verified cleanup evidence; otherwise
 the live attempt stays fail-closed for A3-1c recovery.
 
 The official generic scaffold now emits execution-description v2 and declares
@@ -70,9 +74,11 @@ batch only. Visual starts fail with `capability_not_available`; batch
 `domainEvents` fail with `domain_events_not_supported`. Same-process backend
 shutdown aborts the supervisor, terminates the verified process group, cleans
 owned scratch, and records `dispatcher_shutdown`. Startup with unresolved
-prior live attempts fails closed with `dispatcher_recovery_required`; full
-cross-restart attempt/scratch recovery, user-cancel races/receipts, and
-exactly-once completion cards remain A3-1c rather than current recovery claims.
+prior live attempts fails closed with `dispatcher_recovery_required`.
+A3-1c-a cancellation immediately aborts the matching active in-process run and
+uses heartbeat observation only as a fallback. Full cross-restart
+attempt/process/scratch recovery and exactly-once completion cards remain later
+A3-1c work rather than current recovery claims.
 Visual supervision, scoped browser/Playwright access, and wind import also
 remain later Stage 3 slices.
 

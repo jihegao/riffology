@@ -74,6 +74,15 @@ export class MilestoneA2Api {
         json(response, 200, this.service.getRun(projectId, parts[4]));
         return true;
       }
+      if (request.method === "POST" && parts.length === 6 && parts[5] === "cancel") {
+        const body = await strictJsonBody(request, ["commandId"]);
+        json(response, 200, this.service.cancelRun({
+          projectId,
+          runId: parts[4],
+          commandId: requiredString(body.commandId, "commandId"),
+        }));
+        return true;
+      }
     }
     if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "experiment-configs") {
       const projectId = parts[2];

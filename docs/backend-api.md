@@ -5,7 +5,8 @@
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` schema v4 and checked object bytes are
+Gate API retained below. `ProductStoreV2` schema migration v5, execution
+contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
 technical status.
@@ -148,6 +149,44 @@ Non-succeeded run projections return `outputs: []`. A succeeded run exposes
 only atomically published indexes whose bytes, size, and SHA-256 were rechecked;
 there is not yet a public list/download endpoint in A3-1b.
 
+The A3-1c-a cancellation request is exact:
+
+```ts
+type CancelProjectRunRequest = { commandId: string };
+```
+
+`POST /api/projects/{projectId}/runs/{runId}/cancel` returns `200` with the
+durable `RunCancelReceiptV1`:
+
+```ts
+type RunCancelReceiptV1 = {
+  schemaVersion: 1;
+  commandId: string;
+  projectId: string;
+  runId: string;
+  applied: boolean;
+  code:
+    | "cancellation_requested"
+    | "cancellation_already_requested"
+    | "run_already_terminal";
+  status: "cancelling" | "succeeded" | "failed" | "cancelled" | "timed_out" | "trashed";
+  cancelRequestedAt: string | null;
+  createdAt: string;
+};
+```
+
+The first nonterminal cancellation has `applied: true`; a distinct later
+command while that intent is pending has `applied: false` and
+`cancellation_already_requested`. A terminal-first command has `applied: false`,
+`run_already_terminal`, and the exact terminal status. Same-command retries
+return the original receipt even after later terminalization. Reusing a command
+for another run or intent fails with `idempotency_conflict`. While the persisted
+run remains `queued` or `running`, public run DTOs project `cancelling`.
+Schema migration v5 binds the first cancellation timestamp and command ID to
+the exact same-run committed `run.cancel.v1` payload, intent digest, outcome,
+payload digest, and timestamps; raw unbound or mismatched cancellation state is
+rejected.
+
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
 canned Agent response. Model mutation is limited to typed current-Model tools;
@@ -190,7 +229,8 @@ Admission and request failures use stable codes including `unknown_field`,
 `run_stdout_limit`, `run_stderr_limit`, `run_output_file_limit`,
 `run_output_byte_limit`, `run_output_invalid`,
 `process_cleanup_unverified`, `dispatcher_shutdown`,
-`dispatcher_heartbeat_failed`, and `batch_publication_failed`; an unexpected
+`dispatcher_heartbeat_failed`, `batch_publication_failed`, and
+`run_cancelled`; an unexpected
 supervisor failure records `batch_supervisor_failed`.
 
 The dispatcher shuts down in-process work through an abort signal, verified
@@ -201,10 +241,12 @@ registered process has durable exit and cleanup evidence; otherwise it stays
 live and recovery-required rather than publishing a false failure/success.
 Startup refuses unresolved prior live attempts with
 `dispatcher_recovery_required`; cross-restart attempt/scratch recovery is not
-yet implemented. The user-cancel API/race, completion-card exactly-once
-delivery, visual supervision, output downloads, events, wind migration, and
-final shell routes remain later #14/#15 work. The legacy Gate API below still
-coexists until separately reviewed retirement.
+yet implemented. The current cancel slice handles queued/running work in the
+active process and orders cancellation versus terminal publication by SQLite
+commit order. Cross-restart recovery, completion-card exactly-once delivery,
+visual supervision, output downloads, events, wind migration, and final shell
+routes remain later #14/#15 work. The legacy Gate API below still coexists
+until separately reviewed retirement.
 
 ---
 

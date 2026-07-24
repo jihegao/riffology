@@ -38,6 +38,7 @@ export class ProductRunDispatcher {
   #tail: Promise<void> = Promise.resolve();
   #lastError: Error | null = null;
   #activeAbort: AbortController | null = null;
+  #activeRunId: string | null = null;
 
   constructor(options: ProductRunDispatcherOptions) {
     this.#store = options.store;
@@ -65,6 +66,11 @@ export class ProductRunDispatcher {
     });
   }
 
+  requestCancellation(runId: string): void {
+    if (this.#activeRunId === runId) this.#activeAbort?.abort();
+    this.notify();
+  }
+
   get lastError(): Error | null { return this.#lastError; }
 
   async stop(): Promise<void> {
@@ -76,6 +82,10 @@ export class ProductRunDispatcher {
   async #drain(): Promise<void> {
     while (!this.#stopping) {
       const claimedAt = this.#now();
+      const cancelled = this.#store.finalizeNextCancelledQueuedRun({
+        finishedAt: claimedAt.toISOString(),
+      });
+      if (cancelled) continue;
       const claim = this.#store.claimNextQueuedBatchRun({
         dispatcherGeneration: this.#generation,
         claimedAt: claimedAt.toISOString(),
@@ -114,6 +124,10 @@ export class ProductRunDispatcher {
         if (heartbeatError) return;
         const at = this.#now();
         try {
+          if (this.#store.isRunCancellationRequested(attempt.runId)) {
+            abort?.abort();
+            return;
+          }
           this.#store.heartbeatRunAttempt({
             ...attempt,
             expectedState: "running",
@@ -136,6 +150,8 @@ export class ProductRunDispatcher {
       heartbeat.unref?.();
       abort = new AbortController();
       this.#activeAbort = abort;
+      this.#activeRunId = attempt.runId;
+      if (this.#store.isRunCancellationRequested(attempt.runId)) abort.abort();
       result = await this.#supervisor.supervise({
         run: {
           runId: claim.run.id,
@@ -260,7 +276,10 @@ export class ProductRunDispatcher {
       }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
-      if (abort && this.#activeAbort === abort) this.#activeAbort = null;
+      if (abort && this.#activeAbort === abort) {
+        this.#activeAbort = null;
+        this.#activeRunId = null;
+      }
     }
   }
 

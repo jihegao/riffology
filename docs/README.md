@@ -19,7 +19,7 @@ by Stage 2.
 Stage 3 / #14 remains in progress through
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 The first foundation slice implemented fixed-copy Project creation and the
-Project workspace projection. A3-1a adds schema v4, the closed canonical
+Project workspace projection. A3-1a adds execution contract v4, the closed canonical
 input-schema profile, deterministic sample planning, experiment configuration
 and record digest CAS with immutable historical receipts, Store-only
 execution-description-v2 admission,
@@ -31,9 +31,11 @@ and declares only batch execution; existing v1 Models are not silently
 upgraded.
 
 Visual starts and batch `domainEvents` are explicit current rejections, not
-partial implementations. Cross-restart attempt/scratch recovery, user-cancel
-races, and exactly-once completion cards remain A3-1c; visual execution,
-Playwright access, and ordinary wind import remain later #14 slices. A3-1b is
+partial implementations. A3-1c-a adds schema migration v5 and strict
+same-process cancel receipts/precedence for queued and running batch work.
+Cross-restart attempt/process/scratch recovery and exactly-once completion
+cards remain later A3-1c work; visual execution,
+Playwright access, and ordinary wind import remain later #14 slices. A3-1c-a is
 therefore not completion evidence for Stage 3.
 
 The authoritative product target is now

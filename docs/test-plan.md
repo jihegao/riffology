@@ -153,7 +153,7 @@ Visual starts fail with `capability_not_available`. Batch descriptions that
 declare `domainEvents` fail with `domain_events_not_supported`. These are
 explicit negative gates, not visual/event implementation evidence.
 
-Run the focused A3-1a/A3-1b checks with:
+Run the focused A3-1a/A3-1b/A3-1c-a checks with:
 
 ```bash
 cd backend
@@ -163,6 +163,7 @@ node --experimental-strip-types --test \
   test/generic-batch-supervisor.test.ts \
   test/product-schema.test.ts \
   test/product-schema-v4.test.ts \
+  test/product-schema-v5.test.ts \
   test/product-store-v4.test.ts \
   test/product-store-orchestration.test.ts \
   test/product-store-v2.test.ts \
@@ -170,14 +171,18 @@ node --experimental-strip-types --test \
   test/server.test.ts
 ```
 
-The final integrated A3-1b complete backend run was 256 passed, zero failed,
-and one optional installed-OpenCode smoke skipped. The previously recorded web suite
+The last integrated A3-1b complete backend run was 256 passed, zero failed,
+and one optional installed-OpenCode smoke skipped. A3-1c-a adds focused
+schema-v5 migration/rollback, Raw SQL cancellation binding, queued no-launch,
+immediate active abort, cleanup verification, cancel-first output exclusion,
+terminal-first preservation, and exact HTTP replay tests. The previously recorded web suite
 passed 104/104 and its production build succeeded; no new browser acceptance is
 claimed by this backend batch slice.
 
-A3-1c must still prove cross-restart attempt/scratch reconciliation,
-cancel-versus-terminal commit precedence and receipts, and exactly-once
-completion-card delivery. A3-1b currently fails startup closed with
+A3-1c must still prove cross-restart attempt/process/scratch reconciliation and
+exactly-once completion-card delivery. A3-1c-a now proves same-process
+cancel-versus-terminal commit precedence and receipts; it does not claim
+cross-restart cancellation recovery. The current dispatcher fails startup closed with
 `dispatcher_recovery_required` when prior live attempts need reconciliation;
 that diagnostic is not a recovery implementation.
 

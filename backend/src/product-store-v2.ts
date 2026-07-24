@@ -299,6 +299,28 @@ export type StartRunIntent = Readonly<{
   completionConversationId: string | null;
 }>;
 
+export type CancelRunIntent = Readonly<{
+  commandId: string;
+  projectId: string;
+  runId: string;
+}>;
+
+export type FrozenRunCancelReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  projectId: string;
+  runId: string;
+  applied: boolean;
+  code: "cancellation_requested" | "cancellation_already_requested" | "run_already_terminal";
+  status: "cancelling" | "succeeded" | "failed" | "cancelled" | "timed_out" | "trashed";
+  cancelRequestedAt: IsoTimestamp | null;
+  createdAt: IsoTimestamp;
+}>;
+
+export type CancelRunInput = CancelRunIntent & Readonly<{
+  requestedAt: IsoTimestamp;
+}>;
+
 export type CreateFrozenRunInput = StartRunIntent & Readonly<{
   runId: string;
   expectedConfigurationDigest: string;
@@ -986,7 +1008,7 @@ export class ProductStoreV2 {
   }
 
   createExperiment(input: CreateExperimentInput): ExperimentConfigurationRecord {
-    throw new ProductStoreV2Error("Version-3 experiment creation is unavailable after schema v4; use createExperimentV4.");
+    throw new ProductStoreV2Error("Version-3 experiment creation is unavailable under execution contract v4; use createExperimentV4.");
   }
 
   createExperimentV4(input: CreateExperimentV4Input): ExperimentConfigurationRecordV4 {
@@ -1149,12 +1171,106 @@ export class ProductStoreV2 {
   }
 
   createRun(input: CreateRunInput): void {
-    throw new ProductStoreV2Error("Arbitrary run creation is unavailable after schema v4; use createFrozenRun.");
+    throw new ProductStoreV2Error("Arbitrary run creation is unavailable under execution contract v4; use createFrozenRun.");
   }
 
   getFrozenRunStartReceipt(intent: StartRunIntent): FrozenRunStartReceipt | null {
     assertStartRunIntent(intent);
     return this.#frozenRunStartReceipt(intent, startRunIntentDigest(intent));
+  }
+
+  getFrozenRunCancelReceipt(intent: CancelRunIntent): FrozenRunCancelReceipt | null {
+    assertCancelRunIntent(intent);
+    return this.#frozenRunCancelReceipt(intent, cancelRunIntentDigest(intent));
+  }
+
+  cancelRun(input: CancelRunInput): FrozenRunCancelReceipt {
+    assertCancelRunIntent(input);
+    const intentDigest = cancelRunIntentDigest(input);
+    const replayed = this.#frozenRunCancelReceipt(input, intentDigest);
+    if (replayed) return replayed;
+    return this.#withImmediateTransaction(() => {
+      const committed = this.#frozenRunCancelReceipt(input, intentDigest);
+      if (committed) return committed;
+      const row = this.#database.prepare(
+        "SELECT * FROM runs WHERE id = ? AND project_id = ?",
+      ).get(input.runId, input.projectId) as any;
+      if (!row) throw new ProductStoreV2Error("Run does not exist.");
+      const run = runRecord(row);
+      if (run.contractVersion === 3) throw legacyReadOnlyError("run");
+
+      const terminal = ["succeeded", "failed", "cancelled", "timed_out", "trashed"].includes(run.status);
+      const alreadyRequested = !terminal && run.cancelRequestedAt !== null;
+      const applied = !terminal && !alreadyRequested;
+      const cancelRequestedAt = terminal
+        ? run.cancelRequestedAt
+        : alreadyRequested ? run.cancelRequestedAt : input.requestedAt;
+      const status = terminal ? run.status as FrozenRunCancelReceipt["status"] : "cancelling";
+      const code: FrozenRunCancelReceipt["code"] = terminal
+        ? "run_already_terminal"
+        : alreadyRequested ? "cancellation_already_requested" : "cancellation_requested";
+      const receipt: FrozenRunCancelReceipt = Object.freeze({
+        schemaVersion: 1,
+        commandId: input.commandId,
+        projectId: input.projectId,
+        runId: input.runId,
+        applied,
+        code,
+        status,
+        cancelRequestedAt,
+        createdAt: input.requestedAt,
+      });
+      const receiptJson = json(receipt);
+      const receiptDigest = canonicalDigest(receipt);
+      this.#executeDatabaseStatements([
+        {
+          sql: `INSERT INTO run_commands
+            (id, run_id, command_kind, request_key, intent_sha256, state, outcome_json, created_at, updated_at)
+            VALUES (?, ?, 'cancel', ?, ?, 'committed', ?, ?, ?)`,
+          params: [
+            input.commandId,
+            input.runId,
+            input.commandId,
+            intentDigest,
+            receiptJson,
+            input.requestedAt,
+            input.requestedAt,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `INSERT INTO run_command_receipts
+            (id, run_id, command_id, receipt_kind, payload_sha256, payload_json, committed_at)
+            VALUES (?, ?, ?, 'run.cancel.v1', ?, ?, ?)`,
+          params: [
+            `receipt_${canonicalDigest(input.commandId).slice(0, 32)}`,
+            input.runId,
+            input.commandId,
+            receiptDigest,
+            receiptJson,
+            input.requestedAt,
+          ],
+          expectedChanges: 1,
+        },
+        ...(applied ? [{
+          sql: `UPDATE runs
+            SET cancel_requested_at = ?, first_cancel_command_id = ?, updated_at = ?
+            WHERE id = ? AND project_id = ? AND contract_version = 4
+              AND status IN ('queued', 'running')
+              AND cancel_requested_at IS NULL AND first_cancel_command_id IS NULL`,
+          params: [
+            input.requestedAt,
+            input.commandId,
+            input.requestedAt,
+            input.runId,
+            input.projectId,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "run_cancel_conflict: cancellation lost its durable compare-and-set.",
+        }] : []),
+      ]);
+      return receipt;
+    });
   }
 
   createFrozenRun(input: CreateFrozenRunInput): FrozenRunStartReceipt {
@@ -1412,6 +1528,51 @@ export class ProductStoreV2 {
     });
   }
 
+  finalizeNextCancelledQueuedRun(input: {
+    finishedAt: IsoTimestamp;
+  }): Extract<RunRecord, { contractVersion: 4 }> | null {
+    return this.#withImmediateTransaction(() => {
+      const row = this.#database.prepare(`SELECT id
+        FROM runs
+        WHERE contract_version = 4 AND status = 'queued'
+          AND cancel_requested_at IS NOT NULL AND first_cancel_command_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM run_attempts a
+            WHERE a.run_id = runs.id AND a.state IN ('claimed', 'starting', 'running')
+          )
+        ORDER BY cancel_requested_at, id
+        LIMIT 1`).get() as { id: string } | undefined;
+      if (!row) return null;
+      this.#executeDatabaseStatements([{
+        sql: `UPDATE runs
+          SET status = 'cancelled', terminal_code = 'run_cancelled',
+            terminal_diagnostics_json = ?,
+            resource_overview_json = '{}',
+            finished_at = ?, updated_at = ?
+          WHERE id = ? AND contract_version = 4 AND status = 'queued'
+            AND cancel_requested_at IS NOT NULL AND first_cancel_command_id IS NOT NULL`,
+        params: [
+          json({ code: "run_cancelled", diagnostic: "The queued run was cancelled before launch." }),
+          input.finishedAt,
+          input.finishedAt,
+          row.id,
+        ],
+        expectedChanges: 1,
+        mismatchMessage: "run_cancel_conflict: queued cancellation lost its durable compare-and-set.",
+      }]);
+      return runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(row.id)) as Extract<RunRecord, { contractVersion: 4 }>;
+    });
+  }
+
+  isRunCancellationRequested(runId: string): boolean {
+    assertId(runId);
+    const row = this.#database.prepare(`SELECT cancel_requested_at, first_cancel_command_id
+      FROM runs WHERE id = ? AND contract_version = 4 AND status IN ('queued', 'running')`
+    ).get(runId) as { cancel_requested_at: string | null; first_cancel_command_id: string | null } | undefined;
+    return row?.cancel_requested_at !== null && row?.cancel_requested_at !== undefined
+      && row.first_cancel_command_id !== null;
+  }
+
   markRunAttemptStarting(input: RunAttemptIdentity & { startedAt: IsoTimestamp }): RunAttemptRecord {
     return this.#transitionRunAttempt({
       ...input,
@@ -1594,12 +1755,29 @@ export class ProductStoreV2 {
     assertTerminalData(input.terminalCode, input.terminalDiagnostics, input.resourceOverview);
     return this.#withImmediateTransaction(() => {
       this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      const runState = this.#database.prepare(
+        `SELECT cancel_requested_at, first_cancel_command_id
+          FROM runs WHERE id = ? AND contract_version = 4 AND status = 'running'`,
+      ).get(input.runId) as {
+        cancel_requested_at: string | null;
+        first_cancel_command_id: string | null;
+      } | undefined;
+      if (!runState) {
+        throw new ProductStoreV2Error("invalid_run_transition: the batch run is no longer running.");
+      }
+      const cancellationWon = runState.cancel_requested_at !== null
+        && runState.first_cancel_command_id !== null;
+      const status = cancellationWon ? "cancelled" : input.status;
+      const terminalCode = cancellationWon ? "run_cancelled" : input.terminalCode;
+      const terminalDiagnostics = cancellationWon
+        ? { code: "run_cancelled", diagnostic: "Cancellation committed before the terminal run receipt." }
+        : input.terminalDiagnostics;
       const liveProcesses = Number((this.#database.prepare(`SELECT count(*) AS count
         FROM process_attempts
-        WHERE run_attempt_id = ? AND state NOT IN ('cleanup_complete', 'cleanup_unverified')`
+        WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
       ).get(input.attemptId) as { count: number }).count);
       if (liveProcesses !== 0) {
-        throw new ProductStoreV2Error("process_cleanup_unverified: a batch run cannot finalize while a process identity remains live.");
+        throw new ProductStoreV2Error("process_cleanup_unverified: a batch run cannot finalize unless every process has verified cleanup.");
       }
       this.#executeDatabaseStatements([
         {
@@ -1608,7 +1786,7 @@ export class ProductStoreV2 {
             WHERE id = ? AND run_id = ? AND attempt_generation = ?
               AND dispatcher_generation = ? AND state = ?`,
           params: [
-            input.status,
+            status,
             input.finishedAt,
             input.finishedAt,
             input.attemptId,
@@ -1626,9 +1804,9 @@ export class ProductStoreV2 {
               resource_overview_json = ?, finished_at = ?, updated_at = ?
             WHERE id = ? AND contract_version = 4 AND run_kind = 'batch' AND status = 'running'`,
           params: [
-            input.status,
-            input.terminalCode,
-            json(input.terminalDiagnostics),
+            status,
+            terminalCode,
+            json(terminalDiagnostics),
             json(input.resourceOverview),
             input.finishedAt,
             input.finishedAt,
@@ -1657,6 +1835,9 @@ export class ProductStoreV2 {
     if (run.contractVersion !== 4) throw legacyReadOnlyError("run");
     if (run.runKind !== "batch" || run.status !== "running") {
       throw new ProductStoreV2Error("invalid_run_transition: success requires a running v4 batch run.");
+    }
+    if (run.cancelRequestedAt !== null) {
+      throw new ProductStoreV2Error("run_cancellation_won: cancellation committed before successful output publication.");
     }
     const attempt = this.#database.prepare(`SELECT * FROM run_attempts
       WHERE id = ? AND run_id = ? AND attempt_generation = ? AND dispatcher_generation = ?`
@@ -1764,6 +1945,12 @@ export class ProductStoreV2 {
         sql: `UPDATE run_attempts SET state = 'succeeded', finished_at = ?, heartbeat_at = ?
           WHERE id = ? AND run_id = ? AND attempt_generation = ?
             AND dispatcher_generation = ? AND state = 'running'
+            AND EXISTS (
+              SELECT 1 FROM runs r
+              WHERE r.id = run_attempts.run_id AND r.status = 'running'
+                AND r.cancel_requested_at IS NULL
+                AND r.first_cancel_command_id IS NULL
+            )
             AND (
               SELECT count(*) FROM process_attempts
               WHERE run_attempt_id = run_attempts.id
@@ -1790,7 +1977,9 @@ export class ProductStoreV2 {
           SET status = 'succeeded', terminal_code = 'run_succeeded',
             terminal_diagnostics_json = ?, resource_overview_json = ?,
             finished_at = ?, updated_at = ?
-          WHERE id = ? AND contract_version = 4 AND run_kind = 'batch' AND status = 'running'`,
+          WHERE id = ? AND contract_version = 4 AND run_kind = 'batch'
+            AND status = 'running'
+            AND cancel_requested_at IS NULL AND first_cancel_command_id IS NULL`,
         params: [
           json(input.terminalDiagnostics),
           json(input.resourceOverview),
@@ -2651,6 +2840,54 @@ export class ProductStoreV2 {
     return Object.freeze({ ...receipt });
   }
 
+  #frozenRunCancelReceipt(intent: CancelRunIntent, intentDigest: string): FrozenRunCancelReceipt | null {
+    const row = this.#database.prepare(`SELECT
+        c.run_id AS command_run_id, c.command_kind, c.request_key, c.intent_sha256,
+        c.state AS command_state, c.outcome_json,
+        q.receipt_kind, q.payload_sha256, q.payload_json,
+        r.project_id, r.contract_version, r.cancel_requested_at,
+        r.first_cancel_command_id
+      FROM run_commands c
+      LEFT JOIN run_command_receipts q ON q.command_id = c.id AND q.run_id = c.run_id
+      LEFT JOIN runs r ON r.id = c.run_id
+      WHERE c.id = ?`).get(intent.commandId) as any;
+    if (!row) return null;
+    if (row.command_kind !== "cancel" || row.request_key !== intent.commandId
+      || row.intent_sha256 !== intentDigest) {
+      throw new ProductStoreV2Error("Run command already exists with a different intent.");
+    }
+    if (row.command_state !== "committed" || row.receipt_kind !== "run.cancel.v1"
+      || typeof row.payload_json !== "string" || typeof row.outcome_json !== "string") {
+      throw new ProductStoreV2Error("Committed run-cancel receipt is incomplete.");
+    }
+    let payload: unknown;
+    let outcome: unknown;
+    try {
+      payload = JSON.parse(row.payload_json);
+      outcome = JSON.parse(row.outcome_json);
+    } catch (error) {
+      throw new ProductStoreV2Error("Committed run-cancel receipt contains invalid JSON.", { cause: error });
+    }
+    assertFrozenRunCancelReceipt(payload);
+    if (canonicalDigest(payload) !== row.payload_sha256
+      || !canonicalJsonV2(payload).equals(canonicalJsonV2(outcome))) {
+      throw new ProductStoreV2Error("Committed run-cancel receipt digest or outcome does not match.");
+    }
+    const receipt = payload as FrozenRunCancelReceipt;
+    if (receipt.commandId !== intent.commandId
+      || receipt.projectId !== intent.projectId
+      || receipt.runId !== intent.runId
+      || receipt.runId !== row.command_run_id
+      || row.contract_version !== 4
+      || row.project_id !== receipt.projectId
+      || row.cancel_requested_at !== receipt.cancelRequestedAt
+      || ((row.cancel_requested_at === null) !== (row.first_cancel_command_id === null))
+      || (receipt.applied && row.first_cancel_command_id !== receipt.commandId)) {
+      throw new ProductStoreV2Error("Committed run-cancel receipt resource binding is corrupt.");
+    }
+    return Object.freeze({ ...receipt });
+  }
+
   #verifyFrozenProject(project: any): string {
     const rows = this.#objectRows("owner_project_id = ? AND kind = 'project_model_snapshot'", [project.id]).sort(compareObjectRows);
     if (!rows.length) throw new ProductStoreV2Error("Existing Project snapshot is incomplete.");
@@ -2882,6 +3119,12 @@ const assertStartRunIntent = (intent: StartRunIntent): void => {
   if (intent.completionConversationId !== null) assertId(intent.completionConversationId);
 };
 
+const assertCancelRunIntent = (intent: CancelRunIntent): void => {
+  assertCommandId(intent.commandId);
+  assertId(intent.projectId);
+  assertId(intent.runId);
+};
+
 const assertRunAttemptIdentity = (input: RunAttemptIdentity): void => {
   assertId(input.runId);
   assertId(input.attemptId);
@@ -2934,6 +3177,13 @@ const startRunIntentDigest = (intent: StartRunIntent): string => canonicalDigest
   projectId: intent.projectId,
   experimentConfigId: intent.experimentConfigId,
   completionConversationId: intent.completionConversationId,
+});
+
+const cancelRunIntentDigest = (intent: CancelRunIntent): string => canonicalDigest({
+  schemaVersion: 1,
+  commandKind: "run.cancel",
+  projectId: intent.projectId,
+  runId: intent.runId,
 });
 
 const experimentUpdateIntentDigest = (input: ExperimentUpdateIntentV4): string => canonicalDigest({
@@ -3023,6 +3273,18 @@ const FROZEN_RUN_RECEIPT_KEYS = Object.freeze([
   "createdAt",
 ].sort());
 
+const RUN_CANCEL_RECEIPT_KEYS = Object.freeze([
+  "schemaVersion",
+  "commandId",
+  "projectId",
+  "runId",
+  "applied",
+  "code",
+  "status",
+  "cancelRequestedAt",
+  "createdAt",
+].sort());
+
 const EXPERIMENT_V4_RESPONSE_KEYS = Object.freeze([
   "id",
   "projectId",
@@ -3093,6 +3355,29 @@ const assertFrozenRunStartReceipt: (value: unknown) => asserts value is FrozenRu
     if (typeof receipt[field] !== "string" || !DIGEST.test(receipt[field])) {
       throw new ProductStoreV2Error("Committed run-start receipt has an invalid digest.");
     }
+  }
+};
+
+const assertFrozenRunCancelReceipt: (value: unknown) => asserts value is FrozenRunCancelReceipt = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProductStoreV2Error("Committed run-cancel receipt has an invalid shape.");
+  }
+  const receipt = value as Record<string, unknown>;
+  if (Object.keys(receipt).sort().join("\n") !== RUN_CANCEL_RECEIPT_KEYS.join("\n")
+    || receipt.schemaVersion !== 1
+    || typeof receipt.commandId !== "string"
+    || typeof receipt.projectId !== "string"
+    || typeof receipt.runId !== "string"
+    || typeof receipt.applied !== "boolean"
+    || typeof receipt.createdAt !== "string"
+    || !["cancellation_requested", "cancellation_already_requested", "run_already_terminal"].includes(String(receipt.code))
+    || !["cancelling", "succeeded", "failed", "cancelled", "timed_out", "trashed"].includes(String(receipt.status))
+    || !(receipt.cancelRequestedAt === null || typeof receipt.cancelRequestedAt === "string")
+    || receipt.applied !== (receipt.code === "cancellation_requested")
+    || (receipt.status === "cancelling" && receipt.cancelRequestedAt === null)
+    || (receipt.code !== "run_already_terminal" && receipt.status !== "cancelling")
+    || (receipt.code === "run_already_terminal" && receipt.status === "cancelling")) {
+    throw new ProductStoreV2Error("Committed run-cancel receipt has an invalid shape.");
   }
 };
 
