@@ -37,16 +37,24 @@ success/output triggers with run-kind-bound authority, adds a database visual
 no-completion invariant, and adds private Store authority for visual claim,
 queued cancellation without a card, terminalization, and atomic success/output
 publication.
-A3-2a2b is implemented on the current branch: the generic single-attempt
-visual supervisor and its launch-gate, sandbox, exact process/listener,
-one-shot health, bounded output, and cleanup safety primitives run a real
-`riff-visual-v1` child without opening public admission. Current evidence is a
-full backend gate of 379 tests with 378 passed, zero failed, and one optional
-installed-OpenCode smoke skipped; the 102/102 focused concurrency combination
-passed three consecutive runs; web passes 104/104 and the production build
-succeeds. This slice explicitly excludes the dispatcher, public admission and
-API changes, broker, frame, and browser behavior. A3-2a2c, A3-2b, and A3-2c
-remain pending.
+A3-2a2b was merged and published through PR #30 at merge commit `9f23f61`.
+Its generic single-attempt visual supervisor and launch-gate, sandbox, exact
+process/listener, one-shot health, bounded output, and cleanup safety primitives
+run a real `riff-visual-v1` child.
+A3-2a2c is implemented on the current branch. One dispatcher generation owns
+independent batch and one-slot visual lanes; exact-generation heartbeat,
+cancellation, and finalization, a fatal-error latch, stop/join, and
+generation-fenced cleanup of unlaunched visual scratch preserve the shared
+lifecycle boundary. Existing Project-run admission now accepts visual work,
+restart audit validates exact visual success evidence, and the real-process
+public vertical plus DTO/error/log secrecy gate pass. Current evidence is a
+final full backend gate of 385 tests with 384 passed, zero failed, and one
+optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
+review regressions; the real public vertical passed; web passes 104/104 and
+the production build succeeds.
+This slice exposes neither the child port nor browser access. Visual completion
+remains HTTP `422` `visual_completion_not_supported`; A3-2b and A3-2c remain
+pending.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -60,8 +68,8 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c/A3-2a1 plus current
-A3-2a2a branch boundary is intentionally narrow:
+The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c/A3-2a1/A3-2a2a/
+A3-2a2b plus current A3-2a2c branch boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -132,11 +140,18 @@ A3-2a2a branch boundary is intentionally narrow:
   queued visual cancellation without a completion card, preserves
   cancellation-first terminal precedence, and atomically publishes visual
   success, required outputs, and indexes or rolls all changes back;
+- one shared dispatcher generation runs independent batch and one-slot visual
+  lanes, preserves exact-generation heartbeat/cancel/finalize authority,
+  latches fatal lane failures, and aborts and joins every active lane before
+  stop returns;
+- generation-fenced cleanup removes only exact unlaunched visual scratch, and
+  startup audit accepts terminal visual success only when its exact health,
+  exit-zero, output, and cleanup evidence remains complete;
 - visual recovery validates exact launch, scratch, process, port, health, and
   cleanup evidence before inspection or signalling and preserves visual
   completion disposition as `not_requested`; and
-- public visual admission remains closed: a request without a completion
-  conversation returns `capability_not_available`, while a request with
+- the existing Project-run start route admits an eligible visual experiment
+  without adding a parallel API, while a request with
   `completionConversationId` returns HTTP `422`
   `visual_completion_not_supported`; and
 - Project conversations continue to use the Stage 2 conversation contract.
@@ -153,9 +168,8 @@ The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
 - batch domain-event ingestion or public output list/download routes;
-- a visual dispatcher/supervisor, real child/listener lifecycle, scoped visual
-  proxy, WebSocket forwarding, or
-  Playwright capability; and
+- a scoped visual proxy, frame, WebSocket forwarding, broker/browser
+  capability, or Playwright authority; and
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
@@ -169,18 +183,17 @@ generations by stable prior-attempt identity. A per-Store in-process guard plus
 the Store writer lock prevents a second local dispatcher from reconciling a
 healthy owner. Schema-v5 live process rows lack v6 scratch/launch evidence and
 intentionally require fail-closed repair instead of speculative signalling.
-Visual starts without a completion conversation fail with
-`capability_not_available`; visual starts with `completionConversationId` fail
-earlier with `visual_completion_not_supported`; and batch descriptions that
+Eligible visual starts without a completion conversation use the existing
+Project-run route; visual starts with `completionConversationId` fail with
+`visual_completion_not_supported`; and batch descriptions that
 declare `domainEvents` fail with `domain_events_not_supported`.
 
-The published A3-2a1 and A3-2a2a contracts plus the current A3-2a2b
-single-attempt supervisor do not change this public boundary. Public visual
-admission remains HTTP `409` `capability_not_available`; the earlier
-`completionConversationId` negative gate remains HTTP `422`
-`visual_completion_not_supported`. Only the later A3-2a2c dispatcher/public
-admission gate may remove the capability rejection after its scheduling,
-cancellation, heartbeat, terminalization, and restart evidence is green.
+The published A3-2a1/A3-2a2a/A3-2a2b contracts plus current A3-2a2c
+dispatcher/public admission implementation preserve this public boundary:
+visual runs share the existing Project-run resource, child ports remain
+private, and the `completionConversationId` negative gate remains HTTP `422`
+`visual_completion_not_supported`. Browser bootstrap, broker/frame routes,
+WebSocket forwarding, and Playwright authority begin only in A3-2b/A3-2c.
 
 ## Outcome and stage boundary
 
@@ -619,10 +632,11 @@ The current A3-1b batch implementation may claim hard enforcement only for:
 - bounded termination grace followed by a verified process-group kill and
   cleanup receipt.
 
-`startupTimeMs`, `maxEventCount`, and `maxEventBytes` are frozen reserved fields
-in A3-1b, not current enforcement claims: visual starts fail with
-`capability_not_available`, and batch `domainEvents` fail with
-`domain_events_not_supported`.
+In the historical A3-1b batch-only boundary, `startupTimeMs`,
+`maxEventCount`, and `maxEventBytes` were frozen reserved fields and visual
+starts failed with `capability_not_available`. Current A3-2a2c enforces the
+visual startup budget and admits eligible visual starts; batch `domainEvents`
+remain unsupported with `domain_events_not_supported`.
 
 A3-2a2 adds one server-owned global visual cap,
 `maxActiveVisualRuns = 1`. It is not a member of caller-controlled
@@ -935,21 +949,24 @@ migration closed and is never adopted as healthy. Private Store primitives
 write the same exact-identity process checkpoints while public visual dispatch
 remains closed. Cross-restart recovery now validates those exact checkpoints
 before any inspection or signalling; focused tests use a fake supervisor and
-start no real visual child or listener. The current A3-2a2b branch adds the
-real generic single-attempt supervisor and process-safety primitives.
-A3-2a2c dispatcher integration and public admission remain pending; admission
-may open only after its scheduling, terminalization, and restart gates pass.
+start no real visual child or listener. Published A3-2a2b adds the real generic
+single-attempt supervisor and process-safety primitives. Current A3-2a2c
+integrates that supervisor with the dispatcher and existing Project-run
+admission after its scheduling, terminalization, restart-audit, real-process
+vertical, and secrecy gates pass.
 
-The first visual dispatcher has `maxActiveVisualRuns = 1` and keeps an active
+The visual dispatcher has `maxActiveVisualRuns = 1` and keeps an active
 map keyed by exact `(runId, attemptId)`. It does not claim a second queued visual
 run while that map occupies the slot, but continues claiming eligible batch
 work under the unchanged batch cap. Every lane heartbeat and finalization uses
 the same dispatcher generation that claimed the attempt. The visual slot is
 released only after exact terminal commit plus verified process and scratch
 cleanup. Dispatcher stop aborts every active lane and awaits all lane promises
-before it returns or permits Store close. A healthy visual therefore cannot
-head-of-line block the batch queue, and fairness never authorizes duplicate
-supervision or blind relaunch.
+before it returns or permits Store close. A shared fatal-error latch prevents a
+failed lane from being forgotten while its peers unwind. Generation-fenced
+unlaunched-scratch cleanup removes only the exact claimed visual manifest. A
+healthy visual therefore cannot head-of-line block the batch queue, and
+fairness never authorizes duplicate supervision or blind relaunch.
 
 Listener readiness is detected from the exact OS-owned IPv4 listener without
 sending HTTP. Once ready, health sends exactly one `GET` to
@@ -1296,7 +1313,7 @@ Output indexes never resolve outside the owning Project/run object root.
    receipt, and coordinated health-receipt/manifest corruption fails before
    process inspection or signalling. Focused root 62/62, independent reviewer
    81/81, independent recovery review, full backend, and web/build gates pass.
-   Public visual starts still reject
+   At this published A3-2a1 gate, public visual starts rejected
    with `capability_not_available`, or
    `visual_completion_not_supported` when a completion conversation was
    supplied; this slice has no real-process or browser acceptance claim.
@@ -1305,22 +1322,29 @@ Output indexes never resolve outside the owning Project/run object root.
    `runId` plus `runKind`, preserves batch semantics, closes visual completion
    state in the database, and adds private claim, queued-cancel, terminal, and
    atomic success/output Store authority.
-7. **A3-2a2b generic single-attempt visual supervisor — implemented on the
-   current branch:** a real `riff-visual-v1` child proves the canonical
+7. **A3-2a2b generic single-attempt visual supervisor — merged and published
+   through PR #30:** merge commit `9f23f61`; a real `riff-visual-v1` child proves the canonical
    single-sample input,
    assigned output directory/loopback endpoint, visual-only sandbox, exact
    process and listener ownership before/after bounded health, one-shot health,
    stable failure codes, output validation, and exact process/scratch cleanup.
-   The full backend gate is 378 passed/0 failed/1 optional skip out of 379; the
-   focused concurrency combination passes 102/102 three consecutive times; web
-   is 104/104 and its production build succeeds. This slice has no dispatcher,
+   Its publication gate reported 378 passed/0 failed/1 optional skip out of
+   379; the focused concurrency combination passed 102/102 three consecutive
+   times; web was 104/104 and its production build succeeded. This slice has no dispatcher,
    public admission/API, broker, frame, WebSocket, Playwright, or browser claim.
    Public visual remains HTTP `409` `capability_not_available`, and the
    completion negative gate is unchanged.
-8. **A3-2a2c dispatcher and public admission — pending:** add the one-slot
-   visual scheduler with continued batch dispatch, generation-fenced claim and
-   heartbeat, cancellation/terminal precedence, stop join, restart recovery,
-   and only then remove the public capability rejection.
+8. **A3-2a2c dispatcher and public admission — implemented on the current
+   branch:** one shared generation owns independent batch and one-slot visual
+   lanes, with exact heartbeat/cancel/finalize identity, a fatal-error latch,
+   stop join, and generation-fenced unlaunched-scratch cleanup. Startup audits
+   exact visual success evidence. The existing Project-run route now admits
+   eligible visual work; a real-process public vertical and child-port secrecy
+   gate pass. The final full backend gate reports 384 passed/0 failed/1
+   optional skip out of 385; the focused 13/13 gate covers the review
+   regressions; web is 104/104 and its production build succeeds. Visual
+   completion remains HTTP `422`
+   `visual_completion_not_supported`.
 9. **A3-2b isolated browser access — pending:** scoped broker/frame capability,
    exact IPv6-loopback app/broker Host/port/path, browser-session generation,
    bootstrap/CSRF/nonce/cookie/Origin rules, HTTP and WebSocket enforcement,
@@ -1364,15 +1388,19 @@ parsing and coordinated corruption that fails before process inspection or
 signalling. No real visual child or listener is started, and later visual,
 Playwright, wind, download, event, and browser rows remain unclaimed.
 
-A3-2a2a is published through PR #29 at merge commit `1584e39`. The current
-A3-2a2b branch adds only the generic single-attempt visual supervisor and
-process-safety primitives. Its full backend gate reports 379 total: 378 passed,
-zero failed, and one optional installed-OpenCode smoke skipped. The focused
-concurrency combination passes 102/102 in three consecutive runs; web passes
-104/104 and the production build succeeds. Public visual admission remains
-HTTP `409` `capability_not_available`, the completion negative gate is
-unchanged, and A3-2a2c dispatcher/public admission, A3-2b broker/frame/browser,
-and A3-2c Playwright work remain pending.
+A3-2a2a is published through PR #29 at merge commit `1584e39`. A3-2a2b is
+published through PR #30 at merge commit `9f23f61`. Current A3-2a2c integrates
+the supervisor into one shared-generation dispatcher with independent
+batch/visual lanes, exact heartbeat/cancel/finalize authority, fatal latch,
+stop join, generation-fenced unlaunched-scratch cleanup, and exact visual
+success restart audit. The existing Project-run route admits visual work, and
+the real-process public vertical plus port/secret scans pass. Its final full
+backend gate reports 385 tests with 384 passed, zero failed, and one
+optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
+review regressions; web is 104/104 and the production build succeeds. Visual
+completion remains HTTP `422`
+`visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser and
+A3-2c Playwright work remain pending.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:
@@ -1392,7 +1420,7 @@ implemented merely because part of it is exercised by A3-1b:
 | State and trash safety | Property/table tests reject every illegal transition, stale dispatcher generation, every mutation/dispatch of all-status v3 records, and trash/restore of every nonterminal or cancelling v4 run. |
 | Exactly-once batch card | Fault injection before/after a batch terminal commit proves one deterministic card or one durable skip receipt, never a guessed or duplicate message. Visual terminalization has no card receipt. |
 | Outputs/events | Ownership, sample identity, digest revalidation, atomic ingestion, opaque cursor binding, pagination, filters, limits, trash, and cross-run/tamper failures. |
-| Visual runtime contract | Schema-v8 migration/rollback and restart tests extend schema-v6 scratch/launch/recovery to the existing schema-v4 visual process shape, make its launch-bound port immutable, and require one atomic null-to-timestamp `health_at` plus matching immutable receipt. Schema v9 replaces batch-only success/output triggers with run-kind-bound atomic authority, rejects visual completion state, and requires exact healthy exit-zero cleanup evidence for private visual success/output publication. A3-2a2b adds the private generic single-attempt supervisor and process-safety primitives. Port update, health-only, receipt-only, timestamp mismatch, second write/receipt, unproven pre-v8 visual health/live evidence, wrong run-kind context, extra live attempt/process, and partial output publication fail closed. Public visual start still returns 409 through A3-2a2b. |
+| Visual runtime contract | Schema-v8 migration/rollback and restart tests extend schema-v6 scratch/launch/recovery to the existing schema-v4 visual process shape, make its launch-bound port immutable, and require one atomic null-to-timestamp `health_at` plus matching immutable receipt. Schema v9 replaces batch-only success/output triggers with run-kind-bound atomic authority, rejects visual completion state, and requires exact healthy exit-zero cleanup evidence for private visual success/output publication. A3-2a2b adds the private generic single-attempt supervisor and process-safety primitives; A3-2a2c adds shared-generation dispatch and existing-Project-run visual admission. Port update, health-only, receipt-only, timestamp mismatch, second write/receipt, unproven pre-v8 visual health/live evidence, wrong run-kind context, extra live attempt/process, and partial output publication fail closed. Visual completion still returns 422. |
 | Visual lifecycle | A real child receives the canonical single-sample `--riff-input`, assigned `--riff-output-dir`, fixed loopback host and assigned port. A visual-only sandbox denies other listeners and all outbound/direct network access; exact listener ownership surrounds one bounded manual-redirect health GET and one CAS receipt. The one-slot visual cap leaves a second visual queued while batch finishes, and stop joins every lane. Stable success/failure/timeout/cancel/restart codes are exact. Exit zero succeeds only after required outputs validate. Visual completion input is rejected and no completion-card receipt/message is created. |
 | Visual frame capability | A real browser proves platform app/broker exact-bind `::1` on different server-owned ports while the child remains `127.0.0.1`; platform cookies cross app/broker ports but never reach the child. Evidence includes actual SameSite=Strict broker-cookie delivery, JavaScript denial from HttpOnly, cross-origin parent-DOM denial, exact bootstrap/frame-session Origin/Host/Fetch-Site/CSRF rules, ≤60-second no-Origin one-use nonce navigation and invalidation, post-redirect HTTP and strict WS Origin rules, exact-app-only CSP `frame-ancestors` with no blocking SAMEORIGIN header, generation/Project/run/attempt/expiry/socket binding, socket-first revocation, and three-party secret scans. Port and Cookie Path are not treated as Cookie authority. |
 | Visual/WebSocket | Real process proves loopback health, hidden port, CSP/frame restrictions, exact path/subprotocol, frame/connection/idle limits, redirect denial, stop/timeout/restart, and capability revocation. |
