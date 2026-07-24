@@ -6,7 +6,8 @@ import type { AgentTurnDto, ConversationDto, ConversationMessageDto, Conversatio
 import { createGenericModelScaffold } from "./model-workspace.ts";
 import type { OpenCodeConversationPort, OpenCodeProviderModel } from "./opencode-adapter.ts";
 import { ProductStoreV2, ProductStoreV2Error } from "./product-store-v2.ts";
-import type { ModelRecord } from "./product-domain.ts";
+import { canonicalDigest } from "./canonical-json-v2.ts";
+import type { ExperimentConfigurationRecord, ProjectRecord, ModelRecord, StoredObjectMetadata } from "./product-domain.ts";
 import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
 import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
 
@@ -18,6 +19,20 @@ export type ModelCreationDto = {
   model: Pick<ModelRecord, "id" | "name" | "lifecycleState" | "technicalStatus" | "runMode" | "createdAt" | "updatedAt">;
   conversation: ConversationDto;
 };
+
+export type ProjectCreationDto = {
+  project: Pick<ProjectRecord, "id" | "name" | "lifecycleState" | "sourceModelId" | "modelSnapshotDigest" | "createdAt" | "updatedAt">;
+};
+
+export type ProjectWorkspaceProjectionDto = {
+  project: ProjectCreationDto["project"] & { executionDescription: Record<string, unknown> };
+  files: Array<Pick<StoredObjectMetadata, "id" | "kind" | "relativePath" | "mediaType" | "sizeBytes" | "sha256" | "createdAt">>;
+  conversations: ConversationDto[];
+  experimentConfigurations: ExperimentConfigurationDto[];
+  runs: Array<ReturnType<ProductStoreV2["listRuns"]>[number] & { outputs: ReturnType<ProductStoreV2["listRunOutputs"]> }>;
+};
+
+export type ExperimentConfigurationDto = ExperimentConfigurationRecord & { configurationDigest: string };
 
 export type AgentTurnResult =
   | { mode: "live"; turn: AgentTurnDto; messages: ConversationMessageDto[] }
@@ -107,6 +122,94 @@ export class AgentWorkspaceService {
         },
       });
       return { model: publicModel(created.model), conversation: created.conversation };
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  createProject(input: { commandId: string; name: string; modelId: string }): ProjectCreationDto {
+    const commandId = boundedKey(input.commandId, "commandId");
+    const name = boundedName(input.name, "Project name");
+    const sourceModelId = boundedId(input.modelId);
+    const projectId = stableId("project", commandId);
+    const existing = this.store.listProjects({ includeArchived: true, includeTrashed: true }).find((project) => project.id === projectId);
+    if (existing) {
+      if (existing.name !== name || existing.sourceModelId !== sourceModelId) {
+        throw new ApiError(409, "idempotency_conflict", "That commandId was already used with different Project intent.");
+      }
+      return { project: publicProject(existing) };
+    }
+    try {
+      return { project: publicProject(this.store.createProjectFromModel({ projectId, projectName: name, sourceModelId, createdAt: this.#now() })) };
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  projectWorkspace(projectId: string): ProjectWorkspaceProjectionDto {
+    const id = boundedId(projectId);
+    try {
+      const project = this.store.getProject(id);
+      return {
+        project: { ...publicProject(project), executionDescription: project.executionDescription },
+        files: this.store.listObjectFiles({ kind: "project", id }).filter((file) => file.kind === "project_model_snapshot").map(publicFile),
+        conversations: this.store.listConversations({ kind: "project", id }),
+        experimentConfigurations: this.store.listExperimentConfigurations(id).map(publicExperimentConfiguration),
+        runs: this.store.listRuns(id).map((run) => ({ ...run, outputs: this.store.listRunOutputs(run.id) })),
+      };
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  createExperimentConfiguration(input: { projectId: string; commandId: string; name: string; configuration: Record<string, unknown> }): ExperimentConfigurationDto {
+    const projectId = boundedId(input.projectId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const name = boundedName(input.name, "Experiment configuration name");
+    const configuration = boundedConfiguration(input.configuration);
+    const estimatedSampleCount = estimateSampleCount(configuration);
+    const id = stableId("experiment", `${projectId}:${commandId}`);
+    const existing = this.store.listExperimentConfigurations(projectId, { includeArchived: true, includeTrashed: true }).find((item) => item.id === id);
+    if (existing) {
+      if (existing.name !== name || canonicalDigest(existing.configuration) !== canonicalDigest(configuration)
+        || existing.estimatedSampleCount !== estimatedSampleCount) {
+        throw new ApiError(409, "idempotency_conflict", "That commandId was already used with different experiment intent.");
+      }
+      return publicExperimentConfiguration(existing);
+    }
+    try {
+      return publicExperimentConfiguration(this.store.createExperiment({
+        id,
+        projectId,
+        name,
+        configuration,
+        estimatedSampleCount,
+        transactionId: stableTransactionId("create_experiment", id),
+        createdAt: this.#now(),
+      }));
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  updateExperimentConfiguration(input: { projectId: string; configId: string; commandId: string; name?: string; configuration?: Record<string, unknown> }): ExperimentConfigurationDto {
+    const projectId = boundedId(input.projectId);
+    const configId = boundedId(input.configId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    if (input.name === undefined && input.configuration === undefined) throw new ApiError(422, "invalid_request", "Experiment update must change name or configuration.");
+    let current: ExperimentConfigurationRecord;
+    try {
+      const found = this.store.listExperimentConfigurations(projectId, { includeArchived: true, includeTrashed: true }).find((item) => item.id === configId);
+      if (!found) throw new ProductStoreV2Error("Experiment configuration does not exist.");
+      current = found;
+    } catch (error) { throw storeApiError(error); }
+    const name = input.name === undefined ? current.name : boundedName(input.name, "Experiment configuration name");
+    const configuration = input.configuration === undefined ? current.configuration : boundedConfiguration(input.configuration);
+    const estimatedSampleCount = estimateSampleCount(configuration);
+    const intentDigest = canonicalDigest({ projectId, configId, name, configuration, estimatedSampleCount });
+    try {
+      return publicExperimentConfiguration(this.store.updateExperiment({
+        id: configId,
+        projectId,
+        name,
+        configuration,
+        estimatedSampleCount,
+        transactionId: stableTransactionId("update_experiment", `${configId}:${commandId}`),
+        intentDigest,
+        updatedAt: this.#now(),
+      }));
     } catch (error) { throw storeApiError(error); }
   }
 
@@ -357,7 +460,33 @@ const publicModel = (record: ModelRecord): ModelCreationDto["model"] => ({
   updatedAt: record.updatedAt,
 });
 
+const publicProject = (record: ProjectRecord): ProjectCreationDto["project"] => ({
+  id: record.id,
+  name: record.name,
+  lifecycleState: record.lifecycleState,
+  sourceModelId: record.sourceModelId,
+  modelSnapshotDigest: record.modelSnapshotDigest,
+  createdAt: record.createdAt,
+  updatedAt: record.updatedAt,
+});
+
+const publicFile = (file: StoredObjectMetadata): ProjectWorkspaceProjectionDto["files"][number] => ({
+  id: file.id,
+  kind: file.kind,
+  relativePath: file.relativePath,
+  mediaType: file.mediaType,
+  sizeBytes: file.sizeBytes,
+  sha256: file.sha256,
+  createdAt: file.createdAt,
+});
+
+const publicExperimentConfiguration = (record: ExperimentConfigurationRecord): ExperimentConfigurationDto => ({
+  ...record,
+  configurationDigest: canonicalDigest(record.configuration),
+});
+
 const stableId = (prefix: string, value: string): string => `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
+const stableTransactionId = (operation: string, value: string): string => `mutation_${operation}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 const boundedKey = (value: string, name: string): string => {
   if (typeof value !== "string" || !value.trim() || value.length > 300 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ApiError(422, "invalid_request", `${name} is invalid.`);
   return value;
@@ -384,6 +513,48 @@ const boundedPurpose = (value: string): string => {
   }
   return value.trim();
 };
+const boundedConfiguration = (value: Record<string, unknown>): Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_request", "Experiment configuration must be an object.");
+  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (bytes < 2 || bytes > 64_000) throw new ApiError(422, "invalid_request", "Experiment configuration is too large.");
+  if (!finiteJson(value)) throw new ApiError(422, "invalid_request", "Experiment configuration must contain only finite JSON values.");
+  return structuredClone(value);
+};
+const estimateSampleCount = (configuration: Record<string, unknown>): number => {
+  const seeds = seedCount(configuration);
+  const sweep = configuration.sweep;
+  if (sweep === undefined) return seeds;
+  if (!sweep || typeof sweep !== "object" || Array.isArray(sweep)) throw new ApiError(422, "invalid_request", "Experiment sweep must be an object.");
+  let product = seeds;
+  for (const [key, values] of Object.entries(sweep as Record<string, unknown>)) {
+    if (!key.trim() || !Array.isArray(values) || values.length < 1 || values.length > 100 || !finiteJson(values)) {
+      throw new ApiError(422, "invalid_request", "Experiment sweep fields must be bounded non-empty arrays.");
+    }
+    product *= values.length;
+    if (!Number.isSafeInteger(product) || product > 10_000) throw new ApiError(422, "invalid_request", "Experiment sample count is too large.");
+  }
+  return product;
+};
+const seedCount = (configuration: Record<string, unknown>): number => {
+  const hasSeed = Object.hasOwn(configuration, "seed");
+  const hasSeeds = Object.hasOwn(configuration, "seeds");
+  if (hasSeed && hasSeeds) throw new ApiError(422, "invalid_request", "Use either seed or seeds, not both.");
+  if (hasSeed && !signedInt32((configuration as any).seed)) throw new ApiError(422, "invalid_request", "Experiment seed must be a signed 32-bit integer.");
+  if (!hasSeeds) return 1;
+  const seeds = (configuration as any).seeds;
+  if (!Array.isArray(seeds) || seeds.length < 1 || seeds.length > 1_000 || seeds.some((seed) => !signedInt32(seed))) {
+    throw new ApiError(422, "invalid_request", "Experiment seeds must be a bounded signed 32-bit integer array.");
+  }
+  return seeds.length;
+};
+const signedInt32 = (value: unknown): boolean => Number.isInteger(value) && Number(value) >= -2_147_483_648 && Number(value) <= 2_147_483_647;
+const finiteJson = (value: unknown): boolean => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(finiteJson);
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>).every(([key, item]) => key.length > 0 && !/[\u0000-\u001f\u007f]/u.test(key) && finiteJson(item));
+  return false;
+};
 const assertOwner = (owner: ConversationOwner): void => {
   if (!owner || !["model", "project"].includes(owner.kind)) throw new ApiError(422, "invalid_owner", "Conversation owner kind is invalid.");
   boundedId(owner.id);
@@ -401,7 +572,7 @@ const storeApiError = (error: unknown): ApiError => {
   if (error instanceof ApiError) return error;
   if (!(error instanceof ProductStoreV2Error)) return new ApiError(500, "internal_error", "The Agent workspace could not complete the request.");
   if (/does not exist/u.test(error.message)) return new ApiError(404, "resource_not_found", "The requested resource does not exist.");
-  if (/reused|already|changed|locked|unexpected number/u.test(error.message)) return new ApiError(409, "state_conflict", "The request conflicts with current durable state.");
+  if (/reused|already|different|changed|locked|unexpected number|not active and technically executable/u.test(error.message)) return new ApiError(409, "state_conflict", "The request conflicts with current durable state.");
   if (/invalid|required|must|cannot|outside/u.test(error.message)) return new ApiError(422, "invalid_request", "The request violates the Agent workspace contract.");
   return new ApiError(500, "storage_error", "The Agent workspace store rejected the request.");
 };

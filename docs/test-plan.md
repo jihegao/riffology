@@ -47,7 +47,16 @@ lost-session bounded reconstruction, restart, temporary documents/actions,
 scoped Model mutation, Project mutation denial, and honest technical-status
 copy until the final shared product shell is delivered by #15.
 
-Latest branch evidence: the full backend suite passed, with zero failures and
+Latest local A2 acceptance refresh on 2026-07-22: the focused A2 backend
+set passed 62/62 in this Linux container when run without the macOS-only
+`model-process-isolation.test.ts` file. The web suite passed 104/104 and the
+production build succeeded. The full backend suite was also run and is not green
+in this container: it includes legacy Gate 3 framed-wind tests that currently
+return incompatible/invalid framed evidence and restricted-process tests that
+require the macOS `sandbox-exec` boundary. Those full-suite failures are tracked
+as environment/legacy non-A2 evidence and do not expand the A2 product contract.
+
+Prior branch evidence: the full backend suite passed, with zero failures and
 one optional installed-OpenCode smoke skipped. The latest web suite has 104
 passing tests and the production build succeeds. A
 live technical check materialized an isolated generic Model workspace and

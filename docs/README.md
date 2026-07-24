@@ -37,6 +37,10 @@ product.
   checks. The #13 implementation and real-provider two-turn browser closure are
   complete as documented in the test plan. Stage 3/4 behavior remains
   explicitly out of scope.
+- [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
+  proposed Stage 3 Project execution contract after A2 acceptance, covering New
+  project, experiments, visual/batch runs, outputs, events, Playwright
+  inspection, and wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.

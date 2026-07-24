@@ -79,6 +79,39 @@ export type ProjectSnapshotFile = StoredObjectMetadata & {
   kind: "project_model_snapshot";
 };
 
+export type ExperimentConfigurationRecord = {
+  id: ProductId;
+  projectId: ProductId;
+  name: string;
+  configuration: Record<string, unknown>;
+  estimatedSampleCount: number;
+  lifecycleState: LifecycleState;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+};
+
+export type RunRecord = {
+  id: ProductId;
+  projectId: ProductId;
+  experimentConfigurationId: ProductId;
+  status: RunStatus;
+  frozenConfiguration: Record<string, unknown>;
+  requestedSampleCount: number;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+  startedAt: IsoTimestamp | null;
+  finishedAt: IsoTimestamp | null;
+};
+
+export type OutputIndexRecord = {
+  id: ProductId;
+  runId: ProductId;
+  logicalName: string;
+  outputType: string;
+  file: StoredObjectMetadata;
+  createdAt: IsoTimestamp;
+};
+
 /**
  * Stage 1 store primitive. Implementations must copy bytes, never retain paths
  * into the source model, and commit the project, file rows and bytes as one

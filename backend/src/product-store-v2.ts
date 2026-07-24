@@ -28,6 +28,7 @@ import type {
 import type { DurableConversationRuntime } from "./agent-session-manager.ts";
 import type {
   CreateProjectFromModelInput,
+  ExperimentConfigurationRecord,
   IsoTimestamp,
   LifecycleState,
   ManagedResourceKind,
@@ -36,9 +37,11 @@ import type {
   ModelTechnicalStatus,
   NamedManagedResourceKind,
   ObjectFileKind,
+  OutputIndexRecord,
   PermanentDeletePreview,
   ProjectRecord,
   ResourceOwner,
+  RunRecord,
   RunStatus,
   StoredObjectMetadata,
   TemporaryDocumentState,
@@ -182,7 +185,19 @@ export type CreateExperimentInput = {
   name: string;
   configuration: Record<string, unknown>;
   estimatedSampleCount: number;
+  transactionId?: string;
   createdAt: IsoTimestamp;
+};
+
+export type UpdateExperimentInput = {
+  id: string;
+  projectId: string;
+  name: string;
+  configuration: Record<string, unknown>;
+  estimatedSampleCount: number;
+  transactionId: string;
+  intentDigest: string;
+  updatedAt: IsoTimestamp;
 };
 
 export type CreateRunInput = {
@@ -806,10 +821,41 @@ export class ProductStoreV2 {
     return this.#file(input.objectFileId);
   }
 
-  createExperiment(input: CreateExperimentInput): void {
+  createExperiment(input: CreateExperimentInput): ExperimentConfigurationRecord {
+    const existing = this.#database.prepare("SELECT * FROM experiment_configurations WHERE id = ?").get(input.id) as any;
+    if (existing) {
+      const matches = existing.project_id === input.projectId && existing.name === input.name
+        && existing.configuration_json === json(input.configuration) && existing.estimated_sample_count === input.estimatedSampleCount;
+      if (!matches) throw new ProductStoreV2Error("Experiment configuration ID already exists with a different creation intent.");
+      return experimentConfigurationRecord(existing);
+    }
     this.#databaseMutation([activeLifecycleGuard("projects", input.projectId), { sql: `INSERT INTO experiment_configurations
       (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.projectId, input.name, json(input.configuration), input.estimatedSampleCount, input.createdAt, input.createdAt], expectedChanges: 1 }]);
+      VALUES (?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.projectId, input.name, json(input.configuration), input.estimatedSampleCount, input.createdAt, input.createdAt], expectedChanges: 1 },
+      ...(input.transactionId ? [commandReceiptInsert(input.transactionId, canonicalDigest({ id: input.id, projectId: input.projectId, name: input.name, configuration: input.configuration, estimatedSampleCount: input.estimatedSampleCount }))] : []),
+    ]);
+    return this.#experimentConfiguration(input.projectId, input.id);
+  }
+
+  updateExperiment(input: UpdateExperimentInput): ExperimentConfigurationRecord {
+    const existingReceipt = this.#database.prepare("SELECT manifest_sha256 FROM committed_mutations WHERE transaction_id = ?").get(input.transactionId) as { manifest_sha256: string } | undefined;
+    if (existingReceipt) {
+      if (existingReceipt.manifest_sha256 !== input.intentDigest) throw new ProductStoreV2Error("Experiment configuration command already exists with a different intent.");
+      const current = this.#experimentConfiguration(input.projectId, input.id);
+      if (current.name !== input.name || canonicalDigest(current.configuration) !== canonicalDigest(input.configuration)
+        || current.estimatedSampleCount !== input.estimatedSampleCount) {
+        throw new ProductStoreV2Error("Experiment configuration command was already committed but current state changed.");
+      }
+      return current;
+    }
+    this.#databaseMutation([
+      activeLifecycleGuard("projects", input.projectId),
+      { sql: `UPDATE experiment_configurations SET name = ?, configuration_json = ?, estimated_sample_count = ?, updated_at = ?
+        WHERE id = ? AND project_id = ? AND lifecycle_state = 'active'`,
+      params: [input.name, json(input.configuration), input.estimatedSampleCount, input.updatedAt, input.id, input.projectId], expectedChanges: 1 },
+      commandReceiptInsert(input.transactionId, input.intentDigest),
+    ]);
+    return this.#experimentConfiguration(input.projectId, input.id);
   }
 
   createRun(input: CreateRunInput): void {
@@ -848,6 +894,60 @@ export class ProductStoreV2 {
   listProjects(options: { includeArchived?: boolean; includeTrashed?: boolean } = {}): ProjectRecord[] {
     return (this.#database.prepare(`SELECT * FROM projects ORDER BY id`).all() as any[]).map(projectRecord)
       .filter((row) => visible(row.lifecycleState, options));
+  }
+
+  getProject(id: string): ProjectRecord {
+    assertId(id);
+    return this.#project(id);
+  }
+
+  listExperimentConfigurations(projectId: string, options: { includeArchived?: boolean; includeTrashed?: boolean } = {}): ExperimentConfigurationRecord[] {
+    assertId(projectId);
+    return (this.#database.prepare("SELECT * FROM experiment_configurations WHERE project_id = ? ORDER BY updated_at DESC, id").all(projectId) as any[])
+      .map(experimentConfigurationRecord)
+      .filter((row) => visible(row.lifecycleState, options));
+  }
+
+  listRuns(projectId: string, options: { includeTrashed?: boolean } = {}): RunRecord[] {
+    assertId(projectId);
+    return (this.#database.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY updated_at DESC, id").all(projectId) as any[])
+      .map(runRecord)
+      .filter((row) => row.status !== "trashed" || Boolean(options.includeTrashed));
+  }
+
+  listRunOutputs(runId: string): OutputIndexRecord[] {
+    assertId(runId);
+    return (this.#database.prepare(`SELECT
+        o.id AS output_index_id, o.run_id AS output_run_id, o.object_file_id AS output_object_file_id,
+        o.logical_name, o.output_type, o.created_at AS output_created_at,
+        f.*, r.project_id AS run_project_id
+      FROM output_indexes o
+      JOIN object_files f ON f.id = o.object_file_id
+      JOIN runs r ON r.id = o.run_id
+      WHERE o.run_id = ?
+      ORDER BY o.logical_name, o.id`).all(runId) as any[]).map((row) => ({
+      id: row.output_index_id,
+      runId: row.output_run_id,
+      logicalName: row.logical_name,
+      outputType: row.output_type,
+      file: metadata({
+        id: row.output_object_file_id,
+        owner_model_id: row.owner_model_id,
+        owner_project_id: row.owner_project_id,
+        owner_conversation_id: row.owner_conversation_id,
+        owner_run_id: row.owner_run_id,
+        kind: row.kind,
+        relative_path: row.relative_path,
+        media_type: row.media_type,
+        size_bytes: row.size_bytes,
+        sha256: row.sha256,
+        source_attachment_id: row.source_attachment_id,
+        adoption_purpose: row.adoption_purpose,
+        created_at: row.created_at,
+        run_project_id: row.run_project_id,
+      }),
+      createdAt: row.output_created_at,
+    }));
   }
 
   renameResource(kind: NamedManagedResourceKind, id: string, name: string, updatedAt: IsoTimestamp): void {
@@ -1268,6 +1368,12 @@ export class ProductStoreV2 {
     return projectRecord(row);
   }
 
+  #experimentConfiguration(projectId: string, id: string): ExperimentConfigurationRecord {
+    const row = this.#database.prepare("SELECT * FROM experiment_configurations WHERE id = ? AND project_id = ?").get(id, projectId) as any;
+    if (!row) throw new ProductStoreV2Error("Experiment configuration does not exist.");
+    return experimentConfigurationRecord(row);
+  }
+
   #verifyFrozenProject(project: any): void {
     const rows = this.#objectRows("owner_project_id = ? AND kind = 'project_model_snapshot'", [project.id]).sort(compareObjectRows);
     if (!rows.length) throw new ProductStoreV2Error("Existing Project snapshot is incomplete.");
@@ -1361,6 +1467,30 @@ const projectRecord = (row: any): ProjectRecord => ({
   createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at, trashedAt: row.trashed_at,
 });
 
+const experimentConfigurationRecord = (row: any): ExperimentConfigurationRecord => ({
+  id: row.id,
+  projectId: row.project_id,
+  name: row.name,
+  configuration: JSON.parse(row.configuration_json),
+  estimatedSampleCount: row.estimated_sample_count,
+  lifecycleState: row.lifecycle_state,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const runRecord = (row: any): RunRecord => ({
+  id: row.id,
+  projectId: row.project_id,
+  experimentConfigurationId: row.experiment_configuration_id,
+  status: row.status,
+  frozenConfiguration: JSON.parse(row.frozen_configuration_json),
+  requestedSampleCount: row.requested_sample_count,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+});
+
 const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: string } => {
   switch (kind) {
     case "model": return { table: "models", trashColumn: "model_id" };
@@ -1388,6 +1518,11 @@ const activeLifecycleGuard = (table: "models" | "projects" | "conversations", id
 });
 const activeOwnerGuard = (owner: Extract<ResourceOwner, { kind: "model" | "project" }>): DatabaseMutationStatement => activeLifecycleGuard(owner.kind === "model" ? "models" : "projects", owner.id);
 const assertId = (id: string): void => { if (!SAFE_ID.test(id)) throw new ProductStoreV2Error("Resource ID is invalid."); };
+const commandReceiptInsert = (transactionId: string, intentDigest: string): DatabaseMutationStatement => ({
+  sql: "INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+  params: [transactionId, intentDigest],
+  expectedChanges: 1,
+});
 const assertOptions = (options: ProductStoreV2Options): void => {
   if (Object.keys(options).some((key) => !["initFaultInjector", "coordinatorOptions"].includes(key))) throw new ProductStoreV2Error("Product store options contain an unsupported capability.");
 };

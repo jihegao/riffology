@@ -39,6 +39,43 @@ export class MilestoneA2Api {
       }));
       return true;
     }
+    if (request.method === "POST" && parts.length === 2 && parts[1] === "projects") {
+      const body = await strictJsonBody(request, ["commandId", "name", "modelId"]);
+      json(response, 201, this.service.createProject({
+        commandId: requiredString(body.commandId, "commandId"),
+        name: requiredString(body.name, "name"),
+        modelId: requiredString(body.modelId, "modelId"),
+      }));
+      return true;
+    }
+    if (request.method === "GET" && parts.length === 4 && parts[1] === "projects" && parts[3] === "workspace") {
+      json(response, 200, this.service.projectWorkspace(parts[2]));
+      return true;
+    }
+    if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "experiment-configs") {
+      const projectId = parts[2];
+      if (request.method === "POST" && parts.length === 4) {
+        const body = await strictJsonBody(request, ["commandId", "name", "configuration"]);
+        json(response, 201, this.service.createExperimentConfiguration({
+          projectId,
+          commandId: requiredString(body.commandId, "commandId"),
+          name: requiredString(body.name, "name"),
+          configuration: requiredObject(body.configuration, "configuration"),
+        }));
+        return true;
+      }
+      if (request.method === "PATCH" && parts.length === 5) {
+        const body = await strictJsonBody(request, ["commandId", "name", "configuration"], ["name", "configuration"]);
+        json(response, 200, this.service.updateExperimentConfiguration({
+          projectId,
+          configId: parts[4],
+          commandId: requiredString(body.commandId, "commandId"),
+          ...(body.name === undefined ? {} : { name: requiredString(body.name, "name") }),
+          ...(body.configuration === undefined ? {} : { configuration: requiredObject(body.configuration, "configuration") }),
+        }));
+        return true;
+      }
+    }
     if (parts.length >= 4 && parts[1] === "models") {
       const modelId = parts[2];
       if (request.method === "GET" && parts.length === 4 && parts[3] === "workspace") {
@@ -144,6 +181,11 @@ const strictJsonBody = async (request: IncomingMessage, allowed: string[], optio
 const requiredString = (value: unknown, name: string): string => {
   if (typeof value !== "string") throw new ApiError(422, "invalid_request", `${name} must be text.`);
   return value;
+};
+
+const requiredObject = (value: unknown, name: string): Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_request", `${name} must be an object.`);
+  return value as Record<string, unknown>;
 };
 
 const stringArray = (value: unknown, name: string): string[] => {

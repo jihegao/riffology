@@ -109,6 +109,11 @@ const post = (url: string, body: unknown) => fetch(url, {
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
+const patch = (url: string, body: unknown) => fetch(url, {
+  method: "PATCH",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
 
 const createModel = async (baseUrl: string, commandId = "create-model-a") => {
   const response = await post(`${baseUrl}/api/models`, { commandId, name: "Generic Model", providerId: "provider-a", modelId: "model-a" });
@@ -320,6 +325,129 @@ test("Model workspace projection and technical-check start/read are digest-bound
   const publicText = JSON.stringify({ workspace, started, read });
   assert.doesNotMatch(publicText, /riff-model-owned-check|\/private\/|\/Users\/|workspacePath|capabilityId|private log/u);
   assert.equal(checker.roots.every((root) => !publicText.includes(root)), true);
+});
+
+test("A3 New project creates a fixed Model copy and exposes a sanitized workspace", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a3-project-api-"));
+  const openCode = new ApiOpenCode();
+  const checker = new ApiTechnicalChecker();
+  const { app, baseUrl } = await start(base, openCode, checker);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "a3-source-model");
+
+  const draftProject = await post(`${baseUrl}/api/projects`, { commandId: "project-from-draft", name: "Rejected", modelId: created.model.id });
+  assert.equal(draftProject.status, 409);
+  assert.equal((await draftProject.json() as any).error.code, "state_conflict");
+
+  const check = await post(`${baseUrl}/api/models/${created.model.id}/technical-checks`, { commandId: "publish-source-model" });
+  assert.equal(check.status, 200);
+  assert.equal((await check.json() as any).publication, "published");
+
+  const unknownField = await post(`${baseUrl}/api/projects`, {
+    commandId: "bad-project", name: "Bad", modelId: created.model.id, workspacePath: "/tmp/leak",
+  });
+  assert.equal(unknownField.status, 422);
+  assert.equal((await unknownField.json() as any).error.code, "unknown_field");
+
+  const projectResponse = await post(`${baseUrl}/api/projects`, { commandId: "new-project", name: "Scenario Project", modelId: created.model.id });
+  assert.equal(projectResponse.status, 201, await projectResponse.clone().text());
+  const project = await projectResponse.json() as any;
+  assert.equal(project.project.name, "Scenario Project");
+  assert.equal(project.project.sourceModelId, created.model.id);
+  assert.match(project.project.modelSnapshotDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(Object.keys(project.project).sort(), ["createdAt", "id", "lifecycleState", "modelSnapshotDigest", "name", "sourceModelId", "updatedAt"]);
+
+  const retry = await post(`${baseUrl}/api/projects`, { commandId: "new-project", name: "Scenario Project", modelId: created.model.id });
+  assert.equal(retry.status, 201);
+  assert.deepEqual(await retry.json(), project);
+  const conflict = await post(`${baseUrl}/api/projects`, { commandId: "new-project", name: "Different", modelId: created.model.id });
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json() as any).error.code, "idempotency_conflict");
+
+  const workspaceResponse = await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`);
+  assert.equal(workspaceResponse.status, 200);
+  const workspace = await workspaceResponse.json() as any;
+  assert.deepEqual(workspace.project, { ...project.project, executionDescription: app.productStore!.getProject(project.project.id).executionDescription });
+  assert.equal(workspace.files.length > 0, true);
+  assert.equal(workspace.files.every((file: any) => file.kind === "project_model_snapshot"), true);
+  assert.equal(workspace.files.every((file: any) => file.relativePath.startsWith("model-snapshot/")), true);
+  assert.deepEqual(workspace.conversations, []);
+  assert.deepEqual(workspace.experimentConfigurations, []);
+  assert.deepEqual(workspace.runs, []);
+
+  const conversationResponse = await post(`${baseUrl}/api/objects/project/${project.project.id}/conversations`, {
+    commandId: "project-conversation", name: "Project chat", providerId: "provider-a", modelId: "model-a",
+  });
+  assert.equal(conversationResponse.status, 201);
+  const conversation = await conversationResponse.json() as any;
+  assert.deepEqual(conversation.owner, { kind: "project", id: project.project.id });
+  const workspaceWithConversation = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
+  assert.deepEqual(workspaceWithConversation.conversations.map((item: any) => item.id), [conversation.id]);
+
+  const experimentResponse = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "create-experiment",
+    name: "Baseline",
+    configuration: { seed: 7, parameters: { rate: 2 }, sweep: { demand: [1, 2, 3] } },
+  });
+  assert.equal(experimentResponse.status, 201, await experimentResponse.clone().text());
+  const experiment = await experimentResponse.json() as any;
+  assert.equal(experiment.name, "Baseline");
+  assert.equal(experiment.projectId, project.project.id);
+  assert.equal(experiment.estimatedSampleCount, 3);
+  assert.match(experiment.configurationDigest, /^[0-9a-f]{64}$/u);
+  const experimentRetry = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "create-experiment",
+    name: "Baseline",
+    configuration: { seed: 7, parameters: { rate: 2 }, sweep: { demand: [1, 2, 3] } },
+  });
+  assert.equal(experimentRetry.status, 201);
+  assert.deepEqual(await experimentRetry.json(), experiment);
+  const experimentConflict = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "create-experiment", name: "Changed", configuration: { seed: 7 },
+  });
+  assert.equal(experimentConflict.status, 409);
+  assert.equal((await experimentConflict.json() as any).error.code, "idempotency_conflict");
+
+  const invalidSweep = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "invalid-sweep", name: "Invalid", configuration: { sweep: { demand: [] } },
+  });
+  assert.equal(invalidSweep.status, 422);
+  assert.equal((await invalidSweep.json() as any).error.code, "invalid_request");
+
+  const updateResponse = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "update-experiment",
+    configuration: { seeds: [1, 2], parameters: { rate: 3 }, sweep: { demand: [1, 2] } },
+  });
+  assert.equal(updateResponse.status, 200, await updateResponse.clone().text());
+  const updatedExperiment = await updateResponse.json() as any;
+  assert.equal(updatedExperiment.name, "Baseline");
+  assert.equal(updatedExperiment.estimatedSampleCount, 4);
+  assert.notEqual(updatedExperiment.configurationDigest, experiment.configurationDigest);
+  const updateRetry = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "update-experiment",
+    configuration: { seeds: [1, 2], parameters: { rate: 3 }, sweep: { demand: [1, 2] } },
+  });
+  assert.equal(updateRetry.status, 200);
+  assert.deepEqual(await updateRetry.json(), updatedExperiment);
+  const updateConflict = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "update-experiment",
+    configuration: { seed: 9 },
+  });
+  assert.equal(updateConflict.status, 409);
+  assert.equal((await updateConflict.json() as any).error.code, "state_conflict");
+  const workspaceWithExperiment = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
+  assert.deepEqual(workspaceWithExperiment.experimentConfigurations.map((item: any) => ({ id: item.id, sampleCount: item.estimatedSampleCount })), [
+    { id: experiment.id, sampleCount: 4 },
+  ]);
+
+  const sourceCode = app.productStore!.listObjectFiles({ kind: "model", id: created.model.id }).find((file) => file.kind === "model_code")!;
+  const snapshotCode = app.productStore!.listObjectFiles({ kind: "project", id: project.project.id }).find((file) => file.relativePath.endsWith("code/model.py"))!;
+  const frozenBytes = app.productStore!.readObjectFile(snapshotCode.id);
+  app.productStore!.replaceModelFile(sourceCode.id, Buffer.from("print('changed after project')\n"), "2026-07-22T03:00:00.000Z");
+  assert.equal(app.productStore!.readObjectFile(snapshotCode.id).equals(frozenBytes), true);
+
+  const publicText = JSON.stringify({ project, workspace: workspaceWithExperiment, experiment: updatedExperiment });
+  assert.doesNotMatch(publicText, /\/tmp\/|\/Users\/|workspacePath|externalSessionRef|opaque-session|capability|proxy|processCommand/u);
 });
 
 test("technical-check executes the execution description captured by start, not an earlier Model read", async (t) => {

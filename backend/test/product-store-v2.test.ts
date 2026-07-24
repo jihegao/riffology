@@ -61,8 +61,19 @@ test("fresh ProductStoreV2 atomically initializes and round-trips the complete S
     store.createConversation({ id: "conversation_project", owner: { kind: "project", id: project.id }, name: "Analyze", providerId: "provider", providerModelId: "model", createdAt: NOW });
     store.createMessage({ id: "message_project", conversationId: "conversation_project", ordinal: 0, role: "assistant", status: "complete", text: "Ready", content: { ok: true }, createdAt: NOW });
     store.createExperiment({ id: "experiment_alpha", projectId: project.id, name: "Base", configuration: { seed: 7 }, estimatedSampleCount: 1, createdAt: NOW });
+    assert.throws(() => store.createExperiment({ id: "experiment_alpha", projectId: project.id, name: "Changed", configuration: { seed: 7 }, estimatedSampleCount: 1, createdAt: NOW }), /different creation intent/u);
+    const renamed = store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Renamed", configuration: { seeds: [1, 2] }, estimatedSampleCount: 2, transactionId: "mutation_update_experiment_alpha", intentDigest: "a".repeat(64), updatedAt: LATER });
+    assert.equal(renamed.name, "Renamed");
+    assert.equal(renamed.estimatedSampleCount, 2);
+    assert.equal(store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Renamed", configuration: { seeds: [1, 2] }, estimatedSampleCount: 2, transactionId: "mutation_update_experiment_alpha", intentDigest: "a".repeat(64), updatedAt: LATER }).configuration.seeds instanceof Array, true);
+    assert.throws(() => store.updateExperiment({ id: "experiment_alpha", projectId: project.id, name: "Other", configuration: { seed: 3 }, estimatedSampleCount: 1, transactionId: "mutation_update_experiment_alpha", intentDigest: "b".repeat(64), updatedAt: LATER }), /different intent/u);
     store.createRun({ id: "run_alpha", projectId: project.id, experimentId: "experiment_alpha", status: "succeeded", frozenConfiguration: { seed: 7 }, requestedSampleCount: 1, createdAt: NOW });
     store.createOutput({ id: "output_alpha", objectFileId: "file_output_alpha", runId: "run_alpha", relativePath: "result.csv", logicalName: "result.csv", outputType: "table", mediaType: "text/csv", bytes: Buffer.from("metric\n1\n"), createdAt: NOW });
+    assert.deepEqual(store.listExperimentConfigurations(project.id).map((item) => item.id), ["experiment_alpha"]);
+    assert.deepEqual(store.listRuns(project.id).map((item) => item.id), ["run_alpha"]);
+    assert.deepEqual(store.listRunOutputs("run_alpha").map((item) => ({ id: item.id, runId: item.runId, fileId: item.file.id })), [
+      { id: "output_alpha", runId: "run_alpha", fileId: "file_output_alpha" },
+    ]);
 
     store.renameResource("temporary_document", "document_model", "Updated plan", LATER);
     store.archiveResource("experiment", "experiment_alpha", LATER);
