@@ -19,7 +19,15 @@ import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2 } from "./product-store-v2.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
-import { ProductRunDispatcher, type BatchSupervisorPort } from "./product-run-dispatcher.ts";
+import {
+  GenericVisualSupervisor,
+  type VisualOutputCandidate,
+} from "./generic-visual-supervisor.ts";
+import {
+  ProductRunDispatcher,
+  type BatchSupervisorPort,
+  type VisualSupervisorPort,
+} from "./product-run-dispatcher.ts";
 import { SimulationSkillCatalog } from "./simulation-skill-catalog.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
@@ -60,6 +68,8 @@ export type BackendOptions = {
   a2AllowedSkills?: string[];
   a3BatchSupervisor?: BatchSupervisorPort;
   a3BatchOutputConsumer?: (candidate: BatchOutputCandidate) => Buffer;
+  a3VisualSupervisor?: VisualSupervisorPort;
+  a3VisualOutputConsumer?: (candidate: VisualOutputCandidate) => Buffer;
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
@@ -94,15 +104,26 @@ export class BackendApp {
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
       const scratchRoot = options.a3ScratchRoot ?? join(options.workspaceRoot, ".riff-batch-scratch");
       mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+      let approvedPythonExecutable: string | undefined;
+      const pythonExecutable = (): string =>
+        approvedPythonExecutable ??= configuredBatchPythonExecutable(options.a3PythonExecutable);
       const batchSupervisor = options.a3BatchSupervisor ?? new GenericBatchSupervisor({
-        pythonExecutable: configuredBatchPythonExecutable(options.a3PythonExecutable),
+        pythonExecutable: pythonExecutable(),
+        scratchRoot,
+      });
+      const visualSupervisor = options.a3VisualSupervisor ?? new GenericVisualSupervisor({
+        pythonExecutable: pythonExecutable(),
         scratchRoot,
       });
       this.productRunDispatcher = new ProductRunDispatcher({
         store: this.productStore,
         supervisor: batchSupervisor,
+        visualSupervisor,
         ...(options.a3DispatcherLeaseMs ? { leaseMs: options.a3DispatcherLeaseMs } : {}),
         ...(options.a3BatchOutputConsumer ? { consumeOutput: options.a3BatchOutputConsumer } : {}),
+        ...(options.a3VisualOutputConsumer
+          ? { consumeVisualOutput: options.a3VisualOutputConsumer }
+          : {}),
       });
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
       const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
@@ -117,6 +138,7 @@ export class BackendApp {
           if (cancellationRequested) this.productRunDispatcher?.requestCancellation(runId);
           else this.productRunDispatcher?.notify();
         },
+        true,
       ));
     }
   }

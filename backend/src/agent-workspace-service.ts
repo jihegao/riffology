@@ -120,6 +120,7 @@ export class AgentWorkspaceService {
   #scopedMcpTail: Promise<void> = Promise.resolve();
   readonly #scopedMcpUrl?: (capability: string) => string;
   readonly #onRunQueued?: (runId: string, cancellationRequested: boolean) => void;
+  readonly #visualDispatchAvailable: boolean;
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
   readonly technicalChecks: ModelTechnicalCheckService;
@@ -133,6 +134,7 @@ export class AgentWorkspaceService {
     turnRuntime?: AgentTurnRuntime,
     scopedMcpUrl?: (capability: string) => string,
     onRunQueued?: (runId: string, cancellationRequested: boolean) => void,
+    visualDispatchAvailable = false,
   ) {
     this.store = store;
     this.openCode = openCode;
@@ -142,6 +144,7 @@ export class AgentWorkspaceService {
     this.turnRuntime = turnRuntime;
     this.#scopedMcpUrl = scopedMcpUrl;
     this.#onRunQueued = onRunQueued;
+    this.#visualDispatchAvailable = visualDispatchAvailable;
   }
 
   handleAgentMcp(capability: string | undefined, request: unknown) {
@@ -289,11 +292,13 @@ export class AgentWorkspaceService {
           "Visual runs do not support conversation completion cards.",
         );
       }
-      throw new ApiError(
-        409,
-        "capability_not_available",
-        "Visual run dispatch is not available in this milestone.",
-      );
+      if (!this.#visualDispatchAvailable) {
+        throw new ApiError(
+          409,
+          "capability_not_available",
+          "Visual run dispatch is not available in this runtime.",
+        );
+      }
     }
 
     let description;
@@ -304,7 +309,8 @@ export class AgentWorkspaceService {
       if (error instanceof ExecutionProtocolV2Error) throw new ApiError(409, error.code, error.message);
       throw error;
     }
-    if (description.batch?.domainEvents) {
+    if (experiment.configuration.runKind === "batch"
+      && description.batch?.domainEvents) {
       throw new ApiError(
         409,
         "domain_events_not_supported",

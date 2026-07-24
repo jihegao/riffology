@@ -71,6 +71,7 @@ export class ProductRunRecovery {
       throw new ProductRunRecoveryError("dispatcher_recovery_required", "The candidate dispatcher generation is invalid.");
     }
     this.#store.auditRecoveredBatchSuccesses();
+    this.#store.auditRecoveredVisualSuccesses();
     while (this.#store.finalizeNextCancelledQueuedRun({
       finishedAt: this.#now().toISOString(),
     })) {

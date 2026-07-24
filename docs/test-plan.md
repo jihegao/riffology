@@ -149,12 +149,13 @@ A3-1b adds coverage in `test/execution-protocol-v2.test.ts`,
   tests also close run terminal evidence, process exit/cleanup immutability,
   gate/state shape, and same-transaction successful output publication.
 
-Visual starts without `completionConversationId` fail with HTTP `409`
-`capability_not_available`. If `completionConversationId` is present, that
-field-specific gate takes precedence and fails with HTTP `422`
+At the A3-1 batch-only boundary, visual starts without
+`completionConversationId` failed with HTTP `409`
+`capability_not_available`. Current A3-2a2c admits eligible visual starts
+through the existing Project-run route. If `completionConversationId` is
+present, that field-specific gate still fails with HTTP `422`
 `visual_completion_not_supported`. Batch descriptions that declare
-`domainEvents` fail with `domain_events_not_supported`. These are explicit
-negative gates, not visual/event implementation evidence.
+`domainEvents` fail with `domain_events_not_supported`.
 
 Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c checks with:
 
@@ -255,10 +256,10 @@ A3-2a is delivered through separately reviewed gates:
   released/running/healthy checkpoints and exact cleanup. They also exercise
   production `GenericBatchSupervisor` parsing of an exact durable visual launch
   receipt, while coordinated health-receipt/manifest corruption fails before
-  supervisor inspection or signalling. The current public visual start without
-  `completionConversationId` returns HTTP `409`
-  `capability_not_available`; when that field is present, its earlier gate
-  returns HTTP `422` `visual_completion_not_supported`. This gate runs no
+  supervisor inspection or signalling. At this published A3-2a1 gate, a
+  visual start without `completionConversationId` returned HTTP `409`
+  `capability_not_available`; when that field was present, its earlier gate
+  returned HTTP `422` `visual_completion_not_supported`. This gate runs no
   visual model, opens no listener, and claims no browser behavior.
 - **A3-2a2a schema-v9/Store visual authority — merged and published through PR
   #29:** merge commit `1584e39` upgrades product-database authority to v9
@@ -271,7 +272,8 @@ A3-2a is delivered through separately reviewed gates:
   terminal cancellation precedence, required output validation, atomic
   publication/rollback, and rejection of an extra live attempt/process. Two
   independent reviews and its publication gate are complete.
-- **A3-2a2b generic single-attempt visual supervisor — current branch:** a real
+- **A3-2a2b generic single-attempt visual supervisor — merged and published
+  through PR #30 at merge commit `9f23f61`:** a real
   `riff-visual-v1` child receives
   the canonical single-sample envelope through `--riff-input`, its assigned
   `--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and the frozen assigned
@@ -282,15 +284,20 @@ A3-2a is delivered through separately reviewed gates:
   succeeds only when it is code zero and every required declared output
   validates. The supervisor and process safety primitives do not dispatch,
   publish a public route, broker/frame a page, or claim browser behavior.
-  Current evidence is 379 backend tests with 378 passed, zero failed, and one
-  optional installed-OpenCode smoke skipped; the 102/102 focused concurrency
-  combination passed three consecutive runs; web passes 104/104 and the
-  production build succeeds.
-- **A3-2a2c dispatcher/public admission — pending:** add the one-slot visual
-  scheduler with continued batch dispatch, generation-fenced heartbeat,
-  cancellation/terminal precedence, stop join, restart recovery, and the
-  existing Project-run API admission. Until that gate passes, public visual
-  start remains HTTP `409` `capability_not_available`.
+  Its publication evidence is 379 backend tests with 378 passed, zero failed,
+  and one optional installed-OpenCode smoke skipped; the 102/102 focused
+  concurrency combination passed three consecutive runs; web passed 104/104
+  and the production build succeeded.
+- **A3-2a2c dispatcher/public admission — current branch:** one dispatcher
+  generation owns independent batch and one-slot visual lanes. Tests cover
+  exact-generation heartbeat/cancel/finalize, the fatal-error latch, stop
+  join, generation-fenced cleanup of unlaunched visual scratch, and exact
+  visual-success restart audit. The existing Project-run route admits visual
+  work without exposing the child port or adding a parallel API. The
+  real-process public vertical and DTO/error/log secrecy gate pass. The final
+  backend gate reports 385 total: 384 passed, zero failed, and one
+  optional installed-OpenCode smoke skipped; the focused 13/13 gate covers
+  the review regressions; web passes 104/104 and the production build succeeds.
 
 The macOS real-process gate uses a visual-only `sandbox-exec` profile.
 Counterexamples attempt to listen on another loopback port, connect to another
@@ -303,7 +310,7 @@ the sandbox still denies every outbound attempt. The listener set is checked
 before health, while running, and during termination. That compensation cannot
 be reported as sandbox endpoint isolation.
 
-A3-2a2c will freeze `maxActiveVisualRuns = 1` without changing the batch cap. Tests
+A3-2a2c freezes `maxActiveVisualRuns = 1` without changing the batch cap. Tests
 run one long-lived healthy visual, queue a second visual, and queue a real batch
 run. The second visual must remain queued, the batch must claim and finish, and
 the active map must contain only the exact first `(runId, attemptId)`. Every
@@ -329,7 +336,7 @@ cannot send another HTTP request or create another same-identity health
 receipt. Startup time includes readiness plus that one request and has no HTTP
 retry.
 
-The target public run DTO accepts `runKind: "batch" | "visual"`. Terminal tests
+The public run DTO accepts `runKind: "batch" | "visual"`. Terminal tests
 freeze `succeeded/visual_run_succeeded`, `failed/visual_process_failed`,
 `failed/visual_health_failed`, `failed/visual_listener_invalid`, and
 `timed_out/visual_startup_timeout`, plus `timed_out/run_wall_timeout` and shared
@@ -346,12 +353,11 @@ Visual completion is a negative contract. A public visual start containing
 timeout, cancellation, and restart, with no `run_completion_cards` row and no
 platform message. Project run reads remain authoritative.
 
-A3-2a1, published A3-2a2a, and the current A3-2a2b branch have no dispatcher,
-public visual admission/API, proxy, frame, WebSocket, Playwright, or
-real-browser acceptance row. The public HTTP `409`
-`capability_not_available` and HTTP `422`
-`visual_completion_not_supported` negative gates are unchanged. The remaining
-claims begin only in the later gates:
+A3-2a1, published A3-2a2a/A3-2a2b, and current A3-2a2c expose visual
+admission only through the existing Project-run API. They expose no child
+port, proxy, frame, WebSocket, Playwright authority, or real-browser acceptance
+row. The HTTP `422` `visual_completion_not_supported` negative gate remains.
+The remaining claims begin only in the later gates:
 
 - **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
   enforcement, frame-size, connection-count, and idle-time limits, plus the

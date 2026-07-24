@@ -777,17 +777,20 @@ target.write_text(
     commandId: "command_visual_run",
     experimentConfigId: "experiment_visual_run_rejected",
   };
-  const rejectedVisualRun = await post(visualRunUrl, visualRunRequest);
-  assert.equal(rejectedVisualRun.status, 409);
-  const rejectedVisualError = (await rejectedVisualRun.json() as any).error;
-  assert.equal(rejectedVisualError.code, "capability_not_available");
-  const rejectedVisualRetry = await post(visualRunUrl, visualRunRequest);
-  assert.equal(rejectedVisualRetry.status, 409);
-  const rejectedVisualRetryError = (await rejectedVisualRetry.json() as any).error;
-  assert.deepEqual(
-    { code: rejectedVisualRetryError.code, message: rejectedVisualRetryError.message },
-    { code: rejectedVisualError.code, message: rejectedVisualError.message },
-  );
+  const acceptedVisualRun = await post(visualRunUrl, visualRunRequest);
+  assert.equal(acceptedVisualRun.status, 201);
+  const visualStart = await acceptedVisualRun.json() as any;
+  assert.deepEqual(Object.keys(visualStart).sort(), [
+    "commandId", "completionConversationId", "createdAt", "experimentConfigId", "projectId",
+    "runId", "runKind", "sampleCount", "schemaVersion", "status",
+  ]);
+  assert.equal(visualStart.status, "queued");
+  assert.equal(visualStart.runKind, "visual");
+  assert.equal(visualStart.sampleCount, 1);
+  assert.equal(visualStart.completionConversationId, null);
+  const acceptedVisualRetry = await post(visualRunUrl, visualRunRequest);
+  assert.equal(acceptedVisualRetry.status, 201);
+  assert.deepEqual(await acceptedVisualRetry.json(), visualStart);
 
   const visualCompletionRequest = {
     commandId: "command_visual_run_with_completion",
@@ -812,8 +815,12 @@ target.write_text(
     },
   );
 
-  assert.deepEqual(app.productStore!.listRuns(visualProject.id), []);
-  assert.deepEqual(app.productStore!.listPriorDispatcherRecoveryUnits(), []);
+  const visualRuns = app.productStore!.listRuns(visualProject.id);
+  assert.equal(visualRuns.length, 1);
+  assert.equal(visualRuns[0]!.id, visualStart.runId);
+  assert.equal(visualRuns[0]!.runKind, "visual");
+  assert.equal(visualRuns[0]!.completionConversationId, null);
+  assert.equal(visualRuns[0]!.completionCardDisposition, "not_requested");
   const evidenceDatabase = new DatabaseSync(join(app.productStore!.root, "product.sqlite3"), {
     open: true,
     readOnly: true,
@@ -821,29 +828,17 @@ target.write_text(
   try {
     assert.deepEqual({ ...evidenceDatabase.prepare(`SELECT
       (SELECT count(*) FROM runs WHERE project_id = ?) AS runs,
-      (SELECT count(*) FROM run_attempts a JOIN runs r ON r.id = a.run_id
-        WHERE r.project_id = ?) AS attempts,
-      (SELECT count(*) FROM process_attempts p
-        JOIN run_attempts a ON a.id = p.run_attempt_id
-        JOIN runs r ON r.id = a.run_id
-        WHERE r.project_id = ?) AS processes`
-    ).get(visualProject.id, visualProject.id, visualProject.id) as object }, {
-      runs: 0,
-      attempts: 0,
-      processes: 0,
+      (SELECT count(*) FROM run_completion_cards c JOIN runs r ON r.id = c.run_id
+        WHERE r.project_id = ?) AS cards,
+      (SELECT count(*) FROM messages
+        WHERE message_kind = 'platform_card'
+          AND json_valid(content_json)
+          AND json_extract(content_json, '$.runId') = ?) AS messages`
+    ).get(visualProject.id, visualProject.id, visualStart.runId) as object }, {
+      runs: 1,
+      cards: 0,
+      messages: 0,
     });
-    const healthReceiptTables = evidenceDatabase.prepare(`SELECT name FROM sqlite_master
-      WHERE type = 'table' AND lower(name) LIKE '%health%' AND lower(name) LIKE '%receipt%'
-      ORDER BY name`
-    ).all() as Array<{ name: string }>;
-    for (const { name } of healthReceiptTables) {
-      const quoted = name.replaceAll('"', '""');
-      assert.equal(
-        (evidenceDatabase.prepare(`SELECT count(*) AS count FROM "${quoted}"`).get() as { count: number }).count,
-        0,
-        name,
-      );
-    }
   } finally {
     evidenceDatabase.close();
   }
