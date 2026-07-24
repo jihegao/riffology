@@ -269,18 +269,16 @@ until separately reviewed retirement.
 
 ### A3-2 visual API/runtime gates
 
-The A3-2a1 schema, admission, private Store primitives, and cross-restart visual
-reconciliation described below are current implementation. Its focused
-fake-supervisor recovery suite passes 29/29 without starting a real visual
-child or opening a listener. Production `GenericBatchSupervisor` reads the
-exact durable visual launch receipt and the recovery path adopts it;
-coordinated health-receipt/manifest corruption fails before process inspection
-or signalling. The broader focused root gate passes 62/62, the independent
-reviewer gate passes 81/81, independent recovery review is PASS, the full
-backend gate reports 314 total with 313 passed, zero failed, and one optional
-installed-OpenCode smoke skipped, and web passes 104/104 plus its production
-build. Merge and publication remain pending. A3-2a2, A3-2b, and A3-2c remain
-target contracts, not current routes or acceptance evidence:
+The A3-2a1 schema-v8, private Store evidence, and cross-restart visual
+reconciliation boundary was merged and published through PR #28. A3-2a2a is
+implemented on the current branch at commit `215cbcf`, but is not yet merged or
+published. Its schema-v9 and Store evidence passed two independent reviews,
+focused root tests 78/78, and a final backend gate of 325 total with 324 passed,
+zero failed, and one optional installed-OpenCode smoke skipped; web passes
+104/104 plus its production build. A3-2a2a adds no dispatcher or supervisor,
+starts no real visual child, opens no listener, and does not open public visual
+admission. A3-2a2b/c, A3-2b, and A3-2c remain target contracts, not current
+routes or acceptance evidence:
 
 1. **A3-2a1 schema-v8/Store/recovery:** schema v8 now extends schema-v6 scratch
    and launch evidence to the existing schema-v4 visual process shape, makes
@@ -294,14 +292,24 @@ target contracts, not current routes or acceptance evidence:
    continues to return HTTP `409` `capability_not_available` for a visual
    experiment without `completionConversationId`; if that field is supplied,
    its earlier gate returns HTTP `422` `visual_completion_not_supported`.
-2. **A3-2a2 real visual lifecycle:** only after real-process and restart gates
+2. **A3-2a2a schema-v9/Store authority — current branch, merge pending:**
+   schema v9 replaces the former batch-only success/output triggers with an
+   atomic context bound to both `runId` and `runKind`. It rejects visual
+   completion conversation/disposition/card state in migration and future
+   writes. Private Store methods generation-fence visual claim, finalize queued
+   cancellation without a card, preserve cancellation precedence on terminal
+   failure/timeout, and publish visual success plus required outputs atomically
+   only after one healthy, exit-zero, verified-cleanup process. Public admission
+   remains unchanged.
+3. **A3-2a2b/c real visual lifecycle — pending:** only after dispatcher,
+   supervisor, real-process, listener, and restart gates
    pass, the existing Project run route may accept a visual experiment. It
    remains the same `/api/projects/{projectId}/runs` resource and returns the
    existing allowlisted run DTO; no parallel visual-run API is introduced.
-3. **A3-2b broker/frame/WebSocket:** add browser bootstrap, visual frame
+4. **A3-2b broker/frame/WebSocket:** add browser bootstrap, visual frame
    session, isolated broker HTTP, and exact WebSocket forwarding. Platform app
    and broker exact-bind `::1` on different server-owned ports.
-4. **A3-2c Playwright:** add internal, current-Project/current-healthy-attempt
+5. **A3-2c Playwright:** add internal, current-Project/current-healthy-attempt
    observation and explicit one-turn interaction authority.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
@@ -339,6 +347,11 @@ identity. Health-only, receipt-only, timestamp mismatch, later update, and
 second receipt fail. Because pre-v8 public visual dispatch never existed, any
 unproven pre-v8 visual `health_at` or live process evidence fails migration
 closed instead of becoming healthy. All evidence remains private.
+Schema v9 is the current product-database authority. It is required because the
+prior v4 atomic-success and output-object/index triggers were batch-only. The v9
+replacement binds the internal success context to both run identity and run
+kind, preserves the batch contract, and permits visual success/output writes
+only with the matching visual context and complete visual success evidence.
 No Project workspace, run DTO, transcript, completion record, error, or
 ordinary log may expose a child port or convert it into a public URL. Port
 selection has a bounded local close-then-bind TOCTOU window; A3 does not claim
@@ -361,8 +374,8 @@ its claim dispatcher generation for heartbeat/finalize; the slot is released
 only after exact terminal commit and verified process/scratch cleanup.
 Dispatcher stop aborts and awaits all active lanes before returning. These
 rules do not weaken cancellation precedence, timeouts, or restart cleanup.
-A3-2a1 and A3-2a2 expose no proxy, frame, WebSocket, Playwright capability, or
-positive browser claim.
+A3-2a1 and the current A3-2a2a branch expose no proxy, frame, WebSocket,
+Playwright capability, or positive browser claim.
 
 The target run response continues to use the same `ProjectRunDto`, with
 `runKind: "batch" | "visual"`. Stable visual pairs are

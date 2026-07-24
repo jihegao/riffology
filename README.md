@@ -42,18 +42,23 @@ handoff. A3-1c-c adds schema migration v7 and exactly-once terminal batch
 completion cards: the Store atomically records a deterministic platform system
 message or a permanent skip disposition, and startup reconciles older pending
 terminal runs before serving reads.
-A3-2a1 implementation is now complete behind the still-closed public visual
-boundary. Schema migration v8 adds immutable, launch-bound visual port evidence
-and an atomic one-time visual health receipt/CAS; the private Store now records
-the visual launch, scratch, process identity, gate, running, health, heartbeat,
-exit, and cleanup checkpoints. Public visual starts remain unavailable:
+A3-2a1 was merged and published through PR #28 behind the still-closed public
+visual boundary. Schema migration v8 adds immutable, launch-bound visual port
+evidence and an atomic one-time visual health receipt/CAS; the private Store
+records the visual launch, scratch, process identity, gate, running, health,
+heartbeat, exit, and cleanup checkpoints. A3-2a2a is implemented on the current
+branch at commit `215cbcf`, but is not yet merged or published. Schema migration
+v9 replaces the former batch-only success/output triggers with run-kind-bound
+atomic success authority, rejects visual completion-card state at the database
+boundary, and adds private Store authority for visual claim, queued cancellation
+without a card, terminalization, and atomic success/output publication. Public
+visual starts remain unavailable:
 requests without a completion conversation still fail with
 `capability_not_available`, while requests that supply
 `completionConversationId` fail earlier with HTTP `422` and
-`visual_completion_not_supported`. Cross-restart visual reconciliation is
-implemented and its focused fake-supervisor suite passes 29/29. This slice
-starts no real visual child and opens no listener. Its recovery review and full
-backend/web test gates pass; merge and publication remain pending.
+`visual_completion_not_supported`. Cross-restart visual reconciliation is the
+published A3-2a1 boundary. A3-2a2a adds no dispatcher or supervisor, starts no
+real visual child, and opens no listener. A3-2a2b/c remain pending.
 Real visual execution, scoped Playwright access, and ordinary wind import are
 later #14 slices. Their active contract and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
@@ -186,16 +191,24 @@ The prior A3-1c-c branch's full backend run contained 295 tests: 294 passed,
 zero failed, and one optional smoke was skipped. Its web TypeScript check and
 production build also passed; this is historical A3-1 evidence, not the current
 A3-2a1 full-suite gate.
-Focused A3-2a1 tests now cover schema-v8 migration/rollback and visual
+Focused A3-2a1 tests cover schema-v8 migration/rollback and visual
 health-receipt invariants, the stable public visual-admission rejection, the
 private Store visual process-evidence lifecycle, and cross-restart recovery.
 The focused recovery suite passes 29/29 using a fake supervisor. It starts no
-real visual child and opens no listener. The broader focused root gate passes
-62/62, the independent reviewer gate passes 81/81, and independent recovery
-review is PASS. The full backend gate reports 314 total: 313 passed, zero
-failed, and one optional installed-OpenCode smoke skipped. Web tests pass
-104/104 and the production build succeeds. A3-2a1 is not yet merged or
-published.
+real visual child and opens no listener. A3-2a1 was merged and published through
+PR #28.
+
+Current A3-2a2a evidence covers schema-v9 migration/rollback, run-kind-bound
+atomic success/output publication, the visual no-completion database invariant,
+generation-fenced visual claim, queued cancel with no card, cancellation-first
+terminalization, verified health/exit-zero/cleanup success prerequisites,
+required outputs, and atomic rollback/retry. Two independent reviews are PASS,
+the focused root gate passes 78/78, and the final backend gate reports 325
+total: 324 passed, zero failed, and one optional installed-OpenCode smoke
+skipped. Web tests pass 104/104 and the production build succeeds. This evidence
+does not include a dispatcher, supervisor, real visual child, listener, or
+positive public visual admission. A3-2a2a at commit `215cbcf` is not yet merged
+or published; A3-2a2b/c remain pending.
 
 Focused Milestone A2 verification:
 
