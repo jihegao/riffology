@@ -282,6 +282,13 @@ export class AgentWorkspaceService {
       throw new ApiError(409, "state_conflict", "Only an active experiment configuration can start a run.");
     }
     if (experiment.configuration.runKind === "visual") {
+      if (completionConversationId !== null) {
+        throw new ApiError(
+          422,
+          "visual_completion_not_supported",
+          "Visual runs do not support conversation completion cards.",
+        );
+      }
       throw new ApiError(
         409,
         "capability_not_available",

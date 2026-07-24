@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { BackendApp } from "../src/server.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
@@ -771,13 +772,81 @@ target.write_text(
     plan: visualPlan,
     createdAt: "2026-07-24T04:00:02.000Z",
   });
-  const rejectedVisualRun = await post(`${baseUrl}/api/projects/${visualProject.id}/runs`, {
+  const visualRunUrl = `${baseUrl}/api/projects/${visualProject.id}/runs`;
+  const visualRunRequest = {
     commandId: "command_visual_run",
     experimentConfigId: "experiment_visual_run_rejected",
-  });
+  };
+  const rejectedVisualRun = await post(visualRunUrl, visualRunRequest);
   assert.equal(rejectedVisualRun.status, 409);
-  assert.equal((await rejectedVisualRun.json() as any).error.code, "capability_not_available");
+  const rejectedVisualError = (await rejectedVisualRun.json() as any).error;
+  assert.equal(rejectedVisualError.code, "capability_not_available");
+  const rejectedVisualRetry = await post(visualRunUrl, visualRunRequest);
+  assert.equal(rejectedVisualRetry.status, 409);
+  const rejectedVisualRetryError = (await rejectedVisualRetry.json() as any).error;
+  assert.deepEqual(
+    { code: rejectedVisualRetryError.code, message: rejectedVisualRetryError.message },
+    { code: rejectedVisualError.code, message: rejectedVisualError.message },
+  );
+
+  const visualCompletionRequest = {
+    commandId: "command_visual_run_with_completion",
+    experimentConfigId: "experiment_visual_run_rejected",
+    completionConversationId: "conversation_visual_completion",
+  };
+  const rejectedVisualCompletion = await post(visualRunUrl, visualCompletionRequest);
+  assert.equal(rejectedVisualCompletion.status, 422);
+  const rejectedVisualCompletionError = (await rejectedVisualCompletion.json() as any).error;
+  assert.equal(rejectedVisualCompletionError.code, "visual_completion_not_supported");
+  const rejectedVisualCompletionRetry = await post(visualRunUrl, visualCompletionRequest);
+  assert.equal(rejectedVisualCompletionRetry.status, 422);
+  const rejectedVisualCompletionRetryError = (await rejectedVisualCompletionRetry.json() as any).error;
+  assert.deepEqual(
+    {
+      code: rejectedVisualCompletionRetryError.code,
+      message: rejectedVisualCompletionRetryError.message,
+    },
+    {
+      code: rejectedVisualCompletionError.code,
+      message: rejectedVisualCompletionError.message,
+    },
+  );
+
   assert.deepEqual(app.productStore!.listRuns(visualProject.id), []);
+  assert.deepEqual(app.productStore!.listPriorDispatcherRecoveryUnits(), []);
+  const evidenceDatabase = new DatabaseSync(join(app.productStore!.root, "product.sqlite3"), {
+    open: true,
+    readOnly: true,
+  });
+  try {
+    assert.deepEqual({ ...evidenceDatabase.prepare(`SELECT
+      (SELECT count(*) FROM runs WHERE project_id = ?) AS runs,
+      (SELECT count(*) FROM run_attempts a JOIN runs r ON r.id = a.run_id
+        WHERE r.project_id = ?) AS attempts,
+      (SELECT count(*) FROM process_attempts p
+        JOIN run_attempts a ON a.id = p.run_attempt_id
+        JOIN runs r ON r.id = a.run_id
+        WHERE r.project_id = ?) AS processes`
+    ).get(visualProject.id, visualProject.id, visualProject.id) as object }, {
+      runs: 0,
+      attempts: 0,
+      processes: 0,
+    });
+    const healthReceiptTables = evidenceDatabase.prepare(`SELECT name FROM sqlite_master
+      WHERE type = 'table' AND lower(name) LIKE '%health%' AND lower(name) LIKE '%receipt%'
+      ORDER BY name`
+    ).all() as Array<{ name: string }>;
+    for (const { name } of healthReceiptTables) {
+      const quoted = name.replaceAll('"', '""');
+      assert.equal(
+        (evidenceDatabase.prepare(`SELECT count(*) AS count FROM "${quoted}"`).get() as { count: number }).count,
+        0,
+        name,
+      );
+    }
+  } finally {
+    evidenceDatabase.close();
+  }
   const rejectedRunAuthority = await post(`${baseUrl}/api/projects/${outputProject.id}/runs`, {
     commandId: "command_rejected_run_authority",
     experimentConfigId: "experiment_public_run_projection",
