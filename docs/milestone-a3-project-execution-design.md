@@ -21,12 +21,21 @@ attempt/process/scratch reconciliation, and recovery-before-generation
 activation. A3-1c-c adds schema migration v7, exactly-once deterministic
 batch platform completion cards, permanent skip dispositions, and startup
 reconciliation/audit of terminal pending rows.
-Visual execution remains planned as four sequential review gates:
-A3-2a1 schema-v8/Store/recovery contract with public visual starts still
-rejected, A3-2a2 real visual lifecycle, A3-2b isolated browser broker/frame and
-WebSocket access, and A3-2c scoped Playwright authority. Ordinary wind import
-remains A3-3. None of those target slices is current implementation evidence,
-so this document does not claim that Stage 3 is complete.
+A3-2a1 implementation is now complete: schema v8 freezes visual port/health
+evidence, public visual admission remains closed with stable negative codes,
+private Store primitives record the visual process-evidence lifecycle, and
+cross-restart recovery reconciles exact durable visual evidence. Its focused
+fake-supervisor recovery suite passes 29/29 without starting a real visual
+child or opening a listener. The broader focused root gate passes 62/62, the
+independent reviewer gate passes 81/81, independent recovery review is PASS,
+the full backend gate reports 314 total with 313 passed, zero failed, and one
+optional installed-OpenCode smoke skipped, and web passes 104/104 plus its
+production build. Merge and publication remain pending. The later sequential
+gates remain A3-2a2 real visual lifecycle, A3-2b isolated browser broker/frame
+and WebSocket access, and A3-2c scoped Playwright authority.
+Ordinary wind import remains A3-3. None of the remaining target slices is
+current implementation evidence, so this document does not claim that Stage 3
+is complete.
 
 This document is subordinate to the
 [Milestone A product contract](milestone-a-product-contract.md), builds on the
@@ -37,7 +46,8 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c boundary is intentionally narrow:
+The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c plus A3-2a1 boundary is
+intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -90,10 +100,25 @@ The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c boundary is intentionally na
   `cancelled` without successful outputs;
 - schema migration v7 publishes one deterministic batch platform completion card, or
   one permanent skip disposition, in the terminal run transaction and audits
-  or reconciles terminal pending rows before dispatcher activation; and
+  or reconciles terminal pending rows before dispatcher activation;
+- schema migration v8 covers migration/rollback with a representative v7 batch
+  sentinel and the relevant legacy triggers, makes the launch-bound visual port
+  immutable, and permits exactly one atomic null-to-receipt-timestamp visual
+  health transition with an immutable matching receipt;
+- private Store visual primitives preserve exact launch, scratch,
+  run/attempt/generation/process/PID/start-token/process-group/port identity
+  through registration, gate release, running, health, heartbeat, exit, and
+  cleanup, without exposing those fields through the public run DTO;
+- visual recovery validates exact launch, scratch, process, port, health, and
+  cleanup evidence before inspection or signalling and preserves visual
+  completion disposition as `not_requested`; and
+- public visual admission remains closed: a request without a completion
+  conversation returns `capability_not_available`, while a request with
+  `completionConversationId` returns HTTP `422`
+  `visual_completion_not_supported`; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema migration v7 while the current execution
+The product database is schema migration v8 while the current execution
 contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
@@ -105,8 +130,8 @@ The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
 - batch domain-event ingestion or public output list/download routes;
-- a schema-v8 visual launch/recovery contract, real visual lifecycle, scoped
-  visual proxy, WebSocket forwarding, or Playwright capability; and
+- a real visual lifecycle, scoped visual proxy, WebSocket forwarding, or
+  Playwright capability; and
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
@@ -120,17 +145,16 @@ generations by stable prior-attempt identity. A per-Store in-process guard plus
 the Store writer lock prevents a second local dispatcher from reconciling a
 healthy owner. Schema-v5 live process rows lack v6 scratch/launch evidence and
 intentionally require fail-closed repair instead of speculative signalling.
-Visual starts fail with
-`capability_not_available`, and batch descriptions that declare
-`domainEvents` fail with `domain_events_not_supported`.
+Visual starts without a completion conversation fail with
+`capability_not_available`; visual starts with `completionConversationId` fail
+earlier with `visual_completion_not_supported`; and batch descriptions that
+declare `domainEvents` fail with `domain_events_not_supported`.
 
-The planned A3-2a1 migration does not change this public boundary. It may land
-schema-v8 visual launch, health, and recovery records only while public visual
-start without a completion conversation remains rejected with
-`capability_not_available`. A visual request that supplies
-`completionConversationId` is rejected earlier with
-`visual_completion_not_supported`. A3-2a2 is the first slice permitted to
-remove the capability rejection, after its real lifecycle evidence is green.
+The implemented A3-2a1 schema, admission, private Store, and cross-restart
+recovery contract do not change this public boundary. Its independent review
+and full backend/web gates pass; merge and publication remain pending. A3-2a2
+is the first slice permitted to remove the capability rejection, after its real
+lifecycle evidence is green.
 
 ## Outcome and stage boundary
 
@@ -861,13 +885,13 @@ an unused loopback port, starts the copied entry point, and waits for bounded
 health. Wildcard/non-loopback binding, cross-origin redirect, startup timeout,
 or premature exit fails the run.
 
-Schema v4 already has the `process_kind`, visual `loopback_port`, `health_at`
-shape, and one-live-visual-process index, but that is not complete visual
-evidence: `loopback_port` can currently be updated, and `health_at` lacks a
-complete null-to-timestamp single-write/receipt-same-transaction CAS and
-immutability rule. Schema v8 does not add those columns again. It extends the
-schema-v6 scratch, launch-receipt, manifest, and recovery graph to visual work
-and adds triggers that:
+Schema v4 already had the `process_kind`, visual `loopback_port`, `health_at`
+shape, and one-live-visual-process index, but that was not complete visual
+evidence: `loopback_port` could be updated, and `health_at` lacked a complete
+null-to-timestamp single-write/receipt-same-transaction CAS and immutability
+rule. Schema v8 does not add those columns again. The implemented migration
+extends schema-v6 scratch and launch evidence to visual work and adds triggers
+that:
 
 - reject every update of the launch-bound `loopback_port`;
 - allow `health_at` to change only once from null to the receipt timestamp for
@@ -881,10 +905,12 @@ The separate immutable health receipt stores no capability, cookie, nonce,
 public URL, response body, or other secret. Because public visual dispatch did
 not exist before v8, migration cannot infer that a pre-v8 `health_at` or live
 visual process is legitimate. Any such unproven health/live evidence fails
-migration closed and is never adopted as healthy. Visual model code remains
-behind the same one-use launch gate as batch. A3-2a1 migrates and audits these
-records but does not dispatch visual work; A3-2a2 adds the real supervisor and
-is the first slice that may admit a visual run.
+migration closed and is never adopted as healthy. Private Store primitives
+write the same exact-identity process checkpoints while public visual dispatch
+remains closed. Cross-restart recovery now validates those exact checkpoints
+before any inspection or signalling; focused tests use a fake supervisor and
+start no real visual child or listener. A3-2a2 adds the real supervisor and is
+the first slice that may admit a visual run.
 
 The first visual dispatcher has `maxActiveVisualRuns = 1` and keeps an active
 map keyed by exact `(runId, attemptId)`. It does not claim a second queued visual
@@ -1231,15 +1257,21 @@ Output indexes never resolve outside the owning Project/run object root.
    enforcement. A3-1c-b implements v4 cross-restart attempt/process/scratch
    recovery. A3-1c-c implements exactly-once terminal batch completion cards and
    startup reconciliation.
-5. **A3-2a1 visual runtime contract — pending:** schema v8 migration and
-   rollback, schema-v6 scratch/launch/recovery extension to visual, binding to
-   the existing schema-v4 visual process shape, loopback-port immutability,
-   atomic one-time `health_at` plus health receipt, fail-closed pre-v8 visual
-   evidence, exact restart-cleanup Store contract, and dispatcher scheduling
-   contract. Public
-   visual starts still reject with `capability_not_available`, or
+5. **A3-2a1 visual runtime contract — reviewed, merge pending:**
+   schema v8 migration and rollback, loopback-port immutability, atomic one-time
+   `health_at` plus health receipt, fail-closed pre-v8 visual evidence, stable
+   public rejection, and private exact-identity Store process checkpoints are
+   implemented.
+   Cross-restart visual reconciliation is implemented and its focused
+   fake-supervisor suite passes 29/29 without a real child or listener.
+   Production `GenericBatchSupervisor` reads the exact durable visual launch
+   receipt, and coordinated health-receipt/manifest corruption fails before
+   process inspection or signalling. Focused root 62/62, independent reviewer
+   81/81, independent recovery review, full backend, and web/build gates pass;
+   merge and publication remain pending. Public visual starts still reject
+   with `capability_not_available`, or
    `visual_completion_not_supported` when a completion conversation was
-   supplied; this slice has no process or browser acceptance claim.
+   supplied; this slice has no real-process or browser acceptance claim.
 6. **A3-2a2 real visual lifecycle — pending:** remove the public rejection only
    after a real `riff-visual-v1` child proves the canonical single-sample input,
    assigned output directory/loopback endpoint, visual-only sandbox, exact
@@ -1269,8 +1301,8 @@ does not begin until Stage 3 is merged and accepted.
 ## Verification and acceptance matrix
 
 The final integrated A3-1b full backend run passed 256 tests with zero failures
-and one optional installed-OpenCode smoke skipped. Current A3-1c-c focused
-work has a full backend result of 295 tests: 294 passed, zero failed, and one
+and one optional installed-OpenCode smoke skipped. The historical A3-1c-c
+branch had a full backend result of 295 tests: 294 passed, zero failed, and one
 optional smoke skipped. Its focused
 evidence covers schema-v6 migration/rollback, the foundation/schema/experiment
 rows, the batch portion of exact input freezing, v3 read-only behavior, public
@@ -1280,8 +1312,17 @@ same-process shutdown cleanup, A3-1c-a cancellation precedence/receipts, and
 A3-1c-b restart windows including missing evidence, recovery replay,
 generation handoff, and leader-gone descendant cleanup, plus A3-1c-c
 completion-card status/disposition, fault, restart, schema, context, and
-deletion-closure tests. It does not cover the later visual, Playwright, wind,
-download, event, and browser rows.
+deletion-closure tests.
+
+The current A3-2a1 gate reports 314 backend tests: 313 passed, zero failed, and
+one optional installed-OpenCode smoke skipped. Focused root tests pass 62/62,
+the independent reviewer set passes 81/81, independent recovery review is
+PASS, web tests pass 104/104, and the production build succeeds. Recovery
+evidence includes production `GenericBatchSupervisor` durable visual-receipt
+parsing and coordinated corruption that fails before process inspection or
+signalling. No real visual child or listener is started, and later visual,
+Playwright, wind, download, event, and browser rows remain unclaimed. A3-2a1
+merge and publication remain pending.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:
