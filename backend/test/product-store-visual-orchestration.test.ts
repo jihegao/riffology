@@ -3,12 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { canonicalDigest } from "../src/canonical-json-v2.ts";
 import { planExperiment, type ExperimentPlan } from "../src/experiment-planner.ts";
 import {
   openProductDatabase,
   withAtomicVisualSuccessRunContext,
 } from "../src/product-schema.ts";
+import { ProductRunRecovery } from "../src/product-run-recovery.ts";
 import {
   ProductStoreV2,
   type ClaimedVisualRun,
@@ -75,8 +76,6 @@ const LIMITS: RunLimitsV1 = {
   maxSamples: 1,
   maxConcurrency: 1,
 };
-const json = (value: unknown): string => canonicalJsonV2(value).toString("utf8");
-
 type Fixture = {
   parent: string;
   root: string;
@@ -146,9 +145,9 @@ const createFixture = (
     plan,
     createdAt: NOW,
   });
-  assert.throws(() => store.createFrozenRun({
-    commandId: `command_public_start_${suffix}`,
-    runId: `run_public_${suffix}`,
+  store.createFrozenRun({
+    commandId: `command_start_${suffix}`,
+    runId,
     projectId,
     experimentConfigId: experimentId,
     completionConversationId: null,
@@ -158,39 +157,7 @@ const createFixture = (
     executionDescriptionDigest: canonicalDigest(project.executionDescription),
     limits: LIMITS,
     createdAt: NOW,
-  }), /capability_not_available/u);
-  store.close();
-
-  const database = openProductDatabase(join(root, "product.sqlite3"));
-  try {
-    database.prepare(`INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json,
-        requested_sample_count, created_at, updated_at, contract_version, run_kind,
-        completion_conversation_id, execution_description_sha256, project_snapshot_sha256,
-        frozen_configuration_sha256, sample_plan_json, sample_plan_sha256, limits_json,
-        limits_sha256, start_receipt_sha256, completion_card_disposition)
-      VALUES (?, ?, ?, 'queued', ?, 1, ?, ?, 4, 'visual', NULL, ?, ?, ?, ?, ?, ?, ?, ?,
-        'not_requested')`
-    ).run(
-      runId,
-      projectId,
-      experimentId,
-      json(plan.configuration),
-      NOW,
-      NOW,
-      canonicalDigest(project.executionDescription),
-      project.modelSnapshotDigest,
-      plan.configurationDigest,
-      json(plan.samples),
-      plan.samplePlanDigest,
-      json(LIMITS),
-      canonicalDigest(LIMITS),
-      "a".repeat(64),
-    );
-  } finally {
-    database.close();
-  }
-  store = ProductStoreV2.openForTesting(root, options);
+  });
   return {
     parent,
     root,
@@ -695,5 +662,121 @@ test("visual failure terminal honors cancellation precedence and never creates c
     assert.equal(fixture.store.listRunAttempts(fixture.runId)[0]?.state, "cancelled");
   } finally {
     fixture.close();
+  }
+});
+
+test("recovery audit rejects tampered visual success evidence before a new dispatcher generation can claim", async () => {
+  for (const corruption of ["launch_receipt_identity", "health_path"] as const) {
+    const fixture = createFixture(`recovered_success_${corruption}`);
+    let originalClosed = false;
+    let reopened: ProductStoreV2 | undefined;
+    try {
+      const claim = claimVisual(fixture);
+      completeVisualProcess(fixture, claim, `recovered_success_${corruption}`, true);
+      const committed = fixture.store.commitVisualRunSuccess(successCommit(fixture, claim));
+      assert.equal(committed.run.status, "succeeded", corruption);
+      assert.doesNotThrow(
+        () => fixture.store.auditRecoveredVisualSuccesses(),
+        corruption,
+      );
+      fixture.store.close();
+      originalClosed = true;
+
+      const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+      try {
+        if (corruption === "launch_receipt_identity") {
+          const row = database.prepare(`SELECT
+              manifest.id, manifest.launch_receipt_json
+            FROM process_launch_manifests manifest
+            JOIN run_attempts attempt ON attempt.id = manifest.run_attempt_id
+            WHERE attempt.run_id = ?`
+          ).get(fixture.runId) as {
+            id: string;
+            launch_receipt_json: string;
+          };
+          const receipt = JSON.parse(row.launch_receipt_json) as VisualLaunchReceipt;
+          const {
+            receiptDigest: _priorReceiptDigest,
+            ...priorUnsigned
+          } = receipt;
+          const tamperedUnsigned = {
+            ...priorUnsigned,
+            processStartToken: `${receipt.processStartToken}-tampered`,
+          };
+          const tamperedReceipt: VisualLaunchReceipt = {
+            ...tamperedUnsigned,
+            receiptDigest: canonicalDigest(tamperedUnsigned),
+          };
+          database.exec(`
+            DROP TRIGGER launch_manifest_terminal_immutable_v6;
+            DROP TRIGGER launch_receipt_immutable_v6;
+          `);
+          database.prepare(`UPDATE process_launch_manifests
+            SET launch_receipt_json = ?, launch_receipt_sha256 = ?
+            WHERE id = ?`
+          ).run(
+            JSON.stringify(tamperedReceipt),
+            canonicalDigest(tamperedReceipt),
+            row.id,
+          );
+        } else {
+          const row = database.prepare(`SELECT
+              health.process_attempt_id, health.receipt_json
+            FROM visual_health_receipts health
+            JOIN run_attempts attempt ON attempt.id = health.run_attempt_id
+            WHERE attempt.run_id = ?`
+          ).get(fixture.runId) as {
+            process_attempt_id: string;
+            receipt_json: string;
+          };
+          const receipt = {
+            ...(JSON.parse(row.receipt_json) as Record<string, unknown>),
+            healthPath: "/tampered-health",
+          };
+          database.exec("DROP TRIGGER visual_health_receipt_immutable_v8");
+          database.prepare(`UPDATE visual_health_receipts
+            SET health_path = ?, receipt_json = ?, receipt_sha256 = ?
+            WHERE process_attempt_id = ?`
+          ).run(
+            "/tampered-health",
+            JSON.stringify(receipt),
+            canonicalDigest(receipt),
+            row.process_attempt_id,
+          );
+        }
+      } finally {
+        database.close();
+      }
+
+      reopened = ProductStoreV2.open(fixture.root);
+      assert.throws(
+        () => reopened!.auditRecoveredVisualSuccesses(),
+        /visual_success_recovery_invalid/u,
+        corruption,
+      );
+      await assert.rejects(
+        () => new ProductRunRecovery({
+          store: reopened!,
+          supervisor: {},
+          now: () => new Date(FINISHED_AT),
+        }).recoverBeforeGenerationActivation(OTHER_GENERATION),
+        /visual_success_recovery_invalid/u,
+        corruption,
+      );
+      assert.equal(
+        reopened.getRun(fixture.projectId, fixture.runId).status,
+        "succeeded",
+        corruption,
+      );
+      assert.throws(() => reopened!.claimNextQueuedVisualRun({
+        dispatcherGeneration: OTHER_GENERATION,
+        claimedAt: FINISHED_AT,
+        leaseExpiresAt: "2026-07-25T15:01:00.000Z",
+      }), /stale_dispatcher_generation/u, corruption);
+    } finally {
+      if (!originalClosed) fixture.store.close();
+      reopened?.close();
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
   }
 });

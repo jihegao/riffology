@@ -9,6 +9,16 @@ import {
   type SuperviseBatchInput,
 } from "./generic-batch-supervisor.ts";
 import {
+  consumeVisualOutputCandidate,
+  type GenericVisualSupervisor,
+  type SuperviseVisualInput,
+  type VisualOutputCandidate,
+  type VisualProcessIdentity as SupervisorVisualProcessIdentity,
+  type VisualScratchCleanupReceipt,
+  type VisualScratchPlan,
+  type VisualSupervisionResult,
+} from "./generic-visual-supervisor.ts";
+import {
   ProductRunRecovery,
   type ProductRunRecoverySupervisorPort,
 } from "./product-run-recovery.ts";
@@ -16,20 +26,27 @@ import {
   ProductStoreV2,
   type BatchProcessIdentity as StoreBatchProcessIdentity,
   type ClaimedBatchRun,
+  type ClaimedVisualRun,
   type RunAttemptIdentity,
   type RunLimitsV1,
+  type VisualProcessIdentity as StoreVisualProcessIdentity,
 } from "./product-store-v2.ts";
 
 export type BatchSupervisorPort =
   & Pick<GenericBatchSupervisor, "supervise" | "cleanup">
   & Partial<ProductRunRecoverySupervisorPort>;
 
+export type VisualSupervisorPort =
+  Pick<GenericVisualSupervisor, "supervise" | "cleanup">;
+
 export type ProductRunDispatcherOptions = Readonly<{
   store: ProductStoreV2;
   supervisor: BatchSupervisorPort;
+  visualSupervisor?: VisualSupervisorPort;
   now?: () => Date;
   leaseMs?: number;
   consumeOutput?: (candidate: BatchOutputCandidate) => Buffer;
+  consumeVisualOutput?: (candidate: VisualOutputCandidate) => Buffer;
 }>;
 
 const activeDispatcherByStore = new WeakMap<ProductStoreV2, ProductRunDispatcher>();
@@ -37,23 +54,27 @@ const activeDispatcherByStore = new WeakMap<ProductStoreV2, ProductRunDispatcher
 export class ProductRunDispatcher {
   readonly #store: ProductStoreV2;
   readonly #supervisor: BatchSupervisorPort;
+  readonly #visualSupervisor: VisualSupervisorPort | null;
   readonly #now: () => Date;
   readonly #leaseMs: number;
   readonly #consumeOutput: (candidate: BatchOutputCandidate) => Buffer;
+  readonly #consumeVisualOutput: (candidate: VisualOutputCandidate) => Buffer;
   readonly #generation = canonicalDigest({ dispatcher: randomUUID(), startedAt: Date.now() });
   #started = false;
   #stopping = false;
-  #tail: Promise<void> = Promise.resolve();
+  #batchTail: Promise<void> = Promise.resolve();
+  #visualTail: Promise<void> = Promise.resolve();
   #lastError: Error | null = null;
-  #activeAbort: AbortController | null = null;
-  #activeRunId: string | null = null;
+  readonly #activeAborts = new Map<string, AbortController>();
 
   constructor(options: ProductRunDispatcherOptions) {
     this.#store = options.store;
     this.#supervisor = options.supervisor;
+    this.#visualSupervisor = options.visualSupervisor ?? null;
     this.#now = options.now ?? (() => new Date());
     this.#leaseMs = options.leaseMs ?? 30_000;
     this.#consumeOutput = options.consumeOutput ?? consumeBatchOutputCandidate;
+    this.#consumeVisualOutput = options.consumeVisualOutput ?? consumeVisualOutputCandidate;
     if (!Number.isSafeInteger(this.#leaseMs) || this.#leaseMs < 1_000 || this.#leaseMs > 300_000) {
       throw new Error("ProductRunDispatcher lease duration is invalid.");
     }
@@ -86,14 +107,23 @@ export class ProductRunDispatcher {
   }
 
   notify(): void {
-    if (!this.#started || this.#stopping) return;
-    this.#tail = this.#tail.then(() => this.#drain()).catch((error) => {
-      this.#lastError = error instanceof Error ? error : new Error("Product run dispatcher failed.");
+    if (!this.#started || this.#stopping || this.#lastError) return;
+    this.#batchTail = this.#batchTail.then(() => this.#drainBatch()).catch((error) => {
+      this.#latchFatal(
+        error instanceof Error ? error : new Error("Product run dispatcher failed."),
+      );
     });
+    if (this.#visualSupervisor) {
+      this.#visualTail = this.#visualTail.then(() => this.#drainVisual()).catch((error) => {
+        this.#latchFatal(
+          error instanceof Error ? error : new Error("Product visual run dispatcher failed."),
+        );
+      });
+    }
   }
 
   requestCancellation(runId: string): void {
-    if (this.#activeRunId === runId) this.#activeAbort?.abort();
+    this.#activeAborts.get(runId)?.abort();
     this.notify();
   }
 
@@ -101,9 +131,9 @@ export class ProductRunDispatcher {
 
   async stop(): Promise<void> {
     this.#stopping = true;
-    this.#activeAbort?.abort();
+    for (const abort of this.#activeAborts.values()) abort.abort();
     try {
-      await this.#tail;
+      await Promise.all([this.#batchTail, this.#visualTail]);
     } finally {
       if (activeDispatcherByStore.get(this.#store) === this) {
         activeDispatcherByStore.delete(this.#store);
@@ -111,8 +141,8 @@ export class ProductRunDispatcher {
     }
   }
 
-  async #drain(): Promise<void> {
-    while (!this.#stopping) {
+  async #drainBatch(): Promise<void> {
+    while (!this.#stopping && !this.#lastError) {
       const claimedAt = this.#now();
       const cancelled = this.#store.finalizeNextCancelledQueuedRun({
         finishedAt: claimedAt.toISOString(),
@@ -126,6 +156,29 @@ export class ProductRunDispatcher {
       if (!claim) return;
       await this.#execute(claim);
     }
+  }
+
+  async #drainVisual(): Promise<void> {
+    if (!this.#visualSupervisor) return;
+    while (!this.#stopping && !this.#lastError) {
+      const claimedAt = this.#now();
+      const cancelled = this.#store.finalizeNextCancelledQueuedRun({
+        finishedAt: claimedAt.toISOString(),
+      });
+      if (cancelled) continue;
+      const claim = this.#store.claimNextQueuedVisualRun({
+        dispatcherGeneration: this.#generation,
+        claimedAt: claimedAt.toISOString(),
+        leaseExpiresAt: new Date(claimedAt.getTime() + this.#leaseMs).toISOString(),
+      });
+      if (!claim) return;
+      await this.#executeVisual(claim, this.#visualSupervisor);
+    }
+  }
+
+  #latchFatal(error: Error): void {
+    this.#lastError ??= error;
+    for (const abort of this.#activeAborts.values()) abort.abort();
   }
 
   async #execute(claim: ClaimedBatchRun): Promise<void> {
@@ -181,8 +234,13 @@ export class ProductRunDispatcher {
       }, Math.max(250, Math.floor(this.#leaseMs / 3)));
       heartbeat.unref?.();
       abort = new AbortController();
-      this.#activeAbort = abort;
-      this.#activeRunId = attempt.runId;
+      if (this.#activeAborts.has(attempt.runId)) {
+        throw dispatcherFailure(
+          "dispatcher_recovery_required",
+          "A run already has an active in-process dispatcher owner.",
+        );
+      }
+      this.#activeAborts.set(attempt.runId, abort);
       if (this.#store.isRunCancellationRequested(attempt.runId)) abort.abort();
       result = await this.#supervisor.supervise({
         run: {
@@ -322,11 +380,394 @@ export class ProductRunDispatcher {
       }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
-      if (abort && this.#activeAbort === abort) {
-        this.#activeAbort = null;
-        this.#activeRunId = null;
+      if (abort && this.#activeAborts.get(attempt.runId) === abort) {
+        this.#activeAborts.delete(attempt.runId);
       }
     }
+  }
+
+  async #executeVisual(
+    claim: ClaimedVisualRun,
+    supervisor: VisualSupervisorPort,
+  ): Promise<void> {
+    const attempt = attemptIdentity(claim);
+    const sample = claim.run.samplePlan[0] as SuperviseVisualInput["run"]["sample"] | undefined;
+    let planned: VisualScratchPlan | null = null;
+    let registered: StoreVisualProcessIdentity | null = null;
+    let phase: "blocked" | "released" | "running" | null = null;
+    let exited = false;
+    let cleanupFinalized = false;
+    let attemptState: "claimed" | "starting" | "running" = "claimed";
+    let heartbeatError: Error | null = null;
+    let heartbeat: NodeJS.Timeout | null = null;
+    let result: VisualSupervisionResult | null = null;
+    let cleanupReceipt: VisualScratchCleanupReceipt | null = null;
+    let abort: AbortController | null = null;
+    try {
+      if (!sample || sample.sampleIndex !== 0) {
+        throw dispatcherFailure(
+          "visual_run_invalid",
+          "A claimed visual run does not contain its one frozen sample.",
+        );
+      }
+      const startingAt = this.#now();
+      this.#store.markRunAttemptStarting({ ...attempt, startedAt: startingAt.toISOString() });
+      attemptState = "starting";
+      const project = this.#store.projectExecutionCapability(claim.run.projectId);
+      const runningAt = this.#now();
+      this.#store.markRunAttemptRunning({
+        ...attempt,
+        startedAt: runningAt.toISOString(),
+        leaseExpiresAt: new Date(runningAt.getTime() + this.#leaseMs).toISOString(),
+      });
+      attemptState = "running";
+      abort = new AbortController();
+      if (this.#activeAborts.has(attempt.runId)) {
+        throw dispatcherFailure(
+          "dispatcher_recovery_required",
+          "A run already has an active in-process dispatcher owner.",
+        );
+      }
+      this.#activeAborts.set(attempt.runId, abort);
+      if (this.#store.isRunCancellationRequested(attempt.runId)) abort.abort();
+      heartbeat = setInterval(() => {
+        if (heartbeatError) return;
+        const at = this.#now();
+        try {
+          if (this.#store.isRunCancellationRequested(attempt.runId)) {
+            abort?.abort();
+            return;
+          }
+          this.#store.heartbeatRunAttempt({
+            ...attempt,
+            expectedState: "running",
+            heartbeatAt: at.toISOString(),
+            leaseExpiresAt: new Date(at.getTime() + this.#leaseMs).toISOString(),
+          });
+          if (registered && (phase === "released" || phase === "running")) {
+            this.#store.heartbeatVisualProcess({
+              ...registered,
+              expectedState: phase,
+              heartbeatAt: at.toISOString(),
+            });
+          }
+        } catch (error) {
+          heartbeatError = error instanceof Error ? error : new Error("Visual dispatcher heartbeat failed.");
+          abort?.abort();
+        }
+      }, Math.max(250, Math.floor(this.#leaseMs / 3)));
+      heartbeat.unref?.();
+      result = await supervisor.supervise({
+        run: {
+          runId: claim.run.id,
+          runKind: "visual",
+          sample,
+          limits: claim.run.limits as RunLimitsV1,
+        },
+        project,
+        signal: abort.signal,
+        hooks: {
+          planScratch: async (plan) => {
+            const manifest = this.#store.prepareVisualProcessLaunch({
+              ...attempt,
+              ...plan,
+              createdAt: this.#now().toISOString(),
+            });
+            planned = plan;
+            return manifest;
+          },
+          registerScratchDirectory: async (identity) => {
+            this.#store.registerVisualScratchDirectory({
+              ...attempt,
+              ...identity,
+              registeredAt: this.#now().toISOString(),
+            });
+          },
+          registerProcess: async (identity, launchReceipt) => {
+            const durable = storeVisualProcessIdentity(attempt, identity);
+            this.#store.registerVisualProcessAttempt({
+              ...durable,
+              launchedAt: launchReceipt.createdAt,
+              launchReceipt,
+            });
+            registered = durable;
+            phase = "blocked";
+          },
+          markGateReleased: async (identity) => {
+            const durable = requiredVisualIdentity(registered, identity);
+            this.#store.markVisualProcessGateReleased({
+              ...durable,
+              startedAt: this.#now().toISOString(),
+            });
+            phase = "released";
+          },
+          markProcessStarted: async (identity) => {
+            const durable = requiredVisualIdentity(registered, identity);
+            this.#store.markVisualProcessStarted({
+              ...durable,
+              startedAt: this.#now().toISOString(),
+            });
+            phase = "running";
+          },
+          recordHealth: async (identity) => {
+            const durable = requiredVisualIdentity(registered, identity);
+            this.#store.recordVisualProcessHealth({
+              ...durable,
+              healthyAt: this.#now().toISOString(),
+            });
+          },
+        },
+      });
+      if (heartbeatError) throw dispatcherFailure(
+        "dispatcher_heartbeat_failed",
+        "The durable visual dispatcher heartbeat failed.",
+        heartbeatError,
+      );
+      if (!registered) {
+        if (result.identity || result.status === "succeeded" || !planned) {
+          throw dispatcherFailure(
+            "dispatcher_recovery_required",
+            "A visual supervisor result lacks its exact durable launch identity.",
+          );
+        }
+        cleanupReceipt = supervisor.cleanup(result);
+        this.#store.finalizeUnlaunchedVisualScratchLease({
+          ...attempt,
+          ...planned,
+          cleanupReceiptDigest: cleanupReceipt.receiptDigest,
+          cleanedAt: cleanupReceipt.cleanedAt,
+        });
+        planned = null;
+        this.#store.finalizeVisualRunTerminal({
+          ...attempt,
+          expectedAttemptState: "running",
+          status: result.status === "timed_out" ? "timed_out" : "failed",
+          terminalCode: result.code,
+          terminalDiagnostics: {
+            code: result.code,
+            diagnostic: result.diagnostic,
+          },
+          resourceOverview: visualResourceOverview(result),
+          finishedAt: result.finishedAt,
+        });
+        return;
+      }
+
+      let outputBytes: Array<{ candidate: VisualOutputCandidate; bytes: Buffer }> = [];
+      let terminalOverride: { status: "failed"; code: string; diagnostic: string } | null = null;
+      if (result.status === "succeeded") {
+        try {
+          outputBytes = result.outputs.map((candidate) => ({
+            candidate,
+            bytes: this.#consumeVisualOutput(candidate),
+          }));
+        } catch {
+          terminalOverride = {
+            status: "failed",
+            code: "run_output_invalid",
+            diagnostic: "A validated visual output changed before durable publication.",
+          };
+        }
+      }
+
+      this.#recordVisualResultExit(result, registered, phase);
+      exited = true;
+      cleanupReceipt = supervisor.cleanup(result);
+      this.#store.finalizeVisualProcessCleanup({
+        ...registered,
+        cleanupVerified: true,
+        cleanupReceiptDigest: cleanupReceipt.receiptDigest,
+        cleanedAt: cleanupReceipt.cleanedAt,
+      });
+      cleanupFinalized = true;
+
+      const diagnostics = {
+        code: terminalOverride?.code ?? result.code,
+        diagnostic: terminalOverride?.diagnostic ?? result.diagnostic,
+      };
+      const resources = visualResourceOverview(result);
+      if (result.status === "succeeded" && !terminalOverride) {
+        try {
+          this.#store.commitVisualRunSuccess({
+            ...attempt,
+            outputs: outputBytes.map(({ candidate, bytes }) => ({
+              sampleIndex: 0,
+              sampleId: sample.sampleId,
+              logicalName: candidate.logicalName,
+              outputType: candidate.role,
+              bytes,
+            })),
+            terminalDiagnostics: diagnostics,
+            resourceOverview: resources,
+            finishedAt: result.finishedAt,
+          });
+          return;
+        } catch (error) {
+          throw dispatcherFailure(
+            "visual_publication_failed",
+            "Atomic visual success publication failed.",
+            error,
+          );
+        }
+      }
+      const terminal = terminalOverride ?? result;
+      this.#store.finalizeVisualRunTerminal({
+        ...attempt,
+        expectedAttemptState: "running",
+        status: terminal.status === "timed_out" ? "timed_out" : "failed",
+        terminalCode: terminal.code,
+        terminalDiagnostics: diagnostics,
+        resourceOverview: resources,
+        finishedAt: result.finishedAt,
+      });
+    } catch (error) {
+      abort?.abort();
+      const failure = asError(error);
+      const code = dispatcherErrorCode(failure);
+      const finishedAt = this.#now().toISOString();
+      const safeToFinalize = this.#bestEffortVisualUnwind({
+        attempt,
+        projectId: claim.run.projectId,
+        attemptState,
+        planned,
+        registered,
+        phase,
+        exited,
+        cleanupFinalized,
+        result,
+        cleanupReceipt,
+        terminalCode: code,
+        finishedAt,
+        supervisor,
+      });
+      if (!safeToFinalize) {
+        throw dispatcherFailure(
+          "dispatcher_recovery_required",
+          "Visual dispatcher unwind could not prove every launch, process, and scratch lease exited and was cleaned.",
+          failure,
+        );
+      }
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      if (abort && this.#activeAborts.get(attempt.runId) === abort) {
+        this.#activeAborts.delete(attempt.runId);
+      }
+    }
+  }
+
+  #bestEffortVisualUnwind(input: {
+    attempt: RunAttemptIdentity;
+    projectId: string;
+    attemptState: "claimed" | "starting" | "running";
+    planned: VisualScratchPlan | null;
+    registered: StoreVisualProcessIdentity | null;
+    phase: "blocked" | "released" | "running" | null;
+    exited: boolean;
+    cleanupFinalized: boolean;
+    result: VisualSupervisionResult | null;
+    cleanupReceipt: VisualScratchCleanupReceipt | null;
+    terminalCode: string;
+    finishedAt: string;
+    supervisor: VisualSupervisorPort;
+  }): boolean {
+    if (!input.result) {
+      if (input.registered || input.planned) return false;
+    } else {
+      if (!input.registered) {
+        if (input.result.identity) return false;
+        try {
+          input.cleanupReceipt ??= input.supervisor.cleanup(input.result);
+          if (!input.planned) return false;
+          this.#store.finalizeUnlaunchedVisualScratchLease({
+            ...input.attempt,
+            ...input.planned,
+            cleanupReceiptDigest: input.cleanupReceipt.receiptDigest,
+            cleanedAt: input.cleanupReceipt.cleanedAt,
+          });
+        } catch {
+          return false;
+        }
+        input.planned = null;
+      }
+      if (input.registered && !input.exited) {
+        try {
+          this.#recordVisualResultExit(input.result, input.registered, input.phase);
+          input.exited = true;
+        } catch {
+          return false;
+        }
+      }
+      if (input.registered && !input.cleanupFinalized) {
+        let cleanup = input.cleanupReceipt;
+        if (!cleanup) {
+          try {
+            cleanup = input.supervisor.cleanup(input.result);
+          } catch {
+            return false;
+          }
+        }
+        try {
+          this.#store.finalizeVisualProcessCleanup({
+            ...input.registered,
+            cleanupVerified: true,
+            cleanupReceiptDigest: cleanup.receiptDigest,
+            cleanedAt: cleanup.cleanedAt,
+          });
+          input.cleanupFinalized = true;
+        } catch {
+          return false;
+        }
+      }
+    }
+    try {
+      const current = this.#store.getRun(input.projectId, input.attempt.runId, {
+        includeTrashed: true,
+      });
+      if (["succeeded", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return true;
+      }
+    } catch {
+      // Continue to the exact terminal compare-and-set when current state is not provable.
+    }
+    if (input.attemptState === "claimed") return false;
+    try {
+      this.#store.finalizeVisualRunTerminal({
+        ...input.attempt,
+        expectedAttemptState: input.attemptState,
+        status: "failed",
+        terminalCode: input.terminalCode,
+        terminalDiagnostics: {
+          code: input.terminalCode,
+          diagnostic: "The visual dispatcher failed and completed its best-effort unwind.",
+        },
+        resourceOverview: input.result ? visualResourceOverview(input.result) : {},
+        finishedAt: input.result?.finishedAt ?? input.finishedAt,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  #recordVisualResultExit(
+    result: VisualSupervisionResult,
+    registered: StoreVisualProcessIdentity,
+    phase: "blocked" | "released" | "running" | null,
+  ): void {
+    assertVisualResultIdentity(result, registered);
+    if (!phase) {
+      throw dispatcherFailure(
+        "dispatcher_recovery_required",
+        "A registered visual process lacks its durable launch phase.",
+      );
+    }
+    this.#store.recordVisualProcessExit({
+      ...registered,
+      expectedState: phase,
+      exitedAt: result.finishedAt,
+      exitCode: result.exitCode,
+      exitSignal: result.signal,
+    });
   }
 
   #bestEffortUnwind(input: {
@@ -452,7 +893,9 @@ export class ProductRunDispatcher {
   }
 }
 
-const attemptIdentity = (claim: ClaimedBatchRun): RunAttemptIdentity => ({
+const attemptIdentity = (
+  claim: ClaimedBatchRun | ClaimedVisualRun,
+): RunAttemptIdentity => ({
   runId: claim.run.id,
   attemptId: claim.attempt.id,
   attemptGeneration: claim.attempt.attemptGeneration,
@@ -484,6 +927,20 @@ const storeProcessIdentity = (
   scratchId: identity.scratchId,
 });
 
+const storeVisualProcessIdentity = (
+  attempt: RunAttemptIdentity,
+  identity: SupervisorVisualProcessIdentity,
+): StoreVisualProcessIdentity => ({
+  ...attempt,
+  processKind: "visual",
+  processAttemptId: identity.processAttemptId,
+  pid: identity.pid,
+  processStartToken: identity.processStartToken,
+  processGroupId: identity.processGroupId,
+  loopbackPort: identity.loopbackPort,
+  scratchId: identity.scratchId,
+});
+
 const requiredIdentity = (
   registered: Map<number, StoreBatchProcessIdentity>,
   sampleIndex: number,
@@ -492,6 +949,55 @@ const requiredIdentity = (
   if (!identity) throw new Error("Batch process hook identity was not durably registered.");
   return identity;
 };
+
+const requiredVisualIdentity = (
+  registered: StoreVisualProcessIdentity | null,
+  identity: SupervisorVisualProcessIdentity,
+): StoreVisualProcessIdentity => {
+  if (!registered
+    || registered.processAttemptId !== identity.processAttemptId
+    || registered.runId !== identity.runId
+    || registered.scratchId !== identity.scratchId
+    || registered.pid !== identity.pid
+    || registered.processGroupId !== identity.processGroupId
+    || registered.processStartToken !== identity.processStartToken
+    || registered.loopbackPort !== identity.loopbackPort) {
+    throw dispatcherFailure(
+      "dispatcher_recovery_required",
+      "The visual process hook identity changed after durable registration.",
+    );
+  }
+  return registered;
+};
+
+const assertVisualResultIdentity = (
+  result: VisualSupervisionResult,
+  registered: StoreVisualProcessIdentity,
+): void => {
+  const identity = result.identity;
+  if (!identity
+    || identity.processAttemptId !== registered.processAttemptId
+    || identity.runId !== registered.runId
+    || identity.scratchId !== registered.scratchId
+    || identity.pid !== registered.pid
+    || identity.processGroupId !== registered.processGroupId
+    || identity.processStartToken !== registered.processStartToken) {
+    throw dispatcherFailure(
+      "dispatcher_recovery_required",
+      "A registered visual process has no matching terminal supervisor identity.",
+    );
+  }
+};
+
+const visualResourceOverview = (
+  result: VisualSupervisionResult,
+): Readonly<Record<string, number | boolean>> => Object.freeze({
+  stdoutBytes: result.stdoutBytes,
+  stderrBytes: result.stderrBytes,
+  stdoutTruncated: result.stdoutTruncated,
+  stderrTruncated: result.stderrTruncated,
+  healthVerified: result.healthVerified,
+});
 
 const asError = (error: unknown): Error =>
   error instanceof Error ? error : new Error("Product run dispatcher failed.");

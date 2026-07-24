@@ -143,9 +143,9 @@ const createFixture = (suffix: string): Fixture => {
     plan,
     createdAt: NOW,
   });
-  assert.throws(() => store.createFrozenRun({
-    commandId: `command_public_visual_start_${suffix}`,
-    runId: `run_public_visual_${suffix}`,
+  store.createFrozenRun({
+    commandId: `command_visual_start_${suffix}`,
+    runId,
     projectId,
     experimentConfigId: experimentId,
     completionConversationId: null,
@@ -155,35 +155,11 @@ const createFixture = (suffix: string): Fixture => {
     executionDescriptionDigest: canonicalDigest(project.executionDescription),
     limits: LIMITS,
     createdAt: NOW,
-  }), /capability_not_available/u);
+  });
   store.close();
 
   const database = openProductDatabase(join(root, "product.sqlite3"));
   try {
-    database.prepare(`INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json,
-        requested_sample_count, created_at, updated_at, contract_version, run_kind,
-        completion_conversation_id, execution_description_sha256, project_snapshot_sha256,
-        frozen_configuration_sha256, sample_plan_json, sample_plan_sha256, limits_json,
-        limits_sha256, start_receipt_sha256, completion_card_disposition)
-      VALUES (?, ?, ?, 'queued', ?, 1, ?, ?, 4, 'visual', NULL, ?, ?, ?, ?, ?, ?, ?, ?,
-        'not_requested')`
-    ).run(
-      runId,
-      projectId,
-      experimentId,
-      json(plan.configuration),
-      NOW,
-      NOW,
-      canonicalDigest(project.executionDescription),
-      project.modelSnapshotDigest,
-      plan.configurationDigest,
-      json(plan.samples),
-      plan.samplePlanDigest,
-      json(LIMITS),
-      canonicalDigest(LIMITS),
-      DIGEST_A,
-    );
     database.prepare(
       "INSERT INTO dispatcher_state (singleton, generation, activated_at) VALUES (1, ?, ?)",
     ).run(GENERATION, NOW);
