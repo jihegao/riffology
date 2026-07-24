@@ -54,6 +54,33 @@ class Handler(BaseHTTPRequestHandler):
 host = "0.0.0.0" if mode == "wildcard" else args.riff_host
 server = HTTPServer((host, args.riff_port), Handler)
 server.handle_request()
+
+
+def write_declared_output() -> None:
+    args.riff_output_dir.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            {
+                "mode": mode,
+                "requestCount": request_count,
+                "sampleId": envelope["sampleId"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    if mode == "hardlink_output":
+        source = args.riff_input.parent / "tmp" / "linked-summary.json"
+        source.write_text(encoded, encoding="utf-8")
+        os.link(source, args.riff_output_dir / "summary.json")
+    else:
+        (args.riff_output_dir / "summary.json").write_text(
+            encoded,
+            encoding="utf-8",
+        )
+
+
 if mode == "stdout_overflow":
     sys.stdout.write("x" * 100_000)
     sys.stdout.flush()
@@ -69,26 +96,12 @@ elif mode == "listener_drift":
     replacement.listen(1)
     time.sleep(10)
 else:
-    # Keep the exact listener present while the client consumes the response
-    # and performs its mandatory post-response listener inspection.
+    # Produce outputs while the exact listener remains live, then keep it open
+    # while the client consumes the response and performs its post-response and
+    # healthy-period listener inspections. Exit without interpreter teardown so
+    # the kernel closes the listener as part of process exit, leaving no
+    # artificial close-then-exit window for the supervisor to reject.
+    write_declared_output()
     time.sleep(0.2)
+    os._exit(0)
 server.server_close()
-args.riff_output_dir.mkdir(parents=True, exist_ok=True)
-encoded = (
-    json.dumps(
-        {
-            "mode": mode,
-            "requestCount": request_count,
-            "sampleId": envelope["sampleId"],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    + "\n"
-)
-if mode == "hardlink_output":
-    source = args.riff_input.parent / "tmp" / "linked-summary.json"
-    source.write_text(encoded, encoding="utf-8")
-    os.link(source, args.riff_output_dir / "summary.json")
-else:
-    (args.riff_output_dir / "summary.json").write_text(encoded, encoding="utf-8")

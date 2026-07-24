@@ -716,6 +716,7 @@ export class GenericVisualSupervisor {
 
       const completion = await waitForHealthyCompletion(
         identity,
+        tracked,
         lifecycle.completion,
         wallDeadline,
         this.#now,
@@ -810,7 +811,9 @@ export class GenericVisualSupervisor {
           );
           lease.groupGoneVerified = tracked
             ? verifyTrackedTarget(tracked) === "gone"
-            : stableProcessGroupMembers(child.pid!).length === 0;
+            : liveProcessGroupMembers(
+              stableProcessGroupMembers(child.pid!),
+            ).length === 0;
           if (tracked) stopGroupMonitor(tracked);
           if (!lease.groupGoneVerified) {
             failure = classifyFailure(new GenericVisualSupervisorError(
@@ -1143,7 +1146,12 @@ const assertManifestBinding = (binding: VisualLaunchManifestBinding): void => {
 
 const readProcessIdentity = (
   pid: number,
-): Readonly<{ pid: number; processGroupId: number; startToken: string }> => {
+): Readonly<{
+  pid: number;
+  processGroupId: number;
+  startToken: string;
+  state: string;
+}> => {
   if (!Number.isSafeInteger(pid) || pid < 1) {
     throw new GenericVisualSupervisorError(
       "process_identity_unavailable",
@@ -1152,30 +1160,36 @@ const readProcessIdentity = (
   }
   const probe = spawnSync(
     "/bin/ps",
-    ["-o", "pgid=", "-o", "lstart=", "-p", String(pid)],
+    ["-o", "state=", "-o", "pgid=", "-o", "lstart=", "-p", String(pid)],
     { encoding: "utf8", timeout: 1_000, env: { LANG: "C", LC_ALL: "C" } },
   );
-  const match = /^\s*(\d+)\s+(.+?)\s*$/u.exec(probe.stdout ?? "");
-  const processGroupId = Number(match?.[1]);
-  const startToken = match?.[2]?.trim() ?? "";
+  const match = /^\s*(\S+)\s+(\d+)\s+(.+?)\s*$/u.exec(probe.stdout ?? "");
+  const state = match?.[1] ?? "";
+  const processGroupId = Number(match?.[2]);
+  const startToken = match?.[3]?.trim() ?? "";
   if (probe.status !== 0 || !probe.stdout?.trim()) {
     throw new GenericVisualSupervisorError(
       "process_identity_unavailable",
       "The visual launch process identity could not be verified.",
     );
   }
-  if (processGroupId !== pid || !startToken) {
+  if (processGroupId !== pid || !state || !startToken) {
     throw new GenericVisualSupervisorError(
       "process_identity_mismatch",
       "The visual launch helper is not its expected process-group leader.",
     );
   }
-  return Object.freeze({ pid, processGroupId, startToken });
+  return Object.freeze({ pid, processGroupId, startToken, state });
 };
 
 const assertSameProcessIdentity = (
   expected: VisualProcessIdentity,
-  actual: Readonly<{ pid: number; processGroupId: number; startToken: string }>,
+  actual: Readonly<{
+    pid: number;
+    processGroupId: number;
+    startToken: string;
+    state?: string;
+  }>,
 ): void => {
   if (expected.pid !== actual.pid
     || expected.processGroupId !== actual.processGroupId
@@ -1365,6 +1379,7 @@ const waitUntil = async <T>(
 
 const waitForHealthyCompletion = async <T>(
   identity: VisualProcessIdentity,
+  tracked: ActiveVisualTarget,
   completion: Promise<T>,
   deadline: number,
   now: () => number,
@@ -1383,6 +1398,23 @@ const waitForHealthyCompletion = async <T>(
     try {
       inspectIdentityListener(identity);
     } catch (error) {
+      // The poll timer and Node's child "exit" event are separate event-loop
+      // observations. Under load the timer can win after the kernel has already
+      // closed the listener and reaped the exact process group, while the exit
+      // callback is still queued. Reconcile against the frozen OS identity:
+      // listener loss is healthy only when that exact target is already gone.
+      if (error instanceof VisualListenerInspectionError
+        && (error.code === "visual_listener_identity_mismatch"
+          || error.code === "visual_listener_missing")
+        && verifyTrackedTarget(tracked) === "gone") {
+        return await waitUntil(
+          completion,
+          deadline,
+          now,
+          signal,
+          "run_wall_timeout",
+        );
+      }
       throw new GenericVisualSupervisorError(
         "visual_listener_invalid",
         "The healthy visual listener closed or changed before process exit.",
@@ -1464,6 +1496,7 @@ const ensureNotStopped = (
 type ProcessGroupMember = Readonly<{
   pid: number;
   processGroupId: number;
+  state: string;
   startToken: string;
 }>;
 
@@ -1472,7 +1505,7 @@ const readProcessGroupMembers = (
 ): readonly ProcessGroupMember[] => {
   const probe = spawnSync(
     "/bin/ps",
-    ["-axo", "pid=", "-o", "pgid=", "-o", "lstart="],
+    ["-axo", "pid=", "-o", "pgid=", "-o", "state=", "-o", "lstart="],
     { encoding: "utf8", timeout: 1_000, env: { LANG: "C", LC_ALL: "C" } },
   );
   if (probe.status !== 0) {
@@ -1483,12 +1516,13 @@ const readProcessGroupMembers = (
   }
   const members: ProcessGroupMember[] = [];
   for (const line of probe.stdout.split(/\r?\n/u)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/u.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
     if (!match || Number(match[2]) !== processGroupId) continue;
     members.push(Object.freeze({
       pid: Number(match[1]),
       processGroupId: Number(match[2]),
-      startToken: match[3]!,
+      state: match[3]!,
+      startToken: match[4]!,
     }));
   }
   return Object.freeze(members.sort((left, right) => left.pid - right.pid));
@@ -1514,7 +1548,9 @@ const stableProcessGroupMembers = (
 const startGroupMonitor = (tracked: ActiveVisualTarget): void => {
   tracked.groupMonitor = setInterval(() => {
     try {
-      if (readProcessGroupMembers(tracked.identity.processGroupId).length === 0) {
+      if (liveProcessGroupMembers(
+        readProcessGroupMembers(tracked.identity.processGroupId),
+      ).length === 0) {
         tracked.groupContinuityLost = true;
       }
     } catch {
@@ -1532,19 +1568,21 @@ const stopGroupMonitor = (tracked: ActiveVisualTarget): void => {
 const verifyTrackedTarget = (
   tracked: ActiveVisualTarget,
 ): "present" | "gone" => {
+  let leaderIsZombie = false;
   try {
-    assertSameProcessIdentity(
-      tracked.identity,
-      readProcessIdentity(tracked.identity.pid),
-    );
-    return "present";
+    const current = readProcessIdentity(tracked.identity.pid);
+    assertSameProcessIdentity(tracked.identity, current);
+    leaderIsZombie = current.state.startsWith("Z");
+    if (!leaderIsZombie) return "present";
   } catch (error) {
     if (!(error instanceof GenericVisualSupervisorError)
       || error.code !== "process_identity_unavailable") {
       throw error;
     }
   }
-  const members = stableProcessGroupMembers(tracked.identity.processGroupId);
+  const members = liveProcessGroupMembers(
+    stableProcessGroupMembers(tracked.identity.processGroupId),
+  );
   if (members.length === 0) {
     tracked.groupContinuityLost = true;
     return "gone";
@@ -1608,7 +1646,8 @@ const verifyIdentityGoneForCleanup = (
     const current = readProcessIdentity(identity.pid);
     if (current.pid === identity.pid
       && current.processGroupId === identity.processGroupId
-      && current.startToken === identity.processStartToken) {
+      && current.startToken === identity.processStartToken
+      && !current.state.startsWith("Z")) {
       throw new GenericVisualSupervisorError(
         "scratch_cleanup_unverified",
         "The exact visual process identity remains active before cleanup.",
@@ -1624,13 +1663,20 @@ const verifyIdentityGoneForCleanup = (
       throw error;
     }
   }
-  if (stableProcessGroupMembers(identity.processGroupId).length !== 0) {
+  if (liveProcessGroupMembers(
+    stableProcessGroupMembers(identity.processGroupId),
+  ).length !== 0) {
     throw new GenericVisualSupervisorError(
       "scratch_cleanup_unverified",
       "The exact visual process group remains active before cleanup.",
     );
   }
 };
+
+const liveProcessGroupMembers = (
+  members: readonly ProcessGroupMember[],
+): readonly ProcessGroupMember[] =>
+  members.filter((member) => !member.state.startsWith("Z"));
 
 const waitForTrackedGone = async (
   tracked: ActiveVisualTarget,
