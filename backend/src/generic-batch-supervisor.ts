@@ -36,7 +36,7 @@ import {
   trustedPythonRuntimeRoots,
   type ModelWorkspaceCapability,
 } from "./restricted-process.ts";
-import type { RunLimitsV1 } from "./product-store-v2.ts";
+import type { RunLimitsV1, VisualLaunchReceipt } from "./product-store-v2.ts";
 
 export type FrozenBatchSample = Readonly<{
   sampleIndex: number;
@@ -856,7 +856,8 @@ export class GenericBatchSupervisor {
       "runId" | "sampleIndex" | "sampleId" | "scratchId" | "relativePath"
       | "ownerUid" | "device" | "inode">,
     manifest: BatchLaunchManifestBinding,
-  ): BatchLaunchReceipt | null {
+    processKind: "batch" | "visual" = "batch",
+  ): BatchLaunchReceipt | VisualLaunchReceipt | null {
     const path = exactScratchPath(this.#scratchRoot, lease.relativePath);
     if (!existsSync(path)) return null;
     assertExactDurableScratchDirectory(this.#scratchRoot, path, lease);
@@ -868,7 +869,7 @@ export class GenericBatchSupervisor {
     } catch (error) {
       throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt is invalid JSON.", { cause: error });
     }
-    const selfReceipt = validateLaunchReceipt(value, lease, manifest);
+    const selfReceipt = validateLaunchReceipt(value, lease, manifest, processKind);
     try {
       return bindLaunchReceiptToExactIdentity(selfReceipt);
     } catch (error) {
@@ -1443,20 +1444,26 @@ const validateLaunchReceipt = (
   lease: Pick<DurableBatchScratchLease,
     "runId" | "sampleIndex" | "sampleId" | "scratchId" | "relativePath">,
   manifest: BatchLaunchManifestBinding,
-): BatchLaunchReceipt => {
+  processKind: "batch" | "visual" = "batch",
+): BatchLaunchReceipt | VisualLaunchReceipt => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt has an invalid shape.");
   }
-  const receipt = value as BatchLaunchReceipt;
-  const keys = Object.keys(receipt).sort();
-  const expectedKeys = [
+  const receipt = value as BatchLaunchReceipt | VisualLaunchReceipt;
+  const keys = Object.keys(receipt).sort().join("\n");
+  const batchKeys = [
     "createdAt", "manifestDigest", "manifestId", "pid", "processGroupId",
     "processStartToken", "receiptDigest", "relativePath", "runId", "sampleId",
     "sampleIndex", "schemaVersion", "scratchId",
-  ].sort();
+  ].sort().join("\n");
+  const visualKeys = [
+    "createdAt", "healthPath", "loopbackHost", "loopbackPort", "manifestDigest",
+    "manifestId", "pid", "processGroupId", "processStartToken", "receiptDigest",
+    "relativePath", "runId", "sampleId", "sampleIndex", "schemaVersion", "scratchId",
+  ].sort().join("\n");
   const { receiptDigest, ...unsigned } = receipt;
-  if (keys.join("\n") !== expectedKeys.join("\n")
-    || receipt.schemaVersion !== 1
+  const commonInvalid =
+    receipt.schemaVersion !== 1
     || receipt.manifestId !== manifest.manifestId
     || receipt.manifestDigest !== manifest.manifestDigest
     || receipt.runId !== lease.runId
@@ -1465,20 +1472,37 @@ const validateLaunchReceipt = (
     || receipt.scratchId !== lease.scratchId
     || receipt.relativePath !== lease.relativePath
     || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
-    || receipt.processGroupId !== receipt.pid
+    || !Number.isSafeInteger(receipt.processGroupId) || receipt.processGroupId < 1
     || typeof receipt.processStartToken !== "string"
     || receipt.processStartToken.length < 1 || receipt.processStartToken.length > 300
     || typeof receipt.createdAt !== "string"
     || !/^[0-9a-f]{64}$/u.test(receipt.receiptDigest)
-    || canonicalDigest(unsigned) !== receipt.receiptDigest) {
+    || canonicalDigest(unsigned) !== receipt.receiptDigest;
+  const kindInvalid = processKind === "batch"
+    ? keys !== batchKeys
+      || "loopbackHost" in receipt
+      || receipt.processGroupId !== receipt.pid
+    : keys !== visualKeys
+      || !("loopbackHost" in receipt)
+      || receipt.sampleIndex !== 0
+      || receipt.loopbackHost !== "127.0.0.1"
+      || !Number.isSafeInteger(receipt.loopbackPort)
+      || receipt.loopbackPort < 1 || receipt.loopbackPort > 65_535
+      || typeof receipt.healthPath !== "string"
+      || receipt.healthPath.length < 1 || receipt.healthPath.length > 1_024
+      || !receipt.healthPath.startsWith("/")
+      || /[\\?#\u0000]/u.test(receipt.healthPath);
+  if (commonInvalid || kindInvalid) {
     throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt does not match its manifest and scratch lease.");
   }
-  return Object.freeze({ ...receipt });
+  return Object.freeze({ ...receipt }) as BatchLaunchReceipt | VisualLaunchReceipt;
 };
 
-const bindLaunchReceiptToExactIdentity = (
-  selfReceipt: BatchLaunchReceipt,
-): BatchLaunchReceipt => {
+const bindLaunchReceiptToExactIdentity = <
+  Receipt extends BatchLaunchReceipt | VisualLaunchReceipt,
+>(
+  selfReceipt: Receipt,
+): Receipt => {
   const identity = readProcessIdentity(selfReceipt.pid, {
     runId: selfReceipt.runId,
     sampleIndex: selfReceipt.sampleIndex,
@@ -1502,7 +1526,10 @@ const bindLaunchReceiptToExactIdentity = (
   }
   const { receiptDigest: _receiptDigest, ...unsignedSelf } = selfReceipt;
   const unsigned = { ...unsignedSelf, processStartToken: identity.startToken };
-  return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
+  return Object.freeze({
+    ...unsigned,
+    receiptDigest: canonicalDigest(unsigned),
+  }) as unknown as Receipt;
 };
 
 const sameIdentity = (left: BatchProcessIdentity, right: BatchProcessIdentity): boolean =>
