@@ -264,6 +264,144 @@ Visual supervision, output downloads, events, wind migration, and final shell
 routes remain later #14/#15 work. The legacy Gate API below still coexists
 until separately reviewed retirement.
 
+### Planned A3-2 visual API/runtime gates
+
+These are target contracts, not current routes or acceptance evidence:
+
+1. **A3-2a1 schema-v8/Store/recovery:** extend schema-v6 scratch,
+   launch-receipt, manifest, and recovery evidence to visual; bind it to the
+   existing schema-v4 visual process shape; make its launch-bound port
+   immutable; and add an atomic one-time `health_at` plus separate immutable
+   health receipt. The public start route
+   continues to return `capability_not_available` for a visual experiment
+   without completion-card input, and returns
+   `visual_completion_not_supported` if `completionConversationId` was
+   supplied.
+2. **A3-2a2 real visual lifecycle:** only after real-process and restart gates
+   pass, the existing Project run route may accept a visual experiment. It
+   remains the same `/api/projects/{projectId}/runs` resource and returns the
+   existing allowlisted run DTO; no parallel visual-run API is introduced.
+3. **A3-2b broker/frame/WebSocket:** add browser bootstrap, visual frame
+   session, isolated broker HTTP, and exact WebSocket forwarding. Platform app
+   and broker exact-bind `::1` on different server-owned ports.
+4. **A3-2c Playwright:** add internal, current-Project/current-healthy-attempt
+   observation and explicit one-turn interaction authority.
+
+For A3-2a2 an accepted visual child receives the same canonical single-sample
+input envelope as batch through `--riff-input`, an assigned
+`--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and a server-assigned
+`--riff-port`. Normal exit code zero becomes success only after every required
+declared output validates and publishes atomically. Health alone or exit zero
+alone is insufficient.
+
+A3-2a2 uses a visual-specific macOS sandbox profile. It allows bind/listen only
+on the assigned `127.0.0.1:<port>` and denies other listeners, outbound
+connections, direct network access, and every IPv6/`::1` bind. If endpoint-level
+bind filtering is not available on the installed `sandbox-exec`, exact OS
+ownership inspection must fail a child/process group with any listener other
+than its assigned IPv4 endpoint; the profile must still deny all outbound
+access. The exact listener set is checked before health, while running, and at
+termination.
+
+Visual completion cards are unsupported. If the start request names
+`completionConversationId` for a visual experiment, the Project API rejects it
+with HTTP `422` and stable code `visual_completion_not_supported`. An accepted
+visual start records `completionConversationId: null`; its run projection
+retains `completionCardDisposition: "not_requested"`, and terminalization does
+not create a `run_completion_cards` receipt or transcript message. The Store
+and Project API, not page state or Agent prose, remain lifecycle authority.
+
+Schema v4 already has visual `process_kind`, `loopback_port`, `health_at`, and
+the one-live-process index, but the port can currently be updated and health
+lacks a complete one-write/receipt CAS. Schema v8 does not add those fields.
+It rejects every port update and permits health only as one same-transaction
+null-to-receipt-timestamp `health_at` update plus unique receipt for the exact
+running visual process with matching launch/port/path/run/attempt/process
+identity. Health-only, receipt-only, timestamp mismatch, later update, and
+second receipt fail. Because pre-v8 public visual dispatch never existed, any
+unproven pre-v8 visual `health_at` or live process evidence fails migration
+closed instead of becoming healthy. All evidence remains private.
+No Project workspace, run DTO, transcript, completion record, error, or
+ordinary log may expose a child port or convert it into a public URL. Port
+selection has a bounded local close-then-bind TOCTOU window; A3 does not claim
+strong reservation. Before health commits, the supervisor must verify the
+listener belongs to the exact recorded child/process group and is bound only
+to its assigned loopback endpoint. OS listener readiness is detected without
+HTTP; then the check runs immediately before and after one exact
+manual-redirect `GET` to
+`http://127.0.0.1:<assigned-port><healthPath>`. Every `3xx`, non-`200`,
+oversized header/body, deadline overrun, replacement window, wildcard, or
+ambiguous ownership fails closed. A same-identity compare-and-set permits only
+one immutable health receipt. There is no HTTP retry; concurrent or repeated
+invocations cannot send a second request. `startupTimeMs` covers readiness and
+that one request.
+
+A3-2a2 sets server-owned `maxActiveVisualRuns = 1` without changing the batch
+cap. The active map is keyed by exact `(runId, attemptId)`. At capacity the next
+visual run remains queued while eligible batch work continues. Every lane uses
+its claim dispatcher generation for heartbeat/finalize; the slot is released
+only after exact terminal commit and verified process/scratch cleanup.
+Dispatcher stop aborts and awaits all active lanes before returning. These
+rules do not weaken cancellation precedence, timeouts, or restart cleanup.
+A3-2a1 and A3-2a2 expose no proxy, frame, WebSocket, Playwright capability, or
+positive browser claim.
+
+The target run response continues to use the same `ProjectRunDto`, with
+`runKind: "batch" | "visual"`. Stable visual pairs are
+`succeeded/visual_run_succeeded`, `failed/visual_process_failed`,
+`failed/visual_health_failed`, `failed/visual_listener_invalid`, and
+`timed_out/visual_startup_timeout`. Visual work also uses
+`timed_out/run_wall_timeout` and the existing `failed` stdout/stderr/output/
+cleanup/heartbeat limit codes. Same-process shutdown is
+`failed/dispatcher_shutdown`; restart reconciliation is
+`failed/runtime_interrupted`; cancel-first is `cancelled/run_cancelled`.
+
+For A3-2b, platform app and visual broker both exact-bind IPv6 loopback `::1`
+on different server-owned ports, with URLs
+`http://[::1]:<app-port>` and `http://[::1]:<broker-port>`. Each accepts only
+its configured `Host:port`; the broker also requires the exact route path.
+Different ports create separate origins for DOM access while the shared host
+remains same-site for `SameSite=Strict`. App and broker cookies still cross
+ports and are not isolated from each other. The actual host separation is that
+platform `::1` cookies are not sent to the untrusted child at `127.0.0.1`.
+
+The app cookie is random, host-only, HttpOnly, SameSite=Strict, has no `Domain`,
+and uses `Path=/api/`. It may omit `Secure` on current HTTP and must set it
+under future HTTPS. Bootstrap rejects missing/`null`/wrong exact app
+`Origin`, wrong `Host:port`, or a `Sec-Fetch-Site` value other than
+`same-origin`. A successful new bootstrap rotates the browser-session
+generation and revokes older frame/WS capabilities before returning.
+Frame-session requires the exact app cookie, CSRF, Origin, and Fetch-Site.
+
+The first nonce-bearing broker navigation normally has no `Origin`; it requires
+the exact broker Host/path, live generation/Project/run/attempt/expiry binding,
+and atomic one-use nonce whose expiry is no later than 60 seconds after issue.
+Redemption within 60 seconds may succeed once; expiry, restart, or a new browser
+generation invalidates it immediately. After its nonce-free redirect, HTTP navigation and
+subresources without `Origin` require the exact broker cookie; requests with
+`Origin` additionally require the exact broker origin. WS always requires the
+exact broker Origin, so missing, `null`, app, child, or another origin fails.
+The in-memory registry binds the nonce/capability to browser-session generation,
+Project, run, attempt generation, expiry, and the live socket set; durable audit
+facts contain no secret. Revocation closes all sockets before deleting the
+entry.
+
+The broker cookie has a random independent name, is host-only, HttpOnly,
+SameSite=Strict, has no `Domain`, uses the exact broker path, and expires at
+`min(attempt expiry, 15 minutes)`. It may omit `Secure` on current HTTP and must
+set it under future HTTPS. Cookie `Path`
+is not a trusted authorization boundary: the app never accepts the broker
+cookie and the broker ignores all other cookies. Authorization is the one-use
+capability plus live binding, CSRF/Origin, exact Host/port/path, and expiry.
+Real-browser evidence proves the iframe sends the cookie, JavaScript cannot
+read it, and cross-origin DOM access fails. Every broker document sends CSP
+`frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and does not
+send `X-Frame-Options: SAMEORIGIN`. Only the exact app may embed it. App,
+broker, and child headers/logs are scanned for all cookie, nonce, including
+expired nonce values, capability, URL, and child-port secrets; those values are
+also absent from DTOs and SQLite.
+A3-2c is subsequent and never reuses a user frame URL or cookie.
+
 ---
 
 # Legacy durable project and backend API target

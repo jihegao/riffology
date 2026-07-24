@@ -42,6 +42,23 @@ of older pending terminal runs. Visual execution, Playwright access, and
 ordinary wind import remain later #14 slices. A3-1c-c is therefore not
 completion evidence for Stage 3.
 
+The pending visual sequence is now frozen as A3-2a1 schema-v8 Store/recovery
+contract (public visual start still rejected), A3-2a2 real visual lifecycle,
+A3-2b isolated broker/frame/WebSocket, and A3-2c scoped Playwright. A3-2a1 is
+only the schema/Store/recovery extension plus negative admission: it hardens
+the existing v4 port/health shape with port immutability, atomic health receipt,
+and fail-closed unproven pre-v8 evidence. A3-2a2 uses
+the canonical single-sample input envelope and assigned output directory, never
+publishes child ports, uses a visual-only no-outbound sandbox, starts with one
+active visual slot without blocking batch claims, and sends one no-retry exact
+bounded health GET. It does not support visual completion cards or make a
+browser claim. A3-2b exact-binds platform app and broker to `::1` on different ports:
+the port split isolates DOM origins while remaining same-site, and the IPv6
+host keeps platform cookies away from the untrusted IPv4 visual child. Its
+generation/≤60-second nonce/Origin/Host/registry checks and exact-app
+`frame-ancestors`, not Cookie Path, are authority. A3-3 remains the ordinary
+wind import.
+
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
 supersedes the former Gate 0-4 product target wherever they disagree. The older
@@ -68,8 +85,9 @@ product.
   active Stage 3 / #14 contract and implementation ledger. It distinguishes the
   landed Project foundation, A3-1a frozen-planning boundary, and A3-1b generic
   batch execution plus A3-1c cancellation/restart recovery and exactly-once
-  completion cards from pending
-  visual supervision, scoped Playwright access, and the ordinary wind import.
+  batch completion cards from the pending A3-2a1/A3-2a2 visual runtime,
+  A3-2b broker/frame/WebSocket, A3-2c scoped Playwright, and A3-3 ordinary wind
+  import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.

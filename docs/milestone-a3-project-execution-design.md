@@ -19,11 +19,14 @@ precedence against every terminal transition. A3-1c-b adds schema migration v6,
 durable pre-spawn scratch and launch evidence, exact v4
 attempt/process/scratch reconciliation, and recovery-before-generation
 activation. A3-1c-c adds schema migration v7, exactly-once deterministic
-platform completion cards, permanent skip dispositions, and startup
+batch platform completion cards, permanent skip dispositions, and startup
 reconciliation/audit of terminal pending rows.
-Visual execution,
-Playwright access, and ordinary wind import remain later Stage 3 slices. This
-document therefore does not claim that Stage 3 is complete.
+Visual execution remains planned as four sequential review gates:
+A3-2a1 schema-v8/Store/recovery contract with public visual starts still
+rejected, A3-2a2 real visual lifecycle, A3-2b isolated browser broker/frame and
+WebSocket access, and A3-2c scoped Playwright authority. Ordinary wind import
+remains A3-3. None of those target slices is current implementation evidence,
+so this document does not claim that Stage 3 is complete.
 
 This document is subordinate to the
 [Milestone A product contract](milestone-a-product-contract.md), builds on the
@@ -85,7 +88,7 @@ The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c boundary is intentionally na
   replays a strict receipt, prevents a cancelled queued run from launching,
   aborts active in-process supervision, and makes cancel-first terminalize as
   `cancelled` without successful outputs;
-- schema migration v7 publishes one deterministic platform completion card, or
+- schema migration v7 publishes one deterministic batch platform completion card, or
   one permanent skip disposition, in the terminal run transaction and audits
   or reconciles terminal pending rows before dispatcher activation; and
 - Project conversations continue to use the Stage 2 conversation contract.
@@ -102,7 +105,8 @@ The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
 - batch domain-event ingestion or public output list/download routes;
-- a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
+- a schema-v8 visual launch/recovery contract, real visual lifecycle, scoped
+  visual proxy, WebSocket forwarding, or Playwright capability; and
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
@@ -119,6 +123,14 @@ intentionally require fail-closed repair instead of speculative signalling.
 Visual starts fail with
 `capability_not_available`, and batch descriptions that declare
 `domainEvents` fail with `domain_events_not_supported`.
+
+The planned A3-2a1 migration does not change this public boundary. It may land
+schema-v8 visual launch, health, and recovery records only while public visual
+start without a completion conversation remains rejected with
+`capability_not_available`. A visual request that supplies
+`completionConversationId` is rejected earlier with
+`visual_completion_not_supported`. A3-2a2 is the first slice permitted to
+remove the capability rejection, after its real lifecycle evidence is green.
 
 ## Outcome and stage boundary
 
@@ -192,6 +204,19 @@ against accidental access, not containment of hostile code. Passing a technical
 check or completing a run does not prove scientific validity, calibration,
 safety, decision fitness, or a recommendation.
 
+A3-2a2 uses a separate visual `sandbox-exec` profile rather than widening the
+batch profile. It permits the recorded child/process group to bind and listen
+only on its assigned `127.0.0.1:<port>` endpoint and denies every other
+IPv4 listener, every IPv6/`::1` bind or listener, outbound connection, and
+direct network access. If the installed
+macOS `sandbox-exec` cannot express an endpoint-level bind filter, the outbound
+and direct-network denial remains mandatory and exact OS listener-ownership
+inspection is an additional fail-closed compensation; it does not authorize a
+broader outbound rule. The supervisor rejects any listener owned by the child
+or its process group other than the one assigned IPv4 endpoint. It rechecks
+that closed listener set before health, throughout the running lifetime, and
+before terminal signal/cleanup.
+
 ## Schema v4 and repository contract
 
 Stage 3 runtime requires an ordered schema-v3-to-v4 migration. The migration is
@@ -212,7 +237,7 @@ state required by this contract:
 | `process_attempts` | One unified private process table for both batch and visual children. Bind run attempt, process kind, optional batch sample index/ID, OS PID, OS-derived start token, process-group ID, launch-gate state, launch/start/health/heartbeat/exit times, loopback endpoint only for visual, exit/signal observation, and cleanup receipt/digest. PID alone is never sufficient identity. Frame/proxy capabilities, credentials, raw commands, and arbitrary environment values are never stored. |
 | `output_indexes` | Bind a run-owned `run_file` to one frozen `sample_index`, digest-derived `sample_id`, and declared logical name. Enforce uniqueness on `(run_id, sample_index, logical_name)`. |
 | `domain_events` | Optional append-only `(run_id, sequence)` diagnostic records with sample index, bounded type/payload, byte count, optional event time, and creation time. They are not replay frames. |
-| `completion_cards` or equivalent receipt | Enforce one platform completion card per `(run_id, conversation_id)` and record `published` or a terminal skip reason. |
+| `completion_cards` or equivalent receipt | Batch runs only: enforce one platform completion card per `(run_id, conversation_id)` and record `published` or a terminal skip reason. Visual runs do not support completion cards; they keep `completion_card_disposition = 'not_requested'` without a `run_completion_cards` receipt. |
 
 Integrity checks require:
 
@@ -423,8 +448,23 @@ an alternate representation. Each sample writes below its own assigned
 directory and receives no SQLite path or Project/object-store root.
 
 For `riff-visual-v1`, Riff supplies an unused loopback port and adds
-`--riff-host 127.0.0.1` and `--riff-port`. Health must succeed at the exact
-declared same-origin path within the startup deadline.
+`--riff-input <absolute-run-scratch-file>`,
+`--riff-output-dir <absolute-run-scratch-directory>`,
+`--riff-host 127.0.0.1`, and `--riff-port <server-assigned-port>`. The input
+file is the same canonical single-sample envelope used by batch:
+`{schemaVersion, runId, sampleIndex, sampleId, parameters, seed}`. A visual run
+therefore receives its one frozen sample without a second normalization,
+generated seed, or page-specific parameter channel. Health must succeed at the
+exact declared same-origin path within the startup deadline.
+
+Selecting a currently unused loopback port requires closing the platform probe
+socket before the child can bind, so the local host has a bounded
+close-then-bind TOCTOU risk. Stage 3 does not claim strong port preallocation.
+After launch the supervisor must verify that the exact recorded child/process
+group owns a listener bound only to the assigned loopback endpoint; wildcard,
+different-process, different-group, or otherwise ambiguous listener ownership
+fails closed before health can commit. The public API, DTOs, messages, and
+ordinary logs never expose the assigned port.
 
 WebSocket forwarding is denied unless the `webSocket` object exists. Its path
 must be one exact absolute same-origin path. `subprotocols` contains zero to
@@ -510,7 +550,7 @@ cannot be overridden by the public start request.
 | Field | Scope, clock, aggregation, and terminal code |
 | --- | --- |
 | `wallTimeMs` | One run-attempt budget starting at committed dispatcher claim and ending at terminal commit. All batch samples share the remaining clock; visual startup and serving consume the same budget. Expiry terminates every verified process group with `run_wall_timeout`. |
-| `startupTimeMs` | Visual-only clock from launch-gate release until the declared health probe first succeeds. It is inside `wallTimeMs`; expiry is `visual_startup_timeout`. Process durable-registration uses the separate fixed launch-gate deadline. |
+| `startupTimeMs` | Visual-only clock from launch-gate release through OS listener-readiness detection and the single declared health GET. There is no HTTP retry. It is inside `wallTimeMs`; expiry before the one health receipt is `visual_startup_timeout`. Process durable-registration uses the separate fixed launch-gate deadline. |
 | `terminationGraceMs` | Per process group from committed cancel/limit intent to forced termination. Groups may count down concurrently. Failure to prove exit/cleanup is `process_cleanup_unverified`, never success. |
 | `maxStdoutBytes` / `maxStderrBytes` | Atomic run-level totals across every batch sample or the one visual child, counted as platform pipes are read. First overflow commits `run_stdout_limit` or `run_stderr_limit` and terminates the run. |
 | `maxOutputFiles` / `maxOutputBytes` | Run-level totals across all samples, including required and optional declared outputs, measured from descriptor metadata and verified bytes during ingestion. Overflow is `run_output_file_limit` or `run_output_byte_limit`; nothing is partially published. |
@@ -533,6 +573,12 @@ The current A3-1b batch implementation may claim hard enforcement only for:
 in A3-1b, not current enforcement claims: visual starts fail with
 `capability_not_available`, and batch `domainEvents` fail with
 `domain_events_not_supported`.
+
+A3-2a2 adds one server-owned global visual cap,
+`maxActiveVisualRuns = 1`. It is not a member of caller-controlled
+`RunLimitsV1` and does not change the existing batch concurrency cap. While the
+visual slot is occupied, the dispatcher leaves the next visual run queued and
+continues claiming eligible batch work.
 
 Cross-limit precedence is deterministic by the first committed terminal receipt,
 not by which observer logged first. Output bytes beyond a limit are never
@@ -614,9 +660,11 @@ The target start route retains the current API naming:
 POST /api/projects/{projectId}/runs
 ```
 
-Its body contains `commandId`, `experimentConfigId`, and optional
+Its body contains `commandId`, `experimentConfigId`, and the batch-only optional
 `completionConversationId`; it never accepts a Project path, executable,
-authoritative digest, expanded sample plan, or output location.
+authoritative digest, expanded sample plan, or output location. A visual start
+that supplies `completionConversationId` is rejected with
+`visual_completion_not_supported`.
 
 Starting a run is one atomic store operation:
 
@@ -632,7 +680,8 @@ Starting a run is one atomic store operation:
 6. reject duplicate `sampleId` values;
 7. freeze configuration, exact sample plan, limits, Project snapshot digest,
    execution-description digest, and their canonical digests;
-8. prove any completion conversation belongs to the same Project; and
+8. for batch only, prove any completion conversation belongs to the same
+   Project; visual freezes no completion conversation; and
 9. insert one `queued` run and its idempotency receipt before notifying the
    dispatcher.
 
@@ -812,6 +861,58 @@ an unused loopback port, starts the copied entry point, and waits for bounded
 health. Wildcard/non-loopback binding, cross-origin redirect, startup timeout,
 or premature exit fails the run.
 
+Schema v4 already has the `process_kind`, visual `loopback_port`, `health_at`
+shape, and one-live-visual-process index, but that is not complete visual
+evidence: `loopback_port` can currently be updated, and `health_at` lacks a
+complete null-to-timestamp single-write/receipt-same-transaction CAS and
+immutability rule. Schema v8 does not add those columns again. It extends the
+schema-v6 scratch, launch-receipt, manifest, and recovery graph to visual work
+and adds triggers that:
+
+- reject every update of the launch-bound `loopback_port`;
+- allow `health_at` to change only once from null to the receipt timestamp for
+  the exact visual process in `running`, with matching launch, port, declared
+  health path, run/attempt/process identity, and unique health receipt in the
+  same transaction; and
+- reject every later health update, a `health_at`-only write, a receipt-only
+  insert, timestamp mismatch, or second receipt.
+
+The separate immutable health receipt stores no capability, cookie, nonce,
+public URL, response body, or other secret. Because public visual dispatch did
+not exist before v8, migration cannot infer that a pre-v8 `health_at` or live
+visual process is legitimate. Any such unproven health/live evidence fails
+migration closed and is never adopted as healthy. Visual model code remains
+behind the same one-use launch gate as batch. A3-2a1 migrates and audits these
+records but does not dispatch visual work; A3-2a2 adds the real supervisor and
+is the first slice that may admit a visual run.
+
+The first visual dispatcher has `maxActiveVisualRuns = 1` and keeps an active
+map keyed by exact `(runId, attemptId)`. It does not claim a second queued visual
+run while that map occupies the slot, but continues claiming eligible batch
+work under the unchanged batch cap. Every lane heartbeat and finalization uses
+the same dispatcher generation that claimed the attempt. The visual slot is
+released only after exact terminal commit plus verified process and scratch
+cleanup. Dispatcher stop aborts every active lane and awaits all lane promises
+before it returns or permits Store close. A healthy visual therefore cannot
+head-of-line block the batch queue, and fairness never authorizes duplicate
+supervision or blind relaunch.
+
+Listener readiness is detected from the exact OS-owned IPv4 listener without
+sending HTTP. Once ready, health sends exactly one `GET` to
+`http://127.0.0.1:<assigned-port><declared-healthPath>` using manual redirect
+handling. Every `3xx`, every status other than `200`, an oversized header or
+body, and deadline expiry fail closed. The probe never follows a redirect or
+changes method, host, port, or path, and it has no retry. A concurrent or
+repeated health invocation cannot send another request or insert another
+receipt. Immediately before the request and again
+after the complete bounded response, the supervisor proves that the listener
+still belongs to the exact recorded child/process group and that no other
+listener exists for that identity. Only one same-identity compare-and-set may
+insert the immutable health receipt. Listener replacement between either
+ownership check and receipt commit produces `visual_listener_invalid`, never a
+healthy attempt. The same exact-IPv4/no-other-listener invariant is monitored
+while healthy and checked again before termination and cleanup.
+
 After health, the access broker exposes only a server-minted route scoped to
 `{projectId, runId, attemptGeneration}`. The browser never receives the child
 port. The proxy allows the exact healthy attempt, bounded HTTP, and only the
@@ -821,47 +922,106 @@ restrictive Content Security Policy. The frame has no ambient top navigation,
 popup, parent-origin, or unrestricted download capability.
 
 Stage 3 first establishes a local browser-session capability through
-`POST /api/browser-session/bootstrap` on the app origin. It sets a random
-HttpOnly, SameSite=Strict cookie and returns a separate in-memory CSRF token.
+`POST /api/browser-session/bootstrap` on the platform app origin
+`http://[::1]:<app-port>`. Both platform app and broker bind exact IPv6
+loopback `::1`, on different server-owned ports, and reject any other listener
+address or `Host:port`. The bootstrap sets a random host-only HttpOnly,
+SameSite=Strict cookie with no `Domain`, `Path=/api/`, and returns a separate
+in-memory CSRF token. On current HTTP the cookie may omit `Secure`; under
+future HTTPS it must set `Secure`.
 This is a single-local-user browser capability, not login, identity, multi-user
 authorization, or reuse of the legacy path/default-session mechanism. It is
-rotated on backend restart and scoped only to the app origin.
+rotated on backend restart. The endpoint rejects a missing, `null`, or wrong
+exact app `Origin`, a wrong app `Host:port`, or any
+`Sec-Fetch-Site` other than `same-origin`. A successful new bootstrap increments
+the browser-session generation and revokes every older frame/WS capability
+before returning.
 
 The browser then calls
 `POST /api/projects/{projectId}/runs/{runId}/visual-frame-session` with that
-cookie, exact app `Origin`, `Sec-Fetch-Site: same-origin`, and matching
-`X-Riff-CSRF`. Agent/tool credentials cannot call either endpoint. The response
-contains one `frameUrl` on a dedicated loopback visual-broker origin, with a
-random single-use nonce bound in memory to the browser session, Project, run,
-attempt generation, and expiry of at most 60 seconds.
+exact app cookie, matching `X-Riff-CSRF`, exact app `Origin`, and
+`Sec-Fetch-Site: same-origin`. A wrong value in any field fails. Agent/tool
+credentials cannot call either endpoint. The response contains one `frameUrl`
+on `http://[::1]:<broker-port>` with a random single-use nonce. The in-memory
+registry binds it to
+`{browserSessionGeneration, projectId, runId, attemptGeneration, expiry}` with
+expiry no later than 60 seconds after issuance, and owns the capability's live
+socket set.
 
-First navigation atomically consumes the nonce and redirects to a nonce-free
-broker path while setting a broker-origin HttpOnly, Secure when HTTPS,
-SameSite=Strict, path-scoped frame cookie. The cookie expires no later than the
-attempt or 15 minutes and is checked against the live attempt on every request.
+The app and broker are different origins because their server-owned ports
+differ, but remain same-site on host `::1`, so `SameSite=Strict` can be sent in
+the iframe. Platform cookies are not isolated from each other by port and
+`Path` is not a trusted security boundary. The real host isolation is between
+the platform `::1` cookies and the untrusted visual child at `127.0.0.1`;
+platform cookies are never sent to the child.
+
+The first nonce-bearing iframe navigation normally has no `Origin`. It is
+authorized only by exact broker `Host:port`, exact nonce path, atomic one-use
+nonce consumption, live registry binding, and expiry. It redirects to a
+nonce-free broker path while setting a broker HttpOnly, SameSite=Strict,
+host-only cookie with no `Domain`, a random broker-only name independent of the
+app cookie, and the exact broker path. The cookie expires no later than the
+minimum of attempt expiry and 15 minutes. On current HTTP it may omit `Secure`;
+under future HTTPS it must set `Secure`. After redirect, every request requires
+that exact named cookie plus the live attempt/registry binding. The app never
+interprets or accepts the broker cookie; the broker ignores every other cookie.
 The iframe may use `allow-same-origin` only because the broker is a distinct
 origin; it still omits top-navigation, popup, parent-origin, and unrestricted
 download permissions. Browser same-origin policy, rather than an opaque origin,
 prevents parent DOM access.
 
-Broker documents/assets emit no permissive CORS header. Fetches require the
-exact visual-broker `Origin` when present plus the broker cookie. WebSocket
-upgrade requires that exact Origin, declared path/subprotocol, and broker
-cookie. `null`, app-origin, child-port, cross-site, and missing WebSocket origins
-are rejected. Bootstrap/session POST responses permit only the exact app origin,
-credentials, explicit headers/methods, and never wildcard CORS.
+Every broker document response emits CSP
+`frame-ancestors http://[::1]:<exact-app-port>` with no wildcard or alternate
+app origin. It must not emit `X-Frame-Options: SAMEORIGIN`, which would block
+the authorized cross-port frame. Broker documents/assets emit no permissive
+CORS header. Fetches require the
+broker cookie and live binding. When an HTTP `Origin` header is present it must
+equal the exact broker origin; a normal navigation or subresource request
+without `Origin` is allowed only with the cookie. WebSocket upgrade always
+requires the exact broker `Origin`, declared path/subprotocol, broker cookie,
+and live registry binding. Missing, `null`, app-origin, child-origin, or any
+other WebSocket origin is rejected. Bootstrap/session POST responses permit
+only the exact app origin, credentials, explicit headers/methods, and never
+wildcard CORS.
 
 Raw or hashed frame nonces, `frameUrl`, and frame-session cookies are never
 stored in SQLite, Agent/context DTOs, conversation messages, analytics, access
 logs, completion cards, or error text. Only bounded capability-issued/redeemed/
-revoked audit facts without the secret are retained. Backend restart, expiry,
-redemption replay, user-session change, unhealthy attempt, or terminal state
-revokes access; a fresh authenticated request is required.
+revoked audit facts without the secret are retained. App, broker, and child
+request/response headers plus logs are scanned for all three parties' cookie,
+nonce, including expired nonce values, capability, URL, and child-port secrets;
+the same values are absent from DTOs and SQLite. Backend restart, expiry,
+redemption replay, browser-session generation change, unhealthy attempt, or
+terminal state revokes access. Revocation first closes every registered socket
+and only then removes the registry entry; a fresh bootstrap/session request is
+required.
 
 Visual runs remain `running` while healthy. Explicit stop is cancellation.
 Timeout/resource breaches use their matching terminal states. Normal exit after
-health becomes `succeeded` only when required outputs validate. Stage 3 does not
-synthesize a report from the page.
+health can become `succeeded` only when the exact recorded child exits with code
+zero and every required declared output validates and publishes atomically.
+Exit zero alone, a healthy page, or partial/optional output presence is never
+success. Stage 3 does not synthesize a report from the page.
+
+Visual completion cards are not part of the product contract. Public visual
+start rejects any supplied `completionConversationId` with
+`visual_completion_not_supported`. Accepted visual runs freeze a null
+completion conversation, retain `completion_card_disposition =
+'not_requested'`, and terminalize without inserting a
+`run_completion_cards` receipt or conversation message. The Project run API
+and Store remain authoritative for visual lifecycle and outputs.
+
+A3-2a2 exposes `runKind: "batch" | "visual"` in the same Project run DTO and
+freezes these visual status/code pairs:
+`succeeded/visual_run_succeeded`, `failed/visual_process_failed`,
+`failed/visual_health_failed`, `failed/visual_listener_invalid`, and
+`timed_out/visual_startup_timeout`. Visual work also uses
+`timed_out/run_wall_timeout` and the existing `failed` stdout/stderr/output
+limit, cleanup, and dispatcher-heartbeat codes. Same-process backend shutdown
+produces `failed/dispatcher_shutdown`; cross-restart recovery produces
+`failed/runtime_interrupted`; and cancel-first produces
+`cancelled/run_cancelled`. Page state, health text, or exit observation cannot
+select another status or code.
 
 Every attempt capability and WebSocket closes on stop, unhealthy state,
 terminal reconciliation, backend restart, or expiry. Stored child ports never
@@ -873,6 +1033,9 @@ Playwright is an internal short-lived Agent capability, not ambient browser
 authority. The service derives the current Project from the durable conversation
 and accepts only that Project's current healthy visual attempt. It cannot select
 another Project, run, port, URL, local service, filesystem path, or product page.
+It does not reuse or receive a user's frame URL, nonce, app cookie, or broker
+cookie; A3-2c mints a separate internal one-turn capability only after A3-2b is
+complete.
 
 Read-only observation may capture the declared structured endpoint,
 accessibility tree, bounded DOM text, and screenshots. Each observation records
@@ -1066,13 +1229,36 @@ Output indexes never resolve outside the owning Project/run object root.
 4. **A3-1c batch lifecycle — implemented through A3-1c-c:** A3-1c-a implements public user
    cancellation with committed race receipts and same-process queued/running
    enforcement. A3-1c-b implements v4 cross-restart attempt/process/scratch
-   recovery. A3-1c-c implements exactly-once terminal completion cards and
+   recovery. A3-1c-c implements exactly-once terminal batch completion cards and
    startup reconciliation.
-5. **Visual runtime — pending:** real local visual process, health, scoped proxy/frame and
-   WebSocket limits, cancellation, recovery, and Playwright audit.
-6. **Wind import — pending:** versioned manifest, normal technical check, example Project
+5. **A3-2a1 visual runtime contract — pending:** schema v8 migration and
+   rollback, schema-v6 scratch/launch/recovery extension to visual, binding to
+   the existing schema-v4 visual process shape, loopback-port immutability,
+   atomic one-time `health_at` plus health receipt, fail-closed pre-v8 visual
+   evidence, exact restart-cleanup Store contract, and dispatcher scheduling
+   contract. Public
+   visual starts still reject with `capability_not_available`, or
+   `visual_completion_not_supported` when a completion conversation was
+   supplied; this slice has no process or browser acceptance claim.
+6. **A3-2a2 real visual lifecycle — pending:** remove the public rejection only
+   after a real `riff-visual-v1` child proves the canonical single-sample input,
+   assigned output directory/loopback endpoint, visual-only sandbox, exact
+   listener ownership before/after bounded health, one health receipt, the
+   one-slot visual scheduler with continued batch dispatch, cancellation,
+   stable terminal codes, limits, output validation, stop join, and exact
+   restart cleanup. This slice has no proxy, frame, WebSocket, Playwright, or
+   browser claim.
+7. **A3-2b isolated browser access — pending:** scoped broker/frame capability,
+   exact IPv6-loopback app/broker Host/port/path, browser-session generation,
+   bootstrap/CSRF/nonce/cookie/Origin rules, HTTP and WebSocket enforcement,
+   socket-first revocation, three-party secret scans, and real-browser
+   isolation evidence.
+8. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
+   attempt observation, explicit one-turn interaction, bounded audit, and
+   cross-scope denial.
+9. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-7. **Integration — pending:** focused/full suites, independent contract/security review,
+10. **Integration — pending:** focused/full suites, independent contract/security review,
    narrow Stage 3 browser evidence, documentation sync, PR merge, Issue #14
    closure, and local `main` synchronization.
 
@@ -1113,9 +1299,11 @@ implemented merely because part of it is exercised by A3-1b:
 | Batch runtime | A real generic subprocess proves success and bounded concurrency; tests cover partial-sample failure, missing/extra/path/symlink/media/digest/size failures, hard `RunLimitsV1`, unsupported CPU/memory/process limits, and restart. |
 | Path and secret safety | Counterexamples cover absolute/traversal/control/separator/symlink/special paths, external hardlinks, cross-owner/cross-sample inode aliases, `nlink` or device/inode replacement before/after copy, untracked roots, inherited secret/proxy/home variables, secret-shaped output, and omission of commands/environment/process identity from DTOs/logs. |
 | State and trash safety | Property/table tests reject every illegal transition, stale dispatcher generation, every mutation/dispatch of all-status v3 records, and trash/restore of every nonterminal or cancelling v4 run. |
-| Exactly-once card | Fault injection before/after terminal commit proves one deterministic card or one durable skip receipt, never a guessed or duplicate message. |
+| Exactly-once batch card | Fault injection before/after a batch terminal commit proves one deterministic card or one durable skip receipt, never a guessed or duplicate message. Visual terminalization has no card receipt. |
 | Outputs/events | Ownership, sample identity, digest revalidation, atomic ingestion, opaque cursor binding, pagination, filters, limits, trash, and cross-run/tamper failures. |
-| Visual frame capability | A real browser proves isolated broker origin, local bootstrap cookie/CSRF gating, exact fetch/WS Origin and CORS rules, one-use URL, nonce-free redirect, HttpOnly broker cookie, attempt/session/expiry binding, parent DOM isolation, replay/restart revocation, and absence from persistence/DTOs/logs. |
+| Visual runtime contract | Schema-v8 migration/rollback and restart tests extend schema-v6 scratch/launch/recovery to the existing schema-v4 visual process shape, make its launch-bound port immutable, and require one atomic null-to-timestamp `health_at` plus matching immutable receipt. Port update, health-only, receipt-only, timestamp mismatch, second write/receipt, and unproven pre-v8 visual health/live evidence fail closed. Public visual start still fails in A3-2a1. |
+| Visual lifecycle | A real child receives the canonical single-sample `--riff-input`, assigned `--riff-output-dir`, fixed loopback host and assigned port. A visual-only sandbox denies other listeners and all outbound/direct network access; exact listener ownership surrounds one bounded manual-redirect health GET and one CAS receipt. The one-slot visual cap leaves a second visual queued while batch finishes, and stop joins every lane. Stable success/failure/timeout/cancel/restart codes are exact. Exit zero succeeds only after required outputs validate. Visual completion input is rejected and no completion-card receipt/message is created. |
+| Visual frame capability | A real browser proves platform app/broker exact-bind `::1` on different server-owned ports while the child remains `127.0.0.1`; platform cookies cross app/broker ports but never reach the child. Evidence includes actual SameSite=Strict broker-cookie delivery, JavaScript denial from HttpOnly, cross-origin parent-DOM denial, exact bootstrap/frame-session Origin/Host/Fetch-Site/CSRF rules, ≤60-second no-Origin one-use nonce navigation and invalidation, post-redirect HTTP and strict WS Origin rules, exact-app-only CSP `frame-ancestors` with no blocking SAMEORIGIN header, generation/Project/run/attempt/expiry/socket binding, socket-first revocation, and three-party secret scans. Port and Cookie Path are not treated as Cookie authority. |
 | Visual/WebSocket | Real process proves loopback health, hidden port, CSP/frame restrictions, exact path/subprotocol, frame/connection/idle limits, redirect denial, stop/timeout/restart, and capability revocation. |
 | Playwright authority | Current-run observation is bounded/audited; interaction requires an explicit turn; cross-Project/run/URL, script, upload, clipboard, and expired-capability cases fail. |
 | Direct controls | With OpenCode unavailable, saved configurations/runs remain readable and direct start/cancel/download/trash/restore work without canned Agent output. |
