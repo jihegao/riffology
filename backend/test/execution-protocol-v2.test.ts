@@ -9,6 +9,7 @@ import {
   resolveBatchOutputPathsV1,
   validateBatchInputV1,
   validateExecutionDescriptionV2,
+  visualProcessArguments,
 } from "../src/execution-protocol-v2.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { createGenericModelScaffold } from "../src/model-workspace.ts";
@@ -95,4 +96,50 @@ test("run capability, batch envelope, CLI arguments, and output paths share one 
   }]);
   assert.throws(() => batchProcessArguments(description, "relative-input.json", "/private/tmp/run/output"),
     /application-owned absolute path/u);
+});
+
+test("visual CLI arguments require a declared capability and preserve the server-owned endpoint boundary", () => {
+  const raw = validDescription();
+  raw.runMode = "visual";
+  delete raw.batch;
+  raw.visual = {
+    entryPoint: "code/visual.py",
+    protocol: "riff-visual-v1",
+    healthPath: "/health",
+  };
+  const description = validateExecutionDescriptionV2(raw);
+  const arguments_ = visualProcessArguments(
+    description,
+    "/private/tmp/run/input.json",
+    "/private/tmp/run/output",
+  );
+
+  assert.deepEqual(arguments_, [
+    "code/visual.py",
+    "--riff-input",
+    "/private/tmp/run/input.json",
+    "--riff-output-dir",
+    "/private/tmp/run/output",
+  ]);
+  assert.equal(Object.isFrozen(arguments_), true);
+  assert.equal(arguments_.includes("--riff-host"), false);
+  assert.equal(arguments_.includes("--riff-port"), false);
+
+  const batchOnly = validateExecutionDescriptionV2(validDescription());
+  assert.throws(() => visualProcessArguments(
+    batchOnly,
+    "/private/tmp/run/input.json",
+    "/private/tmp/run/output",
+  ), (error: unknown) =>
+    error instanceof ExecutionProtocolV2Error && error.code === "capability_not_declared");
+
+  for (const [inputPath, outputDirectory] of [
+    ["relative-input.json", "/private/tmp/run/output"],
+    ["/private/tmp/run/input.json", "relative-output"],
+    ["/private/tmp/run/../input.json", "/private/tmp/run/output"],
+    ["/private/tmp/run/input.json", "/"],
+  ]) {
+    assert.throws(() => visualProcessArguments(description, inputPath!, outputDirectory!),
+      /application-owned absolute path/u);
+  }
 });
