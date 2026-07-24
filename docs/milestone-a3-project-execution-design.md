@@ -84,10 +84,13 @@ The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c boundary is intentionally na
 - `POST /api/projects/{projectId}/runs/{runId}/cancel` atomically creates or
   replays a strict receipt, prevents a cancelled queued run from launching,
   aborts active in-process supervision, and makes cancel-first terminalize as
-  `cancelled` without successful outputs; and
+  `cancelled` without successful outputs;
+- schema migration v7 publishes one deterministic platform completion card, or
+  one permanent skip disposition, in the terminal run transaction and audits
+  or reconciles terminal pending rows before dispatcher activation; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema migration v6 while the current execution
+The product database is schema migration v7 while the current execution
 contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
