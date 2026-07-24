@@ -21,7 +21,7 @@ HTTP/API acceptance surface. API integration and the real-provider two-turn
 browser closure are complete; the live evidence is described under Verification.
 
 Stage 3 / #14 is in progress. The Project foundation and A3-1a frozen-planning
-slice implemented fixed-copy Projects, schema v4, the closed canonical
+slice implemented fixed-copy Projects, execution contract v4, the closed canonical
 input-schema profile, deterministic experiment/sample planning, digest
 compare-and-set, immutable command receipts, and execution-description-v2
 admission. A3-1b now adds the public run start/read routes, a durable dispatcher,
@@ -31,13 +31,16 @@ The official generic Model scaffold now emits execution-description v2 with a
 batch-only capability; existing v1 Models are not silently upgraded.
 
 A3-1b explicitly rejects visual runs with `capability_not_available` and batch
-`domainEvents` with `domain_events_not_supported`. Cross-restart
-attempt/scratch recovery, the user-cancel race and receipts, and exactly-once
-completion-card delivery remain A3-1c work. Visual execution, scoped Playwright
+`domainEvents` with `domain_events_not_supported`. A3-1c-a now implements
+schema migration v5 plus strict same-process queued/running cancellation,
+durable replayable receipts, SQLite commit-order terminal precedence, and
+no-successful-output publication after cancel-first. Cross-restart
+attempt/process/scratch recovery and exactly-once completion-card delivery
+remain later A3-1c work. Visual execution, scoped Playwright
 access, and ordinary wind import are later #14 slices. Their active contract and
 negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
-This batch slice is not completion evidence for Stage 3, visual execution, wind
+This lifecycle slice is not completion evidence for Stage 3, cross-restart recovery, completion cards, visual execution, wind
 import, or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.

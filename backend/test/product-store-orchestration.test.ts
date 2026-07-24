@@ -67,6 +67,246 @@ const LIMITS: RunLimitsV1 = {
 const GENERATION_A = "a".repeat(64);
 const GENERATION_B = "b".repeat(64);
 
+test("queued cancellation persists exact receipts, projects cancelling, and never launches", async () => {
+  const fixture = createDispatcherFixture("queued_cancel");
+  let launches = 0;
+  let dispatcher: ProductRunDispatcher | undefined;
+  try {
+    const first = fixture.store.cancelRun({
+      commandId: "command_queued_cancel_first",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      requestedAt: "2026-07-24T10:01:01.000Z",
+    });
+    assert.deepEqual(first, {
+      schemaVersion: 1,
+      commandId: "command_queued_cancel_first",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      applied: true,
+      code: "cancellation_requested",
+      status: "cancelling",
+      cancelRequestedAt: "2026-07-24T10:01:01.000Z",
+      createdAt: "2026-07-24T10:01:01.000Z",
+    });
+    assert.deepEqual(fixture.store.getFrozenRunCancelReceipt({
+      commandId: first.commandId,
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+    }), first);
+    const second = fixture.store.cancelRun({
+      commandId: "command_queued_cancel_second",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      requestedAt: "2026-07-24T10:01:02.000Z",
+    });
+    assert.equal(second.applied, false);
+    assert.equal(second.code, "cancellation_already_requested");
+    assert.equal(second.status, "cancelling");
+    assert.equal(second.cancelRequestedAt, first.cancelRequestedAt);
+    assert.throws(() => fixture.store.getFrozenRunCancelReceipt({
+      commandId: first.commandId,
+      projectId: "project_other_cancel",
+      runId: fixture.runId,
+    }), /different intent/u);
+
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor: {
+        async supervise() {
+          launches += 1;
+          throw new Error("cancelled queued run launched");
+        },
+        cleanup() { throw new Error("cancelled queued run required cleanup"); },
+      },
+      leaseMs: 1_000,
+    });
+    await dispatcher.start();
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.status, "cancelled");
+    assert.equal(terminal.terminalCode, "run_cancelled");
+    assert.equal(terminal.startedAt, null);
+    assert.equal(launches, 0);
+    assert.deepEqual(fixture.store.listRunAttempts(fixture.runId), []);
+    assert.deepEqual(fixture.store.listRunOutputs(fixture.runId), []);
+    assert.deepEqual(fixture.store.getFrozenRunCancelReceipt({
+      commandId: first.commandId,
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+    }), first);
+  } finally {
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("running cancel beats a successful supervisor result and publishes no outputs", async () => {
+  const fixture = createDispatcherFixture("running_cancel");
+  let dispatcher: ProductRunDispatcher | undefined;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+  let activeSignal: AbortSignal | undefined;
+  try {
+    const supervisor: BatchSupervisorPort = {
+      async supervise(input) {
+        activeSignal = input.signal;
+        const sample = input.run.samples[0]!;
+        const identity = {
+          runId: input.run.runId,
+          sampleIndex: sample.sampleIndex,
+          sampleId: sample.sampleId,
+          scratchId: "scratch-running-cancel",
+          pid: 9_910,
+          processGroupId: 9_910,
+          startToken: "start-running-cancel",
+        };
+        await input.hooks?.registerProcess?.(identity);
+        await input.hooks?.markGateReleased?.(identity);
+        await input.hooks?.markProcessStarted?.(identity);
+        entered();
+        await new Promise<void>((resolve) => {
+          if (input.signal?.aborted) resolve();
+          else input.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        const output: BatchOutputCandidate = {
+          sampleIndex: sample.sampleIndex,
+          sampleId: sample.sampleId,
+          logicalName: "result",
+          relativePath: "outputs/result.json",
+          mediaType: "application/json",
+          role: "data",
+          sourcePath: "/private/fake/result.json",
+          scratchPath: "/private/fake/scratch-running-cancel",
+          sizeBytes: 2,
+          sha256: canonicalDigest({}),
+          owner: 0,
+          device: 1,
+          inode: 1,
+        };
+        return {
+          runId: input.run.runId,
+          status: "succeeded",
+          code: "batch_run_succeeded",
+          diagnostic: "injected success after cancellation",
+          startedAt: "2026-07-24T10:01:01.000Z",
+          finishedAt: "2026-07-24T10:01:03.000Z",
+          samples: [{
+            sampleIndex: sample.sampleIndex,
+            sampleId: sample.sampleId,
+            status: "succeeded",
+            code: "batch_run_succeeded",
+            diagnostic: "injected success after cancellation",
+            identity,
+            exitCode: 0,
+            signal: null,
+            durationMs: 2,
+            stdout: "",
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            scratchId: identity.scratchId,
+            scratchPath: output.scratchPath,
+            outputs: [output],
+          }],
+          outputs: [output],
+          resources: {
+            maxConcurrencyObserved: 1,
+            stdoutBytes: 0,
+            stderrBytes: 0,
+            outputFiles: 1,
+            outputBytes: 2,
+          },
+        };
+      },
+      cleanup(result) {
+        const base = {
+          schemaVersion: 1 as const,
+          runId: result.runId,
+          scratchIds: ["scratch-running-cancel"],
+          cleanedAt: "2026-07-24T10:01:04.000Z",
+          verified: true as const,
+        };
+        return { ...base, receiptDigest: canonicalDigest(base) };
+      },
+    };
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor,
+      leaseMs: 300_000,
+      consumeOutput: () => Buffer.from("{}"),
+    });
+    await dispatcher.start();
+    await enteredPromise;
+    const receipt = fixture.store.cancelRun({
+      commandId: "command_running_cancel",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      requestedAt: "2026-07-24T10:01:02.000Z",
+    });
+    assert.equal(receipt.applied, true);
+    assert.equal(receipt.status, "cancelling");
+    assert.equal(activeSignal?.aborted, false);
+    dispatcher.requestCancellation(fixture.runId);
+    assert.equal(activeSignal?.aborted, true);
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.status, "cancelled");
+    assert.equal(terminal.terminalCode, "run_cancelled");
+    assert.equal(fixture.store.listRunAttempts(fixture.runId)[0]!.state, "cancelled");
+    assert.deepEqual(fixture.store.listRunOutputs(fixture.runId), []);
+  } finally {
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("terminal commit wins before cancel and later cancel replays without rewriting it", async () => {
+  const fixture = createDispatcherFixture("terminal_cancel");
+  let dispatcher: ProductRunDispatcher | undefined;
+  try {
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor: syntheticSupervisor({
+        status: "succeeded",
+        code: "batch_run_succeeded",
+        includeOutput: true,
+      }),
+      leaseMs: 1_000,
+      consumeOutput: () => Buffer.from("{}"),
+    });
+    await dispatcher.start();
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.status, "succeeded");
+    const receipt = fixture.store.cancelRun({
+      commandId: "command_terminal_cancel",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      requestedAt: "2026-07-24T10:01:05.000Z",
+    });
+    assert.deepEqual(receipt, {
+      schemaVersion: 1,
+      commandId: "command_terminal_cancel",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      applied: false,
+      code: "run_already_terminal",
+      status: "succeeded",
+      cancelRequestedAt: null,
+      createdAt: "2026-07-24T10:01:05.000Z",
+    });
+    assert.equal(fixture.store.getRun(fixture.projectId, fixture.runId).status, "succeeded");
+    assert.equal(fixture.store.listRunOutputs(fixture.runId).length, 1);
+    assert.deepEqual(fixture.store.cancelRun({
+      commandId: "command_terminal_cancel",
+      projectId: fixture.projectId,
+      runId: fixture.runId,
+      requestedAt: "2026-07-24T10:09:00.000Z",
+    }), receipt);
+  } finally {
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
 test("dispatcher generation fences claims and batch attempts while success publishes outputs atomically", () => {
   const parent = mkdtempSync(join(tmpdir(), "riff-product-orchestration-"));
   let injectSuccessFault = false;
@@ -919,6 +1159,58 @@ test("dispatcher leaves a run recovery-required when cleanup cannot be proven", 
     await assert.rejects(() => replacement.start(), /dispatcher_recovery_required/u);
   } finally {
     await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("cleanup_unverified process evidence blocks every run terminal transition", () => {
+  const fixture = createDispatcherFixture("cleanup_unverified_terminal");
+  try {
+    fixture.store.activateDispatcherGeneration({
+      generation: GENERATION_A,
+      activatedAt: "2026-07-25T01:00:00.000Z",
+    });
+    const claim = fixture.store.claimNextQueuedBatchRun({
+      dispatcherGeneration: GENERATION_A,
+      claimedAt: "2026-07-25T01:00:01.000Z",
+      leaseExpiresAt: "2026-07-25T01:00:31.000Z",
+    })!;
+    const attempt = attemptIdentity(claim);
+    fixture.store.markRunAttemptStarting({ ...attempt, startedAt: "2026-07-25T01:00:02.000Z" });
+    fixture.store.markRunAttemptRunning({
+      ...attempt,
+      startedAt: "2026-07-25T01:00:03.000Z",
+      leaseExpiresAt: "2026-07-25T01:00:33.000Z",
+    });
+    const sample = claim.run.samplePlan[0] as { sampleIndex: number; sampleId: string };
+    const process = processIdentity(claim, sample.sampleIndex, sample.sampleId);
+    fixture.store.registerBatchProcessAttempt({ ...process, launchedAt: "2026-07-25T01:00:04.000Z" });
+    fixture.store.markBatchProcessGateReleased({ ...process, startedAt: "2026-07-25T01:00:05.000Z" });
+    fixture.store.markBatchProcessStarted({ ...process, startedAt: "2026-07-25T01:00:06.000Z" });
+    fixture.store.recordBatchProcessExit({
+      ...process,
+      expectedState: "running",
+      exitedAt: "2026-07-25T01:00:07.000Z",
+      exitCode: 1,
+      exitSignal: null,
+    });
+    fixture.store.finalizeBatchProcessCleanup({
+      ...process,
+      cleanupVerified: false,
+      cleanupReceiptDigest: null,
+    });
+    assert.throws(() => fixture.store.finalizeBatchRunTerminal({
+      ...attempt,
+      expectedAttemptState: "running",
+      status: "failed",
+      terminalCode: "batch_process_failed",
+      terminalDiagnostics: {},
+      resourceOverview: {},
+      finishedAt: "2026-07-25T01:00:08.000Z",
+    }), /every process has verified cleanup/u);
+    assert.equal(fixture.store.getRun(fixture.projectId, fixture.runId).status, "running");
+    assert.equal(fixture.store.listRunAttempts(fixture.runId)[0]!.state, "running");
+  } finally {
     fixture.close();
   }
 });

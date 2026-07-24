@@ -10,6 +10,7 @@ import {
   experimentConfigurationRecordDigest,
   ProductStoreV2,
   ProductStoreV2Error,
+  type FrozenRunCancelReceipt,
   type FrozenRunStartReceipt,
   type RunLimitsV1,
 } from "./product-store-v2.ts";
@@ -105,6 +106,8 @@ export type RunStartDto = {
   createdAt: string;
 };
 
+export type RunCancelDto = FrozenRunCancelReceipt;
+
 export type AgentTurnResult =
   | { mode: "live"; turn: AgentTurnDto; messages: ConversationMessageDto[] }
   | { mode: "read_only"; reason: AgentReadOnlyReason | "agent_failed"; turn: AgentTurnDto; messages: ConversationMessageDto[] };
@@ -116,7 +119,7 @@ export class AgentWorkspaceService {
   readonly #conversationTurnTails = new Map<string, Promise<void>>();
   #scopedMcpTail: Promise<void> = Promise.resolve();
   readonly #scopedMcpUrl?: (capability: string) => string;
-  readonly #onRunQueued?: () => void;
+  readonly #onRunQueued?: (runId: string, cancellationRequested: boolean) => void;
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
   readonly technicalChecks: ModelTechnicalCheckService;
@@ -129,7 +132,7 @@ export class AgentWorkspaceService {
     technicalChecker?: ModelTechnicalCheckerPort,
     turnRuntime?: AgentTurnRuntime,
     scopedMcpUrl?: (capability: string) => string,
-    onRunQueued?: () => void,
+    onRunQueued?: (runId: string, cancellationRequested: boolean) => void,
   ) {
     this.store = store;
     this.openCode = openCode;
@@ -256,7 +259,7 @@ export class AgentWorkspaceService {
     try {
       const replayed = this.store.getFrozenRunStartReceipt(intent);
       if (replayed) {
-        this.#onRunQueued?.();
+        this.#onRunQueued?.(replayed.runId, false);
         return publicRunStart(replayed);
       }
     } catch (error) { throw storeApiError(error); }
@@ -317,8 +320,29 @@ export class AgentWorkspaceService {
         limits: SERVER_RUN_LIMITS,
         createdAt: this.#now(),
       });
-      this.#onRunQueued?.();
+      this.#onRunQueued?.(receipt.runId, false);
       return publicRunStart(receipt);
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  cancelRun(input: {
+    projectId: string;
+    runId: string;
+    commandId: string;
+  }): RunCancelDto {
+    const projectId = boundedId(input.projectId);
+    const runId = boundedId(input.runId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const intent = { projectId, runId, commandId };
+    try {
+      const replayed = this.store.getFrozenRunCancelReceipt(intent);
+      if (replayed) {
+        this.#onRunQueued?.(runId, true);
+        return replayed;
+      }
+      const receipt = this.store.cancelRun({ ...intent, requestedAt: this.#now() });
+      this.#onRunQueued?.(runId, true);
+      return receipt;
     } catch (error) { throw storeApiError(error); }
   }
 
@@ -722,7 +746,11 @@ const publicRun = (record: RunRecord, outputs: OutputIndexRecord[]): ProjectRunD
   id: record.id,
   projectId: record.projectId,
   experimentConfigurationId: record.experimentConfigurationId,
-  status: record.status,
+  status: record.contractVersion === 4
+    && ["queued", "running"].includes(record.status)
+    && record.cancelRequestedAt !== null
+    ? "cancelling"
+    : record.status,
   requestedSampleCount: record.requestedSampleCount,
   createdAt: record.createdAt,
   updatedAt: record.updatedAt,

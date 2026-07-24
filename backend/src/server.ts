@@ -113,7 +113,10 @@ export class BackendApp {
         options.a2TechnicalChecker,
         turnRuntime,
         (capability) => this.#a2McpUrl(capability),
-        () => this.productRunDispatcher?.notify(),
+        (runId, cancellationRequested) => {
+          if (cancellationRequested) this.productRunDispatcher?.requestCancellation(runId);
+          else this.productRunDispatcher?.notify();
+        },
       ));
     }
   }

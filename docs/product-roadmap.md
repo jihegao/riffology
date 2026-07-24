@@ -18,7 +18,7 @@
 > coexist. Stage 3 / #14 is in progress through
 > [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 > The first foundation slice landed the fixed-copy Project/workspace. A3-1a
-> adds schema v4, canonical deterministic sample planning, experiment
+> adds execution contract v4, canonical deterministic sample planning, experiment
 > configuration/record digest CAS with immutable historical receipts,
 > execution-description-v2 admission, and an atomic frozen queued-run receipt.
 > A3-1b adds the public run start/read routes, durable dispatch, a real generic
@@ -26,8 +26,10 @@
 > server-owned limits, and atomic successful output publication. The official
 > generic scaffold now emits execution-description v2 and declares batch only;
 > v1 Models are not silently upgraded. Visual and batch `domainEvents` are
-> explicit current rejections. Cross-restart attempt/scratch recovery,
-> user-cancel races, and exactly-once completion cards remain A3-1c, followed by
+> explicit current rejections. A3-1c-a adds schema migration v5 and strict
+> same-process queued/running cancellation with committed race receipts.
+> Cross-restart attempt/process/scratch recovery and exactly-once completion
+> cards remain later A3-1c work, followed by
 > visual, Playwright, and ordinary wind slices. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 

@@ -814,6 +814,43 @@ target.write_text(
   assert.notEqual(app.productStore!.listRunAttempts(publicStart.runId)[0]!.heartbeatAt, null);
   assert.equal("samplePlan" in publicRun, false);
   assert.equal("limits" in publicRun, false);
+  const requestedCancellationRunIds: string[] = [];
+  const originalRequestCancellation = app.productRunDispatcher!.requestCancellation.bind(app.productRunDispatcher);
+  app.productRunDispatcher!.requestCancellation = (runId: string): void => {
+    requestedCancellationRunIds.push(runId);
+    originalRequestCancellation(runId);
+  };
+  const rejectedCancelAuthority = await post(
+    `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
+    { commandId: "command_public_cancel_unknown", signal: "SIGKILL" },
+  );
+  assert.equal(rejectedCancelAuthority.status, 422);
+  assert.equal((await rejectedCancelAuthority.json() as any).error.code, "unknown_field");
+  const publicCancelResponse = await post(
+    `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
+    { commandId: "command_public_terminal_cancel" },
+  );
+  assert.equal(publicCancelResponse.status, 200);
+  const publicCancel = await publicCancelResponse.json() as any;
+  assert.deepEqual(publicCancel, {
+    schemaVersion: 1,
+    commandId: "command_public_terminal_cancel",
+    projectId: outputProject.id,
+    runId: publicStart.runId,
+    applied: false,
+    code: "run_already_terminal",
+    status: "succeeded",
+    cancelRequestedAt: null,
+    createdAt: publicCancel.createdAt,
+  });
+  assert.deepEqual(requestedCancellationRunIds, [publicStart.runId]);
+  const publicCancelRetry = await post(
+    `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
+    { commandId: "command_public_terminal_cancel" },
+  );
+  assert.equal(publicCancelRetry.status, 200);
+  assert.deepEqual(await publicCancelRetry.json(), publicCancel);
+  assert.deepEqual(requestedCancellationRunIds, [publicStart.runId, publicStart.runId]);
   const outputWorkspace = await (await fetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
   const projectedRunWithOutput = outputWorkspace.runs.find((run: any) => run.id === publicStart.runId);
   assert.deepEqual(Object.keys(projectedRunWithOutput).sort(), [

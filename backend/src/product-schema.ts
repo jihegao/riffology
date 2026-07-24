@@ -1478,9 +1478,209 @@ export const PRODUCT_SCHEMA_V4_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'run receipt is immutable'); END;
 `;
 
+export const PRODUCT_SCHEMA_V5_SQL = SQL`
+  ALTER TABLE runs
+    ADD COLUMN first_cancel_command_id TEXT
+      REFERENCES run_commands(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+  CREATE VIEW valid_run_cancel_receipts_v5 AS
+  SELECT
+    c.id AS command_id,
+    c.run_id,
+    json_extract(q.payload_json, '$.projectId') AS project_id,
+    json_extract(q.payload_json, '$.cancelRequestedAt') AS cancel_requested_at
+  FROM run_commands c
+  JOIN run_command_receipts q
+    ON q.command_id = c.id AND q.run_id = c.run_id
+  WHERE c.command_kind = 'cancel'
+    AND c.request_key = c.id
+    AND c.state = 'committed'
+    AND json_type(q.payload_json) = 'object'
+    AND json_type(q.payload_json, '$.schemaVersion') = 'integer'
+    AND json_extract(q.payload_json, '$.schemaVersion') = 1
+    AND json_type(q.payload_json, '$.commandId') = 'text'
+    AND json_extract(q.payload_json, '$.commandId') = c.id
+    AND json_type(q.payload_json, '$.projectId') = 'text'
+    AND json_type(q.payload_json, '$.runId') = 'text'
+    AND json_extract(q.payload_json, '$.runId') = c.run_id
+    AND json_type(q.payload_json, '$.applied') = 'true'
+    AND json_extract(q.payload_json, '$.applied') = 1
+    AND json_type(q.payload_json, '$.code') = 'text'
+    AND json_extract(q.payload_json, '$.code') = 'cancellation_requested'
+    AND json_type(q.payload_json, '$.status') = 'text'
+    AND json_extract(q.payload_json, '$.status') = 'cancelling'
+    AND json_type(q.payload_json, '$.cancelRequestedAt') = 'text'
+    AND json_type(q.payload_json, '$.createdAt') = 'text'
+    AND json_extract(q.payload_json, '$.createdAt')
+      = json_extract(q.payload_json, '$.cancelRequestedAt')
+    AND c.intent_sha256 = riff_canonical_sha256(json_object(
+      'schemaVersion', 1,
+      'commandKind', 'run.cancel',
+      'projectId', json_extract(q.payload_json, '$.projectId'),
+      'runId', c.run_id
+    ))
+    AND c.outcome_json = q.payload_json
+    AND q.receipt_kind = 'run.cancel.v1'
+    AND q.payload_sha256 = riff_canonical_sha256(q.payload_json)
+    AND c.created_at = json_extract(q.payload_json, '$.cancelRequestedAt')
+    AND c.updated_at = json_extract(q.payload_json, '$.cancelRequestedAt')
+    AND q.committed_at = json_extract(q.payload_json, '$.cancelRequestedAt')
+    AND (SELECT count(*) FROM json_each(q.payload_json)) = 9
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(q.payload_json)
+      WHERE key NOT IN (
+        'schemaVersion', 'commandId', 'projectId', 'runId', 'applied',
+        'code', 'status', 'cancelRequestedAt', 'createdAt'
+      )
+    );
+
+  UPDATE runs
+  SET first_cancel_command_id = (
+    SELECT command_id
+    FROM valid_run_cancel_receipts_v5 v
+    WHERE v.run_id = runs.id
+      AND v.project_id = runs.project_id
+      AND v.cancel_requested_at = runs.cancel_requested_at
+    ORDER BY command_id
+    LIMIT 1
+  )
+  WHERE contract_version = 4
+    AND cancel_requested_at IS NOT NULL
+    AND 1 = (
+      SELECT count(*)
+      FROM valid_run_cancel_receipts_v5 v
+      WHERE v.run_id = runs.id
+        AND v.project_id = runs.project_id
+        AND v.cancel_requested_at = runs.cancel_requested_at
+    );
+
+  CREATE TEMP TABLE product_schema_v5_cancel_guard (
+    valid INTEGER NOT NULL CHECK (valid = 1)
+  ) STRICT;
+  INSERT INTO product_schema_v5_cancel_guard(valid)
+  SELECT 0
+  FROM runs r
+  WHERE r.contract_version = 4
+    AND (
+      (r.cancel_requested_at IS NULL) != (r.first_cancel_command_id IS NULL)
+      OR (r.cancel_requested_at IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM valid_run_cancel_receipts_v5 v
+        WHERE v.command_id = r.first_cancel_command_id
+          AND v.run_id = r.id
+          AND v.project_id = r.project_id
+          AND v.cancel_requested_at = r.cancel_requested_at
+      ))
+    );
+  DROP TABLE product_schema_v5_cancel_guard;
+
+  CREATE TRIGGER run_cancel_binding_insert_v5
+  BEFORE INSERT ON runs
+  WHEN NEW.contract_version = 4
+    AND (NEW.cancel_requested_at IS NOT NULL OR NEW.first_cancel_command_id IS NOT NULL)
+  BEGIN SELECT RAISE(ABORT, 'new v4 run cancellation binding must be empty'); END;
+
+  CREATE TRIGGER run_cancel_binding_update_v5
+  BEFORE UPDATE OF cancel_requested_at, first_cancel_command_id ON runs
+  WHEN OLD.contract_version = 4 AND NOT (
+    OLD.cancel_requested_at IS NULL
+    AND OLD.first_cancel_command_id IS NULL
+    AND NEW.cancel_requested_at IS NOT NULL
+    AND NEW.first_cancel_command_id IS NOT NULL
+    AND OLD.status IN ('queued', 'running')
+    AND EXISTS (
+      SELECT 1
+      FROM valid_run_cancel_receipts_v5 v
+      WHERE v.command_id = NEW.first_cancel_command_id
+        AND v.run_id = NEW.id
+        AND v.project_id = NEW.project_id
+        AND v.cancel_requested_at = NEW.cancel_requested_at
+    )
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid v4 run cancellation receipt binding'); END;
+
+  CREATE TRIGGER run_cancel_terminal_precedence_v5
+  BEFORE UPDATE OF status ON runs WHEN OLD.contract_version = 4 AND (
+    (OLD.cancel_requested_at IS NOT NULL
+      AND NEW.status IN ('succeeded', 'failed', 'timed_out'))
+    OR (NEW.status = 'cancelled' AND (
+      OLD.cancel_requested_at IS NULL
+      OR OLD.first_cancel_command_id IS NULL
+      OR NEW.terminal_code IS NOT 'run_cancelled'
+      OR NOT EXISTS (
+        SELECT 1
+        FROM valid_run_cancel_receipts_v5 v
+        WHERE v.command_id = OLD.first_cancel_command_id
+          AND v.run_id = OLD.id
+          AND v.project_id = OLD.project_id
+          AND v.cancel_requested_at = OLD.cancel_requested_at
+      )
+    ))
+  )
+  BEGIN SELECT RAISE(ABORT, 'v4 run terminal transition violates committed cancellation precedence'); END;
+
+  CREATE TRIGGER run_terminal_requires_verified_cleanup_v5
+  BEFORE UPDATE OF status ON runs
+  WHEN OLD.contract_version = 4
+    AND OLD.status IN ('queued', 'running')
+    AND NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out')
+    AND EXISTS (
+      SELECT 1
+      FROM run_attempts a
+      JOIN process_attempts p ON p.run_attempt_id = a.id
+      WHERE a.run_id = OLD.id AND p.state != 'cleanup_complete'
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run terminal transition requires verified process cleanup'); END;
+
+  CREATE TRIGGER run_attempt_cancel_precedence_v5
+  BEFORE UPDATE OF state ON run_attempts
+  WHEN NEW.state IN ('succeeded', 'failed', 'cancelled', 'timed_out')
+    AND (
+      (EXISTS (
+        SELECT 1 FROM runs
+        WHERE id = OLD.run_id
+          AND cancel_requested_at IS NOT NULL
+          AND first_cancel_command_id IS NOT NULL
+      ) AND NEW.state != 'cancelled')
+      OR (NEW.state = 'cancelled' AND NOT EXISTS (
+        SELECT 1 FROM runs
+        WHERE id = OLD.run_id
+          AND cancel_requested_at IS NOT NULL
+          AND first_cancel_command_id IS NOT NULL
+      ))
+  )
+  BEGIN SELECT RAISE(ABORT, 'run attempt terminal transition violates committed cancellation precedence'); END;
+
+  CREATE TRIGGER run_command_terminal_immutable_v5
+  BEFORE UPDATE ON run_commands
+  WHEN OLD.state IN ('committed', 'rejected')
+  BEGIN SELECT RAISE(ABORT, 'terminal run command is immutable'); END;
+  CREATE TRIGGER run_command_terminal_delete_v5
+  BEFORE DELETE ON run_commands
+  WHEN OLD.state IN ('committed', 'rejected')
+  BEGIN SELECT RAISE(ABORT, 'terminal run command is immutable'); END;
+
+  CREATE TRIGGER run_cancelled_queue_no_launch_v5
+  BEFORE UPDATE OF status ON runs
+  WHEN OLD.contract_version = 4
+    AND OLD.status = 'queued'
+    AND NEW.status = 'running'
+    AND OLD.cancel_requested_at IS NOT NULL
+    AND OLD.first_cancel_command_id IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'cancelled queued run cannot launch'); END;
+
+  CREATE TRIGGER run_attempt_delete_v5
+  BEFORE DELETE ON run_attempts
+  BEGIN SELECT RAISE(ABORT, 'v4 run attempts cannot be deleted directly'); END;
+  CREATE TRIGGER process_attempt_delete_v5
+  BEFORE DELETE ON process_attempts
+  BEGIN SELECT RAISE(ABORT, 'v4 process attempts cannot be deleted directly'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
   Object.freeze({ version: 3, sql: PRODUCT_SCHEMA_V3_SQL }),
   Object.freeze({ version: 4, sql: PRODUCT_SCHEMA_V4_SQL }),
+  Object.freeze({ version: 5, sql: PRODUCT_SCHEMA_V5_SQL }),
 ]);
