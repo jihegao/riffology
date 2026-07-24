@@ -160,6 +160,8 @@ test("permanent-delete previews are deterministic exact closures with composite 
     const project = store.previewPermanentDelete("project", "project_alpha");
     assert.ok(project.records.some((item) => item.table === "runs" && item.key.id === "run_alpha"));
     assert.ok(project.records.some((item) => item.table === "output_indexes"));
+    assert.ok(project.records.some((item) =>
+      item.table === "run_completion_cards" && item.key.run_id === "run_alpha"));
     for (const [table, key, id] of [
       ["experiment_command_receipts", "command_id", "command_create_preview"],
       ["run_commands", "id", "command_start_preview"],
@@ -198,10 +200,20 @@ test("permanent-delete previews are deterministic exact closures with composite 
     assert.ok(run.records.some((item) => item.table === "output_indexes"));
     assert.ok(run.records.some((item) => item.table === "run_commands" && item.key.id === "command_start_preview"));
     assert.ok(run.records.some((item) => item.table === "run_command_receipts"));
+    assert.ok(run.records.some((item) =>
+      item.table === "run_completion_cards" && item.key.run_id === "run_alpha"));
     assert.ok(run.records.some((item) => item.table === "run_attempts"));
     assert.ok(run.records.some((item) => item.table === "process_attempts" && item.key.id === "process_preview"));
     assert.ok(run.records.some((item) => item.table === "run_scratch_leases"));
     assert.ok(run.records.some((item) => item.table === "process_launch_manifests"));
+    const completionMessage = store.listConversationMessages("conversation_project")
+      .find((message) => message.messageKind === "platform_card")!;
+    assert.equal(run.records.some((item) =>
+      item.table === "messages" && item.key.id === completionMessage.id), false);
+    assert.ok(run.exclusions.some((item) =>
+      item.kind === "message"
+      && item.id === completionMessage.id
+      && item.reason === "conversation-owned completion card outside run closure"));
     assert.ok(run.exclusions.some((item) => item.kind === "experiment"));
     assert.equal(store.listModels({ includeArchived: true, includeTrashed: true }).length, 1, "preview never purges");
     const snapshot = store.listObjectFiles({ kind: "project", id: "project_alpha" }).find((file) => file.kind === "project_model_snapshot")!;

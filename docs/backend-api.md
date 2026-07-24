@@ -5,7 +5,7 @@
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` schema migration v6, execution
+Gate API retained below. `ProductStoreV2` schema migration v7, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -22,7 +22,7 @@ The implemented Stage 2 routes are:
 | `GET /api/models/{modelId}/technical-checks/{checkId}` | Read the bounded check DTO and its `pending`, `published`, or `superseded` publication state. |
 | `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. Provider/model locks with the first accepted user message. |
 | `GET /api/conversations/{conversationId}` | Return the redacted durable conversation and public session state. |
-| `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. |
+| `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. Each message has `messageKind: "conversation" | "platform_card"`; a platform card is a system-owned terminal run record, not an Agent turn. |
 | `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
 | `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
 | `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. |
@@ -253,8 +253,15 @@ generations by prior attempt identity. A second in-process dispatcher for the
 same Store is rejected while the first owns it. Schema-v5 live process rows
 without v6 scratch/launch evidence are a documented fail-closed migration
 boundary and require repair rather than speculative signalling.
-Completion-card exactly-once delivery, visual supervision, output downloads,
-events, wind migration, and final shell routes remain later #14/#15 work. The legacy Gate API below still coexists
+A3-1c-c publishes a terminal batch completion card in the same transaction as
+the run disposition. Active or archived bound conversations receive one
+deterministic `platform_card`; absent bindings record `not_requested`, and
+missing/trashed bindings record permanent `conversation_unavailable`. The card
+contains only `runId`, terminal `status`, `sampleCount`, `outputCount`, and
+`outputIds`. Startup reconciles older terminal `pending` rows and fails closed
+if a final disposition, receipt, message, or card digest disagrees.
+Visual supervision, output downloads, events, wind migration, and final shell
+routes remain later #14/#15 work. The legacy Gate API below still coexists
 until separately reviewed retirement.
 
 ---

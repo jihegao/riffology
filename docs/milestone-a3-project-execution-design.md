@@ -18,7 +18,9 @@ running abort behavior, public `cancelling` projection, and SQLite commit-order
 precedence against every terminal transition. A3-1c-b adds schema migration v6,
 durable pre-spawn scratch and launch evidence, exact v4
 attempt/process/scratch reconciliation, and recovery-before-generation
-activation. Exactly-once completion-card delivery remains later A3-1c work.
+activation. A3-1c-c adds schema migration v7, exactly-once deterministic
+platform completion cards, permanent skip dispositions, and startup
+reconciliation/audit of terminal pending rows.
 Visual execution,
 Playwright access, and ordinary wind import remain later Stage 3 slices. This
 document therefore does not claim that Stage 3 is complete.
@@ -32,7 +34,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b boundary is intentionally narrow:
+The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -96,7 +98,6 @@ re-scaffold/upgrade path.
 The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- exactly-once completion-card publication;
 - batch domain-event ingestion or public output list/download routes;
 - a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
 - a versioned wind installation manifest or example Project.
@@ -1059,10 +1060,11 @@ Output indexes never resolve outside the owning Project/run object root.
    subprocesses, currently supported hard limits, same-process shutdown
    cleanup, and atomic successful output publication. Visual and
    `domainEvents` are explicit rejections.
-4. **A3-1c batch lifecycle — partial:** A3-1c-a implements public user
+4. **A3-1c batch lifecycle — implemented through A3-1c-c:** A3-1c-a implements public user
    cancellation with committed race receipts and same-process queued/running
    enforcement. A3-1c-b implements v4 cross-restart attempt/process/scratch
-   recovery. Exactly-once completion cards remain pending.
+   recovery. A3-1c-c implements exactly-once terminal completion cards and
+   startup reconciliation.
 5. **Visual runtime — pending:** real local visual process, health, scoped proxy/frame and
    WebSocket limits, cancellation, recovery, and Playwright audit.
 6. **Wind import — pending:** versioned manifest, normal technical check, example Project
@@ -1078,16 +1080,19 @@ does not begin until Stage 3 is merged and accepted.
 ## Verification and acceptance matrix
 
 The final integrated A3-1b full backend run passed 256 tests with zero failures
-and one optional installed-OpenCode smoke skipped. Current A3-1c-b focused
+and one optional installed-OpenCode smoke skipped. Current A3-1c-c focused
+work has a full backend result of 295 tests: 294 passed, zero failed, and one
+optional smoke skipped. Its focused
 evidence covers schema-v6 migration/rollback, the foundation/schema/experiment
 rows, the batch portion of exact input freezing, v3 read-only behavior, public
 start/read, real generic batch launch/claim/process identity, supported hard
 batch limits, atomic successful outputs, negative visual/event admission, and
 same-process shutdown cleanup, A3-1c-a cancellation precedence/receipts, and
 A3-1c-b restart windows including missing evidence, recovery replay,
-generation handoff, and leader-gone descendant cleanup. It does not cover the
-pending completion-card requirements, nor the later visual, Playwright, wind, download,
-event, and browser rows.
+generation handoff, and leader-gone descendant cleanup, plus A3-1c-c
+completion-card status/disposition, fault, restart, schema, context, and
+deletion-closure tests. It does not cover the later visual, Playwright, wind,
+download, event, and browser rows.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:

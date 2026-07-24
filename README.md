@@ -38,7 +38,10 @@ no-successful-output publication after cancel-first. A3-1c-b adds schema
 migration v6 and fail-closed cross-restart reconciliation for v4 run attempts,
 durable pre-spawn scratch/launch evidence, exact PID/start-token/process-group
 cleanup, cancellation precedence, and recovery-before-dispatcher-generation
-handoff. Exactly-once completion-card delivery remains later A3-1c work.
+handoff. A3-1c-c adds schema migration v7 and exactly-once terminal batch
+completion cards: the Store atomically records a deterministic platform system
+message or a permanent skip disposition, and startup reconciles older pending
+terminal runs before serving reads.
 Visual execution, scoped Playwright
 access, and ordinary wind import are later #14 slices. Their active contract and
 negative-test gates are in
@@ -46,7 +49,7 @@ negative-test gates are in
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
 than being automatically cleaned.
-This lifecycle slice is not completion evidence for Stage 3, completion cards, visual execution, wind
+This lifecycle slice is not completion evidence for Stage 3, visual execution, wind
 import, or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
@@ -168,6 +171,9 @@ The final integrated A3-1b backend run passed 256 tests with 0 failures and
 validation, real generic batch supervision, durable dispatch/orchestration,
 public run start/read, server-owned limits, terminal/process/output database
 invariants, output integrity, error unwind, and shutdown cleanup.
+The current A3-1c-c backend run contains 295 tests: 294 passed, zero failed,
+and one optional smoke was skipped. The web TypeScript check and production
+build also pass; this backend slice adds no browser-acceptance claim.
 
 Focused Milestone A2 verification:
 

@@ -76,6 +76,7 @@ import { ProductObjectStore, sha256, type OwnerPath } from "./object-store.ts";
 import {
   openProductDatabase,
   withAtomicBatchSuccessRunContext,
+  withRunCompletionReconciliationContext,
   type ProductDatabase,
 } from "./product-schema.ts";
 import { createModelWorkspaceCapability } from "./restricted-process.ts";
@@ -458,6 +459,12 @@ type ProductDatabaseMutationStatement = DatabaseMutationStatement & {
   mismatchMessage?: string;
 };
 
+type CompletionCardDisposition = "not_requested" | "published" | "conversation_unavailable";
+type CompletionCardPlan = Readonly<{
+  disposition: CompletionCardDisposition;
+  statements: ProductDatabaseMutationStatement[];
+}>;
+
 export class ProductStoreV2Error extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -527,7 +534,10 @@ export class ProductStoreV2 {
     this.#database = database;
     this.#objects = objects;
     this.#coordinator = coordinator;
-    try { this.#reconcileInterruptedAgentState(); }
+    try {
+      this.#reconcileInterruptedAgentState();
+      this.reconcileRunCompletionCards();
+    }
     catch (error) { coordinator.close(); throw error; }
   }
 
@@ -1576,23 +1586,25 @@ export class ProductStoreV2 {
         ORDER BY cancel_requested_at, id
         LIMIT 1`).get() as { id: string } | undefined;
       if (!row) return null;
+      const completion = this.#completionCardPlan(row.id, "cancelled", input.finishedAt, []);
       this.#executeDatabaseStatements([{
         sql: `UPDATE runs
           SET status = 'cancelled', terminal_code = 'run_cancelled',
             terminal_diagnostics_json = ?,
             resource_overview_json = '{}',
-            finished_at = ?, updated_at = ?
+            completion_card_disposition = ?, finished_at = ?, updated_at = ?
           WHERE id = ? AND contract_version = 4 AND status = 'queued'
             AND cancel_requested_at IS NOT NULL AND first_cancel_command_id IS NOT NULL`,
         params: [
           json({ code: "run_cancelled", diagnostic: "The queued run was cancelled before launch." }),
+          completion.disposition,
           input.finishedAt,
           input.finishedAt,
           row.id,
         ],
         expectedChanges: 1,
         mismatchMessage: "run_cancel_conflict: queued cancellation lost its durable compare-and-set.",
-      }]);
+      }, ...completion.statements]);
       return runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(row.id)) as Extract<RunRecord, { contractVersion: 4 }>;
     });
   }
@@ -1967,6 +1979,7 @@ export class ProductStoreV2 {
       const terminalDiagnostics = cancellationWon
         ? { code: "run_cancelled", diagnostic: "Cancellation committed before the terminal run receipt." }
         : input.terminalDiagnostics;
+      const completion = this.#completionCardPlan(input.runId, status, input.finishedAt, []);
       const liveProcesses = Number((this.#database.prepare(`SELECT count(*) AS count
         FROM process_attempts
         WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
@@ -1996,13 +2009,15 @@ export class ProductStoreV2 {
         {
           sql: `UPDATE runs
             SET status = ?, terminal_code = ?, terminal_diagnostics_json = ?,
-              resource_overview_json = ?, finished_at = ?, updated_at = ?
+              resource_overview_json = ?, completion_card_disposition = ?,
+              finished_at = ?, updated_at = ?
             WHERE id = ? AND contract_version = 4 AND run_kind = 'batch' AND status = 'running'`,
           params: [
             status,
             terminalCode,
             json(terminalDiagnostics),
             json(input.resourceOverview),
+            completion.disposition,
             input.finishedAt,
             input.finishedAt,
             input.runId,
@@ -2010,6 +2025,7 @@ export class ProductStoreV2 {
           expectedChanges: 1,
           mismatchMessage: "invalid_run_transition: the batch run is no longer running.",
         },
+        ...completion.statements,
       ]);
       return runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId)) as Extract<RunRecord, { contractVersion: 4 }>;
     });
@@ -2130,6 +2146,12 @@ export class ProductStoreV2 {
       bytes: output.bytes,
       expectedPriorSha256: null,
     }));
+    const completion = this.#completionCardPlan(
+      input.runId,
+      "succeeded",
+      input.finishedAt,
+      outputs.map((output) => output.id),
+    );
     const statements: DatabaseMutationStatement[] = [
       {
         sql: "UPDATE dispatcher_state SET activated_at = activated_at WHERE singleton = 1 AND generation = ?",
@@ -2171,13 +2193,14 @@ export class ProductStoreV2 {
         sql: `UPDATE runs
           SET status = 'succeeded', terminal_code = 'run_succeeded',
             terminal_diagnostics_json = ?, resource_overview_json = ?,
-            finished_at = ?, updated_at = ?
+            completion_card_disposition = ?, finished_at = ?, updated_at = ?
           WHERE id = ? AND contract_version = 4 AND run_kind = 'batch'
             AND status = 'running'
             AND cancel_requested_at IS NULL AND first_cancel_command_id IS NULL`,
         params: [
           json(input.terminalDiagnostics),
           json(input.resourceOverview),
+          completion.disposition,
           input.finishedAt,
           input.finishedAt,
           input.runId,
@@ -2215,6 +2238,7 @@ export class ProductStoreV2 {
           expectedChanges: 1,
         },
       ]),
+      ...completion.statements,
     ];
     withAtomicBatchSuccessRunContext(this.#database, input.runId, () => {
       this.#coordinator.execute({
@@ -2535,6 +2559,7 @@ export class ProductStoreV2 {
       const runStatus = cancellationWon ? "cancelled" : "failed";
       const attemptState = cancellationWon ? "cancelled" : "interrupted";
       const terminalCode = cancellationWon ? "run_cancelled" : "runtime_interrupted";
+      const completion = this.#completionCardPlan(input.runId, runStatus, input.finishedAt, []);
       this.#executeDatabaseStatements([
         {
           sql: `UPDATE run_attempts SET state = ?, finished_at = ?, heartbeat_at = ?
@@ -2554,7 +2579,7 @@ export class ProductStoreV2 {
         {
           sql: `UPDATE runs SET status = ?, terminal_code = ?,
               terminal_diagnostics_json = ?, resource_overview_json = '{}',
-              finished_at = ?, updated_at = ?
+              completion_card_disposition = ?, finished_at = ?, updated_at = ?
             WHERE id = ? AND contract_version = 4 AND status = 'running'`,
           params: [
             runStatus,
@@ -2565,12 +2590,14 @@ export class ProductStoreV2 {
                 ? "Cancellation committed before cross-restart recovery."
                 : "The prior runtime was interrupted and reconciled before dispatcher generation handoff.",
             }),
+            completion.disposition,
             input.finishedAt,
             input.finishedAt,
             input.runId,
           ],
           expectedChanges: 1,
         },
+        ...completion.statements,
         {
           sql: `UPDATE run_recovery_actions
             SET state = 'completed', terminal_disposition = ?,
@@ -2609,11 +2636,12 @@ export class ProductStoreV2 {
     this.#assertOpen();
     const rows = this.#database.prepare(`SELECT id, project_id
       FROM runs
-      WHERE contract_version = 4 AND run_kind = 'batch' AND status = 'succeeded'
+      WHERE contract_version = 4 AND run_kind = 'batch'
+        AND (status = 'succeeded' OR (status = 'trashed' AND pre_trash_status = 'succeeded'))
       ORDER BY id`
     ).all() as Array<{ id: string; project_id: string }>;
     for (const row of rows) {
-      const run = this.getRun(row.project_id, row.id);
+      const run = this.getRun(row.project_id, row.id, { includeTrashed: true });
       if (run.contractVersion !== 4) continue;
       const attempt = this.#database.prepare(`SELECT id, attempt_generation
         FROM run_attempts WHERE run_id = ? AND state = 'succeeded'
@@ -2702,6 +2730,132 @@ export class ProductStoreV2 {
             );
           }
         }
+      }
+    }
+  }
+
+  reconcileRunCompletionCards(): void {
+    this.#assertOpen();
+    const pending = this.#database.prepare(`SELECT id, status, pre_trash_status, finished_at
+      FROM runs
+      WHERE contract_version = 4 AND run_kind = 'batch'
+        AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+        AND completion_card_disposition = 'pending'
+      ORDER BY finished_at, id`
+    ).all() as Array<{
+      id: string;
+      status: RunStatus;
+      pre_trash_status: RunStatus | null;
+      finished_at: string;
+    }>;
+    if (pending.some((run) =>
+      run.status === "succeeded"
+      || (run.status === "trashed" && run.pre_trash_status === "succeeded"))) {
+      this.auditRecoveredBatchSuccesses();
+    }
+    for (const run of pending) {
+      const status = (run.status === "trashed" ? run.pre_trash_status : run.status) as
+        "succeeded" | "failed" | "cancelled" | "timed_out";
+      if (!["succeeded", "failed", "cancelled", "timed_out"].includes(status)) {
+        throw new ProductStoreV2Error("completion_card_recovery_invalid: terminal run status is contradictory.");
+      }
+      const outputIds = (this.#database.prepare(
+        "SELECT id FROM output_indexes WHERE run_id = ? ORDER BY id",
+      ).all(run.id) as Array<{ id: string }>).map((row) => row.id);
+      const plan = this.#completionCardPlan(run.id, status, run.finished_at, outputIds);
+      withRunCompletionReconciliationContext(this.#database, run.id, () => {
+        this.#databaseMutation([{
+          sql: `UPDATE runs SET completion_card_disposition = ?
+            WHERE id = ? AND contract_version = 4 AND run_kind = 'batch'
+              AND completion_card_disposition = 'pending'
+              AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')`,
+          params: [plan.disposition, run.id],
+          expectedChanges: 1,
+        }, ...plan.statements]);
+      });
+    }
+    this.auditRunCompletionCards();
+  }
+
+  auditRunCompletionCards(): void {
+    this.#assertOpen();
+    const runs = this.#database.prepare(`SELECT *
+      FROM runs WHERE contract_version = 4 AND run_kind = 'batch' ORDER BY id`
+    ).all() as any[];
+    for (const row of runs) {
+      const terminal = ["succeeded", "failed", "cancelled", "timed_out", "trashed"].includes(row.status);
+      const receipt = this.#database.prepare(
+        "SELECT * FROM run_completion_cards WHERE run_id = ?",
+      ).get(row.id) as any;
+      if (!terminal) {
+        const expected = row.completion_conversation_id === null ? "not_requested" : "pending";
+        if (row.completion_card_disposition !== expected || receipt) {
+          throw new ProductStoreV2Error(
+            "completion_card_recovery_invalid: nonterminal run carries a final completion receipt.",
+          );
+        }
+        continue;
+      }
+      if (!receipt || receipt.disposition !== row.completion_card_disposition
+        || receipt.conversation_id !== row.completion_conversation_id) {
+        throw new ProductStoreV2Error(
+          "completion_card_recovery_invalid: terminal run completion receipt is missing or mismatched.",
+        );
+      }
+      if (receipt.disposition !== "published") {
+        if (receipt.message_id !== null || receipt.card_json !== null || receipt.card_sha256 !== null) {
+          throw new ProductStoreV2Error(
+            "completion_card_recovery_invalid: skipped completion receipt unexpectedly has a card.",
+          );
+        }
+        if (receipt.conversation_id !== null
+          && this.#database.prepare("SELECT 1 FROM messages WHERE id = ?").get(
+            completionCardId(row.id, receipt.conversation_id),
+          )) {
+          throw new ProductStoreV2Error(
+            "completion_card_recovery_invalid: unavailable completion receipt unexpectedly has a platform card.",
+          );
+        }
+        continue;
+      }
+      const status = row.status === "trashed" ? row.pre_trash_status : row.status;
+      const outputIds = (this.#database.prepare(
+        "SELECT id FROM output_indexes WHERE run_id = ? ORDER BY id",
+      ).all(row.id) as Array<{ id: string }>).map((item) => item.id);
+      const expectedCard = completionCardPayload(
+        row.id,
+        status,
+        row.requested_sample_count,
+        outputIds,
+      );
+      const message = this.#database.prepare(
+        "SELECT * FROM messages WHERE id = ? AND conversation_id = ?",
+      ).get(receipt.message_id, receipt.conversation_id) as any;
+      const ordinalPosition = message
+        ? Number((this.#database.prepare(`SELECT count(*) AS count FROM messages
+            WHERE conversation_id = ? AND ordinal <= ?`
+          ).get(receipt.conversation_id, message.ordinal) as { count: number }).count) - 1
+        : -1;
+      if (!message || message.message_kind !== "platform_card"
+        || receipt.message_id !== completionCardId(row.id, receipt.conversation_id)
+        || message.role !== "system" || message.status !== "complete"
+        || message.text !== "" || message.action_json !== null
+        || !Number.isSafeInteger(message.ordinal) || message.ordinal < 0
+        || message.ordinal !== ordinalPosition
+        || receipt.created_at !== row.finished_at
+        || message.created_at !== receipt.created_at
+        || message.updated_at !== receipt.created_at
+        || message.content_json !== receipt.card_json
+        || receipt.card_json !== json(expectedCard)
+        || receipt.card_sha256 !== canonicalDigest(expectedCard)
+        || canonicalDigest(JSON.parse(receipt.card_json)) !== receipt.card_sha256
+        || canonicalDigest(JSON.parse(message.content_json)) !== canonicalDigest(expectedCard)
+        || this.#database.prepare(`SELECT 1 FROM agent_turns
+          WHERE input_message_id = ? OR assistant_message_id = ?`
+        ).get(receipt.message_id, receipt.message_id)) {
+        throw new ProductStoreV2Error(
+          "completion_card_recovery_invalid: published platform card is missing, mutated, or linked to an Agent turn.",
+        );
       }
     }
   }
@@ -2885,6 +3039,17 @@ export class ProductStoreV2 {
       exclusions.push({ kind: "project", id: row.project_id, reason: "owner outside experiment closure" });
     } else {
       this.#collectRunExecutionClosure([id], addRows, fileRows);
+      const completion = this.#database.prepare(`SELECT message_id
+        FROM run_completion_cards
+        WHERE run_id = ? AND disposition = 'published' AND message_id IS NOT NULL`
+      ).get(id) as { message_id: string } | undefined;
+      if (completion) {
+        exclusions.push({
+          kind: "message",
+          id: completion.message_id,
+          reason: "conversation-owned completion card outside run closure",
+        });
+      }
       exclusions.push({ kind: "experiment", id: row.experiment_configuration_id, reason: "configuration outside run closure" });
       exclusions.push({ kind: "project", id: row.project_id, reason: "owner outside run closure" });
     }
@@ -2948,6 +3113,9 @@ export class ProductStoreV2 {
       addRows("run_commands", commands);
       addRows("run_command_receipts",
         this.#database.prepare("SELECT * FROM run_command_receipts WHERE run_id = ? ORDER BY id").all(runId) as any[]);
+      addRows("run_completion_cards",
+        this.#database.prepare("SELECT * FROM run_completion_cards WHERE run_id = ?").all(runId) as any[],
+        (receipt) => ({ run_id: receipt.run_id }));
     }
   }
 
@@ -3399,6 +3567,132 @@ export class ProductStoreV2 {
     });
   }
 
+  #completionCardPlan(
+    runId: string,
+    status: "succeeded" | "failed" | "cancelled" | "timed_out",
+    createdAt: IsoTimestamp,
+    outputIdsInput: readonly string[],
+  ): CompletionCardPlan {
+    const run = this.#database.prepare(`SELECT id, project_id, completion_conversation_id,
+        requested_sample_count
+      FROM runs WHERE id = ? AND contract_version = 4 AND run_kind = 'batch'`
+    ).get(runId) as {
+      id: string;
+      project_id: string;
+      completion_conversation_id: string | null;
+      requested_sample_count: number;
+    } | undefined;
+    if (!run) throw new ProductStoreV2Error("completion_card_invalid: batch run does not exist.");
+    const outputIds = [...outputIdsInput].sort(compareStrings);
+    if (new Set(outputIds).size !== outputIds.length
+      || outputIds.some((id) => !SAFE_ID.test(id))) {
+      throw new ProductStoreV2Error("completion_card_invalid: output IDs are invalid.");
+    }
+    const conversationId = run.completion_conversation_id;
+    if (conversationId === null) {
+      return Object.freeze({
+        disposition: "not_requested",
+        statements: [{
+          sql: `INSERT INTO run_completion_cards
+            (run_id, conversation_id, message_id, disposition, card_json, card_sha256, created_at)
+            VALUES (?, NULL, NULL, 'not_requested', NULL, NULL, ?)`,
+          params: [runId, createdAt],
+          expectedChanges: 1,
+        }],
+      });
+    }
+    const conversation = this.#database.prepare(`SELECT project_id, lifecycle_state
+      FROM conversations WHERE id = ?`
+    ).get(conversationId) as { project_id: string; lifecycle_state: LifecycleState } | undefined;
+    if (!conversation || conversation.project_id !== run.project_id
+      || conversation.lifecycle_state === "trashed") {
+      if (this.#database.prepare("SELECT 1 FROM messages WHERE id = ?").get(
+        completionCardId(runId, conversationId),
+      )) {
+        throw new ProductStoreV2Error(
+          "completion_card_recovery_invalid: unavailable conversation unexpectedly has a deterministic platform card.",
+        );
+      }
+      return Object.freeze({
+        disposition: "conversation_unavailable",
+        statements: [{
+          sql: `INSERT INTO run_completion_cards
+            (run_id, conversation_id, message_id, disposition, card_json, card_sha256, created_at)
+            VALUES (?, ?, NULL, 'conversation_unavailable', NULL, NULL, ?)`,
+          params: [runId, conversationId, createdAt],
+          expectedChanges: 1,
+        }],
+      });
+    }
+    const card = completionCardPayload(
+      runId,
+      status,
+      run.requested_sample_count,
+      outputIds,
+    );
+    const cardJson = json(card);
+    const cardId = completionCardId(runId, conversationId);
+    const existing = this.#database.prepare(
+      "SELECT * FROM messages WHERE id = ?",
+    ).get(cardId) as any;
+    if (existing && (
+      existing.conversation_id !== conversationId
+      || existing.message_kind !== "platform_card"
+      || existing.role !== "system"
+      || existing.status !== "complete"
+      || existing.text !== ""
+      || existing.action_json !== null
+      || existing.content_json !== cardJson
+      || existing.created_at !== createdAt
+      || existing.updated_at !== createdAt
+      || !Number.isSafeInteger(existing.ordinal)
+      || existing.ordinal < 0
+      || this.#database.prepare(`SELECT 1 FROM agent_turns
+        WHERE input_message_id = ? OR assistant_message_id = ?`
+      ).get(cardId, cardId)
+    )) {
+      throw new ProductStoreV2Error(
+        "completion_card_recovery_invalid: existing deterministic platform card does not match terminal run.",
+      );
+    }
+    return Object.freeze({
+      disposition: "published",
+      statements: [
+        ...(!existing ? [{
+          sql: `INSERT INTO messages
+            (id, conversation_id, ordinal, role, status, text, content_json,
+              action_json, created_at, updated_at, message_kind)
+            SELECT ?, ?, coalesce(max(ordinal), -1) + 1, 'system', 'complete', '',
+              ?, NULL, ?, ?, 'platform_card'
+            FROM messages WHERE conversation_id = ?`,
+          params: [
+            cardId,
+            conversationId,
+            cardJson,
+            createdAt,
+            createdAt,
+            conversationId,
+          ],
+          expectedChanges: 1,
+        } satisfies ProductDatabaseMutationStatement] : []),
+        {
+          sql: `INSERT INTO run_completion_cards
+            (run_id, conversation_id, message_id, disposition, card_json, card_sha256, created_at)
+            VALUES (?, ?, ?, 'published', ?, ?, ?)`,
+          params: [
+            runId,
+            conversationId,
+            cardId,
+            cardJson,
+            canonicalDigest(card),
+            createdAt,
+          ],
+          expectedChanges: 1,
+        },
+      ],
+    });
+  }
+
   #verifiedMetadata(row: ObjectRow): StoredObjectMetadata {
     const inspected = this.#objects.readWithInspection(ownerPath(row));
     if (!inspected || inspected.sha256 !== row.sha256 || inspected.sizeBytes !== row.size_bytes) {
@@ -3736,8 +4030,38 @@ const conversationDto = (row: any, sessionState: ConversationDto["sessionState"]
   updatedAt: row.updated_at,
 });
 
+const completionCardId = (runId: string, conversationId: string): string =>
+  `run_completion_${canonicalDigest({ runId, conversationId }).slice(0, 32)}`;
+
+const completionCardPayload = (
+  runId: string,
+  status: unknown,
+  sampleCount: number,
+  outputIdsInput: readonly string[],
+): {
+  runId: string;
+  status: "succeeded" | "failed" | "cancelled" | "timed_out";
+  sampleCount: number;
+  outputCount: number;
+  outputIds: string[];
+} => {
+  if (!["succeeded", "failed", "cancelled", "timed_out"].includes(String(status))
+    || !Number.isSafeInteger(sampleCount) || sampleCount < 0) {
+    throw new ProductStoreV2Error("completion_card_invalid: terminal card projection is invalid.");
+  }
+  const outputIds = [...outputIdsInput].sort(compareStrings);
+  return {
+    runId,
+    status: status as "succeeded" | "failed" | "cancelled" | "timed_out",
+    sampleCount,
+    outputCount: outputIds.length,
+    outputIds,
+  };
+};
+
 const messageDto = (row: any): ConversationMessageDto => ({
-  id: row.id, ordinal: row.ordinal, role: row.role, status: row.status, text: row.text,
+  id: row.id, ordinal: row.ordinal, role: row.role, status: row.status,
+  messageKind: row.message_kind ?? "conversation", text: row.text,
   content: JSON.parse(row.content_json), createdAt: row.created_at, updatedAt: row.updated_at,
 });
 

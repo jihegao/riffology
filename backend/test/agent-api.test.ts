@@ -182,6 +182,7 @@ test("A2 providers, atomic Model creation, conversations, live turn, and public 
   assert.equal(turn.mode, "live");
   assert.equal(turn.turn.state, "complete");
   assert.equal(turn.messages.at(-1).text, openCode.assistantText);
+  assert.equal(turn.messages.every((message: any) => message.messageKind === "conversation"), true);
   assert.deepEqual(openCode.prompts[0].binding, { providerId: "provider-a", modelId: "model-a" });
   assert.equal(openCode.created.length, 1);
 
@@ -262,6 +263,7 @@ test("restart preserves completed transcript while provider loss persists a fail
   try {
     const messages = await (await fetch(`${second.baseUrl}/api/conversations/${created.conversation.id}/messages`)).json() as any;
     assert.deepEqual(messages.messages.map((message: any) => message.role), ["user", "assistant"]);
+    assert.deepEqual(messages.messages.map((message: any) => message.messageKind), ["conversation", "conversation"]);
     openCode.catalogue = [];
     const readOnly = await post(`${second.baseUrl}/api/conversations/${created.conversation.id}/turns`, { requestKey: "offline-turn", text: "Do not fake a reply", attachmentIds: [] });
     assert.equal(readOnly.status, 503);

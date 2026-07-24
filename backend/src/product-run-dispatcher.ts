@@ -302,6 +302,7 @@ export class ProductRunDispatcher {
       const finishedAt = this.#now().toISOString();
       const safeToFinalize = this.#bestEffortUnwind({
         attempt,
+        projectId: claim.run.projectId,
         attemptState,
         registered,
         phases,
@@ -330,6 +331,7 @@ export class ProductRunDispatcher {
 
   #bestEffortUnwind(input: {
     attempt: RunAttemptIdentity;
+    projectId: string;
     attemptState: "claimed" | "starting" | "running";
     registered: Map<number, StoreBatchProcessIdentity>;
     phases: Map<number, "blocked" | "released" | "running">;
@@ -367,6 +369,17 @@ export class ProductRunDispatcher {
           return false;
         }
       }
+    }
+    try {
+      const current = this.#store.getRun(input.projectId, input.attempt.runId, {
+        includeTrashed: true,
+      });
+      if (["succeeded", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        this.#store.auditRunCompletionCards();
+        return true;
+      }
+    } catch {
+      // Continue to the normal unwind path when durable terminal state is not provable.
     }
     if (input.attemptState === "claimed") return false;
     try {

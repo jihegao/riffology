@@ -679,7 +679,7 @@ test("atomic batch success survives after-commit crash recovery without replayin
         if (injectCrash && point === "after_sqlite_commit") throw new Error("injected after-commit crash");
       },
     },
-  });
+  }, "active");
   let reopened: ProductStoreV2 | undefined;
   try {
     const generation = "c".repeat(64);
@@ -719,6 +719,9 @@ test("atomic batch success survives after-commit crash recovery without replayin
 
     reopened = ProductStoreV2.open(fixture.root);
     assert.equal(reopened.getRun(fixture.projectId, fixture.runId).status, "succeeded");
+    assert.equal(reopened.getRun(fixture.projectId, fixture.runId).completionCardDisposition, "published");
+    assert.equal(reopened.listConversationMessages(fixture.conversationId!).length, 1);
+    assert.doesNotThrow(() => reopened!.auditRunCompletionCards());
     const outputs = reopened.listRunOutputs(fixture.runId);
     assert.equal(outputs.length, 1);
     assert.equal(reopened.readObjectFile(outputs[0]!.file.id).toString("utf8"), "{\"recovered\":true}");
@@ -741,10 +744,9 @@ test("atomic batch success survives after-commit crash recovery without replayin
     const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
     database.prepare("DELETE FROM output_indexes WHERE run_id = ?").run(fixture.runId);
     database.close();
-    reopened = ProductStoreV2.open(fixture.root);
     assert.throws(
-      () => reopened!.auditRecoveredBatchSuccesses(),
-      /required recovered output is missing/u,
+      () => ProductStoreV2.open(fixture.root),
+      /published platform card is missing, mutated/u,
     );
     assert.deepEqual(readdirSync(join(fixture.root, ".recovery")), []);
   } finally {
@@ -1272,6 +1274,364 @@ test("cleanup_unverified process evidence blocks every run terminal transition",
   }
 });
 
+test("terminal batch runs publish exactly one deterministic platform completion card", async () => {
+  const fixture = createDispatcherFixture("completion_success", {}, "active");
+  let dispatcher: ProductRunDispatcher | undefined;
+  try {
+    fixture.store.createMessage({
+      id: "message_completion_success_user",
+      conversationId: fixture.conversationId!,
+      ordinal: 0,
+      role: "user",
+      status: "complete",
+      text: "Run the experiment.",
+      createdAt: "2026-07-24T10:00:10.000Z",
+    });
+    fixture.store.createMessage({
+      id: "message_completion_success_assistant",
+      conversationId: fixture.conversationId!,
+      ordinal: 1,
+      role: "assistant",
+      status: "complete",
+      text: "Starting it now.",
+      createdAt: "2026-07-24T10:00:11.000Z",
+    });
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor: syntheticSupervisor({
+        status: "succeeded",
+        code: "batch_run_succeeded",
+        includeOutput: true,
+      }),
+      leaseMs: 1_000,
+      consumeOutput: () => Buffer.from("{}"),
+    });
+    await dispatcher.start();
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.completionCardDisposition, "published");
+    const outputIds = fixture.store.listRunOutputs(fixture.runId).map((output) => output.id);
+    const messages = fixture.store.listConversationMessages(fixture.conversationId!);
+    assert.deepEqual(messages.map((message) => message.messageKind), [
+      "conversation",
+      "conversation",
+      "platform_card",
+    ]);
+    const card = messages.at(-1)!;
+    assert.deepEqual(card, {
+      id: `run_completion_${canonicalDigest({
+        runId: fixture.runId,
+        conversationId: fixture.conversationId,
+      }).slice(0, 32)}`,
+      ordinal: 2,
+      role: "system",
+      status: "complete",
+      messageKind: "platform_card",
+      text: "",
+      content: {
+        runId: fixture.runId,
+        status: "succeeded",
+        sampleCount: 1,
+        outputCount: 1,
+        outputIds,
+      },
+      createdAt: "2026-07-24T10:01:02.000Z",
+      updatedAt: "2026-07-24T10:01:02.000Z",
+    });
+    fixture.store.reconcileRunCompletionCards();
+    fixture.store.reconcileRunCompletionCards();
+    assert.equal(fixture.store.listConversationMessages(fixture.conversationId!).length, 3);
+    assert.doesNotThrow(() => fixture.store.auditRunCompletionCards());
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    assert.equal((database.prepare(`SELECT count(*) AS count FROM agent_turns
+      WHERE input_message_id = ? OR assistant_message_id = ?`
+    ).get(card.id, card.id) as { count: number }).count, 0);
+    database.close();
+  } finally {
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("failed, timed-out, and cancelled runs publish status cards while lifecycle controls disposition", () => {
+  for (const [status, lifecycle, expectedDisposition] of [
+    ["failed", "active", "published"],
+    ["timed_out", "archived", "published"],
+    ["cancelled", "trashed", "conversation_unavailable"],
+    ["cancelled", "none", "not_requested"],
+  ] as const) {
+    const suffix = `completion_${status}_${lifecycle}`;
+    const fixture = createDispatcherFixture(suffix, {}, lifecycle);
+    try {
+      if (status === "cancelled") {
+        fixture.store.cancelRun({
+          commandId: `command_cancel_${suffix}`,
+          projectId: fixture.projectId,
+          runId: fixture.runId,
+          requestedAt: "2026-07-24T10:01:01.000Z",
+        });
+        assert.ok(fixture.store.finalizeNextCancelledQueuedRun({
+          finishedAt: "2026-07-24T10:01:02.000Z",
+        }));
+      } else {
+        fixture.store.activateDispatcherGeneration({
+          generation: GENERATION_A,
+          activatedAt: "2026-07-24T10:01:01.000Z",
+        });
+        const claim = fixture.store.claimNextQueuedBatchRun({
+          dispatcherGeneration: GENERATION_A,
+          claimedAt: "2026-07-24T10:01:02.000Z",
+          leaseExpiresAt: "2026-07-24T10:01:32.000Z",
+        })!;
+        fixture.store.markRunAttemptStarting({
+          ...attemptIdentity(claim),
+          startedAt: "2026-07-24T10:01:03.000Z",
+        });
+        fixture.store.finalizeBatchRunTerminal({
+          ...attemptIdentity(claim),
+          expectedAttemptState: "starting",
+          status,
+          terminalCode: status === "failed" ? "batch_process_failed" : "run_wall_timeout",
+          terminalDiagnostics: {},
+          resourceOverview: {},
+          finishedAt: "2026-07-24T10:01:04.000Z",
+        });
+      }
+      const terminal = fixture.store.getRun(fixture.projectId, fixture.runId);
+      assert.equal(terminal.status, status);
+      assert.equal(terminal.completionCardDisposition, expectedDisposition);
+      const messages = fixture.conversationId
+        ? fixture.store.listConversationMessages(fixture.conversationId)
+        : [];
+      assert.equal(messages.length, expectedDisposition === "published" ? 1 : 0);
+      if (expectedDisposition === "published") {
+        assert.deepEqual(messages[0]!.content, {
+          runId: fixture.runId,
+          status,
+          sampleCount: 1,
+          outputCount: 0,
+          outputIds: [],
+        });
+      }
+      assert.doesNotThrow(() => fixture.store.auditRunCompletionCards());
+    } finally {
+      fixture.close();
+    }
+  }
+});
+
+test("dispatcher treats after-sqlite-commit success as durable and does not duplicate the card", async () => {
+  let injectAfterCommit = false;
+  const fixture = createDispatcherFixture("completion_after_commit", {
+    coordinatorOptions: {
+      faultInjector(point) {
+        if (injectAfterCommit && point === "after_sqlite_commit") {
+          injectAfterCommit = false;
+          throw new Error("injected completion after-commit fault");
+        }
+      },
+    },
+  }, "active");
+  let dispatcher: ProductRunDispatcher | undefined;
+  try {
+    const base = syntheticSupervisor({
+      status: "succeeded",
+      code: "batch_run_succeeded",
+      includeOutput: true,
+    });
+    const storePort = overrideDispatcherStore(fixture.store, {
+      commitBatchRunSuccess(input) {
+        injectAfterCommit = true;
+        return fixture.store.commitBatchRunSuccess(input);
+      },
+    });
+    dispatcher = new ProductRunDispatcher({
+      store: storePort,
+      supervisor: base,
+      leaseMs: 1_000,
+      consumeOutput: () => Buffer.from("{}"),
+    });
+    await dispatcher.start();
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.status, "succeeded");
+    await dispatcher.stop();
+    assert.equal(dispatcher.lastError, null);
+    assert.equal(fixture.store.listConversationMessages(fixture.conversationId!).length, 1);
+    assert.doesNotThrow(() => fixture.store.auditRunCompletionCards());
+  } finally {
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("startup reconciles a legacy terminal pending card once and fails closed on published drift", async () => {
+  const fixture = createDispatcherFixture("completion_restart", {}, "active");
+  let dispatcher: ProductRunDispatcher | undefined;
+  let reopened: ProductStoreV2 | undefined;
+  try {
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor: syntheticSupervisor({
+        status: "succeeded",
+        code: "batch_run_succeeded",
+        includeOutput: true,
+      }),
+      leaseMs: 1_000,
+      consumeOutput: () => Buffer.from("{}"),
+    });
+    await dispatcher.start();
+    await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    await dispatcher.stop();
+    fixture.store.close();
+    let database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    database.exec(`
+      DROP TRIGGER run_completion_card_delete_v7;
+      DROP TRIGGER platform_card_delete_v7;
+      DROP TRIGGER run_completion_disposition_immutable_v7;
+      DROP TRIGGER run_completion_disposition_transition_v7;
+    `);
+    database.prepare("DELETE FROM run_completion_cards WHERE run_id = ?").run(fixture.runId);
+    database.prepare("UPDATE runs SET completion_card_disposition = 'pending' WHERE id = ?")
+      .run(fixture.runId);
+    database.close();
+
+    reopened = ProductStoreV2.open(fixture.root);
+    assert.equal(reopened.getRun(fixture.projectId, fixture.runId).completionCardDisposition, "published");
+    assert.equal(reopened.listConversationMessages(fixture.conversationId!).length, 1);
+    reopened.reconcileRunCompletionCards();
+    assert.equal(reopened.listConversationMessages(fixture.conversationId!).length, 1);
+    reopened.close();
+    reopened = undefined;
+
+    database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    database.exec("DROP TRIGGER platform_card_immutable_v7");
+    database.prepare(`UPDATE messages SET updated_at = ?
+      WHERE conversation_id = ? AND message_kind = 'platform_card'`
+    ).run("2026-07-24T10:09:00.000Z", fixture.conversationId);
+    database.close();
+    assert.throws(
+      () => ProductStoreV2.open(fixture.root),
+      /published platform card is missing, mutated/u,
+    );
+
+    database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    database.prepare(`UPDATE messages SET updated_at = ?
+      WHERE conversation_id = ? AND message_kind = 'platform_card'`
+    ).run("2026-07-24T10:01:02.000Z", fixture.conversationId);
+    database.prepare("DELETE FROM run_completion_cards WHERE run_id = ?").run(fixture.runId);
+    database.prepare("UPDATE runs SET completion_card_disposition = 'pending' WHERE id = ?")
+      .run(fixture.runId);
+    database.prepare(`UPDATE messages
+      SET content_json = json_set(content_json, '$.status', 'failed')
+      WHERE conversation_id = ? AND message_kind = 'platform_card'`
+    ).run(fixture.conversationId);
+    database.close();
+    assert.throws(
+      () => ProductStoreV2.open(fixture.root),
+      /existing deterministic platform card does not match terminal run/u,
+    );
+  } finally {
+    await dispatcher?.stop();
+    reopened?.close();
+    fixture.store.close();
+    rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("schema rejects duplicate output IDs and a nonterminal final completion disposition", () => {
+  const queued = createDispatcherFixture("completion_nonterminal_shape", {}, "active");
+  try {
+    queued.store.close();
+    const database = openProductDatabase(join(queued.root, "product.sqlite3"));
+    assert.throws(
+      () => database.prepare(
+        "UPDATE runs SET completion_card_disposition = 'published' WHERE id = ?",
+      ).run(queued.runId),
+      /completion disposition does not match lifecycle/u,
+    );
+    database.close();
+  } finally {
+    queued.store.close();
+    rmSync(queued.parent, { recursive: true, force: true });
+  }
+
+  const completed = createDispatcherFixture(
+    "completion_duplicate_outputs",
+    {},
+    "active",
+    [11, 12],
+  );
+  try {
+    completed.store.activateDispatcherGeneration({
+      generation: GENERATION_A,
+      activatedAt: "2026-07-24T10:01:01.000Z",
+    });
+    const claim = completed.store.claimNextQueuedBatchRun({
+      dispatcherGeneration: GENERATION_A,
+      claimedAt: "2026-07-24T10:01:02.000Z",
+      leaseExpiresAt: "2026-07-24T10:01:32.000Z",
+    })!;
+    const attempt = attemptIdentity(claim);
+    completed.store.markRunAttemptStarting({ ...attempt, startedAt: "2026-07-24T10:01:03.000Z" });
+    completed.store.markRunAttemptRunning({
+      ...attempt,
+      startedAt: "2026-07-24T10:01:04.000Z",
+      leaseExpiresAt: "2026-07-24T10:01:34.000Z",
+    });
+    for (const sample of claim.run.samplePlan as Array<{ sampleIndex: number; sampleId: string }>) {
+      completeSample(completed.store, claim, sample.sampleIndex, sample.sampleId);
+    }
+    completed.store.commitBatchRunSuccess({
+      ...attempt,
+      outputs: (claim.run.samplePlan as Array<{ sampleIndex: number; sampleId: string }>).map(
+        (sample) => ({
+          ...sample,
+          logicalName: "result",
+          outputType: "data",
+          bytes: Buffer.from("{}"),
+        }),
+      ),
+      terminalDiagnostics: {},
+      resourceOverview: {},
+      finishedAt: "2026-07-24T10:01:05.000Z",
+    });
+    const outputIds = completed.store.listRunOutputs(completed.runId).map((output) => output.id);
+    completed.store.close();
+    const database = openProductDatabase(join(completed.root, "product.sqlite3"));
+    database.exec(`
+      DROP TRIGGER run_completion_card_delete_v7;
+      DROP TRIGGER platform_card_delete_v7;
+    `);
+    database.prepare("DELETE FROM run_completion_cards WHERE run_id = ?").run(completed.runId);
+    database.prepare("DELETE FROM messages WHERE conversation_id = ? AND message_kind = 'platform_card'")
+      .run(completed.conversationId);
+    const cardId = `run_completion_${canonicalDigest({
+      runId: completed.runId,
+      conversationId: completed.conversationId,
+    }).slice(0, 32)}`;
+    assert.throws(() => database.prepare(`INSERT INTO messages
+      (id, conversation_id, ordinal, role, status, text, content_json,
+        action_json, created_at, updated_at, message_kind)
+      VALUES (?, ?, 0, 'system', 'complete', '', ?, NULL, ?, ?, 'platform_card')`
+    ).run(
+      cardId,
+      completed.conversationId,
+      JSON.stringify({
+        runId: completed.runId,
+        status: "succeeded",
+        sampleCount: 2,
+        outputCount: 2,
+        outputIds: [outputIds[0], outputIds[0]],
+      }),
+      "2026-07-24T10:01:05.000Z",
+      "2026-07-24T10:01:05.000Z",
+    ), /platform completion card shape or binding mismatch/u);
+    database.close();
+  } finally {
+    completed.store.close();
+    rmSync(completed.parent, { recursive: true, force: true });
+  }
+});
+
 const attemptIdentity = (claim: {
   run: { id: string };
   attempt: { id: string; attemptGeneration: number; dispatcherGeneration: string };
@@ -1330,10 +1690,13 @@ const completeSample = (
 const createDispatcherFixture = (
   suffix: string,
   options: Parameters<typeof ProductStoreV2.openForTesting>[1] = {},
+  completionLifecycle: "none" | "active" | "archived" | "trashed" = "none",
+  seeds: readonly number[] = [1],
 ): {
   store: ProductStoreV2;
   projectId: string;
   runId: string;
+  conversationId: string | null;
   root: string;
   parent: string;
   close: () => void;
@@ -1345,6 +1708,7 @@ const createDispatcherFixture = (
   const projectId = `project_${suffix}`;
   const experimentId = `experiment_${suffix}`;
   const runId = `run_${suffix}`;
+  const conversationId = completionLifecycle === "none" ? null : `conversation_${suffix}`;
   store.createModel({
     id: modelId,
     name: suffix,
@@ -1375,12 +1739,24 @@ const createDispatcherFixture = (
     sourceModelId: modelId,
     createdAt: "2026-07-24T10:00:00.000Z",
   });
+  if (conversationId) {
+    store.createConversation({
+      id: conversationId,
+      owner: { kind: "project", id: projectId },
+      name: `${suffix} completion`,
+      providerId: "provider",
+      providerModelId: "model",
+      createdAt: "2026-07-24T10:00:00.000Z",
+    });
+  }
   const plan = planExperiment({
     configuration: {
       schemaVersion: 1,
       runKind: "batch",
       parameters: {},
-      sampling: { kind: "single" },
+      sampling: seeds.length === 1
+        ? { kind: "single" }
+        : { kind: "multiple-seeds", seeds: [...seeds] },
     },
     inputSchema: INPUT_SCHEMA,
     maxSamples: LIMITS.maxSamples,
@@ -1398,7 +1774,7 @@ const createDispatcherFixture = (
     runId,
     projectId,
     experimentConfigId: experimentId,
-    completionConversationId: null,
+    completionConversationId: conversationId,
     expectedConfigurationDigest: plan.configurationDigest,
     plan,
     projectSnapshotDigest: project.modelSnapshotDigest,
@@ -1406,10 +1782,16 @@ const createDispatcherFixture = (
     limits: LIMITS,
     createdAt: "2026-07-24T10:01:00.000Z",
   });
+  if (conversationId && completionLifecycle === "archived") {
+    store.archiveResource("conversation", conversationId, "2026-07-24T10:01:00.500Z");
+  } else if (conversationId && completionLifecycle === "trashed") {
+    store.trashResource("conversation", conversationId, "2026-07-24T10:01:00.500Z");
+  }
   return {
     store,
     projectId,
     runId,
+    conversationId,
     root,
     parent,
     close() {
