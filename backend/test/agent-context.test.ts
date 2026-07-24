@@ -74,3 +74,39 @@ test("extra external-session or credential-shaped fields are never serialized", 
   const context = buildBoundedAgentContext(value);
   assert.doesNotMatch(context.text, /external-ref-not-allowed|provider-credential-not-allowed/u);
 });
+
+test("platform cards use a separate strict allowlisted context section", () => {
+  const value = input();
+  value.messages = [{
+    id: "run_completion_card",
+    conversationId: value.conversationId,
+    ordinal: 5,
+    role: "system",
+    status: "complete",
+    messageKind: "platform_card",
+    text: "diagnostic=/private/secret.log",
+    content: {
+      runId: "run_alpha",
+      status: "succeeded",
+      sampleCount: 2,
+      outputCount: 2,
+      outputIds: ["output_a", "output_b"],
+    },
+  }];
+  const context = buildBoundedAgentContext(value);
+  assert.match(context.text, /--- PLATFORM CARD ---/u);
+  assert.match(context.text, /run_id: run_alpha/u);
+  assert.match(context.text, /output_ids: output_a,output_b/u);
+  assert.doesNotMatch(context.text, /diagnostic|private|secret\\.log|--- MESSAGE ---/u);
+  assert.deepEqual(context.included.messageIds, ["run_completion_card"]);
+
+  value.messages[0]!.content = {
+    runId: "run_alpha",
+    status: "succeeded",
+    sampleCount: 2,
+    outputCount: 2,
+    outputIds: ["output_a", "output_b"],
+    diagnostics: "not allowed",
+  };
+  assert.throws(() => buildBoundedAgentContext(value), /Platform card context is invalid/u);
+});

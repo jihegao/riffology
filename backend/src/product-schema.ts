@@ -8,6 +8,7 @@ export type ProductDatabase = DatabaseSync;
 export type ProductSchemaMigration = Readonly<{ version: number; sql: string }>;
 
 const atomicBatchSuccessRunContexts = new WeakMap<ProductDatabase, string>();
+const runCompletionReconciliationContexts = new WeakMap<ProductDatabase, string>();
 
 /** @internal ProductStoreV2-only capability; direct callers are limited to schema tests. */
 export const withAtomicBatchSuccessRunContext = <T>(
@@ -26,6 +27,23 @@ export const withAtomicBatchSuccessRunContext = <T>(
   }
 };
 
+/** @internal ProductStoreV2-only capability for migrated terminal pending rows. */
+export const withRunCompletionReconciliationContext = <T>(
+  database: ProductDatabase,
+  runId: string,
+  body: () => T,
+): T => {
+  if (runCompletionReconciliationContexts.has(database)) {
+    throw new Error("A run completion reconciliation context is already active.");
+  }
+  runCompletionReconciliationContexts.set(database, runId);
+  try {
+    return body();
+  } finally {
+    runCompletionReconciliationContexts.delete(database);
+  }
+};
+
 export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
   foreignKeys: true,
   journalMode: "WAL",
@@ -40,6 +58,8 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
   });
   database.function("riff_atomic_batch_success_context", (runId: string) =>
     atomicBatchSuccessRunContexts.get(database) === runId ? 1 : 0);
+  database.function("riff_run_completion_reconcile_context", (runId: string) =>
+    runCompletionReconciliationContexts.get(database) === runId ? 1 : 0);
   database.exec(SQL`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
@@ -1975,6 +1995,218 @@ export const PRODUCT_SCHEMA_V6_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'recovery actions are immutable evidence'); END;
 `;
 
+export const PRODUCT_SCHEMA_V7_SQL = SQL`
+  ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'conversation'
+    CHECK (message_kind IN ('conversation', 'platform_card'));
+
+  CREATE TABLE run_completion_cards (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    conversation_id TEXT,
+    message_id TEXT UNIQUE REFERENCES messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    disposition TEXT NOT NULL CHECK (
+      disposition IN ('not_requested', 'published', 'conversation_unavailable')
+    ),
+    card_json TEXT CHECK (
+      card_json IS NULL OR (json_valid(card_json) AND json_type(card_json) = 'object')
+    ),
+    card_sha256 TEXT CHECK (
+      card_sha256 IS NULL
+      OR (length(card_sha256) = 64 AND card_sha256 NOT GLOB '*[^0-9a-f]*')
+    ),
+    created_at TEXT NOT NULL,
+    CHECK (
+      (disposition = 'not_requested' AND conversation_id IS NULL
+        AND message_id IS NULL AND card_json IS NULL AND card_sha256 IS NULL)
+      OR (disposition = 'conversation_unavailable' AND conversation_id IS NOT NULL
+        AND message_id IS NULL AND card_json IS NULL AND card_sha256 IS NULL)
+      OR (disposition = 'published' AND conversation_id IS NOT NULL
+        AND message_id IS NOT NULL AND card_json IS NOT NULL AND card_sha256 IS NOT NULL)
+    )
+  ) STRICT;
+  CREATE UNIQUE INDEX one_run_completion_conversation_v7
+    ON run_completion_cards(run_id, conversation_id)
+    WHERE conversation_id IS NOT NULL;
+
+  UPDATE runs
+    SET completion_card_disposition = 'pending'
+    WHERE contract_version = 4
+      AND run_kind = 'batch'
+      AND status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed');
+
+  CREATE TRIGGER platform_card_shape_v7
+  BEFORE INSERT ON messages
+  WHEN NEW.message_kind = 'platform_card'
+  BEGIN
+    SELECT CASE WHEN NEW.role != 'system'
+      OR NEW.status != 'complete'
+      OR NEW.text != ''
+      OR NEW.action_json IS NOT NULL
+      OR json_type(NEW.content_json) != 'object'
+      OR (SELECT count(*) FROM json_each(NEW.content_json)) != 5
+      OR EXISTS (
+        SELECT 1 FROM json_each(NEW.content_json)
+        WHERE key NOT IN ('runId', 'status', 'sampleCount', 'outputCount', 'outputIds')
+      )
+      OR json_type(NEW.content_json, '$.runId') != 'text'
+      OR json_type(NEW.content_json, '$.status') != 'text'
+      OR json_type(NEW.content_json, '$.sampleCount') != 'integer'
+      OR json_type(NEW.content_json, '$.outputCount') != 'integer'
+      OR json_type(NEW.content_json, '$.outputIds') != 'array'
+      OR json_extract(NEW.content_json, '$.sampleCount') < 0
+      OR json_extract(NEW.content_json, '$.outputCount') < 0
+      OR json_extract(NEW.content_json, '$.outputCount')
+        != json_array_length(NEW.content_json, '$.outputIds')
+      OR EXISTS (
+        SELECT 1 FROM json_each(NEW.content_json, '$.outputIds')
+        WHERE type != 'text' OR length(value) NOT BETWEEN 3 AND 128
+      )
+      OR (SELECT count(DISTINCT value)
+          FROM json_each(NEW.content_json, '$.outputIds'))
+        != json_array_length(NEW.content_json, '$.outputIds')
+      OR NOT EXISTS (
+        SELECT 1 FROM runs r
+        JOIN conversations c ON c.id = NEW.conversation_id
+        WHERE r.id = json_extract(NEW.content_json, '$.runId')
+          AND r.contract_version = 4
+          AND r.run_kind = 'batch'
+          AND r.completion_conversation_id = NEW.conversation_id
+          AND c.project_id = r.project_id
+          AND c.lifecycle_state IN ('active', 'archived')
+          AND r.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+          AND NEW.created_at = r.finished_at
+          AND NEW.updated_at = r.finished_at
+          AND json_extract(NEW.content_json, '$.status')
+            = CASE WHEN r.status = 'trashed' THEN r.pre_trash_status ELSE r.status END
+          AND json_extract(NEW.content_json, '$.sampleCount') = r.requested_sample_count
+          AND json_extract(NEW.content_json, '$.outputCount')
+            = (SELECT count(*) FROM output_indexes o WHERE o.run_id = r.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(NEW.content_json, '$.outputIds') ids
+            WHERE NOT EXISTS (
+              SELECT 1 FROM output_indexes o
+              WHERE o.run_id = r.id AND o.id = ids.value
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM output_indexes o
+            WHERE o.run_id = r.id
+              AND NOT EXISTS (
+                SELECT 1 FROM json_each(NEW.content_json, '$.outputIds') ids
+                WHERE ids.value = o.id
+              )
+          )
+          AND NEW.id = 'run_completion_' || substr(riff_canonical_sha256(json_object(
+            'runId', r.id,
+            'conversationId', NEW.conversation_id
+          )), 1, 32)
+      )
+    THEN RAISE(ABORT, 'platform completion card shape or binding mismatch') END;
+  END;
+
+  CREATE TRIGGER platform_card_immutable_v7
+  BEFORE UPDATE ON messages WHEN OLD.message_kind = 'platform_card'
+  BEGIN SELECT RAISE(ABORT, 'platform completion card is immutable'); END;
+  CREATE TRIGGER platform_card_delete_v7
+  BEFORE DELETE ON messages WHEN OLD.message_kind = 'platform_card'
+  BEGIN SELECT RAISE(ABORT, 'platform completion card is immutable'); END;
+  CREATE TRIGGER message_kind_immutable_v7
+  BEFORE UPDATE OF message_kind ON messages
+  BEGIN SELECT RAISE(ABORT, 'message kind is immutable'); END;
+  CREATE TRIGGER agent_turn_platform_card_insert_v7
+  BEFORE INSERT ON agent_turns
+  WHEN EXISTS (
+    SELECT 1 FROM messages
+    WHERE id IN (NEW.input_message_id, NEW.assistant_message_id)
+      AND message_kind = 'platform_card'
+  )
+  BEGIN SELECT RAISE(ABORT, 'platform completion card cannot belong to an Agent turn'); END;
+  CREATE TRIGGER agent_turn_platform_card_update_v7
+  BEFORE UPDATE OF input_message_id, assistant_message_id ON agent_turns
+  WHEN EXISTS (
+    SELECT 1 FROM messages
+    WHERE id IN (NEW.input_message_id, NEW.assistant_message_id)
+      AND message_kind = 'platform_card'
+  )
+  BEGIN SELECT RAISE(ABORT, 'platform completion card cannot belong to an Agent turn'); END;
+
+  CREATE TRIGGER run_completion_card_owner_v7
+  BEFORE INSERT ON run_completion_cards
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM runs r
+      WHERE r.id = NEW.run_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'batch'
+        AND r.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+        AND r.completion_card_disposition = NEW.disposition
+        AND NEW.created_at = r.finished_at
+        AND (
+          (NEW.disposition = 'not_requested'
+            AND r.completion_conversation_id IS NULL)
+          OR (NEW.disposition = 'conversation_unavailable'
+            AND r.completion_conversation_id = NEW.conversation_id
+            AND NOT EXISTS (
+              SELECT 1 FROM conversations c
+              WHERE c.id = NEW.conversation_id
+                AND c.project_id = r.project_id
+                AND c.lifecycle_state IN ('active', 'archived')
+            ))
+          OR (NEW.disposition = 'published'
+            AND r.completion_conversation_id = NEW.conversation_id
+            AND NEW.message_id = 'run_completion_' || substr(riff_canonical_sha256(json_object(
+              'runId', r.id,
+              'conversationId', NEW.conversation_id
+            )), 1, 32)
+            AND EXISTS (
+              SELECT 1 FROM messages m
+              WHERE m.id = NEW.message_id
+                AND m.conversation_id = NEW.conversation_id
+                AND m.message_kind = 'platform_card'
+                AND m.created_at = NEW.created_at
+                AND m.updated_at = NEW.created_at
+                AND m.content_json = NEW.card_json
+            )
+            AND NEW.card_sha256 = riff_canonical_sha256(NEW.card_json))
+        )
+    ) THEN RAISE(ABORT, 'run completion card receipt mismatch') END;
+  END;
+  CREATE TRIGGER run_completion_card_immutable_v7
+  BEFORE UPDATE ON run_completion_cards
+  BEGIN SELECT RAISE(ABORT, 'run completion card receipt is immutable'); END;
+  CREATE TRIGGER run_completion_card_delete_v7
+  BEFORE DELETE ON run_completion_cards
+  BEGIN SELECT RAISE(ABORT, 'run completion card receipt is immutable'); END;
+
+  CREATE TRIGGER run_completion_disposition_transition_v7
+  BEFORE UPDATE OF status, completion_card_disposition ON runs
+  WHEN OLD.contract_version = 4 AND (
+    (NEW.status IN ('queued', 'running')
+      AND NOT (
+        (NEW.completion_conversation_id IS NULL AND NEW.completion_card_disposition = 'not_requested')
+        OR (NEW.completion_conversation_id IS NOT NULL AND NEW.completion_card_disposition = 'pending')
+      ))
+    OR (NEW.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+      AND NEW.completion_card_disposition NOT IN (
+        'not_requested', 'published', 'conversation_unavailable'
+      ))
+  )
+  BEGIN SELECT RAISE(ABORT, 'run completion disposition does not match lifecycle'); END;
+  CREATE TRIGGER run_completion_disposition_immutable_v7
+  BEFORE UPDATE OF completion_card_disposition ON runs
+  WHEN OLD.contract_version = 4
+    AND OLD.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'trashed')
+    AND NEW.completion_card_disposition IS NOT OLD.completion_card_disposition
+    AND NOT (
+      OLD.completion_card_disposition = 'pending'
+      AND NEW.completion_card_disposition IN (
+        'not_requested', 'published', 'conversation_unavailable'
+      )
+      AND riff_run_completion_reconcile_context(OLD.id) = 1
+    )
+  BEGIN SELECT RAISE(ABORT, 'terminal run completion disposition is immutable'); END;
+
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -1982,4 +2214,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 4, sql: PRODUCT_SCHEMA_V4_SQL }),
   Object.freeze({ version: 5, sql: PRODUCT_SCHEMA_V5_SQL }),
   Object.freeze({ version: 6, sql: PRODUCT_SCHEMA_V6_SQL }),
+  Object.freeze({ version: 7, sql: PRODUCT_SCHEMA_V7_SQL }),
 ]);

@@ -30,8 +30,9 @@
 > same-process queued/running cancellation with committed race receipts.
 > A3-1c-b adds schema migration v6 and fail-closed v4 cross-restart
 > attempt/process/scratch recovery before dispatcher-generation handoff.
-> Exactly-once completion cards remain later A3-1c work, followed by
-> visual, Playwright, and ordinary wind slices. This is not completion evidence
+> A3-1c-c adds schema migration v7 and exactly-once deterministic platform
+> completion cards with startup reconciliation. Visual, Playwright, and
+> ordinary wind slices remain. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
 > The current process claim is deliberately narrow: macOS, local user,

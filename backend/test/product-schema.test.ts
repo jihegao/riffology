@@ -100,8 +100,8 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     assert.equal((database.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys, 1);
     assert.equal((database.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode, PRODUCT_DATABASE_PRAGMAS.journalMode.toLowerCase());
     assert.equal((database.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous, 2);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 6);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 7);
     assert.deepEqual(Object.keys(PROJECT_INTENT).sort(), ["createdAt", "projectId", "projectName", "sourceModelId"]);
     insertModel(database);
     insertProject(database, "project_alpha", "model_alpha");
@@ -156,7 +156,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     }
     for (const table of ["conversation_summaries", "agent_sessions", "agent_turns", "skill_uses", "action_records", "temporary_document_adoptions",
       "model_technical_checks", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
-      "experiment_command_receipts"]) {
+      "experiment_command_receipts", "run_completion_cards"]) {
       assert.equal(Boolean(reopened.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
     reopened.close();
@@ -165,18 +165,18 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v6 and expose Agent and execution records", () => {
+test("schema migrations advance sequentially from v1 through v7 and expose Agent and execution records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
     database.exec("PRAGMA user_version = 1");
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 6);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 7);
     const columns = database.prepare("PRAGMA table_info(object_files)").all() as Array<{ name: string }>;
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
     for (const table of ["agent_turns", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
-      "experiment_command_receipts"]) {
+      "experiment_command_receipts", "run_completion_cards"]) {
       assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
   } finally {
@@ -184,7 +184,7 @@ test("schema migrations advance sequentially from v1 through v6 and expose Agent
   }
 });
 
-test("ordered v2 through v6 migration locks legacy providers and preserves execution migration atomicity", () => {
+test("ordered v2 through v7 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);
@@ -196,7 +196,7 @@ test("ordered v2 through v6 migration locks legacy providers and preserves execu
     legacy.prepare(`INSERT INTO messages (id, conversation_id, ordinal, role, status, text, created_at, updated_at)
       VALUES ('message_legacy', 'conversation_legacy', 0, 'user', 'complete', 'hello', ?, ?)`).run(NOW, NOW);
     initializeProductSchema(legacy);
-    assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
     assert.equal((legacy.prepare("SELECT provider_locked_at FROM conversations WHERE id = 'conversation_legacy'").get() as { provider_locked_at: string }).provider_locked_at, NOW);
   } finally { legacy.close(); }
 
@@ -348,6 +348,7 @@ test("schema version drift and failed migrations fail closed with transactional 
       PRODUCT_SCHEMA_MIGRATIONS[3],
       PRODUCT_SCHEMA_MIGRATIONS[4],
       PRODUCT_SCHEMA_MIGRATIONS[5],
+      PRODUCT_SCHEMA_MIGRATIONS[6],
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);

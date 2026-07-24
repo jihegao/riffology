@@ -20,6 +20,7 @@ export type ConversationMessageDto = {
   ordinal: number;
   role: "user" | "assistant" | "system" | "tool";
   status: "streaming" | "complete" | "failed";
+  messageKind: "conversation" | "platform_card";
   text: string;
   content: unknown;
   createdAt: IsoTimestamp;

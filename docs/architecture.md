@@ -6,7 +6,7 @@ The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md), the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
-`ProductStoreV2` over SQLite schema migration v6, execution contract v4, and
+`ProductStoreV2` over SQLite schema migration v7, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
@@ -89,7 +89,12 @@ generation using its stable prior-attempt identity. One in-process dispatcher
 owns a `ProductStoreV2` until stop releases that guard; the Store writer lock
 provides the cross-process singleton boundary. Migrated schema-v5 live process
 rows have no v6 launch/scratch identity and intentionally fail recovery closed.
-Exactly-once completion cards remain later A3-1c work.
+A3-1c-c schema v7 publishes one deterministic `platform_card` system message
+in the same SQLite transaction as terminal batch state, or records
+`not_requested` / `conversation_unavailable`. Startup reconciles terminal
+`pending` rows after mutation recovery, then audits message/receipt/card
+agreement and fails closed on drift. Agent turns cannot own platform cards;
+bounded Agent context serializes only their five allowlisted fields.
 Visual supervision, scoped browser/Playwright access, and wind import also
 remain later Stage 3 slices.
 
@@ -118,8 +123,8 @@ executability is digest-bound evidence that a thin interface runs; it is not
 scientific validity, calibration, trust, or decision suitability.
 
 Legacy Gate/wind and queue components still coexist and are retired only by an
-explicit later audit. A3-1c-b is not completion evidence for Stage 3. #14 still
-owns the remaining completion-card, visual, and wind work; #15 owns
+explicit later audit. A3-1c-c is not completion evidence for Stage 3. #14 still
+owns the remaining visual and wind work; #15 owns
 the final Models/Projects home and shared two-pane browser shell.
 
 ---

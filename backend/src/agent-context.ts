@@ -13,7 +13,9 @@ export type AgentContextInput = {
     ordinal: number;
     role: "user" | "assistant" | "system" | "tool";
     status: "streaming" | "complete" | "failed";
+    messageKind?: "conversation" | "platform_card";
     text: string;
+    content?: unknown;
   }>;
   documents?: Array<{ id: string; conversationId: string; mediaType: string; text: string; relevant: boolean }>;
   attachments?: Array<{ id: string; conversationId: string; mediaType: string; preview: string; relevant: boolean }>;
@@ -37,6 +39,14 @@ export type BoundedAgentContext = {
   included: { messageIds: string[]; documentIds: string[]; attachmentIds: string[]; skillIds: string[] };
   limits: AgentContextLimits;
 };
+
+type PlatformCardContext = Readonly<{
+  runId: string;
+  status: "succeeded" | "failed" | "cancelled" | "timed_out";
+  sampleCount: number;
+  outputCount: number;
+  outputIds: string[];
+}>;
 
 export const DEFAULT_AGENT_CONTEXT_LIMITS: AgentContextLimits = Object.freeze({
   maxBytes: 64_000,
@@ -73,6 +83,23 @@ export const buildBoundedAgentContext = (
     .sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id, "en"))
     .slice(-limits.maxMessages);
   for (const message of recent) {
+    if (message.messageKind === "platform_card") {
+      const card = platformCard(message.content);
+      blocks.push({
+        text: section("PLATFORM CARD", [
+          `id: ${safeLabel(message.id)}`,
+          `ordinal: ${safeOrdinal(message.ordinal)}`,
+          `run_id: ${safeLabel(card.runId)}`,
+          `status: ${card.status}`,
+          `sample_count: ${card.sampleCount}`,
+          `output_count: ${card.outputCount}`,
+          `output_ids: ${card.outputIds.map(safeLabel).join(",")}`,
+        ].join("\n")),
+        kind: "messageIds",
+        id: message.id,
+      });
+      continue;
+    }
     blocks.push({
       text: section("MESSAGE", `id: ${safeLabel(message.id)}\nordinal: ${safeOrdinal(message.ordinal)}\nrole: ${message.role}\n${truncateUtf8(scrub(message.text), limits.maxItemBytes)}`),
       kind: "messageIds",
@@ -122,6 +149,26 @@ export const buildBoundedAgentContext = (
     included,
     limits,
   };
+};
+
+const platformCard = (value: unknown): PlatformCardContext => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Platform card context is invalid.");
+  }
+  const card = value as Record<string, unknown>;
+  const keys = Object.keys(card).sort().join("\n");
+  const expected = ["runId", "status", "sampleCount", "outputCount", "outputIds"].sort().join("\n");
+  if (keys !== expected
+    || typeof card.runId !== "string"
+    || !["succeeded", "failed", "cancelled", "timed_out"].includes(String(card.status))
+    || !Number.isSafeInteger(card.sampleCount) || Number(card.sampleCount) < 0
+    || !Number.isSafeInteger(card.outputCount) || Number(card.outputCount) < 0
+    || !Array.isArray(card.outputIds)
+    || card.outputIds.length !== card.outputCount
+    || card.outputIds.some((id) => typeof id !== "string")) {
+    throw new Error("Platform card context is invalid.");
+  }
+  return card as PlatformCardContext;
 };
 
 const scopedRelevant = <T extends { id: string; conversationId: string; relevant: boolean }>(

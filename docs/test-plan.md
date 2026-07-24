@@ -153,7 +153,7 @@ Visual starts fail with `capability_not_available`. Batch descriptions that
 declare `domainEvents` fail with `domain_events_not_supported`. These are
 explicit negative gates, not visual/event implementation evidence.
 
-Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b checks with:
+Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c checks with:
 
 ```bash
 cd backend
@@ -181,6 +181,8 @@ immediate active abort, cleanup verification, cancel-first output exclusion,
 terminal-first preservation, and exact HTTP replay tests. The previously recorded web suite
 passed 104/104 and its production build succeeded; no new browser acceptance is
 claimed by this backend batch slice.
+The current A3-1c-c full backend run contains 295 tests: 294 passed, zero
+failed, and one optional smoke was skipped.
 
 A3-1c-b adds focused schema-v6 migration/rollback, planned-before-create and
 created-before-receipt fault windows, created-without-receipt fail-closed
@@ -191,7 +193,11 @@ child-receipt-before-Store adoption, claimed/starting/running/blocked/released/
 exited/cleanup-complete checkpoints, exact success process/output cardinality,
 same-process dispatcher ownership, and two-generation handoff tests. A migrated
 v5 live process without v6 evidence is explicitly fail-closed. Exactly-once
-completion-card delivery remains pending. The dispatcher still fails closed with
+completion-card coverage now proves all four terminal statuses, all three
+dispositions, deterministic IDs and payload allowlisting, SQLite
+`after_sqlite_commit` recovery, pending-terminal startup reconciliation,
+duplicate-output rejection, Agent-context isolation, and permanent-delete
+closure. The dispatcher still fails closed with
 `dispatcher_recovery_required` when evidence is absent or contradictory; that
 diagnostic is the intended safety boundary, not proof of cleanup.
 

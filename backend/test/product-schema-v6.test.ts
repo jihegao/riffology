@@ -16,6 +16,7 @@ import {
   PRODUCT_SCHEMA_V4_SQL,
   PRODUCT_SCHEMA_V5_SQL,
   PRODUCT_SCHEMA_V6_SQL,
+  withAtomicBatchSuccessRunContext,
 } from "../src/product-schema.ts";
 
 const NOW = "2026-07-25T02:00:00.000Z";
@@ -35,6 +36,77 @@ const installV5 = (database: DatabaseSync): void => {
   ]) database.exec(sql);
   database.prepare("UPDATE product_schema SET version = 5 WHERE singleton = 1").run();
   database.exec("PRAGMA user_version = 5");
+};
+
+const installV6 = (database: DatabaseSync): void => {
+  installV5(database);
+  database.exec(PRODUCT_SCHEMA_V6_SQL);
+  database.prepare("UPDATE product_schema SET version = 6 WHERE singleton = 1").run();
+  database.exec("PRAGMA user_version = 6");
+};
+
+const insertTerminalV4CompletionRun = (
+  database: DatabaseSync,
+  status: "failed" | "succeeded",
+): void => {
+  const samplePlan = [{ sampleIndex: 0, sampleId: DIGEST_A, parameters: {}, seed: null }];
+  const limits = { schemaVersion: 1, wallTimeMs: 60_000, terminationGraceMs: 1_000 };
+  database.prepare(`INSERT INTO models
+    (id, name, technical_status, run_mode, execution_description_json, created_at, updated_at)
+    VALUES ('model_completion', 'Completion', 'executable', 'batch', '{}', ?, ?)`
+  ).run(NOW, NOW);
+  database.prepare(`INSERT INTO projects
+    (id, name, source_model_id, model_snapshot_digest, execution_description_json, created_at, updated_at)
+    VALUES ('project_completion', 'Completion', 'model_completion', ?, '{}', ?, ?)`
+  ).run(DIGEST_A, NOW, NOW);
+  database.prepare(`INSERT INTO conversations
+    (id, project_id, name, provider_id, provider_model_id, created_at, updated_at)
+    VALUES ('conversation_completion', 'project_completion', 'Completion',
+      'provider', 'model', ?, ?)`
+  ).run(NOW, NOW);
+  database.prepare(`INSERT INTO experiment_configurations
+    (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at,
+      contract_version, configuration_sha256, sample_count)
+    VALUES ('experiment_completion', 'project_completion', 'Completion', '{}', 1, ?, ?, 4, ?, 1)`
+  ).run(NOW, NOW, canonicalDigest({}));
+  database.prepare(`INSERT INTO runs
+    (id, project_id, experiment_configuration_id, status, frozen_configuration_json,
+      requested_sample_count, created_at, updated_at, contract_version, run_kind,
+      completion_conversation_id, execution_description_sha256, project_snapshot_sha256,
+      frozen_configuration_sha256, sample_plan_json, sample_plan_sha256, limits_json,
+      limits_sha256, start_receipt_sha256, completion_card_disposition)
+    VALUES ('run_completion', 'project_completion', 'experiment_completion', 'queued', '{}',
+      1, ?, ?, 4, 'batch', 'conversation_completion', ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).run(
+    NOW,
+    NOW,
+    canonicalDigest({}),
+    DIGEST_A,
+    canonicalDigest({}),
+    json(samplePlan),
+    canonicalDigest(samplePlan),
+    json(limits),
+    canonicalDigest(limits),
+    DIGEST_B,
+  );
+  if (status === "succeeded") {
+    database.prepare(
+      "UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = 'run_completion'",
+    ).run(NOW, NOW);
+    withAtomicBatchSuccessRunContext(database, "run_completion", () => {
+      database.prepare(`UPDATE runs SET status = 'succeeded',
+        terminal_code = 'run_succeeded', terminal_diagnostics_json = '{}',
+        resource_overview_json = '{}', finished_at = ?, updated_at = ?
+        WHERE id = 'run_completion'`
+      ).run(NOW, NOW);
+    });
+    return;
+  }
+  database.prepare(`UPDATE runs SET status = 'failed',
+    terminal_code = 'batch_process_failed', terminal_diagnostics_json = '{}',
+    resource_overview_json = '{}', finished_at = ?, updated_at = ?
+    WHERE id = 'run_completion'`
+  ).run(NOW, NOW);
 };
 
 const insertClaimedV4Run = (database: DatabaseSync): void => {
@@ -91,7 +163,7 @@ test("schema v6 preserves a legal live v4 attempt for recovery and keeps executi
     installV5(database);
     insertClaimedV4Run(database);
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
     assert.deepEqual({ ...database.prepare(
       "SELECT contract_version, status FROM runs WHERE id = 'run_recovery'",
     ).get() as object }, { contract_version: 4, status: "running" });
@@ -115,6 +187,7 @@ test("schema v6 migration failure rolls back every recovery table and version ma
     const broken = [
       ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 5),
       { version: 6, sql: `${PRODUCT_SCHEMA_V6_SQL}\nSELECT * FROM missing_v6_guard;` },
+      PRODUCT_SCHEMA_MIGRATIONS[6]!,
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v6_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
@@ -268,6 +341,69 @@ test("a migrated v5 live process without v6 launch evidence fails startup recove
     );
   } finally {
     store?.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a real v6 terminal pending run migrates to v7, publishes once, and survives second reopen", () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-schema-v7-completion-"));
+  const root = join(parent, "store");
+  let store: ProductStoreV2 | undefined;
+  try {
+    mkdirSync(root, { mode: 0o700 });
+    const database = new DatabaseSync(join(root, "product.sqlite3"), { open: true });
+    installV6(database);
+    insertTerminalV4CompletionRun(database, "failed");
+    database.close();
+
+    store = ProductStoreV2.open(root);
+    assert.equal(
+      store.getRun("project_completion", "run_completion").completionCardDisposition,
+      "published",
+    );
+    assert.equal(store.listConversationMessages("conversation_completion").length, 1);
+    store.close();
+    store = ProductStoreV2.open(root);
+    assert.equal(store.listConversationMessages("conversation_completion").length, 1);
+    store.close();
+    store = undefined;
+
+    const inspected = new DatabaseSync(join(root, "product.sqlite3"), { open: true });
+    configureProductDatabase(inspected);
+    assert.equal((inspected.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.throws(() => inspected.prepare(
+      "UPDATE runs SET completion_card_disposition = 'conversation_unavailable' WHERE id = 'run_completion'",
+    ).run(), /terminal run completion disposition is immutable/u);
+    inspected.close();
+  } finally {
+    store?.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("v6 succeeded pending evidence is audited before v7 can publish a completion card", () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-schema-v7-success-audit-"));
+  const root = join(parent, "store");
+  try {
+    mkdirSync(root, { mode: 0o700 });
+    const database = new DatabaseSync(join(root, "product.sqlite3"), { open: true });
+    installV6(database);
+    insertTerminalV4CompletionRun(database, "succeeded");
+    database.close();
+
+    assert.throws(
+      () => ProductStoreV2.open(root),
+      /succeeded run lacks a succeeded attempt/u,
+    );
+    const inspected = new DatabaseSync(join(root, "product.sqlite3"), { open: true });
+    assert.equal((inspected.prepare(
+      "SELECT completion_card_disposition FROM runs WHERE id = 'run_completion'",
+    ).get() as { completion_card_disposition: string }).completion_card_disposition, "pending");
+    assert.equal((inspected.prepare(
+      "SELECT count(*) AS count FROM messages WHERE conversation_id = 'conversation_completion'",
+    ).get() as { count: number }).count, 0);
+    inspected.close();
+  } finally {
     rmSync(parent, { recursive: true, force: true });
   }
 });

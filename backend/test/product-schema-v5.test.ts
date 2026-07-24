@@ -104,8 +104,8 @@ test("schema v5 upgrades a clean v4 database without changing execution contract
     installV4(database);
     const { runId } = insertV4Run(database);
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 6);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 7);
     assert.equal((database.prepare("SELECT contract_version FROM runs WHERE id = ?").get(runId) as { contract_version: number }).contract_version, 4);
     assert.equal((database.prepare("SELECT first_cancel_command_id FROM runs WHERE id = ?").get(runId) as { first_cancel_command_id: string | null }).first_cancel_command_id, null);
     assert.equal(Boolean(database.prepare(
