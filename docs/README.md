@@ -18,10 +18,17 @@ by Stage 2.
 
 Stage 3 / #14 is in progress through
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
-Commit `843cf1c` implemented fixed-copy Project creation, the Project workspace
-projection, and bounded experiment create/update APIs. Schema-v4 run planning,
-batch/visual execution, cancellation, outputs/events, Playwright access, and the
-ordinary wind import remain target contracts, not implementation evidence.
+The first foundation slice implemented fixed-copy Project creation and the
+Project workspace projection. A3-1a adds schema v4, the closed canonical
+input-schema profile, deterministic sample planning, experiment configuration
+and record digest CAS with immutable historical receipts, Store-only
+execution-description-v2 admission,
+and atomic frozen queued-run/start receipts. The generic Stage 2 scaffold still
+emits execution-description v1 and requires a future explicit upgrade before
+that internal run gate can accept it.
+The public start route, dispatcher, batch/visual execution, cancellation,
+outputs/events, completion cards, Playwright access, and ordinary wind import
+remain target contracts, not implementation evidence.
 
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
@@ -47,9 +54,9 @@ product.
   explicitly out of scope.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
   active Stage 3 / #14 contract and implementation ledger. It distinguishes the
-  landed Project/experiment foundation from pending deterministic run planning,
-  batch/visual supervision, outputs/events, scoped Playwright access, and the
-  ordinary wind import.
+  landed Project foundation and A3-1a frozen-planning boundary from pending
+  dispatch, batch/visual supervision, outputs/events, scoped Playwright access,
+  and the ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.

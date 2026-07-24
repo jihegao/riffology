@@ -20,15 +20,22 @@ restricted macOS Model process, digest-bound technical checks, and the narrow
 HTTP/API acceptance surface. API integration and the real-provider two-turn
 browser closure are complete; the live evidence is described under Verification.
 
-Stage 3 / #14 is in progress. Commit `843cf1c` implemented only its
-Project/experiment foundation: fixed-copy Project creation, a Project workspace
-projection, and bounded experiment-configuration create/update APIs. The
-deterministic run plan, generic batch and visual supervisors, cancellation,
-outputs/events, scoped Playwright access, and ordinary wind import remain
-unimplemented. Their active contract and negative-test gates are in
+Stage 3 / #14 is in progress. The first foundation slice implemented fixed-copy
+Project creation and its workspace projection. The current A3-1a slice adds the
+schema-v4 migration, the closed canonical input-schema profile, deterministic
+experiment/sample planning, configuration-and-record digest compare-and-set
+with immutable historical command receipts, execution-description-v2 admission at the
+Store-only run boundary, and an atomic frozen `queued` run/start receipt.
+The generic Stage 2 scaffold remains execution-description v1, so existing
+scaffolded Models require an explicit future upgrade before they can satisfy
+that internal admission gate.
+The public run-start route, dispatcher, generic batch and visual supervisors,
+cancellation races, output/event ingestion, completion cards, scoped Playwright
+access, and ordinary wind import remain unimplemented. Their active contract and
+negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
-No Stage 3 runtime, visual, wind-import, or final browser acceptance is claimed
-from the foundation alone.
+No process execution, visual, wind-import, or final browser acceptance is
+claimed from these foundations alone.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and

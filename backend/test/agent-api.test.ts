@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BackendApp } from "../src/server.ts";
+import { canonicalDigest } from "../src/canonical-json-v2.ts";
+import { planExperiment } from "../src/experiment-planner.ts";
 import { UnavailableMesaAdapter } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel, OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import { captureWorkspaceDigest, executionDescriptionDigest, validateExecutionDescription } from "../src/model-workspace.ts";
@@ -367,10 +369,10 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   const workspaceResponse = await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`);
   assert.equal(workspaceResponse.status, 200);
   const workspace = await workspaceResponse.json() as any;
-  assert.deepEqual(workspace.project, { ...project.project, executionDescription: app.productStore!.getProject(project.project.id).executionDescription });
+  assert.deepEqual(workspace.project, project.project);
   assert.equal(workspace.files.length > 0, true);
-  assert.equal(workspace.files.every((file: any) => file.kind === "project_model_snapshot"), true);
-  assert.equal(workspace.files.every((file: any) => file.relativePath.startsWith("model-snapshot/")), true);
+  assert.equal(workspace.files.every((file: any) =>
+    JSON.stringify(Object.keys(file).sort()) === JSON.stringify(["createdAt", "id", "mediaType", "sha256", "sizeBytes"])), true);
   assert.deepEqual(workspace.conversations, []);
   assert.deepEqual(workspace.experimentConfigurations, []);
   assert.deepEqual(workspace.runs, []);
@@ -384,59 +386,174 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   const workspaceWithConversation = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
   assert.deepEqual(workspaceWithConversation.conversations.map((item: any) => item.id), [conversation.id]);
 
+  const baselineConfiguration = {
+    schemaVersion: 1,
+    runKind: "batch",
+    parameters: { stepLimit: 4, demand: 1 },
+    sampling: {
+      kind: "cartesian-sweep",
+      axes: [{ pointer: "/demand", values: [1, 2, 3] }],
+    },
+  };
   const experimentResponse = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
     commandId: "create-experiment",
     name: "Baseline",
-    configuration: { seed: 7, parameters: { rate: 2 }, sweep: { demand: [1, 2, 3] } },
+    configuration: baselineConfiguration,
   });
   assert.equal(experimentResponse.status, 201, await experimentResponse.clone().text());
   const experiment = await experimentResponse.json() as any;
   assert.equal(experiment.name, "Baseline");
   assert.equal(experiment.projectId, project.project.id);
+  assert.equal(experiment.contractVersion, 4);
+  assert.equal(experiment.readOnly, false);
+  assert.equal(experiment.sampleCount, 3);
   assert.equal(experiment.estimatedSampleCount, 3);
   assert.match(experiment.configurationDigest, /^[0-9a-f]{64}$/u);
+  assert.match(experiment.recordDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(experiment.configuration, baselineConfiguration);
   const experimentRetry = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
     commandId: "create-experiment",
     name: "Baseline",
-    configuration: { seed: 7, parameters: { rate: 2 }, sweep: { demand: [1, 2, 3] } },
+    configuration: baselineConfiguration,
   });
   assert.equal(experimentRetry.status, 201);
   assert.deepEqual(await experimentRetry.json(), experiment);
   const experimentConflict = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
-    commandId: "create-experiment", name: "Changed", configuration: { seed: 7 },
+    commandId: "create-experiment",
+    name: "Changed",
+    configuration: { ...baselineConfiguration, sampling: { kind: "single" } },
   });
   assert.equal(experimentConflict.status, 409);
   assert.equal((await experimentConflict.json() as any).error.code, "idempotency_conflict");
 
-  const invalidSweep = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
-    commandId: "invalid-sweep", name: "Invalid", configuration: { sweep: { demand: [] } },
+  const duplicateSeed = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "duplicate-seed",
+    name: "Invalid duplicate seed",
+    configuration: {
+      schemaVersion: 1,
+      runKind: "batch",
+      parameters: { stepLimit: 4, demand: 1 },
+      sampling: { kind: "multiple-seeds", seeds: [7, 7] },
+    },
   });
-  assert.equal(invalidSweep.status, 422);
-  assert.equal((await invalidSweep.json() as any).error.code, "invalid_request");
+  assert.equal(duplicateSeed.status, 400);
+  assert.equal((await duplicateSeed.json() as any).error.code, "duplicate_sample_seed");
+
+  const overlappingSweep = await post(`${baseUrl}/api/projects/${project.project.id}/experiment-configs`, {
+    commandId: "overlapping-sweep",
+    name: "Invalid overlap",
+    configuration: {
+      schemaVersion: 1,
+      runKind: "batch",
+      parameters: { stepLimit: 4, demand: 1 },
+      sampling: {
+        kind: "cartesian-sweep",
+        axes: [
+          { pointer: "/stepLimit", values: [2] },
+          { pointer: "/stepLimit/value", values: [3] },
+        ],
+      },
+    },
+  });
+  assert.equal(overlappingSweep.status, 400);
+  assert.equal((await overlappingSweep.json() as any).error.code, "overlapping_sweep_pointer");
+
+  const updatedConfiguration = {
+    schemaVersion: 1,
+    runKind: "batch",
+    parameters: { stepLimit: 5, demand: 3 },
+    sampling: {
+      kind: "cartesian-sweep",
+      axes: [{ pointer: "/demand", values: [10, 20] }],
+      seeds: [1, 2],
+    },
+  };
+  const missingUpdateDigest = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "missing-update-digest",
+    name: "Missing CAS",
+  });
+  assert.equal(missingUpdateDigest.status, 422);
+  assert.equal((await missingUpdateDigest.json() as any).error.code, "missing_field");
 
   const updateResponse = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
     commandId: "update-experiment",
-    configuration: { seeds: [1, 2], parameters: { rate: 3 }, sweep: { demand: [1, 2] } },
+    expectedConfigurationDigest: experiment.configurationDigest,
+    expectedRecordDigest: experiment.recordDigest,
+    configuration: updatedConfiguration,
   });
   assert.equal(updateResponse.status, 200, await updateResponse.clone().text());
   const updatedExperiment = await updateResponse.json() as any;
   assert.equal(updatedExperiment.name, "Baseline");
+  assert.equal(updatedExperiment.sampleCount, 4);
   assert.equal(updatedExperiment.estimatedSampleCount, 4);
   assert.notEqual(updatedExperiment.configurationDigest, experiment.configurationDigest);
+  assert.notEqual(updatedExperiment.recordDigest, experiment.recordDigest);
+  assert.deepEqual(updatedExperiment.configuration, updatedConfiguration);
   const updateRetry = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
     commandId: "update-experiment",
-    configuration: { seeds: [1, 2], parameters: { rate: 3 }, sweep: { demand: [1, 2] } },
+    expectedConfigurationDigest: experiment.configurationDigest,
+    expectedRecordDigest: experiment.recordDigest,
+    configuration: updatedConfiguration,
   });
   assert.equal(updateRetry.status, 200);
   assert.deepEqual(await updateRetry.json(), updatedExperiment);
   const updateConflict = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
     commandId: "update-experiment",
-    configuration: { seed: 9 },
+    expectedConfigurationDigest: experiment.configurationDigest,
+    expectedRecordDigest: experiment.recordDigest,
+    configuration: { ...baselineConfiguration, sampling: { kind: "single", seed: 9 } },
   });
   assert.equal(updateConflict.status, 409);
-  assert.equal((await updateConflict.json() as any).error.code, "state_conflict");
+  assert.equal((await updateConflict.json() as any).error.code, "idempotency_conflict");
+
+  const staleUpdate = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "stale-experiment-update",
+    expectedConfigurationDigest: experiment.configurationDigest,
+    expectedRecordDigest: experiment.recordDigest,
+    name: "Stale name",
+  });
+  assert.equal(staleUpdate.status, 409);
+  assert.equal((await staleUpdate.json() as any).error.code, "stale_configuration");
+
+  const renameAfterUpdateResponse = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "rename-after-update",
+    expectedConfigurationDigest: updatedExperiment.configurationDigest,
+    expectedRecordDigest: updatedExperiment.recordDigest,
+    name: "Renamed after update",
+  });
+  assert.equal(renameAfterUpdateResponse.status, 200);
+  const renamedAfterUpdate = await renameAfterUpdateResponse.json() as any;
+  assert.equal(renamedAfterUpdate.name, "Renamed after update");
+
+  const historicalPartialRetry = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "update-experiment",
+    expectedConfigurationDigest: experiment.configurationDigest,
+    expectedRecordDigest: experiment.recordDigest,
+    configuration: updatedConfiguration,
+  });
+  assert.equal(historicalPartialRetry.status, 200);
+  assert.deepEqual(await historicalPartialRetry.json(), updatedExperiment);
+
+  const firstConcurrentNameResponse = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "first-concurrent-name",
+    expectedConfigurationDigest: renamedAfterUpdate.configurationDigest,
+    expectedRecordDigest: renamedAfterUpdate.recordDigest,
+    name: "First concurrent name",
+  });
+  assert.equal(firstConcurrentNameResponse.status, 200);
+  const firstConcurrentName = await firstConcurrentNameResponse.json() as any;
+  assert.equal(firstConcurrentName.name, "First concurrent name");
+  const lostConcurrentName = await patch(`${baseUrl}/api/projects/${project.project.id}/experiment-configs/${experiment.id}`, {
+    commandId: "lost-concurrent-name",
+    expectedConfigurationDigest: renamedAfterUpdate.configurationDigest,
+    expectedRecordDigest: renamedAfterUpdate.recordDigest,
+    name: "Lost concurrent name",
+  });
+  assert.equal(lostConcurrentName.status, 409);
+  assert.equal((await lostConcurrentName.json() as any).error.code, "stale_record");
+
   const workspaceWithExperiment = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
-  assert.deepEqual(workspaceWithExperiment.experimentConfigurations.map((item: any) => ({ id: item.id, sampleCount: item.estimatedSampleCount })), [
+  assert.deepEqual(workspaceWithExperiment.experimentConfigurations.map((item: any) => ({ id: item.id, sampleCount: item.sampleCount })), [
     { id: experiment.id, sampleCount: 4 },
   ]);
 
@@ -446,8 +563,129 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   app.productStore!.replaceModelFile(sourceCode.id, Buffer.from("print('changed after project')\n"), "2026-07-22T03:00:00.000Z");
   assert.equal(app.productStore!.readObjectFile(snapshotCode.id).equals(frozenBytes), true);
 
+  const outputSchema = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: { seed: { type: "integer" } },
+    required: ["seed"],
+    additionalProperties: false,
+  };
+  const outputExecutionDescription = {
+    schemaVersion: 2,
+    runtime: "python",
+    runMode: "batch",
+    dependencyFile: "environment/requirements.txt",
+    inputs: {
+      schemaProfile: "riff-json-schema-2020-12-v1",
+      schema: outputSchema,
+      smoke: { seed: 1 },
+    },
+    outputs: [{
+      logicalName: "result",
+      relativePath: "outputs/result.json",
+      mediaType: "application/json",
+      required: true,
+      role: "data",
+    }],
+    batch: { entryPoint: "code/model.py", protocol: "riff-batch-v1" },
+    cancellation: { signal: "SIGTERM", graceMs: 500 },
+  };
+  app.productStore!.createModel({
+    id: "model_public_run_projection",
+    name: "Public run projection",
+    technicalStatus: "executable",
+    runMode: "batch",
+    executionDescription: outputExecutionDescription,
+    createdAt: "2026-07-24T04:00:00.000Z",
+    files: [{
+      id: "file_public_run_model",
+      kind: "model_code",
+      relativePath: "model.py",
+      mediaType: "text/x-python",
+      bytes: Buffer.from("print('projection')\n"),
+    }],
+  });
+  const outputProject = app.productStore!.createProjectFromModel({
+    projectId: "project_public_run_projection",
+    projectName: "Public run projection",
+    sourceModelId: "model_public_run_projection",
+    createdAt: "2026-07-24T04:00:00.000Z",
+  });
+  const outputPlan = planExperiment({
+    configuration: {
+      schemaVersion: 1,
+      runKind: "batch",
+      parameters: { seed: 1 },
+      sampling: { kind: "single" },
+    },
+    inputSchema: outputSchema,
+    maxSamples: 1,
+  });
+  app.productStore!.createExperimentV4({
+    commandId: "command_public_run_experiment",
+    id: "experiment_public_run_projection",
+    projectId: outputProject.id,
+    name: "Public run projection",
+    plan: outputPlan,
+    createdAt: "2026-07-24T04:00:00.000Z",
+  });
+  app.productStore!.createFrozenRun({
+    commandId: "command_public_run_start",
+    runId: "run_public_projection",
+    projectId: outputProject.id,
+    experimentConfigId: "experiment_public_run_projection",
+    completionConversationId: null,
+    expectedConfigurationDigest: outputPlan.configurationDigest,
+    plan: outputPlan,
+    projectSnapshotDigest: outputProject.modelSnapshotDigest,
+    executionDescriptionDigest: canonicalDigest(outputProject.executionDescription),
+    limits: {
+      schemaVersion: 1,
+      wallTimeMs: 10_000,
+      startupTimeMs: 1_000,
+      terminationGraceMs: 500,
+      maxStdoutBytes: 10_000,
+      maxStderrBytes: 10_000,
+      maxOutputFiles: 2,
+      maxOutputBytes: 10_000,
+      maxEventCount: 10,
+      maxEventBytes: 10_000,
+      maxSamples: 1,
+      maxConcurrency: 1,
+    },
+    createdAt: "2026-07-24T04:00:00.000Z",
+  });
+  app.productStore!.createOutput({
+    id: "output_public_projection",
+    objectFileId: "file_output_public_projection",
+    runId: "run_public_projection",
+    relativePath: "result.json",
+    logicalName: "result",
+    outputType: "data",
+    sampleIndex: outputPlan.samples[0]!.sampleIndex,
+    sampleId: outputPlan.samples[0]!.sampleId,
+    declaredRole: "data",
+    mediaType: "application/json",
+    bytes: Buffer.from("{}"),
+    createdAt: "2026-07-24T04:00:00.000Z",
+  });
+  const outputWorkspace = await (await fetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
+  assert.deepEqual(Object.keys(outputWorkspace.runs[0]).sort(), [
+    "cancelRequestedAt", "completionCardDisposition", "contractVersion", "createdAt",
+    "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "outputs",
+    "projectId", "readOnly", "requestedSampleCount", "runKind", "startedAt", "status",
+    "terminalCode", "updatedAt",
+  ]);
+  assert.deepEqual(Object.keys(outputWorkspace.runs[0].outputs[0]).sort(), [
+    "contractVersion", "createdAt", "declaredRole", "id", "legacyDigest", "logicalName",
+    "mediaType", "outputType", "readOnly", "runId", "sampleId", "sampleIndex", "sha256",
+    "sizeBytes",
+  ]);
+
   const publicText = JSON.stringify({ project, workspace: workspaceWithExperiment, experiment: updatedExperiment });
   assert.doesNotMatch(publicText, /\/tmp\/|\/Users\/|workspacePath|externalSessionRef|opaque-session|capability|proxy|processCommand/u);
+  assert.doesNotMatch(publicText, /"(?:executionDescription|entryPoint|dependencyFile|relativePath|objectFileId|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
+  assert.doesNotMatch(JSON.stringify(outputWorkspace), /"(?:executionDescription|entryPoint|dependencyFile|relativePath|objectFileId|file|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
 });
 
 test("technical-check executes the execution description captured by start, not an earlier Model read", async (t) => {

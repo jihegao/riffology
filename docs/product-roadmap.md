@@ -17,10 +17,16 @@
 > two-turn browser rerun with OpenCode `1.18.4`. Legacy Gate and queue code still
 > coexist. Stage 3 / #14 is in progress through
 > [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
-> Commit `843cf1c` landed only the fixed-copy Project/workspace and experiment
-> create/update foundation. Deterministic run planning, batch/visual execution,
-> outputs/events, scoped Playwright access, and ordinary wind import remain
-> unimplemented. #15 owns the final shared shell and browser acceptance.
+> The first foundation slice landed the fixed-copy Project/workspace. A3-1a
+> adds schema v4, canonical deterministic sample planning, experiment
+> configuration/record digest CAS with immutable historical receipts, Store-only
+> execution-description-v2
+> admission, and an atomic frozen queued-run receipt. The generic Stage 2
+> scaffold remains execution-description v1 and still needs an explicit
+> upgrade. Public run start, dispatch, batch/visual execution, cancellation,
+> outputs/events, completion cards, scoped Playwright access, and ordinary wind
+> import remain unimplemented. #15 owns the final shared shell and browser
+> acceptance.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

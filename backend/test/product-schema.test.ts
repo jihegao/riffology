@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { canonicalDigest, parseCanonicalJsonV2 } from "../src/canonical-json-v2.ts";
 import type { CreateProjectFromModelInput } from "../src/product-domain.ts";
 import {
   initializeProductSchema,
@@ -17,6 +18,17 @@ import {
 const NOW = "2026-07-22T00:00:00.000Z";
 const DIGEST_A = "a".repeat(64);
 const DIGEST_B = "b".repeat(64);
+const SAMPLE_PLAN = JSON.stringify([{ sampleIndex: 0, sampleId: DIGEST_A, parameters: {}, seed: null }]);
+const LIMITS = JSON.stringify({ schemaVersion: 1 });
+const digest = (value: string): string => canonicalDigest(parseCanonicalJsonV2(value));
+const outputContractDigest = (runId: string, logicalName: string): string => canonicalDigest({
+  runId,
+  logicalName,
+  outputType: "table",
+  sampleIndex: 0,
+  sampleId: DIGEST_A,
+  declaredRole: "table",
+});
 
 const PROJECT_INTENT = {
   projectId: "project_alpha",
@@ -46,6 +58,31 @@ const insertConversation = (database: ReturnType<typeof openProductDatabase>, id
   ).run(id, owner.model ?? null, owner.project ?? null, NOW, NOW);
 };
 
+const insertV4Experiment = (database: DatabaseSync, id: string, projectId: string): void => {
+  database.prepare(`INSERT INTO experiment_configurations
+    (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at,
+      contract_version, configuration_sha256, sample_count)
+    VALUES (?, ?, 'Base', '{}', 1, ?, ?, 4, ?, 1)`
+  ).run(id, projectId, NOW, NOW, digest("{}"));
+};
+
+const insertV4Run = (database: DatabaseSync, id: string, projectId: string, experimentId: string): void => {
+  database.prepare(`INSERT INTO runs
+    (id, project_id, experiment_configuration_id, status, frozen_configuration_json,
+      requested_sample_count, created_at, updated_at, contract_version, run_kind,
+      execution_description_sha256, project_snapshot_sha256, frozen_configuration_sha256,
+      sample_plan_json, sample_plan_sha256, limits_json, limits_sha256,
+      start_receipt_sha256, completion_card_disposition)
+    VALUES (?, ?, ?, 'queued', '{}', 1, ?, ?, 4, 'batch', ?, ?, ?, ?, ?, ?, ?, ?, 'not_requested')`
+  ).run(id, projectId, experimentId, NOW, NOW, digest("{}"), DIGEST_A, digest("{}"),
+    SAMPLE_PLAN, digest(SAMPLE_PLAN), LIMITS, digest(LIMITS), DIGEST_B);
+};
+
+const finishV4Run = (database: DatabaseSync, id: string): void => {
+  database.prepare("UPDATE runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?").run(NOW, NOW, id);
+  database.prepare("UPDATE runs SET status = 'succeeded', finished_at = ?, updated_at = ? WHERE id = ?").run(NOW, NOW, id);
+};
+
 test("fresh product storage initializes with durable SQLite policy and survives restart", () => {
   const root = mkdtempSync(join(tmpdir(), "riff-product-schema-"));
   const path = join(root, "riff.sqlite3");
@@ -54,8 +91,8 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     assert.equal((database.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys, 1);
     assert.equal((database.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode, PRODUCT_DATABASE_PRAGMAS.journalMode.toLowerCase());
     assert.equal((database.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous, 2);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 4);
     assert.deepEqual(Object.keys(PROJECT_INTENT).sort(), ["createdAt", "projectId", "projectName", "sourceModelId"]);
     insertModel(database);
     insertProject(database, "project_alpha", "model_alpha");
@@ -78,22 +115,18 @@ test("fresh product storage initializes with durable SQLite policy and survives 
       (id, conversation_id, source_message_id, name, document_state, media_type, content, created_at, updated_at)
       VALUES ('document_alpha', 'conversation_alpha', 'message_alpha', 'Plan', 'draft', 'text/markdown', '# plan', ?, ?)`
     ).run(NOW, NOW);
-    database.prepare(`INSERT INTO experiment_configurations
-      (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at)
-      VALUES ('experiment_alpha', 'project_alpha', 'Base', '{}', 1, ?, ?)`
-    ).run(NOW, NOW);
-    database.prepare(`INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json, requested_sample_count, created_at, updated_at)
-      VALUES ('run_alpha', 'project_alpha', 'experiment_alpha', 'succeeded', '{}', 1, ?, ?)`
-    ).run(NOW, NOW);
+    insertV4Experiment(database, "experiment_alpha", "project_alpha");
+    insertV4Run(database, "run_alpha", "project_alpha", "experiment_alpha");
+    finishV4Run(database, "run_alpha");
     database.prepare(`INSERT INTO object_files
       (id, owner_run_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
       VALUES ('file_output', 'run_alpha', 'run_file', 'result.csv', 'text/csv', 10, ?, ?)`
     ).run(DIGEST_B, NOW);
     database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, created_at)
-      VALUES ('output_alpha', 'run_alpha', 'file_output', 'result.csv', 'table', ?)`
-    ).run(NOW);
+      (id, run_id, object_file_id, logical_name, output_type, contract_version,
+        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+      VALUES ('output_alpha', 'run_alpha', 'file_output', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
+    ).run(DIGEST_A, outputContractDigest("run_alpha", "result.csv"), NOW);
     database.prepare(`INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at)
       VALUES ('mutation_alpha', ?, ?)`
     ).run(DIGEST_A, NOW);
@@ -111,7 +144,9 @@ test("fresh product storage initializes with durable SQLite policy and survives 
     for (const table of ["models", "projects", "conversations", "messages", "temporary_documents", "experiment_configurations", "runs", "object_files", "attachments", "message_attachments", "output_indexes", "trash_entries", "committed_mutations"]) {
       assert.equal((reopened.prepare(`SELECT count(*) AS count FROM ${table}`).get() as { count: number }).count > 0, true, table);
     }
-    for (const table of ["conversation_summaries", "agent_sessions", "agent_turns", "skill_uses", "action_records", "temporary_document_adoptions", "model_technical_checks"]) {
+    for (const table of ["conversation_summaries", "agent_sessions", "agent_turns", "skill_uses", "action_records", "temporary_document_adoptions",
+      "model_technical_checks", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
+      "experiment_command_receipts"]) {
       assert.equal(Boolean(reopened.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
     reopened.close();
@@ -120,23 +155,26 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v3 and expose Agent records", () => {
+test("schema migrations advance sequentially from v1 through v4 and expose Agent and execution records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
     database.exec("PRAGMA user_version = 1");
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 4);
     const columns = database.prepare("PRAGMA table_info(object_files)").all() as Array<{ name: string }>;
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
-    assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_turns'").get()), true);
+    for (const table of ["agent_turns", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
+      "experiment_command_receipts"]) {
+      assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
+    }
   } finally {
     database.close();
   }
 });
 
-test("ordered v2 to v3 migration locks legacy first-user providers and rolls back inconsistent bindings", () => {
+test("ordered v2 through v4 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);
@@ -148,7 +186,7 @@ test("ordered v2 to v3 migration locks legacy first-user providers and rolls bac
     legacy.prepare(`INSERT INTO messages (id, conversation_id, ordinal, role, status, text, created_at, updated_at)
       VALUES ('message_legacy', 'conversation_legacy', 0, 'user', 'complete', 'hello', ?, ?)`).run(NOW, NOW);
     initializeProductSchema(legacy);
-    assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+    assert.equal((legacy.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
     assert.equal((legacy.prepare("SELECT provider_locked_at FROM conversations WHERE id = 'conversation_legacy'").get() as { provider_locked_at: string }).provider_locked_at, NOW);
   } finally { legacy.close(); }
 
@@ -297,6 +335,7 @@ test("schema version drift and failed migrations fail closed with transactional 
       PRODUCT_SCHEMA_MIGRATIONS[0],
       { version: 2, sql: "CREATE TABLE migration_sentinel (id INTEGER); INSERT INTO missing_table VALUES (1);" },
       PRODUCT_SCHEMA_MIGRATIONS[2],
+      PRODUCT_SCHEMA_MIGRATIONS[3],
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);
@@ -341,18 +380,12 @@ test("owner, lifecycle, path, digest and cross-project constraints fail closed",
       VALUES ('file_bad_digest', 'model_one', 'model_code', 'code.py', 'text/plain', 1, ?, ?)`
     ).run("A".repeat(64), NOW), /CHECK constraint failed/u);
 
-    database.prepare(`INSERT INTO experiment_configurations
-      (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at)
-      VALUES ('experiment_one', 'project_one', 'Base', '{}', 1, ?, ?)`
-    ).run(NOW, NOW);
+    insertV4Experiment(database, "experiment_one", "project_one");
     database.prepare(`INSERT INTO temporary_documents
       (id, conversation_id, name, document_state, media_type, content, created_at, updated_at)
       VALUES ('document_one', 'conversation_one', 'Plan', 'draft', 'text/markdown', '# plan', ?, ?)`
     ).run(NOW, NOW);
-    assert.throws(() => database.prepare(`INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json, requested_sample_count, created_at, updated_at)
-      VALUES ('run_wrong_project', 'project_two', 'experiment_one', 'configured', '{}', 1, ?, ?)`
-    ).run(NOW, NOW), /FOREIGN KEY constraint failed/u);
+    assert.throws(() => insertV4Run(database, "run_wrong_project", "project_two", "experiment_one"), /FOREIGN KEY constraint failed/u);
 
     assert.throws(() => database.prepare(`UPDATE models SET lifecycle_state = 'trashed', trashed_at = ? WHERE id = 'model_one'`).run(NOW), /CHECK constraint failed/u);
 
@@ -413,22 +446,18 @@ test("attachment, message, document and output links cannot cross ownership boun
       VALUES ('document_crossed', 'conversation_a', 'message_b', 'Plan', 'draft', 'text/markdown', '# plan', ?, ?)`
     ).run(NOW, NOW), /document source message conversation mismatch/u);
 
-    database.prepare(`INSERT INTO experiment_configurations
-      (id, project_id, name, configuration_json, estimated_sample_count, created_at, updated_at)
-      VALUES ('experiment_a', 'project_alpha', 'Base', '{}', 1, ?, ?)`
-    ).run(NOW, NOW);
-    database.prepare(`INSERT INTO runs
-      (id, project_id, experiment_configuration_id, status, frozen_configuration_json, requested_sample_count, created_at, updated_at)
-      VALUES ('run_a', 'project_alpha', 'experiment_a', 'succeeded', '{}', 1, ?, ?)`
-    ).run(NOW, NOW);
+    insertV4Experiment(database, "experiment_a", "project_alpha");
+    insertV4Run(database, "run_a", "project_alpha", "experiment_a");
+    finishV4Run(database, "run_a");
     database.prepare(`INSERT INTO object_files
       (id, owner_project_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
       VALUES ('file_not_run', 'project_alpha', 'project_model_snapshot', 'result.csv', 'text/csv', 10, ?, ?)`
     ).run(DIGEST_A, NOW);
     assert.throws(() => database.prepare(`INSERT INTO output_indexes
-      (id, run_id, object_file_id, logical_name, output_type, created_at)
-      VALUES ('output_wrong', 'run_a', 'file_not_run', 'result.csv', 'table', ?)`
-    ).run(NOW), /output object ownership mismatch/u);
+      (id, run_id, object_file_id, logical_name, output_type, contract_version,
+        sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+      VALUES ('output_wrong', 'run_a', 'file_not_run', 'result.csv', 'table', 4, 0, ?, 'table', ?, ?)`
+    ).run(DIGEST_A, outputContractDigest("run_a", "result.csv"), NOW), /output object ownership mismatch/u);
   } finally {
     database.close();
   }
@@ -490,6 +519,22 @@ test("project snapshot file metadata remains independent of later source-model e
       (id, owner_project_id, kind, relative_path, media_type, size_bytes, sha256, created_at)
       VALUES ('file_snapshot', 'project_alpha', 'project_model_snapshot', 'model.py', 'text/x-python', 10, ?, ?)`
     ).run(DIGEST_A, NOW);
+
+    assert.throws(() => database.prepare(
+      "UPDATE projects SET model_snapshot_digest = ? WHERE id = 'project_alpha'",
+    ).run(DIGEST_B), /project frozen copy is immutable/u);
+    assert.throws(() => database.prepare(
+      "UPDATE projects SET execution_description_json = '{}' WHERE id = 'project_alpha'",
+    ).run(), /project frozen copy is immutable/u);
+    for (const statement of [
+      "UPDATE object_files SET relative_path = 'changed.py' WHERE id = 'file_snapshot'",
+      "UPDATE object_files SET media_type = 'application/octet-stream' WHERE id = 'file_snapshot'",
+      "UPDATE object_files SET size_bytes = 11 WHERE id = 'file_snapshot'",
+      `UPDATE object_files SET sha256 = '${DIGEST_B}' WHERE id = 'file_snapshot'`,
+      "UPDATE object_files SET created_at = '2026-07-24T01:00:00.000Z' WHERE id = 'file_snapshot'",
+    ]) {
+      assert.throws(() => database.prepare(statement).run(), /project snapshot metadata is immutable/u);
+    }
 
     database.prepare("UPDATE object_files SET sha256 = ?, size_bytes = 11 WHERE id = 'file_model'").run(DIGEST_B);
     assert.deepEqual({ ...database.prepare("SELECT sha256, size_bytes FROM object_files WHERE id = 'file_snapshot'").get() }, { sha256: DIGEST_A, size_bytes: 10 });
