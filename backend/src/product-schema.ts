@@ -7,7 +7,12 @@ const SQL = String.raw;
 export type ProductDatabase = DatabaseSync;
 export type ProductSchemaMigration = Readonly<{ version: number; sql: string }>;
 
-const atomicBatchSuccessRunContexts = new WeakMap<ProductDatabase, string>();
+type AtomicRunSuccessContext = Readonly<{
+  runId: string;
+  runKind: "batch" | "visual";
+}>;
+
+const atomicRunSuccessContexts = new WeakMap<ProductDatabase, AtomicRunSuccessContext>();
 const runCompletionReconciliationContexts = new WeakMap<ProductDatabase, string>();
 const atomicVisualHealthContexts = new WeakMap<
   ProductDatabase,
@@ -20,14 +25,31 @@ export const withAtomicBatchSuccessRunContext = <T>(
   runId: string,
   body: () => T,
 ): T => {
-  if (atomicBatchSuccessRunContexts.has(database)) {
-    throw new Error("An atomic batch success context is already active.");
+  return withAtomicRunSuccessContext(database, { runId, runKind: "batch" }, body);
+};
+
+/** @internal ProductStoreV2-only capability for one atomic visual success publication. */
+export const withAtomicVisualSuccessRunContext = <T>(
+  database: ProductDatabase,
+  runId: string,
+  body: () => T,
+): T => {
+  return withAtomicRunSuccessContext(database, { runId, runKind: "visual" }, body);
+};
+
+const withAtomicRunSuccessContext = <T>(
+  database: ProductDatabase,
+  context: AtomicRunSuccessContext,
+  body: () => T,
+): T => {
+  if (atomicRunSuccessContexts.has(database)) {
+    throw new Error("An atomic run success context is already active.");
   }
-  atomicBatchSuccessRunContexts.set(database, runId);
+  atomicRunSuccessContexts.set(database, context);
   try {
     return body();
   } finally {
-    atomicBatchSuccessRunContexts.delete(database);
+    atomicRunSuccessContexts.delete(database);
   }
 };
 
@@ -78,7 +100,12 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
     return canonicalDigest(parseCanonicalJsonV2(value));
   });
   database.function("riff_atomic_batch_success_context", (runId: string) =>
-    atomicBatchSuccessRunContexts.get(database) === runId ? 1 : 0);
+    atomicRunSuccessContexts.get(database)?.runId === runId
+      && atomicRunSuccessContexts.get(database)?.runKind === "batch" ? 1 : 0);
+  database.function("riff_atomic_run_success_context", (runId: string, runKind: string) => {
+    const context = atomicRunSuccessContexts.get(database);
+    return context?.runId === runId && context.runKind === runKind ? 1 : 0;
+  });
   database.function("riff_run_completion_reconcile_context", (runId: string) =>
     runCompletionReconciliationContexts.get(database) === runId ? 1 : 0);
   database.function("riff_atomic_visual_health_context", (processAttemptId: string, healthyAt: string) => {
@@ -2588,6 +2615,197 @@ export const PRODUCT_SCHEMA_V8_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'visual health receipts are immutable evidence'); END;
 `;
 
+export const PRODUCT_SCHEMA_V9_SQL = SQL`
+  CREATE TEMP TABLE product_schema_v9_visual_completion_guard (
+    valid INTEGER NOT NULL CHECK (valid = 1)
+  ) STRICT;
+  INSERT INTO product_schema_v9_visual_completion_guard (valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1
+    FROM runs
+    WHERE contract_version = 4
+      AND run_kind = 'visual'
+      AND (
+        completion_conversation_id IS NOT NULL
+        OR completion_card_disposition IS NOT 'not_requested'
+        OR EXISTS (
+          SELECT 1 FROM run_completion_cards c WHERE c.run_id = runs.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM messages m
+          WHERE m.message_kind = 'platform_card'
+            AND json_valid(m.content_json)
+            AND json_extract(m.content_json, '$.runId') = runs.id
+        )
+      )
+  );
+  DROP TABLE product_schema_v9_visual_completion_guard;
+
+  DROP TRIGGER run_success_atomic_context_v4;
+  DROP TRIGGER output_v4_run_contract_insert;
+  DROP TRIGGER run_output_object_atomic_success_v4;
+
+  CREATE TRIGGER run_visual_completion_insert_v9
+  BEFORE INSERT ON runs
+  WHEN NEW.contract_version = 4
+    AND NEW.run_kind = 'visual'
+    AND (
+      NEW.completion_conversation_id IS NOT NULL
+      OR NEW.completion_card_disposition IS NOT 'not_requested'
+    )
+  BEGIN SELECT RAISE(ABORT, 'visual runs cannot request completion cards'); END;
+
+  CREATE TRIGGER run_visual_completion_update_v9
+  BEFORE UPDATE ON runs
+  WHEN NEW.contract_version = 4
+    AND NEW.run_kind = 'visual'
+    AND (
+      NEW.completion_conversation_id IS NOT NULL
+      OR NEW.completion_card_disposition IS NOT 'not_requested'
+    )
+  BEGIN SELECT RAISE(ABORT, 'visual runs cannot request completion cards'); END;
+
+  CREATE TRIGGER run_success_atomic_context_v9
+  BEFORE UPDATE OF status ON runs
+  WHEN OLD.contract_version = 4
+    AND NEW.status = 'succeeded'
+    AND NOT (
+      riff_atomic_run_success_context(NEW.id, NEW.run_kind) = 1
+      AND (
+        (
+          NEW.run_kind = 'batch'
+          AND NEW.terminal_code = 'run_succeeded'
+        )
+        OR
+        (
+          NEW.run_kind = 'visual'
+          AND NEW.terminal_code = 'visual_run_succeeded'
+          AND NEW.completion_conversation_id IS NULL
+          AND NEW.completion_card_disposition = 'not_requested'
+          AND (
+            SELECT count(*)
+            FROM run_attempts a
+            WHERE a.run_id = NEW.id
+          ) = 1
+          AND (
+            SELECT count(*)
+            FROM run_attempts a
+            WHERE a.run_id = NEW.id
+              AND a.state = 'succeeded'
+          ) = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM run_attempts a
+            WHERE a.run_id = NEW.id
+              AND a.state IN ('claimed', 'starting', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM process_attempts process
+            JOIN run_attempts a ON a.id = process.run_attempt_id
+            WHERE a.run_id = NEW.id
+              AND process.state NOT IN ('cleanup_complete', 'cleanup_unverified')
+          )
+          AND (
+            SELECT count(*)
+            FROM process_attempts process
+            JOIN run_attempts a ON a.id = process.run_attempt_id
+            WHERE a.run_id = NEW.id
+          ) = 1
+          AND (
+            SELECT count(*)
+            FROM visual_health_receipts health
+            JOIN process_attempts process
+              ON process.id = health.process_attempt_id
+              AND process.run_attempt_id = health.run_attempt_id
+            JOIN run_attempts a
+              ON a.id = health.run_attempt_id
+              AND a.run_id = health.run_id
+            WHERE a.run_id = NEW.id
+          ) = 1
+          AND EXISTS (
+            SELECT 1
+            FROM process_attempts process
+            JOIN run_attempts a ON a.id = process.run_attempt_id
+            JOIN process_launch_manifests manifest
+              ON manifest.process_attempt_id = process.id
+              AND manifest.run_attempt_id = a.id
+            JOIN run_scratch_leases scratch
+              ON scratch.id = manifest.scratch_lease_id
+              AND scratch.run_attempt_id = a.id
+            JOIN visual_health_receipts health
+              ON health.process_attempt_id = process.id
+              AND health.run_attempt_id = a.id
+              AND health.run_id = a.run_id
+              AND health.launch_manifest_id = manifest.id
+            WHERE a.run_id = NEW.id
+              AND a.state = 'succeeded'
+              AND process.process_kind = 'visual'
+              AND process.state = 'cleanup_complete'
+              AND process.exit_code = 0
+              AND process.exit_signal IS NULL
+              AND process.health_at IS NOT NULL
+              AND health.healthy_at = process.health_at
+              AND health.pid = process.pid
+              AND health.process_start_token = process.process_start_token
+              AND health.process_group_id = process.process_group_id
+              AND health.loopback_port = process.loopback_port
+              AND manifest.state = 'cleanup_complete'
+              AND scratch.state = 'cleanup_complete'
+          )
+        )
+      )
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run success requires atomic batch success context or matching visual run context'); END;
+
+  CREATE TRIGGER output_v4_run_contract_insert_v9
+  BEFORE INSERT ON output_indexes
+  BEGIN
+    SELECT CASE WHEN NEW.contract_version != 4
+      OR NEW.legacy_digest IS NOT NULL
+      OR NEW.output_contract_sha256 != riff_canonical_sha256(json_object(
+        'runId', NEW.run_id,
+        'logicalName', NEW.logical_name,
+        'outputType', NEW.output_type,
+        'sampleIndex', NEW.sample_index,
+        'sampleId', NEW.sample_id,
+        'declaredRole', NEW.declared_role
+      ))
+      OR NOT EXISTS (
+        SELECT 1 FROM runs
+        WHERE id = NEW.run_id
+          AND contract_version = 4
+          AND status = 'succeeded'
+          AND riff_atomic_run_success_context(id, run_kind) = 1
+          AND (
+            (run_kind = 'batch' AND terminal_code = 'run_succeeded')
+            OR (run_kind = 'visual' AND terminal_code = 'visual_run_succeeded')
+          )
+          AND NEW.sample_index < requested_sample_count
+          AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleIndex') = NEW.sample_index
+          AND json_extract(sample_plan_json, '$[' || NEW.sample_index || '].sampleId') = NEW.sample_id
+      )
+    THEN RAISE(ABORT, 'new output requires atomic v4 run success') END;
+  END;
+
+  CREATE TRIGGER run_output_object_atomic_success_v9
+  BEFORE INSERT ON object_files
+  WHEN NEW.kind = 'run_file'
+    AND EXISTS (SELECT 1 FROM runs WHERE id = NEW.owner_run_id AND contract_version = 4)
+    AND NOT EXISTS (
+      SELECT 1 FROM runs
+      WHERE id = NEW.owner_run_id
+        AND status = 'succeeded'
+        AND riff_atomic_run_success_context(id, run_kind) = 1
+        AND (
+          (run_kind = 'batch' AND terminal_code = 'run_succeeded')
+          OR (run_kind = 'visual' AND terminal_code = 'visual_run_succeeded')
+        )
+    )
+  BEGIN SELECT RAISE(ABORT, 'v4 run output object requires atomic successful terminal context'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -2597,4 +2815,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 6, sql: PRODUCT_SCHEMA_V6_SQL }),
   Object.freeze({ version: 7, sql: PRODUCT_SCHEMA_V7_SQL }),
   Object.freeze({ version: 8, sql: PRODUCT_SCHEMA_V8_SQL }),
+  Object.freeze({ version: 9, sql: PRODUCT_SCHEMA_V9_SQL }),
 ]);

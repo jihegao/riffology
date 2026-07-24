@@ -558,15 +558,21 @@ test("schema v8 migrates a clean v7 database, installs private health evidence, 
       process: database.prepare("SELECT * FROM process_attempts WHERE id = ?").get(sentinel.processId),
     });
     const preservedTriggers = database.prepare(`SELECT name, sql FROM sqlite_master
-      WHERE type = 'trigger' AND name != 'process_requires_launch_receipt_v6'
+      WHERE type = 'trigger'
+        AND name NOT IN (
+          'process_requires_launch_receipt_v6',
+          'run_success_atomic_context_v4',
+          'output_v4_run_contract_insert',
+          'run_output_object_atomic_success_v4'
+        )
       ORDER BY name`
     ).all() as Array<{ name: string; sql: string }>;
     const batchSentinelBefore = readSentinel();
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.equal((database.prepare(
       "SELECT version FROM product_schema WHERE singleton = 1",
-    ).get() as { version: number }).version, 8);
+    ).get() as { version: number }).version, 9);
     assert.ok(database.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'visual_health_receipts'",
     ).get());
@@ -592,6 +598,7 @@ test("schema v8 migration failure rolls back its table, trigger replacement, and
     const broken = [
       ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 7),
       { version: 8, sql: `${PRODUCT_SCHEMA_V8_SQL}\nSELECT * FROM missing_v8_guard;` },
+      PRODUCT_SCHEMA_MIGRATIONS[8],
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v8_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);

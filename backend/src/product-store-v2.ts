@@ -77,6 +77,7 @@ import {
   openProductDatabase,
   withAtomicBatchSuccessRunContext,
   withAtomicVisualHealthContext,
+  withAtomicVisualSuccessRunContext,
   withRunCompletionReconciliationContext,
   type ProductDatabase,
 } from "./product-schema.ts";
@@ -380,6 +381,11 @@ export type ClaimedBatchRun = Readonly<{
   attempt: RunAttemptRecord;
 }>;
 
+export type ClaimedVisualRun = Readonly<{
+  run: Extract<RunRecord, { contractVersion: 4 }> & Readonly<{ runKind: "visual" }>;
+  attempt: RunAttemptRecord;
+}>;
+
 export type RunAttemptIdentity = Readonly<{
   runId: string;
   attemptId: string;
@@ -542,10 +548,14 @@ export type BatchOutputCommit = Readonly<{
   bytes: Uint8Array;
 }>;
 
+export type VisualOutputCommit = BatchOutputCommit;
+
 export type BatchSuccessCommitReceipt = Readonly<{
   run: Extract<RunRecord, { contractVersion: 4 }>;
   outputs: readonly Extract<OutputIndexRecord, { contractVersion: 4 }>[];
 }>;
+
+export type VisualSuccessCommitReceipt = BatchSuccessCommitReceipt;
 
 export type ProjectExecutionCapability = Readonly<{
   workspace: VerifiedProjectExecutionRootCapability;
@@ -1446,6 +1456,12 @@ export class ProductStoreV2 {
     assertDigest(input.executionDescriptionDigest, "Execution description digest");
     assertRunLimits(input.limits);
     assertPlannerPlan(input.plan, input.limits.maxSamples);
+    if (input.plan.configuration.runKind === "visual"
+      && input.completionConversationId !== null) {
+      throw new ProductStoreV2Error(
+        "visual_completion_not_supported: visual runs cannot request completion cards.",
+      );
+    }
     if (input.expectedConfigurationDigest !== input.plan.configurationDigest) {
       throw new ProductStoreV2Error("stale_configuration: the planned configuration differs from the expected digest.");
     }
@@ -1685,11 +1701,92 @@ export class ProductStoreV2 {
     });
   }
 
+  claimNextQueuedVisualRun(input: {
+    dispatcherGeneration: string;
+    claimedAt: IsoTimestamp;
+    leaseExpiresAt: IsoTimestamp;
+  }): ClaimedVisualRun | null {
+    assertDigest(input.dispatcherGeneration, "Dispatcher generation");
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      const row = this.#database.prepare(`SELECT *
+        FROM runs
+        WHERE contract_version = 4 AND run_kind = 'visual' AND status = 'queued'
+          AND completion_conversation_id IS NULL
+          AND completion_card_disposition = 'not_requested'
+          AND cancel_requested_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM run_attempts a
+            WHERE a.run_id = runs.id AND a.state IN ('claimed', 'starting', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM run_completion_cards c WHERE c.run_id = runs.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM messages m
+            WHERE m.message_kind = 'platform_card'
+              AND json_valid(m.content_json)
+              AND json_extract(m.content_json, '$.runId') = runs.id
+          )
+        ORDER BY created_at, id
+        LIMIT 1`).get() as any;
+      if (!row) return null;
+      const attemptGeneration = Number((this.#database.prepare(
+        "SELECT coalesce(max(attempt_generation), 0) + 1 AS generation FROM run_attempts WHERE run_id = ?",
+      ).get(row.id) as { generation: number }).generation);
+      const attemptId = `attempt_${canonicalDigest({
+        runId: row.id,
+        attemptGeneration,
+        dispatcherGeneration: input.dispatcherGeneration,
+      }).slice(0, 32)}`;
+      this.#executeDatabaseStatements([
+        {
+          sql: `INSERT INTO run_attempts
+            (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
+            VALUES (?, ?, ?, ?, 'claimed', ?, ?)`,
+          params: [
+            attemptId,
+            row.id,
+            attemptGeneration,
+            input.dispatcherGeneration,
+            input.claimedAt,
+            input.leaseExpiresAt,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `UPDATE runs
+            SET status = 'running', started_at = ?, updated_at = ?
+            WHERE id = ? AND contract_version = 4 AND run_kind = 'visual'
+              AND status = 'queued' AND cancel_requested_at IS NULL
+              AND completion_conversation_id IS NULL
+              AND completion_card_disposition = 'not_requested'`,
+          params: [input.claimedAt, input.claimedAt, row.id],
+          expectedChanges: 1,
+          mismatchMessage: "run_claim_conflict: the queued visual run was already claimed.",
+        },
+      ]);
+      const claimed = runRecord(
+        this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(row.id),
+      ) as Extract<RunRecord, { contractVersion: 4 }> & Readonly<{ runKind: "visual" }>;
+      if (claimed.runKind !== "visual") {
+        throw new ProductStoreV2Error("run_claim_conflict: claimed run kind changed.");
+      }
+      return Object.freeze({
+        run: claimed,
+        attempt: runAttemptRecord(
+          this.#database.prepare("SELECT * FROM run_attempts WHERE id = ?").get(attemptId),
+        ),
+      });
+    });
+  }
+
   finalizeNextCancelledQueuedRun(input: {
     finishedAt: IsoTimestamp;
   }): Extract<RunRecord, { contractVersion: 4 }> | null {
     return this.#withImmediateTransaction(() => {
-      const row = this.#database.prepare(`SELECT id
+      const row = this.#database.prepare(`SELECT id, run_kind,
+          completion_conversation_id, completion_card_disposition
         FROM runs
         WHERE contract_version = 4 AND status = 'queued'
           AND cancel_requested_at IS NOT NULL AND first_cancel_command_id IS NOT NULL
@@ -1698,9 +1795,30 @@ export class ProductStoreV2 {
             WHERE a.run_id = runs.id AND a.state IN ('claimed', 'starting', 'running')
           )
         ORDER BY cancel_requested_at, id
-        LIMIT 1`).get() as { id: string } | undefined;
+        LIMIT 1`).get() as {
+          id: string;
+          run_kind: "batch" | "visual";
+          completion_conversation_id: string | null;
+          completion_card_disposition: string | null;
+        } | undefined;
       if (!row) return null;
-      const completion = this.#completionCardPlan(row.id, "cancelled", input.finishedAt, []);
+      if (row.run_kind === "visual"
+        && (row.completion_conversation_id !== null
+          || row.completion_card_disposition !== "not_requested"
+          || this.#database.prepare(
+            "SELECT 1 FROM run_completion_cards WHERE run_id = ?",
+          ).get(row.id)
+          || this.#database.prepare(`SELECT 1 FROM messages
+            WHERE message_kind = 'platform_card' AND json_valid(content_json)
+              AND json_extract(content_json, '$.runId') = ?`
+          ).get(row.id))) {
+        throw new ProductStoreV2Error(
+          "visual_completion_invalid: queued visual cancellation cannot carry completion evidence.",
+        );
+      }
+      const completion: CompletionCardPlan = row.run_kind === "batch"
+        ? this.#completionCardPlan(row.id, "cancelled", input.finishedAt, [])
+        : Object.freeze({ disposition: "not_requested", statements: [] });
       this.#executeDatabaseStatements([{
         sql: `UPDATE runs
           SET status = 'cancelled', terminal_code = 'run_cancelled',
@@ -1708,6 +1826,7 @@ export class ProductStoreV2 {
             resource_overview_json = '{}',
             completion_card_disposition = ?, finished_at = ?, updated_at = ?
           WHERE id = ? AND contract_version = 4 AND status = 'queued'
+            AND run_kind = ?
             AND cancel_requested_at IS NOT NULL AND first_cancel_command_id IS NOT NULL`,
         params: [
           json({ code: "run_cancelled", diagnostic: "The queued run was cancelled before launch." }),
@@ -1715,6 +1834,7 @@ export class ProductStoreV2 {
           input.finishedAt,
           input.finishedAt,
           row.id,
+          row.run_kind,
         ],
         expectedChanges: 1,
         mismatchMessage: "run_cancel_conflict: queued cancellation lost its durable compare-and-set.",
@@ -2571,6 +2691,112 @@ export class ProductStoreV2 {
     });
   }
 
+  finalizeVisualRunTerminal(input: RunAttemptIdentity & {
+    expectedAttemptState: "starting" | "running";
+    status: "failed" | "timed_out";
+    terminalCode: string;
+    terminalDiagnostics: Record<string, unknown>;
+    resourceOverview: Record<string, unknown>;
+    finishedAt: IsoTimestamp;
+  }): Extract<RunRecord, { contractVersion: 4 }> {
+    assertRunAttemptIdentity(input);
+    assertTerminalData(input.terminalCode, input.terminalDiagnostics, input.resourceOverview);
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      const runState = this.#database.prepare(
+        `SELECT completion_conversation_id, completion_card_disposition,
+            cancel_requested_at, first_cancel_command_id
+          FROM runs
+          WHERE id = ? AND contract_version = 4 AND run_kind = 'visual'
+            AND status = 'running'`,
+      ).get(input.runId) as {
+        completion_conversation_id: string | null;
+        completion_card_disposition: string;
+        cancel_requested_at: string | null;
+        first_cancel_command_id: string | null;
+      } | undefined;
+      if (!runState) {
+        throw new ProductStoreV2Error("invalid_run_transition: the visual run is no longer running.");
+      }
+      if (runState.completion_conversation_id !== null
+        || runState.completion_card_disposition !== "not_requested"
+        || this.#database.prepare(
+          "SELECT 1 FROM run_completion_cards WHERE run_id = ?",
+        ).get(input.runId)
+        || this.#database.prepare(`SELECT 1 FROM messages
+          WHERE message_kind = 'platform_card' AND json_valid(content_json)
+            AND json_extract(content_json, '$.runId') = ?`
+        ).get(input.runId)) {
+        throw new ProductStoreV2Error(
+          "visual_completion_invalid: visual terminal state cannot carry completion-card evidence.",
+        );
+      }
+      const cancellationWon = runState.cancel_requested_at !== null
+        && runState.first_cancel_command_id !== null;
+      const status = cancellationWon ? "cancelled" : input.status;
+      const terminalCode = cancellationWon ? "run_cancelled" : input.terminalCode;
+      const terminalDiagnostics = cancellationWon
+        ? { code: "run_cancelled", diagnostic: "Cancellation committed before the terminal run receipt." }
+        : input.terminalDiagnostics;
+      const openProcesses = Number((this.#database.prepare(`SELECT count(*) AS count
+        FROM process_attempts
+        WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
+      ).get(input.attemptId) as { count: number }).count);
+      const openLeases = Number((this.#database.prepare(`SELECT count(*) AS count
+        FROM run_scratch_leases
+        WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
+      ).get(input.attemptId) as { count: number }).count);
+      if (openProcesses !== 0 || openLeases !== 0) {
+        throw new ProductStoreV2Error(
+          "process_cleanup_unverified: a visual run cannot finalize until every process and scratch lease has verified cleanup.",
+        );
+      }
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE run_attempts
+            SET state = ?, finished_at = ?, heartbeat_at = ?
+            WHERE id = ? AND run_id = ? AND attempt_generation = ?
+              AND dispatcher_generation = ? AND state = ?`,
+          params: [
+            status,
+            input.finishedAt,
+            input.finishedAt,
+            input.attemptId,
+            input.runId,
+            input.attemptGeneration,
+            input.dispatcherGeneration,
+            input.expectedAttemptState,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "stale_dispatcher_generation: the visual terminal run-attempt compare-and-set failed.",
+        },
+        {
+          sql: `UPDATE runs
+            SET status = ?, terminal_code = ?, terminal_diagnostics_json = ?,
+              resource_overview_json = ?, completion_card_disposition = 'not_requested',
+              finished_at = ?, updated_at = ?
+            WHERE id = ? AND contract_version = 4 AND run_kind = 'visual'
+              AND status = 'running' AND completion_conversation_id IS NULL
+              AND completion_card_disposition = 'not_requested'`,
+          params: [
+            status,
+            terminalCode,
+            json(terminalDiagnostics),
+            json(input.resourceOverview),
+            input.finishedAt,
+            input.finishedAt,
+            input.runId,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "invalid_run_transition: the visual run is no longer running.",
+        },
+      ]);
+      return runRecord(
+        this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId),
+      ) as Extract<RunRecord, { contractVersion: 4 }>;
+    });
+  }
+
   commitBatchRunSuccess(input: RunAttemptIdentity & {
     outputs: readonly BatchOutputCommit[];
     terminalDiagnostics: Record<string, unknown>;
@@ -2795,6 +3021,337 @@ export class ProductStoreV2 {
       run: runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId)) as Extract<RunRecord, { contractVersion: 4 }>,
       outputs: Object.freeze(this.listRunOutputs(input.runId)
         .filter((output): output is Extract<OutputIndexRecord, { contractVersion: 4 }> => output.contractVersion === 4)),
+    });
+  }
+
+  commitVisualRunSuccess(input: RunAttemptIdentity & {
+    outputs: readonly VisualOutputCommit[];
+    terminalDiagnostics: Record<string, unknown>;
+    resourceOverview: Record<string, unknown>;
+    finishedAt: IsoTimestamp;
+  }): VisualSuccessCommitReceipt {
+    assertRunAttemptIdentity(input);
+    assertTerminalData("visual_run_succeeded", input.terminalDiagnostics, input.resourceOverview);
+    this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+    const runRow = this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId) as any;
+    if (!runRow) throw new ProductStoreV2Error("Run does not exist.");
+    const run = runRecord(runRow);
+    if (run.contractVersion !== 4) throw legacyReadOnlyError("run");
+    if (run.runKind !== "visual" || run.status !== "running") {
+      throw new ProductStoreV2Error("invalid_run_transition: success requires a running v4 visual run.");
+    }
+    if (run.completionConversationId !== null
+      || run.completionCardDisposition !== "not_requested"
+      || this.#database.prepare(
+        "SELECT 1 FROM run_completion_cards WHERE run_id = ?",
+      ).get(input.runId)
+      || this.#database.prepare(`SELECT 1 FROM messages
+        WHERE message_kind = 'platform_card' AND json_valid(content_json)
+          AND json_extract(content_json, '$.runId') = ?`
+      ).get(input.runId)) {
+      throw new ProductStoreV2Error(
+        "visual_completion_invalid: visual success cannot carry completion-card evidence.",
+      );
+    }
+    if (run.cancelRequestedAt !== null) {
+      throw new ProductStoreV2Error(
+        "run_cancellation_won: cancellation committed before successful output publication.",
+      );
+    }
+    const attempt = this.#database.prepare(`SELECT * FROM run_attempts
+      WHERE id = ? AND run_id = ? AND attempt_generation = ? AND dispatcher_generation = ?`
+    ).get(input.attemptId, input.runId, input.attemptGeneration, input.dispatcherGeneration) as any;
+    if (!attempt || attempt.state !== "running") {
+      throw new ProductStoreV2Error("invalid_run_transition: success requires the current running attempt.");
+    }
+    const project = this.#project(run.projectId);
+    let execution;
+    try {
+      execution = validateExecutionDescriptionV2(project.executionDescription);
+      assertRunCapabilityV2(execution, "visual");
+    } catch (error) {
+      if (error instanceof ExecutionProtocolV2Error) {
+        throw new ProductStoreV2Error(`${error.code}: ${error.message}`, { cause: error });
+      }
+      throw error;
+    }
+    if (canonicalDigest(execution) !== run.executionDescriptionDigest) {
+      throw new ProductStoreV2Error(
+        "visual_success_invalid: the copied Project execution description changed.",
+      );
+    }
+    const samples = run.samplePlan as Array<{
+      sampleIndex: number;
+      sampleId: string;
+    }>;
+    const sample = samples[0];
+    if (samples.length !== 1 || sample?.sampleIndex !== 0) {
+      throw new ProductStoreV2Error("visual_success_invalid: visual success requires one frozen sample.");
+    }
+    const processes = this.#database.prepare(`SELECT
+        process.id, process.process_kind, process.sample_index, process.sample_id,
+        process.state, process.exit_code, process.exit_signal, process.health_at,
+        health.process_attempt_id AS health_process_attempt_id
+      FROM process_attempts process
+      LEFT JOIN visual_health_receipts health
+        ON health.process_attempt_id = process.id
+        AND health.run_attempt_id = process.run_attempt_id
+      WHERE process.run_attempt_id = ?
+      ORDER BY process.id`
+    ).all(input.attemptId) as Array<{
+      id: string;
+      process_kind: string;
+      sample_index: number | null;
+      sample_id: string | null;
+      state: string;
+      exit_code: number | null;
+      exit_signal: string | null;
+      health_at: string | null;
+      health_process_attempt_id: string | null;
+    }>;
+    if (processes.length !== 1
+      || processes[0]?.process_kind !== "visual"
+      || processes[0].sample_index !== null
+      || processes[0].sample_id !== null
+      || processes[0].state !== "cleanup_complete"
+      || processes[0].exit_code !== 0
+      || processes[0].exit_signal !== null
+      || processes[0].health_at === null
+      || processes[0].health_process_attempt_id !== processes[0].id) {
+      throw new ProductStoreV2Error(
+        "visual_success_invalid: success requires one healthy, verified-cleanup, zero-exit visual process.",
+      );
+    }
+    const declarations = new Map(execution.outputs.map((output) => [output.logicalName, output]));
+    const seen = new Set<string>();
+    const outputs = input.outputs.map((output) => {
+      const declaration = declarations.get(output.logicalName);
+      const key = `0:${output.logicalName}`;
+      if (output.sampleIndex !== 0 || output.sampleId !== sample.sampleId
+        || !declaration || seen.has(key)
+        || typeof output.outputType !== "string" || !output.outputType.trim()
+        || output.outputType.length > 200
+        || !(output.bytes instanceof Uint8Array)) {
+        throw new ProductStoreV2Error(
+          "run_output_invalid: a successful visual output is undeclared, duplicated, or bound to the wrong sample.",
+        );
+      }
+      seen.add(key);
+      const bytes = Buffer.from(output.bytes);
+      const identity = {
+        runId: input.runId,
+        sampleIndex: 0,
+        logicalName: output.logicalName,
+      };
+      const id = `output_${canonicalDigest(identity).slice(0, 32)}`;
+      const objectFileId = `file_${canonicalDigest({ ...identity, kind: "run_output" }).slice(0, 32)}`;
+      const relativePath = `outputs/0/${declaration.relativePath.replace(/^outputs\//u, "")}`;
+      const digest = sha256(bytes);
+      const outputContractDigest = canonicalDigest({
+        runId: input.runId,
+        logicalName: output.logicalName,
+        outputType: output.outputType,
+        sampleIndex: 0,
+        sampleId: output.sampleId,
+        declaredRole: declaration.role,
+      });
+      return {
+        ...output,
+        sampleIndex: 0,
+        id,
+        objectFileId,
+        relativePath,
+        mediaType: declaration.mediaType,
+        declaredRole: declaration.role,
+        bytes,
+        digest,
+        outputContractDigest,
+      };
+    }).sort((left, right) => compareStrings(left.logicalName, right.logicalName));
+    for (const declaration of execution.outputs) {
+      if (declaration.required && !seen.has(`0:${declaration.logicalName}`)) {
+        throw new ProductStoreV2Error("run_output_invalid: a required declared output is missing.");
+      }
+    }
+    const limits = run.limits as RunLimitsV1;
+    const totalBytes = outputs.reduce((sum, output) => sum + output.bytes.byteLength, 0);
+    if (outputs.length > limits.maxOutputFiles) {
+      throw new ProductStoreV2Error("run_output_file_limit: successful outputs exceed the frozen file limit.");
+    }
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > limits.maxOutputBytes) {
+      throw new ProductStoreV2Error("run_output_byte_limit: successful outputs exceed the frozen byte limit.");
+    }
+    const owner = { kind: "run" as const, id: input.runId };
+    const files = outputs.map((output) => ({
+      operation: "write" as const,
+      target: {
+        owner,
+        runProjectId: run.projectId,
+        relativePath: output.relativePath,
+      } satisfies OwnerPath,
+      bytes: output.bytes,
+      expectedPriorSha256: null,
+    }));
+    const statements: DatabaseMutationStatement[] = [
+      {
+        sql: "UPDATE dispatcher_state SET activated_at = activated_at WHERE singleton = 1 AND generation = ?",
+        params: [input.dispatcherGeneration],
+        expectedChanges: 1,
+      },
+      {
+        sql: `UPDATE run_attempts SET state = 'succeeded', finished_at = ?, heartbeat_at = ?
+          WHERE id = ? AND run_id = ? AND attempt_generation = ?
+            AND dispatcher_generation = ? AND state = 'running'
+            AND EXISTS (
+              SELECT 1 FROM runs r
+              WHERE r.id = run_attempts.run_id
+                AND r.contract_version = 4 AND r.run_kind = 'visual'
+                AND r.status = 'running'
+                AND r.completion_conversation_id IS NULL
+                AND r.completion_card_disposition = 'not_requested'
+                AND r.cancel_requested_at IS NULL
+                AND r.first_cancel_command_id IS NULL
+            )
+            AND (
+              SELECT count(*) FROM process_attempts process
+              WHERE process.run_attempt_id = run_attempts.id
+                AND process.process_kind = 'visual'
+                AND process.state = 'cleanup_complete'
+                AND process.exit_code = 0
+                AND process.exit_signal IS NULL
+                AND process.health_at IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM visual_health_receipts health
+                  WHERE health.process_attempt_id = process.id
+                    AND health.run_attempt_id = run_attempts.id
+                    AND health.run_id = run_attempts.run_id
+                    AND health.healthy_at = process.health_at
+                    AND health.pid = process.pid
+                    AND health.process_start_token = process.process_start_token
+                    AND health.process_group_id = process.process_group_id
+                    AND health.loopback_port = process.loopback_port
+                )
+            ) = 1
+            AND (
+              SELECT count(*) FROM process_attempts
+              WHERE run_attempt_id = run_attempts.id
+            ) = 1
+            AND (
+              SELECT count(*) FROM run_attempts all_attempts
+              WHERE all_attempts.run_id = run_attempts.run_id
+            ) = 1
+            AND (
+              SELECT count(*)
+              FROM process_attempts all_processes
+              JOIN run_attempts all_process_attempts
+                ON all_process_attempts.id = all_processes.run_attempt_id
+              WHERE all_process_attempts.run_id = run_attempts.run_id
+            ) = 1
+            AND (
+              SELECT count(*)
+              FROM visual_health_receipts all_health
+              JOIN process_attempts all_health_process
+                ON all_health_process.id = all_health.process_attempt_id
+                AND all_health_process.run_attempt_id = all_health.run_attempt_id
+              JOIN run_attempts all_health_attempt
+                ON all_health_attempt.id = all_health.run_attempt_id
+                AND all_health_attempt.run_id = all_health.run_id
+              WHERE all_health_attempt.run_id = run_attempts.run_id
+            ) = 1
+            AND NOT EXISTS (
+              SELECT 1 FROM run_attempts other
+              WHERE other.run_id = run_attempts.run_id
+                AND other.id != run_attempts.id
+                AND other.state IN ('claimed', 'starting', 'running')
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM process_attempts other_process
+              JOIN run_attempts other_attempt
+                ON other_attempt.id = other_process.run_attempt_id
+              WHERE other_attempt.run_id = run_attempts.run_id
+                AND other_attempt.id != run_attempts.id
+                AND other_process.state NOT IN ('cleanup_complete', 'cleanup_unverified')
+            )`,
+        params: [
+          input.finishedAt,
+          input.finishedAt,
+          input.attemptId,
+          input.runId,
+          input.attemptGeneration,
+          input.dispatcherGeneration,
+        ],
+        expectedChanges: 1,
+      },
+      {
+        sql: `UPDATE runs
+          SET status = 'succeeded', terminal_code = 'visual_run_succeeded',
+            terminal_diagnostics_json = ?, resource_overview_json = ?,
+            completion_card_disposition = 'not_requested',
+            finished_at = ?, updated_at = ?
+          WHERE id = ? AND contract_version = 4 AND run_kind = 'visual'
+            AND status = 'running'
+            AND completion_conversation_id IS NULL
+            AND completion_card_disposition = 'not_requested'
+            AND cancel_requested_at IS NULL AND first_cancel_command_id IS NULL`,
+        params: [
+          json(input.terminalDiagnostics),
+          json(input.resourceOverview),
+          input.finishedAt,
+          input.finishedAt,
+          input.runId,
+        ],
+        expectedChanges: 1,
+      },
+      ...outputs.flatMap((output): DatabaseMutationStatement[] => [
+        objectInsert({
+          id: output.objectFileId,
+          owner,
+          kind: "run_file",
+          relativePath: output.relativePath,
+          mediaType: output.mediaType,
+          sizeBytes: output.bytes.byteLength,
+          digest: output.digest,
+          createdAt: input.finishedAt,
+        }),
+        {
+          sql: `INSERT INTO output_indexes
+            (id, run_id, object_file_id, logical_name, output_type, contract_version, legacy_digest,
+              sample_index, sample_id, declared_role, output_contract_sha256, created_at)
+            VALUES (?, ?, ?, ?, ?, 4, NULL, 0, ?, ?, ?, ?)`,
+          params: [
+            output.id,
+            input.runId,
+            output.objectFileId,
+            output.logicalName,
+            output.outputType,
+            output.sampleId,
+            output.declaredRole,
+            output.outputContractDigest,
+            input.finishedAt,
+          ],
+          expectedChanges: 1,
+        },
+      ]),
+    ];
+    withAtomicVisualSuccessRunContext(this.#database, input.runId, () => {
+      this.#coordinator.execute({
+        transactionId: `mutation_${canonicalDigest({
+          kind: "visual_success",
+          runId: input.runId,
+          attemptGeneration: input.attemptGeneration,
+        }).slice(0, 48)}`,
+        files,
+        statements,
+      });
+    });
+    return Object.freeze({
+      run: runRecord(
+        this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId),
+      ) as Extract<RunRecord, { contractVersion: 4 }>,
+      outputs: Object.freeze(this.listRunOutputs(input.runId)
+        .filter((output): output is Extract<OutputIndexRecord, { contractVersion: 4 }> =>
+          output.contractVersion === 4)),
     });
   }
 
