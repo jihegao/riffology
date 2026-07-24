@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 5 as const;
+export const PRODUCT_SCHEMA_VERSION = 6 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -192,6 +192,38 @@ export type ProcessAttemptRecord = {
   processGroupId: number;
   state: ProcessAttemptState;
   cleanupReceiptDigest: Sha256Digest | null;
+};
+
+export type RunScratchLeaseRecord = {
+  id: ProductId;
+  runId: ProductId;
+  runAttemptId: ProductId;
+  dispatcherGeneration: Sha256Digest;
+  sampleIndex: number;
+  sampleId: Sha256Digest;
+  relativePath: string;
+  state: "planned" | "created" | "active" | "cleanup_complete" | "cleanup_unverified";
+  ownerUid: number | null;
+  device: number | null;
+  inode: number | null;
+  createdAt: IsoTimestamp;
+  registeredAt: IsoTimestamp | null;
+  cleanedAt: IsoTimestamp | null;
+  cleanupReceiptDigest: Sha256Digest | null;
+};
+
+export type ProcessLaunchManifestRecord = {
+  id: ProductId;
+  runAttemptId: ProductId;
+  scratchLeaseId: ProductId;
+  processAttemptId: ProductId | null;
+  state: "planned" | "registered" | "released" | "exited" | "cleanup_complete";
+  manifest: Record<string, unknown>;
+  manifestDigest: Sha256Digest;
+  launchReceipt: Record<string, unknown> | null;
+  launchReceiptDigest: Sha256Digest | null;
+  createdAt: IsoTimestamp;
+  registeredAt: IsoTimestamp | null;
 };
 
 export type RunCommandRecord = {

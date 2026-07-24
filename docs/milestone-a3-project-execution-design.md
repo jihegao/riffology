@@ -15,8 +15,10 @@ existing v1 Models are not silently upgraded.
 Visual starts and batch `domainEvents` are explicit current rejections.
 A3-1c-a adds schema migration v5, the strict public cancel command/receipt, queued no-launch and
 running abort behavior, public `cancelling` projection, and SQLite commit-order
-precedence against every terminal transition. Cross-restart attempt/scratch
-recovery and exactly-once completion-card delivery remain later A3-1c work.
+precedence against every terminal transition. A3-1c-b adds schema migration v6,
+durable pre-spawn scratch and launch evidence, exact v4
+attempt/process/scratch reconciliation, and recovery-before-generation
+activation. Exactly-once completion-card delivery remains later A3-1c work.
 Visual execution,
 Playwright access, and ordinary wind import remain later Stage 3 slices. This
 document therefore does not claim that Stage 3 is complete.
@@ -30,7 +32,7 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b/A3-1c-a boundary is intentionally narrow:
+The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -67,6 +69,10 @@ The implemented A3-1a/A3-1b/A3-1c-a boundary is intentionally narrow:
   migration v5 additionally binds first-cancel state to its exact committed
   receipt and requires every registered process to be `cleanup_complete` before
   run terminalization;
+- schema migration v6 records immutable scratch leases, launch manifests,
+  child-authored launch receipts, and recovery actions; startup audits success
+  receipts, drains queued cancellations, and reconciles prior v4 live attempts
+  before a new dispatcher generation activates;
 - dispatcher heartbeat, capability, supervision, consumption, and publication
   exceptions share one best-effort unwind; only durably exited and cleaned
   processes can reach a failed terminal, otherwise the run remains
@@ -79,7 +85,7 @@ The implemented A3-1a/A3-1b/A3-1c-a boundary is intentionally narrow:
   `cancelled` without successful outputs; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema migration v5 while the current execution
+The product database is schema migration v6 while the current execution
 contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
@@ -90,16 +96,23 @@ re-scaffold/upgrade path.
 The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- full cross-restart attempt/process/scratch recovery;
 - exactly-once completion-card publication;
 - batch domain-event ingestion or public output list/download routes;
 - a scoped visual proxy, WebSocket forwarding, or Playwright capability; and
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
-persist `dispatcher_shutdown`. Startup with prior unresolved live attempts
-fails closed with `dispatcher_recovery_required`; that is not the A3-1c
-cross-restart recovery implementation. Visual starts fail with
+persist `dispatcher_shutdown`. Cross-restart recovery handles only v4 evidence
+that can be proven exact. A created scratch lease without a launch receipt,
+PID/start-token mismatch, ownership/inode drift, contradictory state, or a
+planned path that unexpectedly exists fails closed with
+`dispatcher_recovery_required`; no untracked directory is scanned or removed.
+Started recovery actions are adopted across newly randomized dispatcher
+generations by stable prior-attempt identity. A per-Store in-process guard plus
+the Store writer lock prevents a second local dispatcher from reconciling a
+healthy owner. Schema-v5 live process rows lack v6 scratch/launch evidence and
+intentionally require fail-closed repair instead of speculative signalling.
+Visual starts fail with
 `capability_not_available`, and batch descriptions that declare
 `domainEvents` fail with `domain_events_not_supported`.
 
@@ -996,12 +1009,9 @@ capabilities.
 
 Current A3-1b same-process shutdown aborts active supervision, terminates the
 verified process group, removes only the owned scratch path, and records the run
-failed with `dispatcher_shutdown`. On startup it does not guess that a prior
-live attempt is dead or recovered: unresolved attempt/process state fails
-closed with `dispatcher_recovery_required`.
-
-A3-1c must implement and prove the following cross-restart reconciliation
-target after Stage 1/2 mutation/action recovery and before dispatch:
+failed with `dispatcher_shutdown`. A3-1c-b now runs the following
+cross-restart reconciliation after Stage 1/2 mutation/action recovery and
+before dispatch:
 
 - every contract-version-3 experiment/run/output remains read-only and outside
   dispatch, mutation, template, cleanup, and trash graphs regardless of status;
@@ -1017,6 +1027,16 @@ target after Stage 1/2 mutation/action recovery and before dispatch:
   uncommitted manifests roll back without exposing partial success; and
 - scratch directories are deleted only when exact application-owned
   run/attempt identities are terminal and their paths pass ownership checks.
+
+The launch order is durable manifest, exact scratch creation/registration,
+detached child spawn, child-authored fsynced receipt, Store process registration,
+then one-use gate release. Crashes before directory creation close only an
+absent planned path. A created directory without a receipt cannot exclude spawn
+and therefore fails closed. A durable receipt not yet adopted by the Store may
+be adopted and reconciled. Recovery actions are replayable while `started`,
+including after the next process mints a different candidate generation, and a
+second dispatcher generation cannot activate until all prior v4 live attempts
+are terminal with verified cleanup.
 
 Untracked, legacy, Model, Project, and `.riff-workspace` directories are never
 scanned as disposable scratch. Contradictory receipts, ownership drift, future
@@ -1041,8 +1061,8 @@ Output indexes never resolve outside the owning Project/run object root.
    `domainEvents` are explicit rejections.
 4. **A3-1c batch lifecycle — partial:** A3-1c-a implements public user
    cancellation with committed race receipts and same-process queued/running
-   enforcement. Cross-restart attempt/scratch recovery and exactly-once
-   completion cards remain pending sub-slices.
+   enforcement. A3-1c-b implements v4 cross-restart attempt/process/scratch
+   recovery. Exactly-once completion cards remain pending.
 5. **Visual runtime — pending:** real local visual process, health, scoped proxy/frame and
    WebSocket limits, cancellation, recovery, and Playwright audit.
 6. **Wind import — pending:** versioned manifest, normal technical check, example Project
@@ -1058,12 +1078,15 @@ does not begin until Stage 3 is merged and accepted.
 ## Verification and acceptance matrix
 
 The final integrated A3-1b full backend run passed 256 tests with zero failures
-and one optional installed-OpenCode smoke skipped. Current evidence covers the foundation/schema/experiment
+and one optional installed-OpenCode smoke skipped. Current A3-1c-b focused
+evidence covers schema-v6 migration/rollback, the foundation/schema/experiment
 rows, the batch portion of exact input freezing, v3 read-only behavior, public
 start/read, real generic batch launch/claim/process identity, supported hard
 batch limits, atomic successful outputs, negative visual/event admission, and
-same-process shutdown cleanup, and A3-1c-a cancellation precedence/receipts. It
-does not cover the pending A3-1c restart or card requirements, nor the later visual, Playwright, wind, download,
+same-process shutdown cleanup, A3-1c-a cancellation precedence/receipts, and
+A3-1c-b restart windows including missing evidence, recovery replay,
+generation handoff, and leader-gone descendant cleanup. It does not cover the
+pending completion-card requirements, nor the later visual, Playwright, wind, download,
 event, and browser rows.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked

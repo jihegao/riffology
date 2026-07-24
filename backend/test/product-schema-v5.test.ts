@@ -104,8 +104,8 @@ test("schema v5 upgrades a clean v4 database without changing execution contract
     installV4(database);
     const { runId } = insertV4Run(database);
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 5);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 6);
     assert.equal((database.prepare("SELECT contract_version FROM runs WHERE id = ?").get(runId) as { contract_version: number }).contract_version, 4);
     assert.equal((database.prepare("SELECT first_cancel_command_id FROM runs WHERE id = ?").get(runId) as { first_cancel_command_id: string | null }).first_cancel_command_id, null);
     assert.equal(Boolean(database.prepare(
@@ -259,6 +259,52 @@ test("schema v5 keeps the bound cancel command and process evidence immutable", 
         claimed_at, lease_expires_at)
       VALUES ('attempt_immutable_evidence', ?, 1, ?, 'claimed', ?, ?)`
     ).run(processEvidence.runId, generation, NOW, CANCEL_AT);
+    const manifest = {
+      schemaVersion: 1,
+      kind: "batch_process_launch",
+      runId: processEvidence.runId,
+      attemptId: "attempt_immutable_evidence",
+      attemptGeneration: 1,
+      dispatcherGeneration: generation,
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_immutable_evidence",
+      relativePath: "synthetic-immutable-evidence",
+    };
+    const manifestDigest = digest(manifest);
+    const manifestId = `launch_${manifestDigest.slice(0, 32)}`;
+    const unsignedLaunchReceipt = {
+      schemaVersion: 1,
+      manifestId,
+      manifestDigest,
+      runId: processEvidence.runId,
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_immutable_evidence",
+      relativePath: "synthetic-immutable-evidence",
+      pid: 4242,
+      processGroupId: 4242,
+      processStartToken: "start-token",
+      createdAt: NOW,
+    };
+    const launchReceipt = {
+      ...unsignedLaunchReceipt,
+      receiptDigest: digest(unsignedLaunchReceipt),
+    };
+    database.prepare(`INSERT INTO run_scratch_leases
+      (id, run_id, run_attempt_id, dispatcher_generation, sample_index, sample_id,
+        relative_path, state, owner_uid, device, inode, created_at, registered_at)
+      VALUES ('scratch_immutable_evidence', ?, 'attempt_immutable_evidence', ?, 0, ?,
+        'synthetic-immutable-evidence', 'active', 0, 0, 1, ?, ?)`
+    ).run(processEvidence.runId, generation, DIGEST_A, NOW, NOW);
+    database.prepare(`INSERT INTO process_launch_manifests
+      (id, run_attempt_id, scratch_lease_id, process_attempt_id, state,
+        manifest_json, manifest_sha256, launch_receipt_json, launch_receipt_sha256,
+        created_at, registered_at)
+      VALUES (?, 'attempt_immutable_evidence',
+        'scratch_immutable_evidence', 'process_immutable_evidence', 'registered',
+        ?, ?, ?, ?, ?, ?)`
+    ).run(manifestId, json(manifest), manifestDigest, json(launchReceipt), digest(launchReceipt), NOW, NOW);
     database.prepare(`INSERT INTO process_attempts
       (id, run_attempt_id, process_kind, sample_index, sample_id,
         pid, process_start_token, process_group_id, launch_gate_state, state, launched_at)

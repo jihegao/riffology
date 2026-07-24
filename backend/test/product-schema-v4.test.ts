@@ -11,6 +11,7 @@ import {
   PRODUCT_SCHEMA_V3_SQL,
   PRODUCT_SCHEMA_V4_SQL,
   PRODUCT_SCHEMA_V5_SQL,
+  PRODUCT_SCHEMA_V6_SQL,
   withAtomicBatchSuccessRunContext,
 } from "../src/product-schema.ts";
 
@@ -89,7 +90,7 @@ test("v3 execution rows migrate transactionally to read-only version-3 contracts
     ).run(NOW);
 
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
     const expectedDigests = new Map([
       ["experiment_configurations", canonicalDigest({
         contractVersion: 3,
@@ -218,6 +219,7 @@ test("a failed v4 migration rolls back columns, tables, legacy markers, and vers
       PRODUCT_SCHEMA_MIGRATIONS[2],
       { version: 4, sql: `${PRODUCT_SCHEMA_V4_SQL}\nINSERT INTO missing_v4_table VALUES (1);` },
       { version: 5, sql: PRODUCT_SCHEMA_V5_SQL },
+      { version: 6, sql: PRODUCT_SCHEMA_V6_SQL },
     ]), /missing_v4_table/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);
@@ -352,6 +354,59 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
         'application/json', 1, ?, ?)`
     ).run(DIGEST_A, NOW), /v4 run output object requires atomic successful terminal context/u);
 
+    const launchManifest = {
+      schemaVersion: 1,
+      kind: "batch_process_launch",
+      runId: "run_alpha",
+      attemptId: "attempt_alpha",
+      attemptGeneration: 1,
+      dispatcherGeneration: DIGEST_A,
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_alpha",
+      relativePath: "synthetic-process-alpha",
+    };
+    const launchManifestDigest = canonicalDigest(launchManifest);
+    const launchManifestId = `launch_${launchManifestDigest.slice(0, 32)}`;
+    const unsignedLaunchReceipt = {
+      schemaVersion: 1,
+      manifestId: launchManifestId,
+      manifestDigest: launchManifestDigest,
+      runId: "run_alpha",
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_alpha",
+      relativePath: "synthetic-process-alpha",
+      pid: 101,
+      processGroupId: 101,
+      processStartToken: "start-101",
+      createdAt: NOW,
+    };
+    const launchReceipt = {
+      ...unsignedLaunchReceipt,
+      receiptDigest: canonicalDigest(unsignedLaunchReceipt),
+    };
+    database.prepare(`INSERT INTO run_scratch_leases
+      (id, run_id, run_attempt_id, dispatcher_generation, sample_index, sample_id,
+        relative_path, state, owner_uid, device, inode, created_at, registered_at)
+      VALUES ('scratch_alpha', 'run_alpha', 'attempt_alpha', ?, 0, ?,
+        'synthetic-process-alpha', 'active', 0, 0, 1, ?, ?)`
+    ).run(DIGEST_A, DIGEST_A, NOW, NOW);
+    database.prepare(`INSERT INTO process_launch_manifests
+      (id, run_attempt_id, scratch_lease_id, process_attempt_id, state,
+        manifest_json, manifest_sha256, launch_receipt_json, launch_receipt_sha256,
+        created_at, registered_at)
+      VALUES (?, 'attempt_alpha', 'scratch_alpha', 'process_alpha', 'registered',
+        ?, ?, ?, ?, ?, ?)`
+    ).run(
+      launchManifestId,
+      JSON.stringify(launchManifest),
+      launchManifestDigest,
+      JSON.stringify(launchReceipt),
+      canonicalDigest(launchReceipt),
+      NOW,
+      NOW,
+    );
     database.prepare(`INSERT INTO process_attempts
       (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
         process_group_id, launch_gate_state, state, launched_at)
@@ -361,13 +416,13 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
       (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
         process_group_id, launch_gate_state, state, launched_at)
       VALUES ('process_bad_sample', 'attempt_alpha', 'batch', 0, ?, 102, 'start-102', 102, 'blocked', 'blocked', ?)`
-    ).run(DIGEST_B, NOW), /process attempt run or sample mismatch|UNIQUE constraint failed/u);
+    ).run(DIGEST_B, NOW), /process attempt run or sample mismatch|UNIQUE constraint failed|durable launch manifest/u);
     assert.throws(() => database.prepare(`INSERT INTO process_attempts
       (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
         process_group_id, launch_gate_state, state, launched_at, exited_at, exit_code)
       VALUES ('process_prefilled_exit', 'attempt_alpha', 'batch', 0, ?, 102, 'start-102', 102,
         'blocked', 'blocked', ?, ?, 0)`
-    ).run(DIGEST_A, NOW, NOW), /new process attempt requires blocked evidence shape|UNIQUE constraint failed/u);
+    ).run(DIGEST_A, NOW, NOW), /new process attempt requires blocked evidence shape|UNIQUE constraint failed|durable launch manifest/u);
     assert.throws(() => database.prepare("UPDATE process_attempts SET pid = 999 WHERE id = 'process_alpha'").run(),
       /process attempt identity is immutable/u);
     assert.throws(() => database.prepare(
@@ -413,6 +468,59 @@ test("v4 frozen runs, attempts, process identities, commands, and receipts fail 
     database.prepare(
       "UPDATE run_attempts SET state = 'running', heartbeat_at = ? WHERE id = 'attempt_unverified'",
     ).run(NOW);
+    const unverifiedManifest = {
+      schemaVersion: 1,
+      kind: "batch_process_launch",
+      runId: "run_unverified",
+      attemptId: "attempt_unverified",
+      attemptGeneration: 1,
+      dispatcherGeneration: DIGEST_A,
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_unverified",
+      relativePath: "synthetic-process-unverified",
+    };
+    const unverifiedManifestDigest = canonicalDigest(unverifiedManifest);
+    const unverifiedManifestId = `launch_${unverifiedManifestDigest.slice(0, 32)}`;
+    const unsignedUnverifiedReceipt = {
+      schemaVersion: 1,
+      manifestId: unverifiedManifestId,
+      manifestDigest: unverifiedManifestDigest,
+      runId: "run_unverified",
+      sampleIndex: 0,
+      sampleId: DIGEST_A,
+      scratchId: "scratch_unverified",
+      relativePath: "synthetic-process-unverified",
+      pid: 202,
+      processGroupId: 202,
+      processStartToken: "start-202",
+      createdAt: NOW,
+    };
+    const unverifiedReceipt = {
+      ...unsignedUnverifiedReceipt,
+      receiptDigest: canonicalDigest(unsignedUnverifiedReceipt),
+    };
+    database.prepare(`INSERT INTO run_scratch_leases
+      (id, run_id, run_attempt_id, dispatcher_generation, sample_index, sample_id,
+        relative_path, state, owner_uid, device, inode, created_at, registered_at)
+      VALUES ('scratch_unverified', 'run_unverified', 'attempt_unverified', ?, 0, ?,
+        'synthetic-process-unverified', 'active', 0, 0, 2, ?, ?)`
+    ).run(DIGEST_A, DIGEST_A, NOW, NOW);
+    database.prepare(`INSERT INTO process_launch_manifests
+      (id, run_attempt_id, scratch_lease_id, process_attempt_id, state,
+        manifest_json, manifest_sha256, launch_receipt_json, launch_receipt_sha256,
+        created_at, registered_at)
+      VALUES (?, 'attempt_unverified', 'scratch_unverified',
+        'process_unverified', 'registered', ?, ?, ?, ?, ?, ?)`
+    ).run(
+      unverifiedManifestId,
+      JSON.stringify(unverifiedManifest),
+      unverifiedManifestDigest,
+      JSON.stringify(unverifiedReceipt),
+      canonicalDigest(unverifiedReceipt),
+      NOW,
+      NOW,
+    );
     database.prepare(`INSERT INTO process_attempts
       (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
         process_group_id, launch_gate_state, state, launched_at)

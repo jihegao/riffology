@@ -5,7 +5,7 @@
 The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md) and
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` schema migration v5, execution
+Gate API retained below. `ProductStoreV2` schema migration v6, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -239,13 +239,22 @@ Heartbeat, capability, supervisor, output-consumption, and publication
 exceptions use the same best-effort unwind. A run terminalizes only after every
 registered process has durable exit and cleanup evidence; otherwise it stays
 live and recovery-required rather than publishing a false failure/success.
-Startup refuses unresolved prior live attempts with
-`dispatcher_recovery_required`; cross-restart attempt/scratch recovery is not
-yet implemented. The current cancel slice handles queued/running work in the
-active process and orders cancellation versus terminal publication by SQLite
-commit order. Cross-restart recovery, completion-card exactly-once delivery,
-visual supervision, output downloads, events, wind migration, and final shell
-routes remain later #14/#15 work. The legacy Gate API below still coexists
+On startup A3-1c-b audits recovered successes, drains committed queued
+cancellations, and reconciles durable v4 prior attempts before a candidate
+dispatcher generation activates. A planned scratch path must be absent; a
+created lease without a durable launch receipt, PID/start-token mismatch,
+ownership/inode drift, or unverified group cleanup fails closed with
+`dispatcher_recovery_required` and is not deleted or signalled speculatively.
+Only exact registered scratch paths are removed; the scratch root is never
+scanned. A3-1c-a orders cancellation versus terminal publication by SQLite
+commit order, and that precedence is preserved during recovery.
+An unfinished recovery action is adopted across newly randomized dispatcher
+generations by prior attempt identity. A second in-process dispatcher for the
+same Store is rejected while the first owns it. Schema-v5 live process rows
+without v6 scratch/launch evidence are a documented fail-closed migration
+boundary and require repair rather than speculative signalling.
+Completion-card exactly-once delivery, visual supervision, output downloads,
+events, wind migration, and final shell routes remain later #14/#15 work. The legacy Gate API below still coexists
 until separately reviewed retirement.
 
 ---

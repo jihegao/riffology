@@ -153,7 +153,7 @@ Visual starts fail with `capability_not_available`. Batch descriptions that
 declare `domainEvents` fail with `domain_events_not_supported`. These are
 explicit negative gates, not visual/event implementation evidence.
 
-Run the focused A3-1a/A3-1b/A3-1c-a checks with:
+Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b checks with:
 
 ```bash
 cd backend
@@ -164,8 +164,11 @@ node --experimental-strip-types --test \
   test/product-schema.test.ts \
   test/product-schema-v4.test.ts \
   test/product-schema-v5.test.ts \
+  test/product-schema-v6.test.ts \
   test/product-store-v4.test.ts \
   test/product-store-orchestration.test.ts \
+  test/product-run-recovery.test.ts \
+  test/product-store-v2-deletion.test.ts \
   test/product-store-v2.test.ts \
   test/agent-api.test.ts \
   test/server.test.ts
@@ -179,12 +182,18 @@ terminal-first preservation, and exact HTTP replay tests. The previously recorde
 passed 104/104 and its production build succeeded; no new browser acceptance is
 claimed by this backend batch slice.
 
-A3-1c must still prove cross-restart attempt/process/scratch reconciliation and
-exactly-once completion-card delivery. A3-1c-a now proves same-process
-cancel-versus-terminal commit precedence and receipts; it does not claim
-cross-restart cancellation recovery. The current dispatcher fails startup closed with
-`dispatcher_recovery_required` when prior live attempts need reconciliation;
-that diagnostic is not a recovery implementation.
+A3-1c-b adds focused schema-v6 migration/rollback, planned-before-create and
+created-before-receipt fault windows, created-without-receipt fail-closed
+behavior, exact scratch identity and untracked-directory preservation,
+PID/start-token mismatch rejection, real leader-gone descendant cleanup,
+queued cancellation recovery, cross-random-generation started-action adoption,
+child-receipt-before-Store adoption, claimed/starting/running/blocked/released/
+exited/cleanup-complete checkpoints, exact success process/output cardinality,
+same-process dispatcher ownership, and two-generation handoff tests. A migrated
+v5 live process without v6 evidence is explicitly fail-closed. Exactly-once
+completion-card delivery remains pending. The dispatcher still fails closed with
+`dispatcher_recovery_required` when evidence is absent or contradictory; that
+diagnostic is the intended safety boundary, not proof of cleanup.
 
 Later visual tests must prove exact WebSocket path/subprotocol enforcement plus
 frame-size, connection-count, and idle-time limits, as well as the same-origin

@@ -8,7 +8,6 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -73,8 +72,78 @@ export type BatchProcessIdentity = Readonly<{
   startToken: string;
 }>;
 
+export type BatchScratchPlan = Readonly<{
+  runId: string;
+  sampleIndex: number;
+  sampleId: string;
+  scratchId: string;
+  relativePath: string;
+}>;
+
+export type BatchScratchDirectoryIdentity = BatchScratchPlan & Readonly<{
+  ownerUid: number;
+  device: number;
+  inode: number;
+}>;
+
+export type BatchLaunchManifestBinding = Readonly<{
+  manifestId: string;
+  manifestDigest: string;
+}>;
+
+export type BatchLaunchReceipt = Readonly<{
+  schemaVersion: 1;
+  manifestId: string;
+  manifestDigest: string;
+  runId: string;
+  sampleIndex: number;
+  sampleId: string;
+  scratchId: string;
+  relativePath: string;
+  pid: number;
+  processGroupId: number;
+  processStartToken: string;
+  createdAt: string;
+  receiptDigest: string;
+}>;
+
+export type DurableBatchScratchLease = BatchScratchDirectoryIdentity & Readonly<{
+  registeredAt: string;
+}>;
+
+export type RecoveredProcessTerminationReceipt = Readonly<{
+  schemaVersion: 1;
+  runId: string;
+  sampleIndex: number;
+  sampleId: string;
+  scratchId: string;
+  pid: number;
+  processGroupId: number;
+  processStartToken: string;
+  termSent: boolean;
+  killSent: boolean;
+  groupGone: true;
+  observedAt: string;
+  receiptDigest: string;
+}>;
+
+export type RecoveredScratchCleanupReceipt = Readonly<{
+  schemaVersion: 1;
+  runId: string;
+  sampleIndex: number;
+  sampleId: string;
+  scratchId: string;
+  relativePath: string;
+  disposition: "removed" | "already_absent";
+  cleanedAt: string;
+  verified: true;
+  receiptDigest: string;
+}>;
+
 export type BatchSupervisorHooks = Readonly<{
-  registerProcess?: (identity: BatchProcessIdentity) => Promise<void>;
+  planScratch?: (plan: BatchScratchPlan) => Promise<BatchLaunchManifestBinding>;
+  registerScratchDirectory?: (identity: BatchScratchDirectoryIdentity) => Promise<void>;
+  registerProcess?: (identity: BatchProcessIdentity, receipt: BatchLaunchReceipt) => Promise<void>;
   markGateReleased?: (identity: BatchProcessIdentity) => Promise<void>;
   markProcessStarted?: (identity: BatchProcessIdentity) => Promise<void>;
 }>;
@@ -147,7 +216,13 @@ export type GenericBatchSupervisorOptions = Readonly<{
   registrationTimeoutMs?: number;
   now?: () => number;
   faultInjector?: (
-    checkpoint: "after_execution_root_verified" | "after_execution_root_copied" | "before_output_discovery",
+    checkpoint:
+      | "after_execution_root_verified"
+      | "after_scratch_lease_planned"
+      | "after_scratch_directory_registered"
+      | "after_execution_root_copied"
+      | "after_launch_receipt_persisted"
+      | "before_output_discovery",
     paths: Readonly<{ projectRoot: string; projectCopy?: string; outputDirectory?: string }>,
   ) => void;
 }>;
@@ -236,6 +311,8 @@ export class GenericBatchSupervisor {
   readonly #scratchLeases = new Map<string, {
     runId: string;
     sampleIndex: number;
+    sampleId: string;
+    relativePath: string;
     path: string;
     identity: BatchProcessIdentity | null;
     exited: boolean;
@@ -342,12 +419,41 @@ export class GenericBatchSupervisor {
 
     const runSample = async (sample: FrozenBatchSample): Promise<void> => {
       if (fatal) return;
-      const scratchId = `sample-${sample.sampleIndex}-${randomUUID()}`;
-      const scratchPath = mkdtempSync(join(this.#scratchRoot, `riff-${safePrefix(run.runId)}-${sample.sampleIndex}-`));
+      const nonce = randomUUID().replaceAll("-", "");
+      const scratchId = `scratch_${nonce}`;
+      const relativePath = `riff-${safePrefix(run.runId)}-${sample.sampleIndex}-${nonce}`;
+      const scratchPath = join(this.#scratchRoot, relativePath);
+      const scratchPlan = Object.freeze({
+        runId: run.runId,
+        sampleIndex: sample.sampleIndex,
+        sampleId: sample.sampleId,
+        scratchId,
+        relativePath,
+      });
+      const manifestBinding = await (input.hooks?.planScratch?.(scratchPlan)
+        ?? Promise.resolve(localManifestBinding(scratchPlan)));
+      assertManifestBinding(manifestBinding);
+      this.#faultInjector?.("after_scratch_lease_planned", { projectRoot });
+      mkdirSync(scratchPath, { recursive: false, mode: 0o700 });
+      const scratchInfo = lstatSync(scratchPath);
+      if (scratchInfo.isSymbolicLink() || !scratchInfo.isDirectory()
+        || realpathSync(scratchPath) !== scratchPath || dirname(scratchPath) !== this.#scratchRoot) {
+        throw new GenericBatchSupervisorError("unsafe_batch_path", "The planned scratch directory is unsafe.");
+      }
+      const scratchDirectoryIdentity = Object.freeze({
+        ...scratchPlan,
+        ownerUid: scratchInfo.uid,
+        device: scratchInfo.dev,
+        inode: scratchInfo.ino,
+      });
+      await (input.hooks?.registerScratchDirectory?.(scratchDirectoryIdentity) ?? Promise.resolve());
+      this.#faultInjector?.("after_scratch_directory_registered", { projectRoot });
       const mutable = initialSample(sample, scratchId, scratchPath, this.#now());
       const scratchLease = {
         runId: run.runId,
         sampleIndex: sample.sampleIndex,
+        sampleId: sample.sampleId,
+        relativePath,
         path: scratchPath,
         identity: null as BatchProcessIdentity | null,
         exited: false,
@@ -391,18 +497,57 @@ export class GenericBatchSupervisor {
         assertContainedRegular(projectCopy, entryPath, "batch_entrypoint_invalid");
 
         const registrationDeadline = this.#now() + this.#registrationTimeoutMs;
-        const child = this.#spawnGated(projectCopy, inputPath, outputDirectory, tempDirectory, argv);
+        const launchNonce = `nonce_${randomUUID().replaceAll("-", "")}`;
+        const launchReceiptPath = join(scratchPath, "launch-receipt.json");
+        const launchReceiptBase = {
+          schemaVersion: 1 as const,
+          manifestId: manifestBinding.manifestId,
+          manifestDigest: manifestBinding.manifestDigest,
+          runId: run.runId,
+          sampleIndex: sample.sampleIndex,
+          sampleId: sample.sampleId,
+          scratchId,
+          relativePath,
+          createdAt: new Date(this.#now()).toISOString(),
+        };
+        const child = this.#spawnGated(
+          projectCopy,
+          inputPath,
+          outputDirectory,
+          tempDirectory,
+          launchReceiptPath,
+          launchNonce,
+          launchReceiptBase,
+          argv,
+        );
         if (!child.pid) throw new GenericBatchSupervisorError("process_spawn_failed", "The batch helper did not receive a PID.");
         scratchLease.groupGoneVerified = false;
         const lifecycle = observeChild(child);
         let identity: BatchProcessIdentity;
+        let launchReceipt: BatchLaunchReceipt;
         try {
+          await runGateHook(
+            waitForLaunchReceiptSignal(child),
+            registrationDeadline,
+            this.#now,
+            input.signal,
+          );
+          launchReceipt = bindLaunchReceiptToExactIdentity(validateLaunchReceipt(
+            JSON.parse(readFileSync(launchReceiptPath, "utf8")),
+            scratchDirectoryIdentity,
+            manifestBinding,
+          ));
           identity = readProcessIdentity(child.pid, {
             runId: run.runId,
             sampleIndex: sample.sampleIndex,
             sampleId: sample.sampleId,
             scratchId,
           });
+          if (identity.pid !== launchReceipt.pid
+            || identity.processGroupId !== launchReceipt.processGroupId
+            || identity.startToken !== launchReceipt.processStartToken) {
+            throw new GenericBatchSupervisorError("process_identity_mismatch", "The self-authored launch receipt differs from the OS process identity.");
+          }
         } catch (error) {
           closeGateWithoutRelease(child);
           await runGateHook(lifecycle.completion, registrationDeadline, this.#now);
@@ -426,8 +571,9 @@ export class GenericBatchSupervisor {
         child.stdout!.on("data", (chunk: Buffer) => appendStream(mutable, "stdout", Buffer.from(chunk)));
         child.stderr!.on("data", (chunk: Buffer) => appendStream(mutable, "stderr", Buffer.from(chunk)));
 
+        this.#faultInjector?.("after_launch_receipt_persisted", { projectRoot, projectCopy });
         await runGateHook(
-          input.hooks?.registerProcess?.(identity) ?? Promise.resolve(),
+          input.hooks?.registerProcess?.(identity, launchReceipt) ?? Promise.resolve(),
           registrationDeadline,
           this.#now,
           input.signal,
@@ -437,7 +583,7 @@ export class GenericBatchSupervisor {
           sampleIndex: sample.sampleIndex,
           sampleId: sample.sampleId,
           scratchId,
-        }))) {
+        }, identity.startToken))) {
           throw new GenericBatchSupervisorError("process_identity_mismatch", "The launch-gate process identity changed before release.");
         }
         await runGateHook(
@@ -653,11 +799,152 @@ export class GenericBatchSupervisor {
     });
   }
 
+  inspectRecordedProcess(identity: BatchProcessIdentity): "present" | "gone" {
+    return inspectRecordedIdentity(identity);
+  }
+
+  async terminateRecordedProcess(
+    identity: BatchProcessIdentity,
+    graceMs: number,
+    observedAt = new Date(this.#now()).toISOString(),
+  ): Promise<RecoveredProcessTerminationReceipt> {
+    if (!Number.isSafeInteger(graceMs) || graceMs < 1 || graceMs > 300_000) {
+      throw new GenericBatchSupervisorError("process_cleanup_unverified", "The recovery termination grace is invalid.");
+    }
+    let termSent = false;
+    let killSent = false;
+    if (inspectRecordedIdentity(identity) === "present") {
+      signalRecordedProcessGroup(identity, "SIGTERM");
+      termSent = true;
+      if (!await waitForRecordedProcessGroupGone(identity, graceMs)) {
+        signalRecordedProcessGroup(identity, "SIGKILL");
+        killSent = true;
+        if (!await waitForRecordedProcessGroupGone(identity, 2_000)) {
+          throw new GenericBatchSupervisorError("process_cleanup_unverified", "The recovered process group survived SIGKILL.");
+        }
+      }
+    }
+    if (inspectRecordedIdentity(identity) !== "gone") {
+      throw new GenericBatchSupervisorError("process_cleanup_unverified", "The recovered process group could not be proven gone.");
+    }
+    const unsigned = {
+      schemaVersion: 1 as const,
+      runId: identity.runId,
+      sampleIndex: identity.sampleIndex,
+      sampleId: identity.sampleId,
+      scratchId: identity.scratchId,
+      pid: identity.pid,
+      processGroupId: identity.processGroupId,
+      processStartToken: identity.startToken,
+      termSent,
+      killSent,
+      groupGone: true as const,
+      observedAt,
+    };
+    return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
+  }
+
+  verifyRecordedProcessGroupGone(identity: BatchProcessIdentity): true {
+    if (inspectRecordedIdentity(identity) !== "gone") {
+      throw new GenericBatchSupervisorError("process_cleanup_unverified", "The recorded process group is not gone.");
+    }
+    return true;
+  }
+
+  readDurableLaunchReceipt(
+    lease: Pick<DurableBatchScratchLease,
+      "runId" | "sampleIndex" | "sampleId" | "scratchId" | "relativePath"
+      | "ownerUid" | "device" | "inode">,
+    manifest: BatchLaunchManifestBinding,
+  ): BatchLaunchReceipt | null {
+    const path = exactScratchPath(this.#scratchRoot, lease.relativePath);
+    if (!existsSync(path)) return null;
+    assertExactDurableScratchDirectory(this.#scratchRoot, path, lease);
+    const receiptPath = join(path, "launch-receipt.json");
+    if (!existsSync(receiptPath)) return null;
+    let value: unknown;
+    try {
+      value = JSON.parse(readFileSync(receiptPath, "utf8"));
+    } catch (error) {
+      throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt is invalid JSON.", { cause: error });
+    }
+    const selfReceipt = validateLaunchReceipt(value, lease, manifest);
+    try {
+      return bindLaunchReceiptToExactIdentity(selfReceipt);
+    } catch (error) {
+      if (error instanceof GenericBatchSupervisorError && error.code === "process_identity_unavailable") {
+        // The launch helper can close its gate and exit after its parent dies.
+        // Preserve the child-authored receipt so recovery can prove that the
+        // exact PID/PGID is absent; a reused live PID will still fail the
+        // start-token comparison before any signal is sent.
+        return selfReceipt;
+      }
+      throw error;
+    }
+  }
+
+  cleanupDurableScratch(
+    lease: DurableBatchScratchLease,
+    cleanedAt = new Date(this.#now()).toISOString(),
+  ): RecoveredScratchCleanupReceipt {
+    const path = exactScratchPath(this.#scratchRoot, lease.relativePath);
+    let disposition: "removed" | "already_absent" = "already_absent";
+    if (existsSync(path)) {
+      assertExactDurableScratchDirectory(this.#scratchRoot, path, lease);
+      removeOwnedScratchTree(path);
+      if (existsSync(path)) {
+        throw new GenericBatchSupervisorError("scratch_cleanup_unverified", "The durable scratch directory remains after recovery cleanup.");
+      }
+      disposition = "removed";
+    }
+    const unsigned = {
+      schemaVersion: 1 as const,
+      runId: lease.runId,
+      sampleIndex: lease.sampleIndex,
+      sampleId: lease.sampleId,
+      scratchId: lease.scratchId,
+      relativePath: lease.relativePath,
+      disposition,
+      cleanedAt,
+      verified: true as const,
+    };
+    return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
+  }
+
+  cleanupPlannedScratch(
+    plan: BatchScratchPlan,
+    cleanedAt = new Date(this.#now()).toISOString(),
+  ): RecoveredScratchCleanupReceipt {
+    const path = exactScratchPath(this.#scratchRoot, plan.relativePath);
+    if (existsSync(path)) {
+      throw new GenericBatchSupervisorError(
+        "scratch_cleanup_unverified",
+        "A planned scratch path exists without a durable directory identity.",
+      );
+    }
+    const unsigned = {
+      schemaVersion: 1 as const,
+      runId: plan.runId,
+      sampleIndex: plan.sampleIndex,
+      sampleId: plan.sampleId,
+      scratchId: plan.scratchId,
+      relativePath: plan.relativePath,
+      disposition: "already_absent" as const,
+      cleanedAt,
+      verified: true as const,
+    };
+    return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
+  }
+
   #spawnGated(
     cwd: string,
     inputPath: string,
     outputDirectory: string,
     tempDirectory: string,
+    launchReceiptPath: string,
+    launchNonce: string,
+    launchReceiptBase: Omit<BatchLaunchReceipt,
+      "pid" | "processGroupId" | "processStartToken" | "receiptDigest">,
     modelArgv: readonly string[],
   ): ChildProcess {
     const sandbox = canonicalRestrictedExecutable("/usr/bin/sandbox-exec");
@@ -666,6 +953,7 @@ export class GenericBatchSupervisor {
       inputPath,
       outputRoot: outputDirectory,
       tempRoot: tempDirectory,
+      launchReceiptPath,
       executable: this.#python,
       runtimeReadRoots: this.#runtimeReadRoots,
     });
@@ -677,6 +965,9 @@ export class GenericBatchSupervisor {
         "-I",
         "-c",
         pythonGateWrapper(this.#pythonImportRoots),
+        launchNonce,
+        JSON.stringify(launchReceiptBase),
+        launchReceiptPath,
         ...modelArgv,
       ], {
         cwd,
@@ -684,7 +975,7 @@ export class GenericBatchSupervisor {
         shell: false,
         detached: true,
         windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"],
       });
     } catch (error) {
       throw new GenericBatchSupervisorError("process_spawn_failed", "The launch-gated batch process could not start.", { cause: error });
@@ -1123,10 +1414,160 @@ const readProcessIdentity = (
   return Object.freeze({ ...base, pid, processGroupId, startToken });
 };
 
+const localManifestBinding = (plan: BatchScratchPlan): BatchLaunchManifestBinding => {
+  const manifest = {
+    schemaVersion: 1,
+    kind: "batch_process_launch",
+    runId: plan.runId,
+    sampleIndex: plan.sampleIndex,
+    sampleId: plan.sampleId,
+    scratchId: plan.scratchId,
+    relativePath: plan.relativePath,
+  };
+  return Object.freeze({
+    manifestId: `launch_${canonicalDigest(manifest).slice(0, 32)}`,
+    manifestDigest: canonicalDigest(manifest),
+  });
+};
+
+const assertManifestBinding = (binding: BatchLaunchManifestBinding): void => {
+  if (!binding || typeof binding !== "object"
+    || !SAFE_ID.test(binding.manifestId)
+    || !/^[0-9a-f]{64}$/u.test(binding.manifestDigest)) {
+    throw new GenericBatchSupervisorError("process_registration_failed", "The durable launch manifest binding is invalid.");
+  }
+};
+
+const validateLaunchReceipt = (
+  value: unknown,
+  lease: Pick<DurableBatchScratchLease,
+    "runId" | "sampleIndex" | "sampleId" | "scratchId" | "relativePath">,
+  manifest: BatchLaunchManifestBinding,
+): BatchLaunchReceipt => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt has an invalid shape.");
+  }
+  const receipt = value as BatchLaunchReceipt;
+  const keys = Object.keys(receipt).sort();
+  const expectedKeys = [
+    "createdAt", "manifestDigest", "manifestId", "pid", "processGroupId",
+    "processStartToken", "receiptDigest", "relativePath", "runId", "sampleId",
+    "sampleIndex", "schemaVersion", "scratchId",
+  ].sort();
+  const { receiptDigest, ...unsigned } = receipt;
+  if (keys.join("\n") !== expectedKeys.join("\n")
+    || receipt.schemaVersion !== 1
+    || receipt.manifestId !== manifest.manifestId
+    || receipt.manifestDigest !== manifest.manifestDigest
+    || receipt.runId !== lease.runId
+    || receipt.sampleIndex !== lease.sampleIndex
+    || receipt.sampleId !== lease.sampleId
+    || receipt.scratchId !== lease.scratchId
+    || receipt.relativePath !== lease.relativePath
+    || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
+    || receipt.processGroupId !== receipt.pid
+    || typeof receipt.processStartToken !== "string"
+    || receipt.processStartToken.length < 1 || receipt.processStartToken.length > 300
+    || typeof receipt.createdAt !== "string"
+    || !/^[0-9a-f]{64}$/u.test(receipt.receiptDigest)
+    || canonicalDigest(unsigned) !== receipt.receiptDigest) {
+    throw new GenericBatchSupervisorError("process_identity_mismatch", "The durable launch receipt does not match its manifest and scratch lease.");
+  }
+  return Object.freeze({ ...receipt });
+};
+
+const bindLaunchReceiptToExactIdentity = (
+  selfReceipt: BatchLaunchReceipt,
+): BatchLaunchReceipt => {
+  const identity = readProcessIdentity(selfReceipt.pid, {
+    runId: selfReceipt.runId,
+    sampleIndex: selfReceipt.sampleIndex,
+    sampleId: selfReceipt.sampleId,
+    scratchId: selfReceipt.scratchId,
+  });
+  if (identity.processGroupId !== selfReceipt.processGroupId) {
+    throw new GenericBatchSupervisorError(
+      "process_identity_mismatch",
+      "The durable launch receipt process group differs from the OS identity.",
+    );
+  }
+  const startedAt = Date.parse(identity.startToken);
+  const receiptAt = Date.parse(selfReceipt.createdAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(receiptAt)
+    || Math.abs(startedAt - receiptAt) > 10_000) {
+    throw new GenericBatchSupervisorError(
+      "process_identity_mismatch",
+      "The durable launch receipt timestamp does not match the OS process start.",
+    );
+  }
+  const { receiptDigest: _receiptDigest, ...unsignedSelf } = selfReceipt;
+  const unsigned = { ...unsignedSelf, processStartToken: identity.startToken };
+  return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
+};
+
 const sameIdentity = (left: BatchProcessIdentity, right: BatchProcessIdentity): boolean =>
   left.pid === right.pid && left.processGroupId === right.processGroupId && left.startToken === right.startToken
   && left.runId === right.runId && left.sampleIndex === right.sampleIndex
   && left.sampleId === right.sampleId && left.scratchId === right.scratchId;
+
+const inspectRecordedIdentity = (identity: BatchProcessIdentity): "present" | "gone" => {
+  try {
+    const current = readProcessIdentity(identity.pid, {
+      runId: identity.runId,
+      sampleIndex: identity.sampleIndex,
+      sampleId: identity.sampleId,
+      scratchId: identity.scratchId,
+    });
+    if (!sameIdentity(identity, current)) {
+      throw new GenericBatchSupervisorError("process_identity_mismatch", "The recorded process leader identity changed.");
+    }
+    return "present";
+  } catch (error) {
+    if (!(error instanceof GenericBatchSupervisorError) || error.code !== "process_identity_unavailable") throw error;
+  }
+  const first = requiredProcessGroupMembers(identity.processGroupId);
+  const second = requiredProcessGroupMembers(identity.processGroupId);
+  if (canonicalDigest(first) !== canonicalDigest(second)) {
+    throw new GenericBatchSupervisorError("process_identity_mismatch", "The recorded process group changed during recovery inspection.");
+  }
+  if (second.length) {
+    if (Number.isFinite(Date.parse(identity.startToken))) {
+      // A process group cannot be reassigned while descendants still retain
+      // it. An OS-bound leader start token therefore keeps the exact group
+      // signalable even after the leader exits. Child-only nonce receipts do
+      // not satisfy this condition and remain fail-closed.
+      return "present";
+    }
+    throw new GenericBatchSupervisorError(
+      "process_identity_mismatch",
+      "The recorded leader disappeared while its process group still contains unverifiable members.",
+    );
+  }
+  return "gone";
+};
+
+const signalRecordedProcessGroup = (identity: BatchProcessIdentity, signal: "SIGTERM" | "SIGKILL"): void => {
+  if (inspectRecordedIdentity(identity) === "gone") return;
+  try {
+    process.kill(-identity.processGroupId, signal);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH"
+      && inspectRecordedIdentity(identity) === "gone") return;
+    throw new GenericBatchSupervisorError("process_cleanup_unverified", `The recovered process group could not receive ${signal}.`, { cause: error });
+  }
+};
+
+const waitForRecordedProcessGroupGone = async (
+  identity: BatchProcessIdentity,
+  timeoutMs: number,
+): Promise<boolean> => {
+  const deadline = Date.now() + boundedDelay(timeoutMs);
+  while (Date.now() < deadline) {
+    if (inspectRecordedIdentity(identity) === "gone") return true;
+    await delay(20);
+  }
+  return inspectRecordedIdentity(identity) === "gone";
+};
 
 const observeChild = (child: ChildProcess): {
   completion: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
@@ -1164,6 +1605,21 @@ const waitForStartedSignal = (child: ChildProcess): Promise<void> =>
     });
     stream.once("error", (error) => reject(new GenericBatchSupervisorError("process_registration_failed", "The launch-gate start acknowledgement failed.", { cause: error })));
     stream.once("end", () => reject(new GenericBatchSupervisorError("process_registration_failed", "The launch gate closed before Model start.")));
+  });
+
+const waitForLaunchReceiptSignal = (child: ChildProcess): Promise<void> =>
+  new Promise((resolveReceipt, reject) => {
+    const stream = child.stdio[5];
+    if (!stream || typeof stream === "number" || !("once" in stream)) {
+      reject(new GenericBatchSupervisorError("process_registration_failed", "The durable launch-receipt acknowledgement pipe is unavailable."));
+      return;
+    }
+    stream.once("data", (chunk: Buffer) => {
+      if (Buffer.from(chunk).subarray(0, 1).toString() === "1") resolveReceipt();
+      else reject(new GenericBatchSupervisorError("process_registration_failed", "The durable launch-receipt acknowledgement is invalid."));
+    });
+    stream.once("error", (error) => reject(new GenericBatchSupervisorError("process_registration_failed", "The durable launch-receipt acknowledgement failed.", { cause: error })));
+    stream.once("end", () => reject(new GenericBatchSupervisorError("process_registration_failed", "The launch helper closed before persisting its receipt.")));
   });
 
 const releaseGate = (child: ChildProcess): void => {
@@ -1482,6 +1938,42 @@ const assertExactScratchDirectory = (
   }
 };
 
+const exactScratchPath = (scratchRoot: string, relativePath: string): string => {
+  if (!relativePath || relativePath === "." || relativePath === ".."
+    || relativePath.includes("/") || relativePath.includes("\\")
+    || relativePath.includes("\0") || !/^[A-Za-z0-9._-]+$/u.test(relativePath)) {
+    throw new GenericBatchSupervisorError("scratch_cleanup_unverified", "The durable scratch relative path is invalid.");
+  }
+  const path = join(scratchRoot, relativePath);
+  if (dirname(path) !== scratchRoot) {
+    throw new GenericBatchSupervisorError("scratch_cleanup_unverified", "The durable scratch path escaped its root.");
+  }
+  return path;
+};
+
+const assertExactDurableScratchDirectory = (
+  scratchRoot: string,
+  path: string,
+  lease: Pick<DurableBatchScratchLease,
+    "relativePath" | "ownerUid" | "device" | "inode">,
+): void => {
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink() || !info.isDirectory()
+      || dirname(path) !== scratchRoot || realpathSync(path) !== path
+      || info.uid !== lease.ownerUid || info.dev !== lease.device || info.ino !== lease.inode
+      || path !== exactScratchPath(scratchRoot, lease.relativePath)) {
+      throw new Error("durable scratch identity changed");
+    }
+  } catch (error) {
+    throw new GenericBatchSupervisorError(
+      "scratch_cleanup_unverified",
+      "The exact durable scratch directory changed before recovery.",
+      { cause: error },
+    );
+  }
+};
+
 const removeOwnedScratchTree = (directory: string): void => {
   const info = lstatSync(directory);
   if (info.isSymbolicLink() || !info.isDirectory()) {
@@ -1524,13 +2016,29 @@ const pythonImportRoots = (requestedExecutable: string): string[] => {
 };
 
 const pythonGateWrapper = (importRoots: readonly string[]): string => [
-  "import os,runpy,sys",
+  "import hashlib,json,os,runpy,sys",
   `sys.path[:0]=${JSON.stringify(importRoots)}`,
+  "nonce=sys.argv[1]",
+  "base=json.loads(sys.argv[2])",
+  "receipt_path=sys.argv[3]",
+  "unsigned=dict(base,pid=os.getpid(),processGroupId=os.getpgid(0),processStartToken=nonce)",
+  "payload=json.dumps(unsigned,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')",
+  "receipt=dict(unsigned,receiptDigest=hashlib.sha256(payload).hexdigest())",
+  "encoded=json.dumps(receipt,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')+b'\\n'",
+  "fd=os.open(receipt_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)",
+  "os.write(fd,encoded)",
+  "os.fsync(fd)",
+  "os.close(fd)",
+  "dirfd=os.open(os.path.dirname(receipt_path),os.O_RDONLY)",
+  "os.fsync(dirfd)",
+  "os.close(dirfd)",
+  "os.write(5,b'1')",
+  "os.close(5)",
   "gate=os.read(3,1)",
   "if gate != b'1': raise SystemExit(125)",
-  "entry=sys.argv[1]",
+  "entry=sys.argv[4]",
   "sys.path.insert(0,os.path.dirname(os.path.abspath(entry)))",
-  "sys.argv=sys.argv[1:]",
+  "sys.argv=sys.argv[4:]",
   "os.write(4,b'1')",
   "os.close(4)",
   "runpy.run_path(entry,run_name='__main__')",

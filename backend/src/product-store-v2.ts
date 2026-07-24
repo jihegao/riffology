@@ -27,6 +27,13 @@ import {
 } from "./execution-protocol-v2.ts";
 import {
   verifyProjectExecutionRootCapability,
+  type BatchLaunchManifestBinding,
+  type BatchLaunchReceipt,
+  type BatchScratchDirectoryIdentity,
+  type BatchScratchPlan,
+  type DurableBatchScratchLease,
+  type RecoveredProcessTerminationReceipt,
+  type RecoveredScratchCleanupReceipt,
   type VerifiedProjectExecutionRootCapability,
 } from "./generic-batch-supervisor.ts";
 import type {
@@ -58,6 +65,7 @@ import type {
   ProcessAttemptRecord,
   ResourceOwner,
   RunAttemptRecord,
+  RunScratchLeaseRecord,
   RunRecord,
   RunStatus,
   StoredObjectMetadata,
@@ -384,6 +392,31 @@ export type BatchProcessIdentity = RunAttemptIdentity & Readonly<{
   pid: number;
   processStartToken: string;
   processGroupId: number;
+  scratchId?: string;
+}>;
+
+export type BatchLaunchIdentity = RunAttemptIdentity & BatchScratchPlan;
+
+export type RecoveryProcessRecord = BatchProcessIdentity & Readonly<{
+  scratchId: string;
+  scratchLease: DurableBatchScratchLease;
+  launchManifest: BatchLaunchManifestBinding;
+  state: "blocked" | "released" | "running" | "exited" | "cleanup_complete" | "cleanup_unverified";
+  exitCode: number | null;
+  exitSignal: string | null;
+}>;
+
+export type PendingLaunchRecoveryRecord = Readonly<{
+  scratchLease: RunScratchLeaseRecord;
+  launchManifest: BatchLaunchManifestBinding;
+}>;
+
+export type PriorDispatcherRecoveryUnit = Readonly<{
+  run: Extract<RunRecord, { contractVersion: 4 }>;
+  attempt: RunAttemptRecord;
+  processes: readonly RecoveryProcessRecord[];
+  scratchLeases: readonly RunScratchLeaseRecord[];
+  pendingLaunches: readonly PendingLaunchRecoveryRecord[];
 }>;
 
 export type BatchOutputCommit = Readonly<{
@@ -1629,8 +1662,114 @@ export class ProductStoreV2 {
     });
   }
 
+  prepareBatchProcessLaunch(input: BatchLaunchIdentity & {
+    createdAt: IsoTimestamp;
+  }): BatchLaunchManifestBinding {
+    assertRunAttemptIdentity(input);
+    assertBatchScratchPlan(input);
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      const attempt = this.#database.prepare(`SELECT a.state, r.contract_version, r.sample_plan_json
+        FROM run_attempts a
+        JOIN runs r ON r.id = a.run_id
+        WHERE a.id = ? AND a.run_id = ? AND a.attempt_generation = ?
+          AND a.dispatcher_generation = ?`
+      ).get(input.attemptId, input.runId, input.attemptGeneration, input.dispatcherGeneration) as {
+        state: string;
+        contract_version: number;
+        sample_plan_json: string;
+      } | undefined;
+      const sample = attempt ? (JSON.parse(attempt.sample_plan_json) as Array<{ sampleIndex: number; sampleId: string }>)[input.sampleIndex] : undefined;
+      if (!attempt || attempt.contract_version !== 4 || !["starting", "running"].includes(attempt.state)
+        || sample?.sampleIndex !== input.sampleIndex || sample.sampleId !== input.sampleId) {
+        throw new ProductStoreV2Error("process_launch_manifest_invalid: launch planning requires the current v4 attempt and frozen sample.");
+      }
+      const manifest = launchManifestPayload(input);
+      const manifestDigest = canonicalDigest(manifest);
+      const manifestId = `launch_${manifestDigest.slice(0, 32)}`;
+      this.#executeDatabaseStatements([
+        {
+          sql: `INSERT INTO run_scratch_leases
+            (id, run_id, run_attempt_id, dispatcher_generation, sample_index, sample_id,
+              relative_path, state, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+          params: [
+            input.scratchId,
+            input.runId,
+            input.attemptId,
+            input.dispatcherGeneration,
+            input.sampleIndex,
+            input.sampleId,
+            input.relativePath,
+            input.createdAt,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `INSERT INTO process_launch_manifests
+            (id, run_attempt_id, scratch_lease_id, state, manifest_json, manifest_sha256, created_at)
+            VALUES (?, ?, ?, 'planned', ?, ?, ?)`,
+          params: [
+            manifestId,
+            input.attemptId,
+            input.scratchId,
+            json(manifest),
+            manifestDigest,
+            input.createdAt,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+      return Object.freeze({ manifestId, manifestDigest });
+    });
+  }
+
+  registerBatchScratchDirectory(input: BatchLaunchIdentity & BatchScratchDirectoryIdentity & {
+    registeredAt: IsoTimestamp;
+  }): RunScratchLeaseRecord {
+    assertRunAttemptIdentity(input);
+    assertBatchScratchPlan(input);
+    for (const [label, value, minimum] of [
+      ["Scratch owner", input.ownerUid, 0],
+      ["Scratch device", input.device, 0],
+      ["Scratch inode", input.inode, 1],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < minimum) {
+        throw new ProductStoreV2Error(`${label} identity is invalid.`);
+      }
+    }
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      this.#executeDatabaseStatements([{
+        sql: `UPDATE run_scratch_leases
+          SET state = 'created', owner_uid = ?, device = ?, inode = ?, registered_at = ?
+          WHERE id = ? AND run_id = ? AND run_attempt_id = ? AND dispatcher_generation = ?
+            AND sample_index = ? AND sample_id = ? AND relative_path = ? AND state = 'planned'`,
+        params: [
+          input.ownerUid,
+          input.device,
+          input.inode,
+          input.registeredAt,
+          input.scratchId,
+          input.runId,
+          input.attemptId,
+          input.dispatcherGeneration,
+          input.sampleIndex,
+          input.sampleId,
+          input.relativePath,
+        ],
+        expectedChanges: 1,
+        mismatchMessage: "process_launch_manifest_invalid: scratch directory registration lost its exact lease.",
+      }]);
+      return scratchLeaseRecord(this.#database.prepare(
+        "SELECT * FROM run_scratch_leases WHERE id = ?",
+      ).get(input.scratchId));
+    });
+  }
+
   registerBatchProcessAttempt(input: BatchProcessIdentity & {
     launchedAt: IsoTimestamp;
+    launchReceipt?: BatchLaunchReceipt;
   }): ProcessAttemptRecord {
     assertBatchProcessIdentity(input);
     return this.#withImmediateTransaction(() => {
@@ -1651,6 +1790,7 @@ export class ProductStoreV2 {
         || samples[input.sampleIndex]?.sampleId !== input.sampleId) {
         throw new ProductStoreV2Error("process_attempt_sample_mismatch: the process sample does not match the frozen run plan.");
       }
+      this.#ensureRegisteredLaunchEvidence(input);
       this.#executeDatabaseStatements([{
         sql: `INSERT INTO process_attempts
           (id, run_attempt_id, process_kind, sample_index, sample_id, pid, process_start_token,
@@ -1680,6 +1820,14 @@ export class ProductStoreV2 {
       nextState: "released",
       set: "launch_gate_state = 'released', state = 'released', started_at = ?",
       params: [input.startedAt],
+      extraStatements: [{
+        sql: `UPDATE process_launch_manifests
+          SET state = 'released'
+          WHERE process_attempt_id = ? AND state = 'registered'`,
+        params: [input.processAttemptId],
+        expectedChanges: 1,
+        mismatchMessage: "process_launch_manifest_invalid: gate release lacks registered launch evidence.",
+      }],
     });
   }
 
@@ -1724,22 +1872,69 @@ export class ProductStoreV2 {
       nextState: "exited",
       set: "state = 'exited', exited_at = ?, exit_code = ?, exit_signal = ?",
       params: [input.exitedAt, input.exitCode, input.exitSignal],
+      extraStatements: [{
+        sql: `UPDATE process_launch_manifests
+          SET state = 'exited'
+          WHERE process_attempt_id = ? AND state IN ('registered', 'released')`,
+        params: [input.processAttemptId],
+        expectedChanges: 1,
+        mismatchMessage: "process_launch_manifest_invalid: process exit lacks launch evidence.",
+      }],
     });
   }
 
   finalizeBatchProcessCleanup(input: BatchProcessIdentity & {
     cleanupVerified: boolean;
     cleanupReceiptDigest: string | null;
+    cleanedAt?: IsoTimestamp;
   }): ProcessAttemptRecord {
     if (input.cleanupVerified) assertDigest(input.cleanupReceiptDigest ?? "", "Cleanup receipt digest");
     if (!input.cleanupVerified && input.cleanupReceiptDigest !== null) {
       throw new ProductStoreV2Error("Unverified cleanup cannot carry a verified cleanup receipt.");
     }
+    const cleanedAt = input.cleanedAt ?? new Date().toISOString();
+    const scratchReceipt = input.cleanupVerified ? {
+      schemaVersion: 1,
+      kind: "batch_scratch_cleanup",
+      processAttemptId: input.processAttemptId,
+      scratchId: input.scratchId ?? null,
+      supervisorReceiptDigest: input.cleanupReceiptDigest,
+      cleanedAt,
+      verified: true,
+    } : null;
+    const scratchReceiptDigest = scratchReceipt ? canonicalDigest(scratchReceipt) : null;
     return this.#transitionBatchProcess(input, {
       expectedState: "exited",
       nextState: input.cleanupVerified ? "cleanup_complete" : "cleanup_unverified",
       set: "state = ?, cleanup_receipt_sha256 = ?",
       params: [input.cleanupVerified ? "cleanup_complete" : "cleanup_unverified", input.cleanupReceiptDigest],
+      extraStatements: [
+        {
+          sql: `UPDATE run_scratch_leases
+            SET state = ?, cleaned_at = ?, cleanup_receipt_json = ?, cleanup_receipt_sha256 = ?
+            WHERE id = (
+              SELECT scratch_lease_id FROM process_launch_manifests
+              WHERE process_attempt_id = ?
+            ) AND state IN ('created', 'active')`,
+          params: [
+            input.cleanupVerified ? "cleanup_complete" : "cleanup_unverified",
+            cleanedAt,
+            scratchReceipt ? json(scratchReceipt) : null,
+            scratchReceiptDigest,
+            input.processAttemptId,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "scratch_cleanup_unverified: process cleanup lacks its exact scratch lease.",
+        },
+        ...(input.cleanupVerified ? [{
+          sql: `UPDATE process_launch_manifests
+            SET state = 'cleanup_complete'
+            WHERE process_attempt_id = ? AND state = 'exited'`,
+          params: [input.processAttemptId],
+          expectedChanges: 1,
+          mismatchMessage: "scratch_cleanup_unverified: process cleanup lacks exited launch evidence.",
+        }] : []),
+      ],
     });
   }
 
@@ -2089,6 +2284,428 @@ export class ProductStoreV2 {
     ).all(runId) as any[]).map(runAttemptRecord);
   }
 
+  listPriorDispatcherRecoveryUnits(): PriorDispatcherRecoveryUnit[] {
+    this.#assertOpen();
+    const attempts = this.#database.prepare(`SELECT a.*
+      FROM run_attempts a
+      JOIN runs r ON r.id = a.run_id
+      WHERE r.contract_version = 4
+        AND a.state IN ('claimed', 'starting', 'running')
+      ORDER BY a.claimed_at, a.id`
+    ).all() as any[];
+    return attempts.map((row) => {
+      const attempt = runAttemptRecord({
+        id: row.id,
+        run_id: row.run_id,
+        attempt_generation: row.attempt_generation,
+        dispatcher_generation: row.dispatcher_generation,
+        state: row.state,
+        claimed_at: row.claimed_at,
+        lease_expires_at: row.lease_expires_at,
+        heartbeat_at: row.heartbeat_at,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+      });
+      const run = runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(attempt.runId));
+      if (run.contractVersion !== 4) throw new ProductStoreV2Error("legacy_contract_read_only: recovery cannot include a v3 run.");
+      const leases = (this.#database.prepare(
+        "SELECT * FROM run_scratch_leases WHERE run_attempt_id = ? ORDER BY sample_index, id",
+      ).all(attempt.id) as any[]).map(scratchLeaseRecord);
+      const processRows = this.#database.prepare(`SELECT
+          p.*, s.id AS scratch_id, s.relative_path, s.owner_uid, s.device, s.inode,
+          s.state AS scratch_state, s.registered_at AS scratch_registered_at,
+          m.id AS manifest_id, m.state AS manifest_state, m.manifest_json,
+          m.manifest_sha256, m.launch_receipt_json, m.launch_receipt_sha256
+        FROM process_attempts p
+        LEFT JOIN process_launch_manifests m ON m.process_attempt_id = p.id
+        LEFT JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+        WHERE p.run_attempt_id = ?
+        ORDER BY p.sample_index, p.id`
+      ).all(attempt.id) as any[];
+      const processes = processRows.map((process): RecoveryProcessRecord => {
+        if (!process.scratch_id || !process.manifest_id || !process.manifest_sha256
+          || process.owner_uid === null || process.device === null || process.inode === null
+          || !process.scratch_registered_at) {
+          throw new ProductStoreV2Error(
+            "dispatcher_recovery_required: a live process lacks durable launch or scratch evidence.",
+          );
+        }
+        assertStoredProcessLaunchEvidence(process, attempt);
+        return Object.freeze({
+          runId: attempt.runId,
+          attemptId: attempt.id,
+          attemptGeneration: attempt.attemptGeneration,
+          dispatcherGeneration: attempt.dispatcherGeneration,
+          processAttemptId: process.id,
+          sampleIndex: process.sample_index,
+          sampleId: process.sample_id,
+          pid: process.pid,
+          processStartToken: process.process_start_token,
+          processGroupId: process.process_group_id,
+          scratchId: process.scratch_id,
+          scratchLease: Object.freeze({
+            runId: attempt.runId,
+            sampleIndex: process.sample_index,
+            sampleId: process.sample_id,
+            scratchId: process.scratch_id,
+            relativePath: process.relative_path,
+            ownerUid: process.owner_uid,
+            device: process.device,
+            inode: process.inode,
+            registeredAt: process.scratch_registered_at,
+          }),
+          launchManifest: Object.freeze({
+            manifestId: process.manifest_id,
+            manifestDigest: process.manifest_sha256,
+          }),
+          state: process.state,
+          exitCode: process.exit_code,
+          exitSignal: process.exit_signal,
+        });
+      });
+      const pendingLaunches = (this.#database.prepare(`SELECT
+          m.id AS manifest_id, m.manifest_sha256, s.*
+        FROM process_launch_manifests m
+        JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+        WHERE m.run_attempt_id = ? AND m.process_attempt_id IS NULL
+          AND s.state != 'cleanup_complete'
+        ORDER BY s.sample_index, m.id`
+      ).all(attempt.id) as any[]).map((pending): PendingLaunchRecoveryRecord => Object.freeze({
+        scratchLease: scratchLeaseRecord(pending),
+        launchManifest: Object.freeze({
+          manifestId: pending.manifest_id,
+          manifestDigest: pending.manifest_sha256,
+        }),
+      }));
+      return Object.freeze({
+        run,
+        attempt,
+        processes: Object.freeze(processes),
+        scratchLeases: Object.freeze(leases),
+        pendingLaunches: Object.freeze(pendingLaunches),
+      });
+    });
+  }
+
+  beginRunRecovery(input: {
+    attemptId: string;
+    priorDispatcherGeneration: string;
+    candidateDispatcherGeneration: string;
+    createdAt: IsoTimestamp;
+  }): string {
+    assertId(input.attemptId);
+    assertDigest(input.priorDispatcherGeneration, "Prior dispatcher generation");
+    assertDigest(input.candidateDispatcherGeneration, "Candidate dispatcher generation");
+    const action = {
+      schemaVersion: 1,
+      kind: "cross_restart_recovery",
+      attemptId: input.attemptId,
+      priorDispatcherGeneration: input.priorDispatcherGeneration,
+      candidateDispatcherGeneration: input.candidateDispatcherGeneration,
+    };
+    const id = `recovery_${canonicalDigest(action).slice(0, 32)}`;
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.priorDispatcherGeneration);
+      const started = this.#database.prepare(`SELECT id
+        FROM run_recovery_actions
+        WHERE run_attempt_id = ? AND prior_dispatcher_generation = ? AND state = 'started'
+        ORDER BY id`
+      ).all(input.attemptId, input.priorDispatcherGeneration) as Array<{ id: string }>;
+      if (started.length > 1) {
+        throw new ProductStoreV2Error("dispatcher_recovery_required: multiple started recovery actions are ambiguous.");
+      }
+      if (started.length === 1) {
+        // A backend crash mints a fresh candidate generation. The unfinished
+        // action still owns the same prior attempt and must be adopted instead
+        // of stranded behind its original random candidate generation.
+        return started[0]!.id;
+      }
+      const prior = this.#database.prepare(
+        "SELECT state FROM run_recovery_actions WHERE id = ?",
+      ).get(id) as { state: string } | undefined;
+      if (prior) {
+        if (prior.state !== "started") {
+          throw new ProductStoreV2Error("dispatcher_recovery_required: a terminal recovery action cannot be replayed.");
+        }
+        return id;
+      }
+      this.#executeDatabaseStatements([{
+        sql: `INSERT INTO run_recovery_actions
+          (id, run_attempt_id, prior_dispatcher_generation, candidate_dispatcher_generation,
+            state, action_json, action_sha256, created_at)
+          VALUES (?, ?, ?, ?, 'started', ?, ?, ?)`,
+        params: [
+          id,
+          input.attemptId,
+          input.priorDispatcherGeneration,
+          input.candidateDispatcherGeneration,
+          json(action),
+          canonicalDigest(action),
+          input.createdAt,
+        ],
+        expectedChanges: 1,
+      }]);
+      return id;
+    });
+  }
+
+  adoptRecoveredLaunchReceipt(input: RunAttemptIdentity & {
+    processAttemptId: string;
+    launchReceipt: BatchLaunchReceipt;
+    launchedAt: IsoTimestamp;
+  }): ProcessAttemptRecord {
+    const receipt = input.launchReceipt;
+    return this.registerBatchProcessAttempt({
+      ...input,
+      sampleIndex: receipt.sampleIndex,
+      sampleId: receipt.sampleId,
+      pid: receipt.pid,
+      processStartToken: receipt.processStartToken,
+      processGroupId: receipt.processGroupId,
+      scratchId: receipt.scratchId,
+      launchReceipt: receipt,
+      launchedAt: input.launchedAt,
+    });
+  }
+
+  finalizeUnlaunchedScratchLease(input: {
+    leaseId: string;
+    runAttemptId: string;
+    receipt: RecoveredScratchCleanupReceipt;
+  }): void {
+    assertId(input.leaseId);
+    assertId(input.runAttemptId);
+    this.#databaseMutation([{
+      sql: `UPDATE run_scratch_leases
+        SET state = 'cleanup_complete', cleaned_at = ?,
+          cleanup_receipt_json = ?, cleanup_receipt_sha256 = ?
+        WHERE id = ? AND run_attempt_id = ?
+          AND state IN ('planned', 'created')`,
+      params: [
+        input.receipt.cleanedAt,
+        json(input.receipt),
+        canonicalDigest(input.receipt),
+        input.leaseId,
+        input.runAttemptId,
+      ],
+      expectedChanges: 1,
+      mismatchMessage: "scratch_cleanup_unverified: unlaunched scratch cleanup lost its lease.",
+    }]);
+  }
+
+  completeRecoveredRun(input: RunAttemptIdentity & {
+    recoveryActionId: string;
+    disposition: "interrupted" | "cancelled";
+    processReceipts: readonly RecoveredProcessTerminationReceipt[];
+    scratchReceipts: readonly RecoveredScratchCleanupReceipt[];
+    finishedAt: IsoTimestamp;
+  }): Extract<RunRecord, { contractVersion: 4 }> {
+    assertRunAttemptIdentity(input);
+    assertId(input.recoveryActionId);
+    const receipt = {
+      schemaVersion: 1,
+      kind: "run_cross_restart_cleanup",
+      runId: input.runId,
+      attemptId: input.attemptId,
+      disposition: input.disposition,
+      processReceiptDigests: [...input.processReceipts].map((item) => item.receiptDigest).sort(),
+      scratchReceiptDigests: [...input.scratchReceipts].map((item) => item.receiptDigest).sort(),
+      finishedAt: input.finishedAt,
+      verified: true,
+    };
+    return this.#withImmediateTransaction(() => {
+      this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
+      const run = this.#database.prepare(`SELECT cancel_requested_at, first_cancel_command_id
+        FROM runs WHERE id = ? AND contract_version = 4 AND status = 'running'`
+      ).get(input.runId) as { cancel_requested_at: string | null; first_cancel_command_id: string | null } | undefined;
+      if (!run) throw new ProductStoreV2Error("invalid_run_transition: recovered run is no longer running.");
+      const cancellationWon = run.cancel_requested_at !== null && run.first_cancel_command_id !== null;
+      if ((input.disposition === "cancelled") !== cancellationWon) {
+        throw new ProductStoreV2Error("run_cancellation_won: recovery disposition violates committed cancellation precedence.");
+      }
+      const openProcesses = Number((this.#database.prepare(`SELECT count(*) AS count
+        FROM process_attempts WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
+      ).get(input.attemptId) as { count: number }).count);
+      const openLeases = Number((this.#database.prepare(`SELECT count(*) AS count
+        FROM run_scratch_leases WHERE run_attempt_id = ? AND state != 'cleanup_complete'`
+      ).get(input.attemptId) as { count: number }).count);
+      if (openProcesses || openLeases) {
+        throw new ProductStoreV2Error("process_cleanup_unverified: recovery cannot finalize before every process and scratch lease is clean.");
+      }
+      const runStatus = cancellationWon ? "cancelled" : "failed";
+      const attemptState = cancellationWon ? "cancelled" : "interrupted";
+      const terminalCode = cancellationWon ? "run_cancelled" : "runtime_interrupted";
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE run_attempts SET state = ?, finished_at = ?, heartbeat_at = ?
+            WHERE id = ? AND run_id = ? AND attempt_generation = ?
+              AND dispatcher_generation = ? AND state IN ('claimed', 'starting', 'running')`,
+          params: [
+            attemptState,
+            input.finishedAt,
+            input.finishedAt,
+            input.attemptId,
+            input.runId,
+            input.attemptGeneration,
+            input.dispatcherGeneration,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `UPDATE runs SET status = ?, terminal_code = ?,
+              terminal_diagnostics_json = ?, resource_overview_json = '{}',
+              finished_at = ?, updated_at = ?
+            WHERE id = ? AND contract_version = 4 AND status = 'running'`,
+          params: [
+            runStatus,
+            terminalCode,
+            json({
+              code: terminalCode,
+              diagnostic: cancellationWon
+                ? "Cancellation committed before cross-restart recovery."
+                : "The prior runtime was interrupted and reconciled before dispatcher generation handoff.",
+            }),
+            input.finishedAt,
+            input.finishedAt,
+            input.runId,
+          ],
+          expectedChanges: 1,
+        },
+        {
+          sql: `UPDATE run_recovery_actions
+            SET state = 'completed', terminal_disposition = ?,
+              cleanup_receipt_json = ?, cleanup_receipt_sha256 = ?, finished_at = ?
+            WHERE id = ? AND run_attempt_id = ? AND state = 'started'`,
+          params: [
+            input.disposition,
+            json(receipt),
+            canonicalDigest(receipt),
+            input.finishedAt,
+            input.recoveryActionId,
+            input.attemptId,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+      return runRecord(this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(input.runId)) as Extract<RunRecord, { contractVersion: 4 }>;
+    });
+  }
+
+  failRunRecovery(input: {
+    recoveryActionId: string;
+    attemptId: string;
+    failedAt: IsoTimestamp;
+  }): void {
+    this.#databaseMutation([{
+      sql: `UPDATE run_recovery_actions
+        SET state = 'failed', finished_at = ?
+        WHERE id = ? AND run_attempt_id = ? AND state = 'started'`,
+      params: [input.failedAt, input.recoveryActionId, input.attemptId],
+      expectedChanges: 1,
+    }]);
+  }
+
+  auditRecoveredBatchSuccesses(): void {
+    this.#assertOpen();
+    const rows = this.#database.prepare(`SELECT id, project_id
+      FROM runs
+      WHERE contract_version = 4 AND run_kind = 'batch' AND status = 'succeeded'
+      ORDER BY id`
+    ).all() as Array<{ id: string; project_id: string }>;
+    for (const row of rows) {
+      const run = this.getRun(row.project_id, row.id);
+      if (run.contractVersion !== 4) continue;
+      const attempt = this.#database.prepare(`SELECT id, attempt_generation
+        FROM run_attempts WHERE run_id = ? AND state = 'succeeded'
+        ORDER BY attempt_generation DESC LIMIT 1`
+      ).get(row.id) as { id: string; attempt_generation: number } | undefined;
+      if (!attempt) {
+        throw new ProductStoreV2Error("batch_success_recovery_invalid: succeeded run lacks a succeeded attempt.");
+      }
+      const transactionId = `mutation_${canonicalDigest({
+        kind: "batch_success",
+        runId: row.id,
+        attemptGeneration: attempt.attempt_generation,
+      }).slice(0, 48)}`;
+      if (!this.#database.prepare(
+        "SELECT 1 FROM committed_mutations WHERE transaction_id = ?",
+      ).get(transactionId)) {
+        throw new ProductStoreV2Error("batch_success_recovery_invalid: succeeded run lacks its committed mutation receipt.");
+      }
+      const samples = run.samplePlan as Array<{ sampleIndex: number; sampleId: string }>;
+      const processes = this.#database.prepare(`SELECT sample_index, sample_id, state, exit_code
+        FROM process_attempts WHERE run_attempt_id = ? ORDER BY sample_index, id`
+      ).all(attempt.id) as Array<{
+        sample_index: number;
+        sample_id: string;
+        state: string;
+        exit_code: number | null;
+      }>;
+      if (processes.length !== samples.length || processes.some((process, index) =>
+        process.sample_index !== samples[index]?.sampleIndex
+        || process.sample_id !== samples[index]?.sampleId
+        || process.state !== "cleanup_complete"
+        || process.exit_code !== 0)) {
+        throw new ProductStoreV2Error(
+          "batch_success_recovery_invalid: success requires one cleaned zero-exit process per frozen sample.",
+        );
+      }
+      let execution: ExecutionDescriptionV2;
+      try {
+        execution = validateExecutionDescriptionV2(this.#project(run.projectId).executionDescription);
+        assertRunCapabilityV2(execution, "batch");
+      } catch (error) {
+        throw new ProductStoreV2Error(
+          "batch_success_recovery_invalid: the frozen execution output contract is invalid.",
+          { cause: error },
+        );
+      }
+      if (canonicalDigest(execution) !== run.executionDescriptionDigest) {
+        throw new ProductStoreV2Error(
+          "batch_success_recovery_invalid: the execution output contract digest changed.",
+        );
+      }
+      const declarations = new Map(execution.outputs.map((output) => [output.logicalName, output]));
+      const seen = new Set<string>();
+      const outputs = this.listRunOutputs(row.id);
+      for (const output of outputs) {
+        if (output.contractVersion !== 4) {
+          throw new ProductStoreV2Error("batch_success_recovery_invalid: succeeded v4 run contains a legacy output.");
+        }
+        const sample = samples[output.sampleIndex];
+        const declaration = declarations.get(output.logicalName);
+        const key = `${output.sampleIndex}:${output.logicalName}`;
+        const expectedContractDigest = canonicalDigest({
+          runId: run.id,
+          logicalName: output.logicalName,
+          outputType: output.outputType,
+          sampleIndex: output.sampleIndex,
+          sampleId: output.sampleId,
+          declaredRole: output.declaredRole,
+        });
+        if (!sample || sample.sampleIndex !== output.sampleIndex || sample.sampleId !== output.sampleId
+          || !declaration || seen.has(key)
+          || output.declaredRole !== declaration.role
+          || output.file.mediaType !== declaration.mediaType
+          || output.outputContractDigest !== expectedContractDigest) {
+          throw new ProductStoreV2Error(
+            "batch_success_recovery_invalid: a recovered output contradicts its frozen sample or declaration.",
+          );
+        }
+        seen.add(key);
+      }
+      for (const sample of samples) {
+        for (const declaration of execution.outputs) {
+          if (declaration.required && !seen.has(`${sample.sampleIndex}:${declaration.logicalName}`)) {
+            throw new ProductStoreV2Error(
+              "batch_success_recovery_invalid: a required recovered output is missing.",
+            );
+          }
+        }
+      }
+    }
+  }
+
   projectExecutionCapability(projectId: string): ProjectExecutionCapability {
     assertId(projectId);
     const row = this.#database.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as any;
@@ -2318,6 +2935,12 @@ export class ProductStoreV2 {
       const attempts = this.#database.prepare("SELECT * FROM run_attempts WHERE run_id = ? ORDER BY id").all(runId) as any[];
       addRows("run_attempts", attempts);
       for (const attempt of attempts) {
+        addRows("run_scratch_leases",
+          this.#database.prepare("SELECT * FROM run_scratch_leases WHERE run_attempt_id = ? ORDER BY id").all(attempt.id) as any[]);
+        addRows("process_launch_manifests",
+          this.#database.prepare("SELECT * FROM process_launch_manifests WHERE run_attempt_id = ? ORDER BY id").all(attempt.id) as any[]);
+        addRows("run_recovery_actions",
+          this.#database.prepare("SELECT * FROM run_recovery_actions WHERE run_attempt_id = ? ORDER BY id").all(attempt.id) as any[]);
         addRows("process_attempts",
           this.#database.prepare("SELECT * FROM process_attempts WHERE run_attempt_id = ? ORDER BY id").all(attempt.id) as any[]);
       }
@@ -2539,6 +3162,142 @@ export class ProductStoreV2 {
     }
   }
 
+  #ensureRegisteredLaunchEvidence(input: BatchProcessIdentity & {
+    launchedAt: IsoTimestamp;
+    launchReceipt?: BatchLaunchReceipt;
+  }): void {
+    const existing = input.scratchId ? this.#database.prepare(`SELECT
+        m.id AS manifest_id, m.manifest_sha256, m.state AS manifest_state,
+        s.id AS scratch_id, s.relative_path, s.state AS scratch_state
+      FROM process_launch_manifests m
+      JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+      WHERE m.run_attempt_id = ? AND s.id = ?`
+    ).get(input.attemptId, input.scratchId) as {
+      manifest_id: string;
+      manifest_sha256: string;
+      manifest_state: string;
+      scratch_id: string;
+      relative_path: string;
+      scratch_state: string;
+    } | undefined : undefined;
+    if (existing) {
+      const receipt = input.launchReceipt;
+      if (!receipt || existing.manifest_state !== "planned" || existing.scratch_state !== "created"
+        || receipt.schemaVersion !== 1
+        || receipt.manifestId !== existing.manifest_id
+        || receipt.manifestDigest !== existing.manifest_sha256
+        || receipt.runId !== input.runId
+        || receipt.sampleIndex !== input.sampleIndex
+        || receipt.sampleId !== input.sampleId
+        || receipt.scratchId !== existing.scratch_id
+        || receipt.relativePath !== existing.relative_path
+        || receipt.pid !== input.pid
+        || receipt.processGroupId !== input.processGroupId
+        || receipt.processStartToken !== input.processStartToken
+        || receipt.receiptDigest !== launchReceiptUnsignedDigest(receipt)) {
+        throw new ProductStoreV2Error("process_launch_manifest_invalid: launch receipt does not match its planned process.");
+      }
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE run_scratch_leases
+            SET state = 'active'
+            WHERE id = ? AND run_attempt_id = ? AND state = 'created'`,
+          params: [existing.scratch_id, input.attemptId],
+          expectedChanges: 1,
+        },
+        {
+          sql: `UPDATE process_launch_manifests
+            SET process_attempt_id = ?, state = 'registered',
+              launch_receipt_json = ?, launch_receipt_sha256 = ?, registered_at = ?
+            WHERE id = ? AND run_attempt_id = ? AND state = 'planned'`,
+          params: [
+            input.processAttemptId,
+            json(receipt),
+            canonicalDigest(receipt),
+            input.launchedAt,
+            existing.manifest_id,
+            input.attemptId,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+      return;
+    }
+
+    // Direct Store tests and non-process test doubles do not own a filesystem
+    // scratch capability. They still receive complete schema evidence, while
+    // the production GenericBatchSupervisor always takes the pre-spawn path.
+    const scratchId = `scratch_${canonicalDigest({
+      processAttemptId: input.processAttemptId,
+      syntheticScratchHint: input.scratchId ?? null,
+    }).slice(0, 32)}`;
+    const relativePath = `synthetic-${canonicalDigest({ scratchId }).slice(0, 32)}`;
+    const plan = {
+      ...input,
+      scratchId,
+      relativePath,
+    };
+    const manifest = launchManifestPayload(plan);
+    const manifestDigest = canonicalDigest(manifest);
+    const manifestId = `launch_${manifestDigest.slice(0, 32)}`;
+    const unsignedReceipt = {
+      schemaVersion: 1 as const,
+      manifestId,
+      manifestDigest,
+      runId: input.runId,
+      sampleIndex: input.sampleIndex,
+      sampleId: input.sampleId,
+      scratchId,
+      relativePath,
+      pid: input.pid,
+      processGroupId: input.processGroupId,
+      processStartToken: input.processStartToken,
+      createdAt: input.launchedAt,
+    };
+    const receipt = { ...unsignedReceipt, receiptDigest: canonicalDigest(unsignedReceipt) };
+    this.#executeDatabaseStatements([
+      {
+        sql: `INSERT INTO run_scratch_leases
+          (id, run_id, run_attempt_id, dispatcher_generation, sample_index, sample_id,
+            relative_path, state, owner_uid, device, inode, created_at, registered_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, 1, ?, ?)`,
+        params: [
+          scratchId,
+          input.runId,
+          input.attemptId,
+          input.dispatcherGeneration,
+          input.sampleIndex,
+          input.sampleId,
+          relativePath,
+          typeof process.getuid === "function" ? process.getuid() : 0,
+          input.launchedAt,
+          input.launchedAt,
+        ],
+        expectedChanges: 1,
+      },
+      {
+        sql: `INSERT INTO process_launch_manifests
+          (id, run_attempt_id, scratch_lease_id, process_attempt_id, state,
+            manifest_json, manifest_sha256, launch_receipt_json, launch_receipt_sha256,
+            created_at, registered_at)
+          VALUES (?, ?, ?, ?, 'registered', ?, ?, ?, ?, ?, ?)`,
+        params: [
+          manifestId,
+          input.attemptId,
+          scratchId,
+          input.processAttemptId,
+          json(manifest),
+          manifestDigest,
+          json(receipt),
+          canonicalDigest(receipt),
+          input.launchedAt,
+          input.launchedAt,
+        ],
+        expectedChanges: 1,
+      },
+    ]);
+  }
+
   #assertCurrentDispatcherGeneration(generation: string): void {
     const row = this.#database.prepare(
       "SELECT generation FROM dispatcher_state WHERE singleton = 1",
@@ -2598,40 +3357,44 @@ export class ProductStoreV2 {
       set: string;
       params: Array<string | number | null>;
       stateTransition?: boolean;
+      extraStatements?: ProductDatabaseMutationStatement[];
     },
   ): ProcessAttemptRecord {
     assertBatchProcessIdentity(input);
     return this.#withImmediateTransaction(() => {
       this.#assertCurrentDispatcherGeneration(input.dispatcherGeneration);
-      this.#executeDatabaseStatements([{
-        sql: `UPDATE process_attempts
-          SET ${transition.set}
-          WHERE id = ? AND run_attempt_id = ? AND process_kind = 'batch'
-            AND sample_index = ? AND sample_id = ? AND pid = ?
-            AND process_start_token = ? AND process_group_id = ? AND state = ?
-            AND EXISTS (
-              SELECT 1 FROM run_attempts a
-              WHERE a.id = process_attempts.run_attempt_id
-                AND a.run_id = ? AND a.attempt_generation = ?
-                AND a.dispatcher_generation = ?
-            )`,
-        params: [
-          ...transition.params,
-          input.processAttemptId,
-          input.attemptId,
-          input.sampleIndex,
-          input.sampleId,
-          input.pid,
-          input.processStartToken,
-          input.processGroupId,
-          transition.expectedState,
-          input.runId,
-          input.attemptGeneration,
-          input.dispatcherGeneration,
-        ],
-        expectedChanges: 1,
-        mismatchMessage: "stale_dispatcher_generation: the batch process transition lost its full-identity compare-and-set.",
-      }]);
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE process_attempts
+            SET ${transition.set}
+            WHERE id = ? AND run_attempt_id = ? AND process_kind = 'batch'
+              AND sample_index = ? AND sample_id = ? AND pid = ?
+              AND process_start_token = ? AND process_group_id = ? AND state = ?
+              AND EXISTS (
+                SELECT 1 FROM run_attempts a
+                WHERE a.id = process_attempts.run_attempt_id
+                  AND a.run_id = ? AND a.attempt_generation = ?
+                  AND a.dispatcher_generation = ?
+              )`,
+          params: [
+            ...transition.params,
+            input.processAttemptId,
+            input.attemptId,
+            input.sampleIndex,
+            input.sampleId,
+            input.pid,
+            input.processStartToken,
+            input.processGroupId,
+            transition.expectedState,
+            input.runId,
+            input.attemptGeneration,
+            input.dispatcherGeneration,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "stale_dispatcher_generation: the batch process transition lost its full-identity compare-and-set.",
+        },
+        ...(transition.extraStatements ?? []),
+      ]);
       return processAttemptRecord(this.#database.prepare("SELECT * FROM process_attempts WHERE id = ?").get(input.processAttemptId));
     });
   }
@@ -3081,6 +3844,27 @@ const processAttemptRecord = (row: any): ProcessAttemptRecord => {
   };
 };
 
+const scratchLeaseRecord = (row: any): RunScratchLeaseRecord => {
+  if (!row) throw new ProductStoreV2Error("Scratch lease does not exist.");
+  return {
+    id: row.id,
+    runId: row.run_id,
+    runAttemptId: row.run_attempt_id,
+    dispatcherGeneration: row.dispatcher_generation,
+    sampleIndex: row.sample_index,
+    sampleId: row.sample_id,
+    relativePath: row.relative_path,
+    state: row.state,
+    ownerUid: row.owner_uid,
+    device: row.device,
+    inode: row.inode,
+    createdAt: row.created_at,
+    registeredAt: row.registered_at,
+    cleanedAt: row.cleaned_at,
+    cleanupReceiptDigest: row.cleanup_receipt_sha256,
+  };
+};
+
 const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: string } => {
   switch (kind) {
     case "model": return { table: "models", trashColumn: "model_id" };
@@ -3132,6 +3916,111 @@ const assertRunAttemptIdentity = (input: RunAttemptIdentity): void => {
     throw new ProductStoreV2Error("Run attempt generation is invalid.");
   }
   assertDigest(input.dispatcherGeneration, "Dispatcher generation");
+};
+
+const assertBatchScratchPlan = (input: BatchScratchPlan): void => {
+  assertId(input.runId);
+  assertId(input.scratchId);
+  if (!Number.isSafeInteger(input.sampleIndex) || input.sampleIndex < 0) {
+    throw new ProductStoreV2Error("Batch scratch sample index is invalid.");
+  }
+  assertDigest(input.sampleId, "Batch scratch sample ID");
+  if (typeof input.relativePath !== "string" || input.relativePath.length < 3
+    || input.relativePath.length > 200 || !/^[A-Za-z0-9._-]+$/u.test(input.relativePath)
+    || [".", ".."].includes(input.relativePath)) {
+    throw new ProductStoreV2Error("Batch scratch relative path is invalid.");
+  }
+};
+
+const launchManifestPayload = (input: RunAttemptIdentity & BatchScratchPlan): Record<string, unknown> => ({
+  schemaVersion: 1,
+  kind: "batch_process_launch",
+  runId: input.runId,
+  attemptId: input.attemptId,
+  attemptGeneration: input.attemptGeneration,
+  dispatcherGeneration: input.dispatcherGeneration,
+  sampleIndex: input.sampleIndex,
+  sampleId: input.sampleId,
+  scratchId: input.scratchId,
+  relativePath: input.relativePath,
+});
+
+const assertStoredProcessLaunchEvidence = (
+  row: Record<string, any>,
+  attempt: RunAttemptRecord,
+): void => {
+  let manifest: Record<string, unknown>;
+  let receipt: BatchLaunchReceipt;
+  try {
+    manifest = JSON.parse(row.manifest_json);
+    receipt = JSON.parse(row.launch_receipt_json);
+  } catch (error) {
+    throw new ProductStoreV2Error(
+      "dispatcher_recovery_required: process launch evidence is not valid JSON.",
+      { cause: error },
+    );
+  }
+  const expectedManifest = launchManifestPayload({
+    runId: attempt.runId,
+    attemptId: attempt.id,
+    attemptGeneration: attempt.attemptGeneration,
+    dispatcherGeneration: attempt.dispatcherGeneration,
+    sampleIndex: row.sample_index,
+    sampleId: row.sample_id,
+    scratchId: row.scratch_id,
+    relativePath: row.relative_path,
+  });
+  const receiptShapeValid = Boolean(receipt && typeof receipt === "object" && !Array.isArray(receipt));
+  const receiptKeys = receiptShapeValid ? Object.keys(receipt).sort().join("\n") : "";
+  const expectedReceiptKeys = [
+    "createdAt", "manifestDigest", "manifestId", "pid", "processGroupId",
+    "processStartToken", "receiptDigest", "relativePath", "runId", "sampleId",
+    "sampleIndex", "schemaVersion", "scratchId",
+  ].sort().join("\n");
+  const expectedManifestState =
+    row.state === "blocked" ? "registered"
+      : ["released", "running"].includes(row.state) ? "released"
+        : row.state === "cleanup_complete" ? "cleanup_complete"
+          : "exited";
+  const expectedScratchState =
+    row.state === "cleanup_complete" ? "cleanup_complete"
+      : row.state === "cleanup_unverified" ? "cleanup_unverified"
+        : "active";
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)
+    || canonicalDigest(manifest) !== row.manifest_sha256
+    || canonicalDigest(manifest) !== canonicalDigest(expectedManifest)
+    || row.manifest_id !== `launch_${row.manifest_sha256.slice(0, 32)}`
+    || row.manifest_state !== expectedManifestState
+    || row.scratch_state !== expectedScratchState
+    || !receiptShapeValid
+    || receiptKeys !== expectedReceiptKeys
+    || canonicalDigest(receipt) !== row.launch_receipt_sha256
+    || receipt.schemaVersion !== 1
+    || receipt.manifestId !== row.manifest_id
+    || receipt.manifestDigest !== row.manifest_sha256
+    || receipt.runId !== attempt.runId
+    || receipt.sampleIndex !== row.sample_index
+    || receipt.sampleId !== row.sample_id
+    || receipt.scratchId !== row.scratch_id
+    || receipt.relativePath !== row.relative_path
+    || receipt.pid !== row.pid
+    || receipt.processGroupId !== row.process_group_id
+    || receipt.processStartToken !== row.process_start_token
+    || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
+    || receipt.processGroupId !== receipt.pid
+    || typeof receipt.createdAt !== "string"
+    || typeof receipt.receiptDigest !== "string"
+    || !/^[0-9a-f]{64}$/u.test(receipt.receiptDigest)
+    || receipt.receiptDigest !== launchReceiptUnsignedDigest(receipt)) {
+    throw new ProductStoreV2Error(
+      "dispatcher_recovery_required: process row contradicts its durable launch receipt.",
+    );
+  }
+};
+
+const launchReceiptUnsignedDigest = (receipt: BatchLaunchReceipt): string => {
+  const { receiptDigest: _receiptDigest, ...unsigned } = receipt;
+  return canonicalDigest(unsigned);
 };
 
 const assertBatchProcessIdentity = (input: BatchProcessIdentity): void => {

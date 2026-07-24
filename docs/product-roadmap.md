@@ -28,8 +28,9 @@
 > v1 Models are not silently upgraded. Visual and batch `domainEvents` are
 > explicit current rejections. A3-1c-a adds schema migration v5 and strict
 > same-process queued/running cancellation with committed race receipts.
-> Cross-restart attempt/process/scratch recovery and exactly-once completion
-> cards remain later A3-1c work, followed by
+> A3-1c-b adds schema migration v6 and fail-closed v4 cross-restart
+> attempt/process/scratch recovery before dispatcher-generation handoff.
+> Exactly-once completion cards remain later A3-1c work, followed by
 > visual, Playwright, and ordinary wind slices. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 

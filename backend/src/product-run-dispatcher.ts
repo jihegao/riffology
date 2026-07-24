@@ -9,6 +9,10 @@ import {
   type SuperviseBatchInput,
 } from "./generic-batch-supervisor.ts";
 import {
+  ProductRunRecovery,
+  type ProductRunRecoverySupervisorPort,
+} from "./product-run-recovery.ts";
+import {
   ProductStoreV2,
   type BatchProcessIdentity as StoreBatchProcessIdentity,
   type ClaimedBatchRun,
@@ -16,7 +20,9 @@ import {
   type RunLimitsV1,
 } from "./product-store-v2.ts";
 
-export type BatchSupervisorPort = Pick<GenericBatchSupervisor, "supervise" | "cleanup">;
+export type BatchSupervisorPort =
+  & Pick<GenericBatchSupervisor, "supervise" | "cleanup">
+  & Partial<ProductRunRecoverySupervisorPort>;
 
 export type ProductRunDispatcherOptions = Readonly<{
   store: ProductStoreV2;
@@ -25,6 +31,8 @@ export type ProductRunDispatcherOptions = Readonly<{
   leaseMs?: number;
   consumeOutput?: (candidate: BatchOutputCandidate) => Buffer;
 }>;
+
+const activeDispatcherByStore = new WeakMap<ProductStoreV2, ProductRunDispatcher>();
 
 export class ProductRunDispatcher {
   readonly #store: ProductStoreV2;
@@ -53,10 +61,28 @@ export class ProductRunDispatcher {
 
   async start(): Promise<void> {
     if (this.#started) return;
-    const now = this.#now().toISOString();
-    this.#store.activateDispatcherGeneration({ generation: this.#generation, activatedAt: now });
-    this.#started = true;
-    this.notify();
+    const owner = activeDispatcherByStore.get(this.#store);
+    if (owner && owner !== this) {
+      throw new Error("dispatcher_already_active: this ProductStore already has an in-process dispatcher.");
+    }
+    if (owner === this) {
+      throw new Error("dispatcher_start_in_progress: this dispatcher is already starting.");
+    }
+    activeDispatcherByStore.set(this.#store, this);
+    try {
+      await new ProductRunRecovery({
+        store: this.#store,
+        supervisor: this.#supervisor,
+        now: this.#now,
+      }).recoverBeforeGenerationActivation(this.#generation);
+      const now = this.#now().toISOString();
+      this.#store.activateDispatcherGeneration({ generation: this.#generation, activatedAt: now });
+      this.#started = true;
+      this.notify();
+    } catch (error) {
+      activeDispatcherByStore.delete(this.#store);
+      throw error;
+    }
   }
 
   notify(): void {
@@ -76,7 +102,13 @@ export class ProductRunDispatcher {
   async stop(): Promise<void> {
     this.#stopping = true;
     this.#activeAbort?.abort();
-    await this.#tail;
+    try {
+      await this.#tail;
+    } finally {
+      if (activeDispatcherByStore.get(this.#store) === this) {
+        activeDispatcherByStore.delete(this.#store);
+      }
+    }
   }
 
   async #drain(): Promise<void> {
@@ -162,11 +194,24 @@ export class ProductRunDispatcher {
         project,
         signal: abort.signal,
         hooks: {
-          registerProcess: async (identity) => {
+          planScratch: async (plan) => this.#store.prepareBatchProcessLaunch({
+            ...attempt,
+            ...plan,
+            createdAt: this.#now().toISOString(),
+          }),
+          registerScratchDirectory: async (identity) => {
+            this.#store.registerBatchScratchDirectory({
+              ...attempt,
+              ...identity,
+              registeredAt: this.#now().toISOString(),
+            });
+          },
+          registerProcess: async (identity, launchReceipt) => {
             const durable = storeProcessIdentity(attempt, identity);
             this.#store.registerBatchProcessAttempt({
               ...durable,
               launchedAt: this.#now().toISOString(),
+              launchReceipt,
             });
             registered.set(identity.sampleIndex, durable);
             phases.set(identity.sampleIndex, "blocked");
@@ -387,6 +432,7 @@ export class ProductRunDispatcher {
         ...durable,
         cleanupVerified: true,
         cleanupReceiptDigest: cleanup.receiptDigest,
+        cleanedAt: cleanup.cleanedAt,
       });
       cleanupFinalized.add(sampleIndex);
     }
@@ -422,6 +468,7 @@ const storeProcessIdentity = (
   pid: identity.pid,
   processStartToken: identity.startToken,
   processGroupId: identity.processGroupId,
+  scratchId: identity.scratchId,
 });
 
 const requiredIdentity = (

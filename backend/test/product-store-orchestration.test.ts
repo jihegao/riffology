@@ -307,6 +307,39 @@ test("terminal commit wins before cancel and later cancel replays without rewrit
   }
 });
 
+test("one in-process dispatcher owns a ProductStore until stop releases the guard", async () => {
+  const fixture = createDispatcherFixture("dispatcher_singleton");
+  const supervisor = syntheticSupervisor({
+    status: "succeeded",
+    code: "batch_run_succeeded",
+    includeOutput: true,
+  });
+  const first = new ProductRunDispatcher({
+    store: fixture.store,
+    supervisor,
+    leaseMs: 1_000,
+    consumeOutput: () => Buffer.from("{}"),
+  });
+  const second = new ProductRunDispatcher({
+    store: fixture.store,
+    supervisor,
+    leaseMs: 1_000,
+    consumeOutput: () => Buffer.from("{}"),
+  });
+  try {
+    await first.start();
+    await assert.rejects(() => second.start(), /dispatcher_already_active/u);
+    const terminal = await waitForTerminalRun(fixture.store, fixture.projectId, fixture.runId);
+    assert.equal(terminal.status, "succeeded");
+    await first.stop();
+    await assert.doesNotReject(() => second.start());
+  } finally {
+    await first.stop();
+    await second.stop();
+    fixture.close();
+  }
+});
+
 test("dispatcher generation fences claims and batch attempts while success publishes outputs atomically", () => {
   const parent = mkdtempSync(join(tmpdir(), "riff-product-orchestration-"));
   let injectSuccessFault = false;
@@ -689,6 +722,30 @@ test("atomic batch success survives after-commit crash recovery without replayin
     const outputs = reopened.listRunOutputs(fixture.runId);
     assert.equal(outputs.length, 1);
     assert.equal(reopened.readObjectFile(outputs[0]!.file.id).toString("utf8"), "{\"recovered\":true}");
+    assert.doesNotThrow(() => reopened!.auditRecoveredBatchSuccesses());
+    const outputPath = join(
+      reopened.root,
+      "objects/projects",
+      fixture.projectId,
+      "runs",
+      fixture.runId,
+      outputs[0]!.file.relativePath,
+    );
+    writeFileSync(outputPath, "{\"recovered\":false}");
+    assert.throws(
+      () => reopened!.auditRecoveredBatchSuccesses(),
+      /metadata or bytes drifted|digest drift/u,
+    );
+    writeFileSync(outputPath, "{\"recovered\":true}");
+    reopened.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    database.prepare("DELETE FROM output_indexes WHERE run_id = ?").run(fixture.runId);
+    database.close();
+    reopened = ProductStoreV2.open(fixture.root);
+    assert.throws(
+      () => reopened!.auditRecoveredBatchSuccesses(),
+      /required recovered output is missing/u,
+    );
     assert.deepEqual(readdirSync(join(fixture.root, ".recovery")), []);
   } finally {
     reopened?.close();
@@ -870,7 +927,7 @@ test("dispatcher persists pre-registration failures and surfaces registered-proc
     assert.equal(registeredFailure.status, "running");
     assert.equal(store.listRunAttempts(registeredFailure.id)[0]!.state, "running");
     const replacement = new ProductRunDispatcher({ store, supervisor, leaseMs: 1_000 });
-    await assert.rejects(() => replacement.start(), /dispatcher_recovery_required/u);
+    await assert.rejects(() => replacement.start(), /dispatcher_already_active/u);
   } finally {
     await dispatcher?.stop();
     store.close();
@@ -1156,7 +1213,7 @@ test("dispatcher leaves a run recovery-required when cleanup cannot be proven", 
     assert.match(dispatcher.lastError?.message ?? "", /dispatcher_recovery_required/u);
     assert.equal(fixture.store.getRun(fixture.projectId, fixture.runId).status, "running");
     const replacement = new ProductRunDispatcher({ store: fixture.store, supervisor, leaseMs: 1_000 });
-    await assert.rejects(() => replacement.start(), /dispatcher_recovery_required/u);
+    await assert.rejects(() => replacement.start(), /dispatcher_already_active/u);
   } finally {
     await dispatcher?.stop();
     fixture.close();
