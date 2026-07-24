@@ -31,8 +31,22 @@
 > A3-1c-b adds schema migration v6 and fail-closed v4 cross-restart
 > attempt/process/scratch recovery before dispatcher-generation handoff.
 > A3-1c-c adds schema migration v7 and exactly-once deterministic platform
-> completion cards with startup reconciliation. Visual, Playwright, and
-> ordinary wind slices remain. This is not completion evidence
+> batch completion cards with startup reconciliation. Pending visual work is frozen
+> as A3-2a1 schema-v8 Store/recovery evidence while public visual starts still
+> reject, A3-2a2 real visual lifecycle, A3-2b isolated broker/frame/WebSocket,
+> and A3-2c scoped Playwright. A3-2a1 remains schema/Store/recovery plus
+> negative admission only, hardening the existing v4 port/health shape and
+> rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
+> assigned output directory, a visual-only no-outbound sandbox, one active
+> visual slot that cannot block batch, and one no-retry exact bounded health
+> GET; it does not support visual completion cards or claim browser access.
+> A3-2b uses
+> platform `::1` on different server-owned ports so Strict cookies remain
+> same-site and SOP isolates DOM origins, while the untrusted child remains on
+> IPv4 `127.0.0.1` and receives no platform cookie. One-use capability,
+> ≤60-second nonce, generation, Origin, Host, registry, and exact-app
+> `frame-ancestors` checks remain authority. A3-3 remains the ordinary wind
+> import. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
 > The current process claim is deliberately narrow: macOS, local user,

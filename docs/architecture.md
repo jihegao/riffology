@@ -98,6 +98,103 @@ bounded Agent context serializes only their five allowlisted fields.
 Visual supervision, scoped browser/Playwright access, and wind import also
 remain later Stage 3 slices.
 
+The planned visual work is deliberately split so persistence authority lands
+before public execution:
+
+```text
+A3-2a1 schema v8 / Store / recovery
+  -> extend v6 scratch / launch / recovery to visual
+  -> harden existing v4 visual process shape; make launch port immutable
+  -> atomic one-write health_at + matching immutable receipt
+  -> reject unproven pre-v8 health/live evidence
+  -> public visual start still capability_not_available
+
+A3-2a2 real visual lifecycle
+  -> same canonical single-sample --riff-input as batch
+  -> assigned --riff-output-dir --riff-host 127.0.0.1 --riff-port
+  -> visual-only sandbox: assigned IPv4 listener only, no ::1/outbound network
+  -> exact GET health + before/after listener ownership + one CAS receipt
+  -> cancellation / timeout / output validation / restart cleanup
+  -> maxActiveVisualRuns=1; full visual lane cannot block batch queue drain
+
+A3-2b isolated broker / frame / WebSocket
+  -> platform app + broker exact-bind ::1 on different server-owned ports
+  -> one-use frame capability + exact broker Host:port/path
+
+A3-2c scoped Playwright
+  -> current Project + current healthy attempt -> bounded observation
+  -> explicit one-turn, one-use typed interaction
+```
+
+Port selection closes a local probe socket before child bind and therefore has
+a bounded TOCTOU window; it is not a strong reservation claim. Health cannot
+commit until the platform proves the exact recorded child/process group owns a
+listener on only the assigned loopback endpoint. The visual-specific sandbox
+denies all outbound/direct network access, every other IPv4 listener, and every
+IPv6/`::1` bind. When the host cannot express an endpoint-level bind filter,
+exact OS listener ownership is a required compensation but never permission to
+relax outbound denial.
+Schema v4 already has visual process kind, port, `health_at`, and the
+one-live-visual-process rule, but the port is currently updateable and health
+does not have complete one-write/receipt atomicity. Schema v8 does not re-add
+those fields: it rejects every port update and requires a single
+null-to-receipt-timestamp `health_at` write plus the unique matching receipt in
+one transaction for the exact running launch/port/path/identity. Health-only,
+receipt-only, mismatched, or repeated evidence fails. Unproven pre-v8 visual
+health/live evidence fails migration closed.
+
+Health first
+detects exact OS listener readiness, then performs one no-retry
+manual-redirect exact-path GET, accepts only bounded `200`, rechecks listener
+ownership after the response, and commits one same-identity CAS receipt.
+Concurrent/repeated calls cannot send another request. Exact IPv4 listener
+ownership is monitored while running and checked again at termination. The port
+and health evidence remain backend-only and cannot become a URL/secret
+projection.
+
+The first implementation has a server-owned `maxActiveVisualRuns = 1` and an
+active map keyed by `(runId, attemptId)`. A full visual lane leaves the next
+visual queued while batch claims continue under their unchanged cap. The same
+dispatcher generation heartbeats and finalizes each lane; a slot releases only
+after terminal commit and verified cleanup. Stop aborts and joins all lanes
+before Store close.
+
+The platform app and broker both exact-bind IPv6 loopback `::1` on different
+server-owned ports and expose `http://[::1]:<port>` URLs. The port split gives
+same-origin-policy DOM isolation while the shared host remains same-site for
+`SameSite=Strict`. Their cookies still cross ports and are not isolated from
+each other; the real host boundary is that platform `::1` cookies are not sent
+to the untrusted visual child on `127.0.0.1`.
+
+The app cookie is host-only, HttpOnly, and `Path=/api/`. Bootstrap requires
+exact app Host/Origin and `Sec-Fetch-Site: same-origin`; a new generation
+revokes older frame/WS capabilities. Frame-session additionally requires the
+exact cookie and CSRF. First nonce navigation normally has no Origin and uses
+exact broker Host/path plus atomic nonce consumption within at most 60 seconds;
+expiry, restart, or generation rotation invalidates it immediately. Later
+broker HTTP requires the exact named cookie/live attempt, and exact broker
+Origin when one is present; WS always requires the exact broker Origin. The
+broker cookie expires at `min(attempt expiry, 15 minutes)`. Both cookies may
+omit `Secure` on current HTTP and must set it under future HTTPS. Every broker
+document permits framing only through CSP
+`frame-ancestors http://[::1]:<exact-app-port>`; wildcard ancestors and
+`X-Frame-Options: SAMEORIGIN` are forbidden. The capability registry
+binds browser-session generation, Project, run, attempt generation, expiry, and
+socket set. Revocation closes sockets before deleting state. Cookie `Path` is
+not authority, and A3-2c does not reuse user frame secrets.
+
+Visual completion cards are intentionally absent. A visual start that supplies
+`completionConversationId` fails with `visual_completion_not_supported`;
+accepted visual runs keep the disposition `not_requested` and terminalize
+without a completion-card receipt or message. Success requires exact child exit
+code zero plus atomic validation of every required declared output. A3-2a1 and
+A3-2a2 have no proxy/frame/WebSocket/Playwright or browser evidence claim.
+The target run DTO supports both run kinds. Visual terminal codes are
+`visual_run_succeeded`, `visual_process_failed`, `visual_health_failed`,
+`visual_listener_invalid`, and `visual_startup_timeout`; same-process shutdown,
+restart, and cancel-first remain respectively `failed/dispatcher_shutdown`,
+`failed/runtime_interrupted`, and `cancelled/run_cancelled`.
+
 One conversation owns one provider/model lock and at most one nonterminal
 backend-only external session generation. Its turns are serialized; the scoped
 OpenCode MCP registration is additionally serialized because that registry is

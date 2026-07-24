@@ -205,7 +205,7 @@ child-receipt-before-Store adoption, claimed/starting/running/blocked/released/
 exited/cleanup-complete checkpoints, exact success process/output cardinality,
 same-process dispatcher ownership, and two-generation handoff tests. A migrated
 v5 live process without v6 evidence is explicitly fail-closed. Exactly-once
-completion-card coverage now proves all four terminal statuses, all three
+batch completion-card coverage now proves all four terminal statuses, all three
 dispositions, deterministic IDs and payload allowlisting, SQLite
 `after_sqlite_commit` recovery, pending-terminal startup reconciliation,
 duplicate-output rejection, Agent-context isolation, and permanent-delete
@@ -213,13 +213,144 @@ closure. The dispatcher still fails closed with
 `dispatcher_recovery_required` when evidence is absent or contradictory; that
 diagnostic is the intended safety boundary, not proof of cleanup.
 
-Later visual tests must prove exact WebSocket path/subprotocol enforcement plus
-frame-size, connection-count, and idle-time limits, as well as the same-origin
-local bootstrap plus isolated-broker HttpOnly one-use frame-session boundary,
-Origin/CORS rules, and parent DOM isolation in a real browser. Installer tests
-must pin and verify the
-execution-v2 scaffold and wind manifest IDs, versions, and concrete digests,
-including same-ID conflicts and mandatory re-scaffolding for unproven v1 Models.
+### Planned A3-2 visual gates
+
+A3-2a is split into two separately merged gates:
+
+- **A3-2a1 schema-v8/Store/recovery contract:** migration and rollback tests
+  must preserve every v3-v7 batch row, trigger, completion-card receipt, and
+  recovery invariant while extending schema-v6 scratch/launch/recovery evidence
+  to the existing schema-v4 visual process shape. Tests must not treat its
+  current `loopback_port` or `health_at` as immutable: v8 adds the missing
+  triggers. Direct SQL covers a port update, `health_at`-only write,
+  receipt-only insert, receipt/timestamp mismatch, second health update, second
+  receipt, duplicate, cross-run, cross-attempt, wrong-port, wrong-path, and
+  mutable health evidence.
+  The only allowed health transition is one same-transaction null-to-receipt-
+  timestamp `health_at` write plus unique receipt for the exact running visual
+  process with matching launch/port/path/identity.
+  Missing health evidence is invalid only after health has committed, for a
+  healthy projection, or for a success path that requires health; pre-health
+  planned/created/released/running recovery checkpoints legitimately have no
+  health receipt.
+  Migration fixtures with any pre-v8 visual `health_at` or live process evidence
+  fail closed because public visual dispatch was never available and the
+  evidence cannot be proven; migration never auto-adopts it as healthy.
+  Recovery tests cover planned/created/receipt-before-adoption/registered/
+  released/running/healthy checkpoints and exact cleanup, but the public visual
+  start without completion-card input must still return
+  `capability_not_available`. A request with `completionConversationId` returns
+  `visual_completion_not_supported`. This gate runs no visual model and claims
+  no browser behavior.
+- **A3-2a2 real visual lifecycle:** a real `riff-visual-v1` child must receive
+  the canonical single-sample envelope through `--riff-input`, its assigned
+  `--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and the frozen assigned
+  `--riff-port`. Tests compare the input to the planner/sample-ID preimage and
+  cover early exit, startup and wall timeout, stdout/stderr limits,
+  cancellation, same-process shutdown, and restart cleanup. A normal exit
+  succeeds only when it is code zero and every required declared output
+  validates and publishes atomically.
+
+The macOS real-process gate uses a visual-only `sandbox-exec` profile.
+Counterexamples attempt to listen on another loopback port, connect to another
+local service, connect to an external address, and bind IPv6 loopback `::1`.
+Only bind/listen on the assigned `127.0.0.1:<assigned-port>` may survive; all outbound,
+direct network, other IPv4 listener, and `::1` bind attempts must remain denied.
+If endpoint-level bind filtering is unavailable, tests show exact OS listener
+ownership detects and fails a child/process group with any extra listener while
+the sandbox still denies every outbound attempt. The listener set is checked
+before health, while running, and during termination. That compensation cannot
+be reported as sandbox endpoint isolation.
+
+A3-2a2 freezes `maxActiveVisualRuns = 1` without changing the batch cap. Tests
+run one long-lived healthy visual, queue a second visual, and queue a real batch
+run. The second visual must remain queued, the batch must claim and finish, and
+the active map must contain only the exact first `(runId, attemptId)`. Every
+lane heartbeats/finalizes with its claim generation. The visual slot is released
+only after terminal commit and verified process/scratch cleanup. Dispatcher
+stop must abort and await every active lane before returning.
+
+The assigned-port tests acknowledge the local close-then-bind TOCTOU window.
+They prove the platform detects and fails closed on wildcard binding, listener
+ownership by another PID/process group, port replacement, and ambiguous
+ownership before health commits; they do not claim strong port reservation.
+Public DTO/transcript/error/log scans must find neither child ports nor derived
+public URLs.
+
+Health tests first detect exact OS listener readiness without HTTP, then issue
+one exact manual-redirect `GET` to
+`http://127.0.0.1:<assigned-port><healthPath>`. They reject every `3xx`, non-`200`,
+oversized header/body, deadline overrun, wrong path, and listener mismatch.
+Exact child/process-group listener ownership is checked both immediately before
+the request and after the complete bounded response. Replacement in either
+window fails with `visual_listener_invalid`; concurrent or repeated probes
+cannot send another HTTP request or create another same-identity health
+receipt. Startup time includes readiness plus that one request and has no HTTP
+retry.
+
+The target public run DTO accepts `runKind: "batch" | "visual"`. Terminal tests
+freeze `succeeded/visual_run_succeeded`, `failed/visual_process_failed`,
+`failed/visual_health_failed`, `failed/visual_listener_invalid`, and
+`timed_out/visual_startup_timeout`, plus `timed_out/run_wall_timeout` and shared
+`failed` stdout/stderr/output/cleanup/heartbeat codes. They specifically prove
+same-process shutdown is
+`failed/dispatcher_shutdown`, restart recovery is
+`failed/runtime_interrupted`, and cancel-first is
+`cancelled/run_cancelled`.
+
+Visual completion is a negative contract. A public visual start containing
+`completionConversationId` must return HTTP `422`
+`visual_completion_not_supported`. Accepted visual runs retain
+`completionCardDisposition: "not_requested"` through success, failure,
+timeout, cancellation, and restart, with no `run_completion_cards` row and no
+platform message. Project run reads remain authoritative.
+
+A3-2a1 and A3-2a2 have no proxy, frame, WebSocket, Playwright, or real-browser
+acceptance row. Those claims begin only in the later gates:
+
+- **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
+  enforcement, frame-size, connection-count, and idle-time limits, plus the
+  same-origin local bootstrap, isolated-broker HttpOnly one-use frame session,
+  Origin/CORS rules, and parent DOM isolation in a real browser. Platform app
+  and broker exact-bind `::1` on different server-owned ports and use
+  `http://[::1]:<port>` URLs; the untrusted child remains IPv4
+  `127.0.0.1:<assigned-port>`. Tests prove app/broker cookies cross ports but
+  are not sent to the child host. The iframe demonstrably sends the
+  `SameSite=Strict` broker cookie, JavaScript cannot read the HttpOnly cookie,
+  and the different port origin cannot access the parent DOM.
+
+  Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, and wrong
+  Fetch-Site; its app cookie is host-only with `Path=/api/`. A new bootstrap
+  generation first revokes old frames and WS. Frame-session requires exact
+  cookie, CSRF, Origin, and Fetch-Site. First nonce navigation succeeds without
+  Origin only at the exact broker Host/path, only once, and no later than 60
+  seconds after issue. Tests redeem within 60 seconds, reject after expiry, and
+  prove restart or a new browser generation invalidates the nonce immediately.
+  Expired nonce values never appear in logs, headers, DTOs, or SQLite.
+  Post-redirect HTTP
+  without Origin requires the broker cookie; HTTP with Origin requires exact
+  broker Origin. WS requires exact broker Origin and rejects missing, `null`,
+  app, child, and foreign values. Registry assertions cover browser-session
+  generation, Project, run, attempt generation, expiry, and socket set;
+  revocation closes sockets before removal. Three-party app/broker/child
+  headers and logs pass secret scans. Tests do not treat port separation or
+  Cookie `Path` as Cookie authorization. The broker cookie expires at
+  `min(attempt expiry, 15 minutes)`. App and broker cookies may omit `Secure` on
+  current HTTP, but HTTPS fixtures require it.
+
+  Every broker document must emit exact CSP
+  `frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and must not
+  emit `X-Frame-Options: SAMEORIGIN`. A real browser proves the exact app can
+  embed the frame while another `::1` port, a different app, the IPv4 child,
+  and a foreign top-level page cannot.
+- **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
+  explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
+  script, upload, clipboard, and expired-capability rejection. Its internal
+  capability never reuses the user's frame URL, app cookie, or broker cookie.
+
+Installer tests in A3-3 must pin and verify the execution-v2 scaffold and wind
+manifest IDs, versions, and concrete digests, including same-ID conflicts and
+mandatory re-scaffolding for unproven v1 Models.
 
 Mocks cover fault branches only. A3-1b batch acceptance uses a real generic
 subprocess. Visual acceptance still requires a real local visual process, and
