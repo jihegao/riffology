@@ -1,6 +1,6 @@
 # Delivery test plan
 
-## Milestone A2 current verification
+## Milestone A2 accepted verification
 
 Stage 2 verification is governed by
 [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
@@ -84,6 +84,69 @@ or trust.
 
 Legacy Gate/queue tests remain present while the implementations coexist. #14
 Project execution/wind import and #15 final-shell E2E are non-scope for A2.
+
+## Milestone A3 foundation and pending gates
+
+Commit `843cf1c` implements only the Stage 3 Project/experiment foundation.
+Current focused coverage in `test/product-store-v2.test.ts` and
+`test/agent-api.test.ts` currently proves only:
+
+- a draft Model is rejected by the Project API, and a Model whose stubbed
+  technical check publishes `executable` can create a Project;
+- two initial Project copies of the same unchanged source have the same snapshot
+  digest, and a later source-file edit does not change the already copied
+  Project bytes;
+- the tested Project workspace DTO lists copied snapshot metadata, an initially
+  empty run/configuration projection, then the created conversation and
+  experiment; the serialized fixture does not contain the tested path/session/
+  capability/process marker strings;
+- the current preliminary experiment shape calculates the tested seed/sweep
+  cardinalities, rejects an empty sweep axis, replays identical create/update
+  commands, and rejects reuse with changed intent; and
+- Project-scoped conversations remain available through the Stage 2 contract.
+
+These tests do not yet prove general malformed/non-finite JSON handling, the
+canonical schema profile, unknown-property/default/ref semantics, arbitrary
+secret absence, populated run/output workspace DTOs, or concurrent experiment
+compare-and-set. Claims remain limited to the explicit fixtures above.
+
+Run the focused foundation checks with:
+
+```bash
+cd backend
+node --experimental-strip-types --test \
+  test/product-store-v2.test.ts \
+  test/agent-api.test.ts
+```
+
+These checks do not prove execution-description v2, exact sample planning,
+schema v4, run dispatch, cancellation, output/event ingestion, completion cards,
+visual proxying, Playwright access, or wind installation. Those gates are
+defined in
+[`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
+
+Before the batch-runtime slice merges, automated tests must additionally prove
+duplicate seed/value rejection, normalized JSON Pointer overlap rejection,
+the common schema validator at technical-check/save/run-start, default/ref/
+additional-property/numeric/format/no-coercion semantics, deterministic sample
+ordering/IDs including `seed: null`, frozen digests, cancel-versus-terminal
+commit precedence, dispatcher/process identity, illegal-state/nonterminal-trash
+rejection, all-status v3 read-only migration, unified batch/visual launch-gate
+attempts, symlink/hardlink/inode-race and secret counterexamples, every
+`RunLimitsV1` scope/code, exactly-once completion cards, and restart-safe atomic
+outputs.
+Visual tests must prove exact WebSocket path/subprotocol enforcement plus
+frame-size, connection-count, and idle-time limits, as well as the same-origin
+local bootstrap plus isolated-broker HttpOnly one-use frame-session boundary,
+Origin/CORS rules, and parent DOM isolation in a real browser. Installer tests
+must pin and verify the
+execution-v2 scaffold and wind manifest IDs, versions, and concrete digests,
+including same-ID conflicts and mandatory re-scaffolding for unproven v1 Models.
+
+Mocks cover fault branches only. Batch acceptance requires a real generic
+subprocess, visual acceptance requires a real local visual process, and final
+Stage 3 acceptance requires a narrow browser Project/run flow. None of those
+pending gates may be claimed from the foundation tests.
 
 ---
 

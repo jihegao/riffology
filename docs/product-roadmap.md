@@ -7,16 +7,20 @@
 > conversation surface, require immutable user-visible revisions, or hard-code
 > Wind Evidence Studio as the product.
 
-> **Current delivery status:** Stage 1 is implemented. Stage 2 / #13 is the
-> current authority through
+> **Current delivery status:** Stages 1 and 2 are implemented. Stage 2 / #13 is
+> the completed Agent/Model-workspace authority through
 > [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md).
 > Schema v3/store, durable per-conversation OpenCode context, scoped MCP/skills,
 > attachments/documents, generic Model workspace, restricted macOS process,
 > technical checker, and the narrow provider/Model/conversation/turn/check API
 > are implemented. Final acceptance completed the real-provider same-session
 > two-turn browser rerun with OpenCode `1.18.4`. Legacy Gate and queue code still
-> coexist. #14 owns Project execution/wind import and #15 owns the final shared
-> shell.
+> coexist. Stage 3 / #14 is in progress through
+> [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
+> Commit `843cf1c` landed only the fixed-copy Project/workspace and experiment
+> create/update foundation. Deterministic run planning, batch/visual execution,
+> outputs/events, scoped Playwright access, and ordinary wind import remain
+> unimplemented. #15 owns the final shared shell and browser acceptance.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network
