@@ -261,6 +261,23 @@ export const batchProcessArguments = (
   ]);
 };
 
+export const visualProcessArguments = (
+  description: ExecutionDescriptionV2,
+  inputPath: string,
+  outputDirectory: string,
+): readonly string[] => {
+  assertRunCapabilityV2(description, "visual");
+  const input = absoluteScratchPath(inputPath, "visual input path");
+  const output = absoluteScratchPath(outputDirectory, "visual output directory");
+  return Object.freeze([
+    description.visual!.entryPoint,
+    "--riff-input",
+    input,
+    "--riff-output-dir",
+    output,
+  ]);
+};
+
 export const resolveBatchOutputPathsV1 = (
   description: ExecutionDescriptionV2,
   outputDirectory: string,
