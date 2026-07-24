@@ -260,8 +260,9 @@ A3-2a is delivered through separately reviewed gates:
   `capability_not_available`; when that field is present, its earlier gate
   returns HTTP `422` `visual_completion_not_supported`. This gate runs no
   visual model, opens no listener, and claims no browser behavior.
-- **A3-2a2a schema-v9/Store visual authority — current branch, merge pending:**
-  commit `215cbcf` upgrades product-database authority to v9 because the former
+- **A3-2a2a schema-v9/Store visual authority — merged and published through PR
+  #29:** merge commit `1584e39` upgrades product-database authority to v9
+  because the former
   atomic success/output triggers admitted only batch publication. The v9
   replacement binds atomic success to `runId` plus `runKind`, preserves batch
   behavior, rejects visual completion state including `NULL` disposition, and
@@ -269,20 +270,27 @@ A3-2a is delivered through separately reviewed gates:
   Store tests cover generation-fenced claim, queued cancellation with no card,
   terminal cancellation precedence, required output validation, atomic
   publication/rollback, and rejection of an extra live attempt/process. Two
-  independent reviews are PASS; focused root tests pass 78/78; the final backend
-  gate reports 325 total, 324 passed, zero failed, and one optional
-  installed-OpenCode smoke skipped; web tests pass 104/104 and the production
-  build succeeds. Public visual admission remains HTTP `409`
-  `capability_not_available`. This gate has no dispatcher, supervisor, real
-  child, listener, or browser claim and is not yet merged or published.
-- **A3-2a2b/c real visual lifecycle — pending:** a real `riff-visual-v1` child must receive
+  independent reviews and its publication gate are complete.
+- **A3-2a2b generic single-attempt visual supervisor — current branch:** a real
+  `riff-visual-v1` child receives
   the canonical single-sample envelope through `--riff-input`, its assigned
   `--riff-output-dir`, fixed `--riff-host 127.0.0.1`, and the frozen assigned
   `--riff-port`. Tests compare the input to the planner/sample-ID preimage and
   cover early exit, startup and wall timeout, stdout/stderr limits,
-  cancellation, same-process shutdown, and restart cleanup. A normal exit
+  listener drift, one-shot health rejection, abort, exact process/scratch
+  cleanup, and safe output discovery. A normal exit
   succeeds only when it is code zero and every required declared output
-  validates and publishes atomically.
+  validates. The supervisor and process safety primitives do not dispatch,
+  publish a public route, broker/frame a page, or claim browser behavior.
+  Current evidence is 379 backend tests with 378 passed, zero failed, and one
+  optional installed-OpenCode smoke skipped; the 102/102 focused concurrency
+  combination passed three consecutive runs; web passes 104/104 and the
+  production build succeeds.
+- **A3-2a2c dispatcher/public admission — pending:** add the one-slot visual
+  scheduler with continued batch dispatch, generation-fenced heartbeat,
+  cancellation/terminal precedence, stop join, restart recovery, and the
+  existing Project-run API admission. Until that gate passes, public visual
+  start remains HTTP `409` `capability_not_available`.
 
 The macOS real-process gate uses a visual-only `sandbox-exec` profile.
 Counterexamples attempt to listen on another loopback port, connect to another
@@ -295,7 +303,7 @@ the sandbox still denies every outbound attempt. The listener set is checked
 before health, while running, and during termination. That compensation cannot
 be reported as sandbox endpoint isolation.
 
-A3-2a2 freezes `maxActiveVisualRuns = 1` without changing the batch cap. Tests
+A3-2a2c will freeze `maxActiveVisualRuns = 1` without changing the batch cap. Tests
 run one long-lived healthy visual, queue a second visual, and queue a real batch
 run. The second visual must remain queued, the batch must claim and finish, and
 the active map must contain only the exact first `(runId, attemptId)`. Every
@@ -338,9 +346,12 @@ Visual completion is a negative contract. A public visual start containing
 timeout, cancellation, and restart, with no `run_completion_cards` row and no
 platform message. Project run reads remain authoritative.
 
-A3-2a1 and the current A3-2a2a branch have no proxy, frame, WebSocket,
-Playwright, or real-browser acceptance row. Those claims begin only in the
-later gates:
+A3-2a1, published A3-2a2a, and the current A3-2a2b branch have no dispatcher,
+public visual admission/API, proxy, frame, WebSocket, Playwright, or
+real-browser acceptance row. The public HTTP `409`
+`capability_not_available` and HTTP `422`
+`visual_completion_not_supported` negative gates are unchanged. The remaining
+claims begin only in the later gates:
 
 - **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
   enforcement, frame-size, connection-count, and idle-time limits, plus the
