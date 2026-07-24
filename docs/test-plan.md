@@ -170,7 +170,9 @@ node --experimental-strip-types --test \
   test/product-run-recovery.test.ts \
   test/product-store-v2-deletion.test.ts \
   test/product-store-v2.test.ts \
+  test/agent-context.test.ts \
   test/agent-api.test.ts \
+  test/a3-1-api-vertical.test.ts \
   test/server.test.ts
 ```
 
@@ -183,6 +185,16 @@ passed 104/104 and its production build succeeded; no new browser acceptance is
 claimed by this backend batch slice.
 The current A3-1c-c full backend run contains 295 tests: 294 passed, zero
 failed, and one optional smoke was skipped.
+The A3-1 API vertical acceptance is intentionally narrower than a browser user
+flow: it starts from a production-Store executable Model fixture, then uses only
+the public Project, conversation, experiment, run, cancel, and transcript APIs.
+A public long-running batch run deterministically occupies the dispatcher while
+the test starts and cancels a second public queued run; no private Store or
+dispatcher observation decides the result. The test proves a real generic
+subprocess success, checked output indexes, one platform completion card,
+stable run/output/card projections after reopening the same workspace, and
+queued-cancel receipt replay with zero successful outputs and one cancelled
+card that remains exactly once after another reopen.
 
 A3-1c-b adds focused schema-v6 migration/rollback, planned-before-create and
 created-before-receipt fault windows, created-without-receipt fail-closed
