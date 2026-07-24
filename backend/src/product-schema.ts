@@ -9,6 +9,10 @@ export type ProductSchemaMigration = Readonly<{ version: number; sql: string }>;
 
 const atomicBatchSuccessRunContexts = new WeakMap<ProductDatabase, string>();
 const runCompletionReconciliationContexts = new WeakMap<ProductDatabase, string>();
+const atomicVisualHealthContexts = new WeakMap<
+  ProductDatabase,
+  Readonly<{ processAttemptId: string; healthyAt: string }>
+>();
 
 /** @internal ProductStoreV2-only capability; direct callers are limited to schema tests. */
 export const withAtomicBatchSuccessRunContext = <T>(
@@ -44,6 +48,23 @@ export const withRunCompletionReconciliationContext = <T>(
   }
 };
 
+/** @internal ProductStoreV2-only capability for one atomic visual health receipt. */
+export const withAtomicVisualHealthContext = <T>(
+  database: ProductDatabase,
+  input: Readonly<{ processAttemptId: string; healthyAt: string }>,
+  body: () => T,
+): T => {
+  if (atomicVisualHealthContexts.has(database)) {
+    throw new Error("An atomic visual health context is already active.");
+  }
+  atomicVisualHealthContexts.set(database, input);
+  try {
+    return body();
+  } finally {
+    atomicVisualHealthContexts.delete(database);
+  }
+};
+
 export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
   foreignKeys: true,
   journalMode: "WAL",
@@ -60,6 +81,10 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
     atomicBatchSuccessRunContexts.get(database) === runId ? 1 : 0);
   database.function("riff_run_completion_reconcile_context", (runId: string) =>
     runCompletionReconciliationContexts.get(database) === runId ? 1 : 0);
+  database.function("riff_atomic_visual_health_context", (processAttemptId: string, healthyAt: string) => {
+    const context = atomicVisualHealthContexts.get(database);
+    return context?.processAttemptId === processAttemptId && context.healthyAt === healthyAt ? 1 : 0;
+  });
   database.exec(SQL`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
@@ -2207,6 +2232,362 @@ export const PRODUCT_SCHEMA_V7_SQL = SQL`
 
 `;
 
+export const PRODUCT_SCHEMA_V8_SQL = SQL`
+  CREATE TEMP TABLE product_schema_v8_visual_evidence_guard (
+    valid INTEGER NOT NULL CHECK (valid = 1)
+  ) STRICT;
+  INSERT INTO product_schema_v8_visual_evidence_guard (valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1
+    FROM process_attempts
+    WHERE process_kind = 'visual'
+      AND (
+        health_at IS NOT NULL
+        OR state NOT IN ('cleanup_complete', 'cleanup_unverified')
+      )
+  );
+  INSERT INTO product_schema_v8_visual_evidence_guard (valid)
+  SELECT 0 WHERE EXISTS (
+    SELECT 1
+    FROM run_attempts a
+    JOIN runs r ON r.id = a.run_id
+    WHERE r.contract_version = 4
+      AND r.run_kind = 'visual'
+      AND a.state IN ('claimed', 'starting', 'running')
+  );
+  DROP TABLE product_schema_v8_visual_evidence_guard;
+
+  CREATE TABLE visual_health_receipts (
+    process_attempt_id TEXT PRIMARY KEY
+      REFERENCES process_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    launch_manifest_id TEXT NOT NULL UNIQUE
+      REFERENCES process_launch_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    pid INTEGER NOT NULL CHECK (pid >= 1),
+    process_start_token TEXT NOT NULL CHECK (length(process_start_token) BETWEEN 1 AND 300),
+    process_group_id INTEGER NOT NULL CHECK (process_group_id >= 1),
+    loopback_port INTEGER NOT NULL CHECK (loopback_port BETWEEN 1 AND 65535),
+    health_path TEXT NOT NULL CHECK (
+      length(health_path) BETWEEN 1 AND 1024
+      AND substr(health_path, 1, 1) = '/'
+      AND instr(health_path, char(92)) = 0
+      AND instr(health_path, '?') = 0
+      AND instr(health_path, '#') = 0
+      AND instr(health_path, char(0)) = 0
+    ),
+    healthy_at TEXT NOT NULL,
+    receipt_json TEXT NOT NULL
+      CHECK (json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+    receipt_sha256 TEXT NOT NULL
+      CHECK (length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    UNIQUE (run_attempt_id, process_attempt_id)
+  ) STRICT;
+
+  DROP TRIGGER process_requires_launch_receipt_v6;
+  CREATE TRIGGER process_requires_launch_receipt_v8
+  BEFORE INSERT ON process_attempts
+  BEGIN
+    SELECT CASE WHEN NOT (
+      (
+        NEW.process_kind = 'batch'
+        AND EXISTS (
+          SELECT 1
+          FROM process_launch_manifests m
+          JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+          JOIN run_attempts a ON a.id = NEW.run_attempt_id
+          JOIN runs r ON r.id = a.run_id
+          WHERE m.process_attempt_id = NEW.id
+            AND m.run_attempt_id = NEW.run_attempt_id
+            AND r.contract_version = 4
+            AND r.run_kind = 'batch'
+            AND m.state = 'registered'
+            AND m.launch_receipt_json IS NOT NULL
+            AND m.launch_receipt_sha256 = riff_canonical_sha256(m.launch_receipt_json)
+            AND (SELECT count(*) FROM json_each(m.launch_receipt_json)) = 13
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(m.launch_receipt_json)
+              WHERE key NOT IN (
+                'schemaVersion', 'manifestId', 'manifestDigest', 'runId',
+                'sampleIndex', 'sampleId', 'scratchId', 'relativePath',
+                'pid', 'processGroupId', 'processStartToken', 'createdAt',
+                'receiptDigest'
+              )
+            )
+            AND m.manifest_sha256 = riff_canonical_sha256(json_object(
+              'schemaVersion', 1,
+              'kind', 'batch_process_launch',
+              'runId', a.run_id,
+              'attemptId', a.id,
+              'attemptGeneration', a.attempt_generation,
+              'dispatcherGeneration', a.dispatcher_generation,
+              'sampleIndex', s.sample_index,
+              'sampleId', s.sample_id,
+              'scratchId', s.id,
+              'relativePath', s.relative_path
+            ))
+            AND json_extract(m.launch_receipt_json, '$.schemaVersion') = 1
+            AND json_extract(m.launch_receipt_json, '$.manifestId') = m.id
+            AND json_extract(m.launch_receipt_json, '$.manifestDigest') = m.manifest_sha256
+            AND json_extract(m.launch_receipt_json, '$.runId') = a.run_id
+            AND json_extract(m.launch_receipt_json, '$.sampleIndex') = NEW.sample_index
+            AND json_extract(m.launch_receipt_json, '$.sampleId') = NEW.sample_id
+            AND json_extract(m.launch_receipt_json, '$.scratchId') = s.id
+            AND json_extract(m.launch_receipt_json, '$.relativePath') = s.relative_path
+            AND json_extract(m.launch_receipt_json, '$.pid') = NEW.pid
+            AND json_extract(m.launch_receipt_json, '$.processGroupId') = NEW.process_group_id
+            AND json_extract(m.launch_receipt_json, '$.processStartToken') = NEW.process_start_token
+            AND json_extract(m.launch_receipt_json, '$.receiptDigest')
+              = riff_canonical_sha256(json_remove(m.launch_receipt_json, '$.receiptDigest'))
+            AND s.run_attempt_id = NEW.run_attempt_id
+            AND s.sample_index = NEW.sample_index
+            AND s.sample_id = NEW.sample_id
+            AND s.state = 'active'
+        )
+      )
+      OR
+      (
+        NEW.process_kind = 'visual'
+        AND EXISTS (
+          SELECT 1
+          FROM process_launch_manifests m
+          JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+          JOIN run_attempts a ON a.id = NEW.run_attempt_id
+          JOIN runs r ON r.id = a.run_id
+          JOIN projects p ON p.id = r.project_id
+          WHERE m.process_attempt_id = NEW.id
+            AND m.run_attempt_id = NEW.run_attempt_id
+            AND r.contract_version = 4
+            AND r.run_kind = 'visual'
+            AND r.requested_sample_count = 1
+            AND riff_canonical_sha256(p.execution_description_json)
+              = r.execution_description_sha256
+            AND m.state = 'registered'
+            AND m.launch_receipt_json IS NOT NULL
+            AND m.launch_receipt_sha256 = riff_canonical_sha256(m.launch_receipt_json)
+            AND (SELECT count(*) FROM json_each(m.launch_receipt_json)) = 16
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(m.launch_receipt_json)
+              WHERE key NOT IN (
+                'schemaVersion', 'manifestId', 'manifestDigest', 'runId',
+                'sampleIndex', 'sampleId', 'scratchId', 'relativePath',
+                'pid', 'processGroupId', 'processStartToken', 'loopbackHost',
+                'loopbackPort', 'healthPath', 'createdAt', 'receiptDigest'
+              )
+            )
+            AND m.manifest_sha256 = riff_canonical_sha256(json_object(
+              'schemaVersion', 1,
+              'kind', 'visual_process_launch',
+              'runId', a.run_id,
+              'attemptId', a.id,
+              'attemptGeneration', a.attempt_generation,
+              'dispatcherGeneration', a.dispatcher_generation,
+              'sampleIndex', s.sample_index,
+              'sampleId', s.sample_id,
+              'scratchId', s.id,
+              'relativePath', s.relative_path,
+              'loopbackHost', '127.0.0.1',
+              'loopbackPort', NEW.loopback_port,
+              'healthPath', json_extract(p.execution_description_json, '$.visual.healthPath')
+            ))
+            AND json_extract(m.launch_receipt_json, '$.schemaVersion') = 1
+            AND json_extract(m.launch_receipt_json, '$.manifestId') = m.id
+            AND json_extract(m.launch_receipt_json, '$.manifestDigest') = m.manifest_sha256
+            AND json_extract(m.launch_receipt_json, '$.runId') = a.run_id
+            AND json_extract(m.launch_receipt_json, '$.sampleIndex') = s.sample_index
+            AND json_extract(m.launch_receipt_json, '$.sampleId') = s.sample_id
+            AND json_extract(m.launch_receipt_json, '$.scratchId') = s.id
+            AND json_extract(m.launch_receipt_json, '$.relativePath') = s.relative_path
+            AND json_extract(m.launch_receipt_json, '$.pid') = NEW.pid
+            AND json_extract(m.launch_receipt_json, '$.processGroupId') = NEW.process_group_id
+            AND json_extract(m.launch_receipt_json, '$.processStartToken') = NEW.process_start_token
+            AND json_extract(m.launch_receipt_json, '$.loopbackHost') = '127.0.0.1'
+            AND json_extract(m.launch_receipt_json, '$.loopbackPort') = NEW.loopback_port
+            AND json_extract(m.launch_receipt_json, '$.healthPath')
+              = json_extract(p.execution_description_json, '$.visual.healthPath')
+            AND json_extract(m.launch_receipt_json, '$.createdAt') = NEW.launched_at
+            AND json_extract(m.launch_receipt_json, '$.receiptDigest')
+              = riff_canonical_sha256(json_remove(m.launch_receipt_json, '$.receiptDigest'))
+            AND s.run_attempt_id = NEW.run_attempt_id
+            AND s.sample_index = 0
+            AND s.sample_id = json_extract(r.sample_plan_json, '$[0].sampleId')
+            AND s.state = 'active'
+        )
+      )
+    ) THEN RAISE(ABORT, 'process attempt requires durable launch manifest and receipt') END;
+  END;
+
+  CREATE TRIGGER process_visual_loopback_port_immutable_v8
+  BEFORE UPDATE OF loopback_port ON process_attempts
+  BEGIN SELECT RAISE(ABORT, 'visual process loopback port is immutable'); END;
+
+  CREATE TRIGGER visual_health_transition_v8
+  BEFORE UPDATE OF health_at ON process_attempts
+  WHEN NOT (
+    OLD.process_kind = 'visual'
+    AND NEW.process_kind = 'visual'
+    AND OLD.state = 'running'
+    AND NEW.state = 'running'
+    AND OLD.health_at IS NULL
+    AND NEW.health_at IS NOT NULL
+    AND riff_atomic_visual_health_context(OLD.id, NEW.health_at) = 1
+    AND NOT EXISTS (
+      SELECT 1 FROM visual_health_receipts h
+      WHERE h.process_attempt_id = OLD.id
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM process_launch_manifests m
+      JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+      JOIN run_attempts a ON a.id = OLD.run_attempt_id
+      JOIN runs r ON r.id = a.run_id
+      JOIN projects p ON p.id = r.project_id
+      WHERE m.process_attempt_id = OLD.id
+        AND m.run_attempt_id = OLD.run_attempt_id
+        AND m.state = 'released'
+        AND r.contract_version = 4
+        AND r.run_kind = 'visual'
+        AND riff_canonical_sha256(p.execution_description_json)
+          = r.execution_description_sha256
+        AND s.run_attempt_id = OLD.run_attempt_id
+        AND s.sample_index = 0
+        AND s.sample_id = json_extract(r.sample_plan_json, '$[0].sampleId')
+        AND s.state = 'active'
+        AND json_extract(m.manifest_json, '$.kind') = 'visual_process_launch'
+        AND json_extract(m.manifest_json, '$.loopbackHost') = '127.0.0.1'
+        AND json_extract(m.manifest_json, '$.loopbackPort') = OLD.loopback_port
+        AND json_extract(m.manifest_json, '$.healthPath')
+          = json_extract(p.execution_description_json, '$.visual.healthPath')
+        AND m.manifest_sha256 = riff_canonical_sha256(m.manifest_json)
+      )
+  )
+  BEGIN SELECT RAISE(ABORT, 'visual health requires one atomic matching receipt'); END;
+
+  CREATE TRIGGER visual_health_receipt_insert_v8
+  BEFORE INSERT ON visual_health_receipts
+  WHEN NOT (
+    riff_atomic_visual_health_context(NEW.process_attempt_id, NEW.healthy_at) = 1
+    AND NEW.created_at = NEW.healthy_at
+    AND NEW.receipt_sha256 = riff_canonical_sha256(NEW.receipt_json)
+    AND (SELECT count(*) FROM json_each(NEW.receipt_json)) = 14
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(NEW.receipt_json)
+      WHERE key NOT IN (
+        'schemaVersion', 'kind', 'runId', 'attemptId', 'attemptGeneration',
+        'processAttemptId', 'launchManifestId', 'launchManifestDigest',
+        'pid', 'processStartToken', 'processGroupId',
+        'loopbackPort', 'healthPath', 'healthyAt'
+      )
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM process_attempts process
+      JOIN run_attempts a ON a.id = process.run_attempt_id
+      JOIN runs r ON r.id = a.run_id
+      JOIN process_launch_manifests m ON m.process_attempt_id = process.id
+      WHERE process.id = NEW.process_attempt_id
+        AND process.process_kind = 'visual'
+        AND process.state = 'running'
+        AND process.health_at = NEW.healthy_at
+        AND process.loopback_port = NEW.loopback_port
+        AND a.id = NEW.run_attempt_id
+        AND a.run_id = NEW.run_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'visual'
+        AND m.id = NEW.launch_manifest_id
+        AND m.state = 'released'
+        AND m.manifest_sha256 = riff_canonical_sha256(m.manifest_json)
+        AND process.pid = NEW.pid
+        AND process.process_start_token = NEW.process_start_token
+        AND process.process_group_id = NEW.process_group_id
+        AND json_extract(m.manifest_json, '$.healthPath') = NEW.health_path
+        AND json_extract(NEW.receipt_json, '$.schemaVersion') = 1
+        AND json_extract(NEW.receipt_json, '$.kind') = 'visual_process_health'
+        AND json_extract(NEW.receipt_json, '$.runId') = NEW.run_id
+        AND json_extract(NEW.receipt_json, '$.attemptId') = NEW.run_attempt_id
+        AND json_extract(NEW.receipt_json, '$.attemptGeneration') = a.attempt_generation
+        AND json_extract(NEW.receipt_json, '$.processAttemptId') = NEW.process_attempt_id
+        AND json_extract(NEW.receipt_json, '$.launchManifestId') = NEW.launch_manifest_id
+        AND json_extract(NEW.receipt_json, '$.launchManifestDigest') = m.manifest_sha256
+        AND json_extract(NEW.receipt_json, '$.pid') = NEW.pid
+        AND json_extract(NEW.receipt_json, '$.processStartToken') = NEW.process_start_token
+        AND json_extract(NEW.receipt_json, '$.processGroupId') = NEW.process_group_id
+        AND json_extract(NEW.receipt_json, '$.loopbackPort') = NEW.loopback_port
+        AND json_extract(NEW.receipt_json, '$.healthPath') = NEW.health_path
+        AND json_extract(NEW.receipt_json, '$.healthyAt') = NEW.healthy_at
+    )
+  )
+  BEGIN SELECT RAISE(ABORT, 'visual health receipt does not match the running process'); END;
+
+  CREATE TRIGGER visual_health_receipt_after_process_update_v8
+  AFTER UPDATE OF health_at ON process_attempts
+  WHEN OLD.health_at IS NULL AND NEW.health_at IS NOT NULL
+  BEGIN
+    INSERT INTO visual_health_receipts (
+      process_attempt_id, run_id, run_attempt_id, launch_manifest_id,
+      pid, process_start_token, process_group_id, loopback_port, health_path,
+      healthy_at, receipt_json, receipt_sha256, created_at
+    )
+    SELECT
+      NEW.id,
+      a.run_id,
+      a.id,
+      m.id,
+      NEW.pid,
+      NEW.process_start_token,
+      NEW.process_group_id,
+      NEW.loopback_port,
+      json_extract(m.manifest_json, '$.healthPath'),
+      NEW.health_at,
+      json_object(
+        'schemaVersion', 1,
+        'kind', 'visual_process_health',
+        'runId', a.run_id,
+        'attemptId', a.id,
+        'attemptGeneration', a.attempt_generation,
+        'processAttemptId', NEW.id,
+        'launchManifestId', m.id,
+        'launchManifestDigest', m.manifest_sha256,
+        'pid', NEW.pid,
+        'processStartToken', NEW.process_start_token,
+        'processGroupId', NEW.process_group_id,
+        'loopbackPort', NEW.loopback_port,
+        'healthPath', json_extract(m.manifest_json, '$.healthPath'),
+        'healthyAt', NEW.health_at
+      ),
+      riff_canonical_sha256(json_object(
+        'schemaVersion', 1,
+        'kind', 'visual_process_health',
+        'runId', a.run_id,
+        'attemptId', a.id,
+        'attemptGeneration', a.attempt_generation,
+        'processAttemptId', NEW.id,
+        'launchManifestId', m.id,
+        'launchManifestDigest', m.manifest_sha256,
+        'pid', NEW.pid,
+        'processStartToken', NEW.process_start_token,
+        'processGroupId', NEW.process_group_id,
+        'loopbackPort', NEW.loopback_port,
+        'healthPath', json_extract(m.manifest_json, '$.healthPath'),
+        'healthyAt', NEW.health_at
+      )),
+      NEW.health_at
+    FROM run_attempts a
+    JOIN process_launch_manifests m
+      ON m.process_attempt_id = NEW.id AND m.run_attempt_id = a.id
+    WHERE a.id = NEW.run_attempt_id
+      AND NEW.process_kind = 'visual';
+  END;
+
+  CREATE TRIGGER visual_health_receipt_immutable_v8
+  BEFORE UPDATE ON visual_health_receipts
+  BEGIN SELECT RAISE(ABORT, 'visual health receipts are immutable'); END;
+  CREATE TRIGGER visual_health_receipt_delete_v8
+  BEFORE DELETE ON visual_health_receipts
+  BEGIN SELECT RAISE(ABORT, 'visual health receipts are immutable evidence'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -2215,4 +2596,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 5, sql: PRODUCT_SCHEMA_V5_SQL }),
   Object.freeze({ version: 6, sql: PRODUCT_SCHEMA_V6_SQL }),
   Object.freeze({ version: 7, sql: PRODUCT_SCHEMA_V7_SQL }),
+  Object.freeze({ version: 8, sql: PRODUCT_SCHEMA_V8_SQL }),
 ]);
