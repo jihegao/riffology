@@ -168,6 +168,9 @@ test("permanent-delete previews are deterministic exact closures with composite 
     ] as const) {
       assert.ok(project.records.some((item) => item.table === table && item.key[key] === id), `${table} is in the Project purge closure`);
     }
+    for (const table of ["run_scratch_leases", "process_launch_manifests"] as const) {
+      assert.ok(project.records.some((item) => item.table === table), `${table} is in the Project purge closure`);
+    }
     assert.ok(project.records.some((item) => item.table === "run_attempts"), "run_attempts is in the Project purge closure");
     assert.ok(project.exclusions.some((item) => item.kind === "model" && item.id === "model_alpha"));
 
@@ -197,6 +200,8 @@ test("permanent-delete previews are deterministic exact closures with composite 
     assert.ok(run.records.some((item) => item.table === "run_command_receipts"));
     assert.ok(run.records.some((item) => item.table === "run_attempts"));
     assert.ok(run.records.some((item) => item.table === "process_attempts" && item.key.id === "process_preview"));
+    assert.ok(run.records.some((item) => item.table === "run_scratch_leases"));
+    assert.ok(run.records.some((item) => item.table === "process_launch_manifests"));
     assert.ok(run.exclusions.some((item) => item.kind === "experiment"));
     assert.equal(store.listModels({ includeArchived: true, includeTrashed: true }).length, 1, "preview never purges");
     const snapshot = store.listObjectFiles({ kind: "project", id: "project_alpha" }).find((file) => file.kind === "project_model_snapshot")!;

@@ -33,10 +33,12 @@ upgraded.
 Visual starts and batch `domainEvents` are explicit current rejections, not
 partial implementations. A3-1c-a adds schema migration v5 and strict
 same-process cancel receipts/precedence for queued and running batch work.
-Cross-restart attempt/process/scratch recovery and exactly-once completion
-cards remain later A3-1c work; visual execution,
-Playwright access, and ordinary wind import remain later #14 slices. A3-1c-a is
-therefore not completion evidence for Stage 3.
+A3-1c-b adds schema migration v6, durable scratch/launch manifests and receipts,
+and recovery of v4 claimed/starting/running attempts before a new dispatcher
+generation may activate. Contradictory or missing evidence fails closed without
+scanning untracked scratch. Exactly-once completion cards remain later A3-1c
+work; visual execution, Playwright access, and ordinary wind import remain
+later #14 slices. A3-1c-b is therefore not completion evidence for Stage 3.
 
 The authoritative product target is now
 [`milestone-a-product-contract.md`](milestone-a-product-contract.md). It
@@ -63,7 +65,8 @@ product.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
   active Stage 3 / #14 contract and implementation ledger. It distinguishes the
   landed Project foundation, A3-1a frozen-planning boundary, and A3-1b generic
-  batch execution from pending recovery/cancellation/completion-card work,
+  batch execution plus A3-1c cancellation/restart recovery from pending
+  completion-card work,
   visual supervision, scoped Playwright access, and the ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit

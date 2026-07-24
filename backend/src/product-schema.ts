@@ -1677,10 +1677,309 @@ export const PRODUCT_SCHEMA_V5_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'v4 process attempts cannot be deleted directly'); END;
 `;
 
+export const PRODUCT_SCHEMA_V6_SQL = SQL`
+  CREATE TABLE run_scratch_leases (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    dispatcher_generation TEXT NOT NULL
+      CHECK (length(dispatcher_generation) = 64 AND dispatcher_generation NOT GLOB '*[^0-9a-f]*'),
+    sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+    sample_id TEXT NOT NULL
+      CHECK (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*'),
+    relative_path TEXT NOT NULL CHECK (
+      length(relative_path) BETWEEN 3 AND 200
+      AND relative_path NOT IN ('.', '..')
+      AND relative_path NOT LIKE '%/%'
+      AND relative_path NOT LIKE '%\%'
+      AND relative_path NOT GLOB '*[^A-Za-z0-9._-]*'
+    ),
+    state TEXT NOT NULL CHECK (
+      state IN ('planned', 'created', 'active', 'cleanup_complete', 'cleanup_unverified')
+    ),
+    owner_uid INTEGER CHECK (owner_uid IS NULL OR owner_uid >= 0),
+    device INTEGER CHECK (device IS NULL OR device >= 0),
+    inode INTEGER CHECK (inode IS NULL OR inode >= 1),
+    created_at TEXT NOT NULL,
+    registered_at TEXT,
+    cleaned_at TEXT,
+    cleanup_receipt_json TEXT CHECK (
+      cleanup_receipt_json IS NULL
+      OR (json_valid(cleanup_receipt_json) AND json_type(cleanup_receipt_json) = 'object')
+    ),
+    cleanup_receipt_sha256 TEXT CHECK (
+      cleanup_receipt_sha256 IS NULL
+      OR (length(cleanup_receipt_sha256) = 64 AND cleanup_receipt_sha256 NOT GLOB '*[^0-9a-f]*')
+    ),
+    UNIQUE (run_attempt_id, sample_index),
+    UNIQUE (run_attempt_id, id),
+    CHECK (
+      (state = 'planned' AND owner_uid IS NULL AND device IS NULL AND inode IS NULL
+        AND registered_at IS NULL AND cleaned_at IS NULL
+        AND cleanup_receipt_json IS NULL AND cleanup_receipt_sha256 IS NULL)
+      OR (state IN ('created', 'active') AND owner_uid IS NOT NULL AND device IS NOT NULL
+        AND inode IS NOT NULL AND registered_at IS NOT NULL AND cleaned_at IS NULL
+        AND cleanup_receipt_json IS NULL AND cleanup_receipt_sha256 IS NULL)
+      OR (state = 'cleanup_complete' AND cleaned_at IS NOT NULL
+        AND cleanup_receipt_json IS NOT NULL AND cleanup_receipt_sha256 IS NOT NULL)
+      OR (state = 'cleanup_unverified' AND cleaned_at IS NOT NULL
+        AND cleanup_receipt_json IS NULL AND cleanup_receipt_sha256 IS NULL)
+    )
+  ) STRICT;
+
+  CREATE TABLE process_launch_manifests (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    scratch_lease_id TEXT NOT NULL REFERENCES run_scratch_leases(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    process_attempt_id TEXT UNIQUE,
+    state TEXT NOT NULL CHECK (
+      state IN ('planned', 'registered', 'released', 'exited', 'cleanup_complete')
+    ),
+    manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json) AND json_type(manifest_json) = 'object'),
+    manifest_sha256 TEXT NOT NULL
+      CHECK (length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+    launch_receipt_json TEXT CHECK (
+      launch_receipt_json IS NULL
+      OR (json_valid(launch_receipt_json) AND json_type(launch_receipt_json) = 'object')
+    ),
+    launch_receipt_sha256 TEXT CHECK (
+      launch_receipt_sha256 IS NULL
+      OR (length(launch_receipt_sha256) = 64 AND launch_receipt_sha256 NOT GLOB '*[^0-9a-f]*')
+    ),
+    created_at TEXT NOT NULL,
+    registered_at TEXT,
+    CHECK (
+      (state = 'planned' AND process_attempt_id IS NULL
+        AND launch_receipt_json IS NULL AND launch_receipt_sha256 IS NULL
+        AND registered_at IS NULL)
+      OR (state IN ('registered', 'released', 'exited', 'cleanup_complete')
+        AND process_attempt_id IS NOT NULL
+        AND launch_receipt_json IS NOT NULL AND launch_receipt_sha256 IS NOT NULL
+        AND registered_at IS NOT NULL)
+    )
+  ) STRICT;
+
+  CREATE TABLE run_recovery_actions (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    prior_dispatcher_generation TEXT NOT NULL
+      CHECK (length(prior_dispatcher_generation) = 64 AND prior_dispatcher_generation NOT GLOB '*[^0-9a-f]*'),
+    candidate_dispatcher_generation TEXT NOT NULL
+      CHECK (length(candidate_dispatcher_generation) = 64 AND candidate_dispatcher_generation NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK (state IN ('started', 'completed', 'failed')),
+    terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition IN ('interrupted', 'cancelled')),
+    action_json TEXT NOT NULL CHECK (json_valid(action_json) AND json_type(action_json) = 'object'),
+    action_sha256 TEXT NOT NULL
+      CHECK (length(action_sha256) = 64 AND action_sha256 NOT GLOB '*[^0-9a-f]*'),
+    cleanup_receipt_json TEXT CHECK (
+      cleanup_receipt_json IS NULL
+      OR (json_valid(cleanup_receipt_json) AND json_type(cleanup_receipt_json) = 'object')
+    ),
+    cleanup_receipt_sha256 TEXT CHECK (
+      cleanup_receipt_sha256 IS NULL
+      OR (length(cleanup_receipt_sha256) = 64 AND cleanup_receipt_sha256 NOT GLOB '*[^0-9a-f]*')
+    ),
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (run_attempt_id, candidate_dispatcher_generation),
+    CHECK (
+      (state = 'started' AND terminal_disposition IS NULL AND finished_at IS NULL
+        AND cleanup_receipt_json IS NULL AND cleanup_receipt_sha256 IS NULL)
+      OR (state = 'completed' AND terminal_disposition IS NOT NULL AND finished_at IS NOT NULL
+        AND cleanup_receipt_json IS NOT NULL AND cleanup_receipt_sha256 IS NOT NULL)
+      OR (state = 'failed' AND terminal_disposition IS NULL AND finished_at IS NOT NULL
+        AND cleanup_receipt_json IS NULL AND cleanup_receipt_sha256 IS NULL)
+    )
+  ) STRICT;
+
+  CREATE TRIGGER scratch_lease_owner_v6
+  BEFORE INSERT ON run_scratch_leases
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM run_attempts a
+      JOIN runs r ON r.id = a.run_id
+      WHERE a.id = NEW.run_attempt_id
+        AND a.run_id = NEW.run_id
+        AND a.dispatcher_generation = NEW.dispatcher_generation
+        AND r.contract_version = 4
+        AND NEW.sample_index < r.requested_sample_count
+        AND json_extract(r.sample_plan_json, '$[' || NEW.sample_index || '].sampleId') = NEW.sample_id
+    ) THEN RAISE(ABORT, 'scratch lease run, attempt, generation, or sample mismatch') END;
+  END;
+  CREATE TRIGGER scratch_lease_binding_immutable_v6
+  BEFORE UPDATE OF id, run_id, run_attempt_id, dispatcher_generation,
+    sample_index, sample_id, relative_path, created_at ON run_scratch_leases
+  BEGIN SELECT RAISE(ABORT, 'scratch lease binding is immutable'); END;
+  CREATE TRIGGER scratch_lease_filesystem_identity_immutable_v6
+  BEFORE UPDATE OF owner_uid, device, inode, registered_at ON run_scratch_leases
+  WHEN OLD.owner_uid IS NOT NULL OR OLD.device IS NOT NULL
+    OR OLD.inode IS NOT NULL OR OLD.registered_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'registered scratch filesystem identity is immutable'); END;
+  CREATE TRIGGER scratch_lease_transition_v6
+  BEFORE UPDATE OF state ON run_scratch_leases
+  WHEN NOT (
+    (OLD.state = 'planned' AND NEW.state IN ('created', 'cleanup_complete', 'cleanup_unverified'))
+    OR (OLD.state = 'created' AND NEW.state IN ('active', 'cleanup_complete', 'cleanup_unverified'))
+    OR (OLD.state = 'active' AND NEW.state IN ('cleanup_complete', 'cleanup_unverified'))
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid scratch lease transition'); END;
+  CREATE TRIGGER scratch_lease_receipt_digest_v6
+  BEFORE UPDATE OF cleanup_receipt_json, cleanup_receipt_sha256 ON run_scratch_leases
+  WHEN NEW.cleanup_receipt_json IS NOT NULL
+    AND NEW.cleanup_receipt_sha256 != riff_canonical_sha256(NEW.cleanup_receipt_json)
+  BEGIN SELECT RAISE(ABORT, 'scratch cleanup receipt digest mismatch'); END;
+  CREATE TRIGGER scratch_lease_terminal_immutable_v6
+  BEFORE UPDATE ON run_scratch_leases
+  WHEN OLD.state IN ('cleanup_complete', 'cleanup_unverified')
+  BEGIN SELECT RAISE(ABORT, 'terminal scratch lease is immutable'); END;
+  CREATE TRIGGER scratch_lease_delete_v6
+  BEFORE DELETE ON run_scratch_leases
+  BEGIN SELECT RAISE(ABORT, 'scratch leases are immutable recovery evidence'); END;
+
+  CREATE TRIGGER launch_manifest_owner_v6
+  BEFORE INSERT ON process_launch_manifests
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM run_scratch_leases s
+      WHERE s.id = NEW.scratch_lease_id AND s.run_attempt_id = NEW.run_attempt_id
+    ) THEN RAISE(ABORT, 'launch manifest scratch lease mismatch') END;
+  END;
+  CREATE TRIGGER launch_manifest_digest_insert_v6
+  BEFORE INSERT ON process_launch_manifests
+  WHEN NEW.manifest_sha256 != riff_canonical_sha256(NEW.manifest_json)
+  BEGIN SELECT RAISE(ABORT, 'launch manifest digest mismatch'); END;
+  CREATE TRIGGER launch_manifest_binding_immutable_v6
+  BEFORE UPDATE OF id, run_attempt_id, scratch_lease_id, manifest_json,
+    manifest_sha256, created_at ON process_launch_manifests
+  BEGIN SELECT RAISE(ABORT, 'launch manifest binding is immutable'); END;
+  CREATE TRIGGER launch_registration_binding_immutable_v6
+  BEFORE UPDATE OF process_attempt_id, registered_at ON process_launch_manifests
+  WHEN OLD.process_attempt_id IS NOT NULL OR OLD.registered_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'registered launch process binding is immutable'); END;
+  CREATE TRIGGER launch_manifest_transition_v6
+  BEFORE UPDATE OF state ON process_launch_manifests
+  WHEN NOT (
+    (OLD.state = 'planned' AND NEW.state = 'registered')
+    OR (OLD.state = 'registered' AND NEW.state IN ('released', 'exited'))
+    OR (OLD.state = 'released' AND NEW.state = 'exited')
+    OR (OLD.state = 'exited' AND NEW.state = 'cleanup_complete')
+  )
+  BEGIN SELECT RAISE(ABORT, 'invalid launch manifest transition'); END;
+  CREATE TRIGGER launch_receipt_digest_v6
+  BEFORE UPDATE OF launch_receipt_json, launch_receipt_sha256 ON process_launch_manifests
+  WHEN NEW.launch_receipt_json IS NOT NULL
+    AND NEW.launch_receipt_sha256 != riff_canonical_sha256(NEW.launch_receipt_json)
+  BEGIN SELECT RAISE(ABORT, 'launch receipt digest mismatch'); END;
+  CREATE TRIGGER launch_receipt_immutable_v6
+  BEFORE UPDATE OF launch_receipt_json, launch_receipt_sha256 ON process_launch_manifests
+  WHEN OLD.launch_receipt_json IS NOT NULL OR OLD.launch_receipt_sha256 IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'registered launch receipt is immutable'); END;
+  CREATE TRIGGER launch_manifest_terminal_immutable_v6
+  BEFORE UPDATE ON process_launch_manifests
+  WHEN OLD.state = 'cleanup_complete'
+  BEGIN SELECT RAISE(ABORT, 'terminal launch manifest is immutable'); END;
+  CREATE TRIGGER launch_manifest_delete_v6
+  BEFORE DELETE ON process_launch_manifests
+  BEGIN SELECT RAISE(ABORT, 'launch manifests are immutable recovery evidence'); END;
+
+  CREATE TRIGGER process_requires_launch_receipt_v6
+  BEFORE INSERT ON process_attempts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM process_launch_manifests m
+      JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+      JOIN run_attempts a ON a.id = NEW.run_attempt_id
+      WHERE m.process_attempt_id = NEW.id
+        AND m.run_attempt_id = NEW.run_attempt_id
+        AND m.state = 'registered'
+        AND m.launch_receipt_json IS NOT NULL
+        AND m.launch_receipt_sha256 = riff_canonical_sha256(m.launch_receipt_json)
+        AND (SELECT count(*) FROM json_each(m.launch_receipt_json)) = 13
+        AND NOT EXISTS (
+          SELECT 1 FROM json_each(m.launch_receipt_json)
+          WHERE key NOT IN (
+            'schemaVersion', 'manifestId', 'manifestDigest', 'runId',
+            'sampleIndex', 'sampleId', 'scratchId', 'relativePath',
+            'pid', 'processGroupId', 'processStartToken', 'createdAt',
+            'receiptDigest'
+          )
+        )
+        AND m.manifest_sha256 = riff_canonical_sha256(json_object(
+          'schemaVersion', 1,
+          'kind', 'batch_process_launch',
+          'runId', a.run_id,
+          'attemptId', a.id,
+          'attemptGeneration', a.attempt_generation,
+          'dispatcherGeneration', a.dispatcher_generation,
+          'sampleIndex', s.sample_index,
+          'sampleId', s.sample_id,
+          'scratchId', s.id,
+          'relativePath', s.relative_path
+        ))
+        AND json_extract(m.launch_receipt_json, '$.schemaVersion') = 1
+        AND json_extract(m.launch_receipt_json, '$.manifestId') = m.id
+        AND json_extract(m.launch_receipt_json, '$.manifestDigest') = m.manifest_sha256
+        AND json_extract(m.launch_receipt_json, '$.runId') = a.run_id
+        AND json_extract(m.launch_receipt_json, '$.sampleIndex') = NEW.sample_index
+        AND json_extract(m.launch_receipt_json, '$.sampleId') = NEW.sample_id
+        AND json_extract(m.launch_receipt_json, '$.scratchId') = s.id
+        AND json_extract(m.launch_receipt_json, '$.relativePath') = s.relative_path
+        AND json_extract(m.launch_receipt_json, '$.pid') = NEW.pid
+        AND json_extract(m.launch_receipt_json, '$.processGroupId') = NEW.process_group_id
+        AND json_extract(m.launch_receipt_json, '$.processStartToken') = NEW.process_start_token
+        AND json_extract(m.launch_receipt_json, '$.receiptDigest')
+          = riff_canonical_sha256(json_remove(m.launch_receipt_json, '$.receiptDigest'))
+        AND s.run_attempt_id = NEW.run_attempt_id
+        AND s.sample_index = NEW.sample_index
+        AND s.sample_id = NEW.sample_id
+        AND s.state = 'active'
+    ) THEN RAISE(ABORT, 'process attempt requires durable launch manifest and receipt') END;
+  END;
+
+  CREATE TRIGGER recovery_action_owner_v6
+  BEFORE INSERT ON run_recovery_actions
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM run_attempts a
+      JOIN runs r ON r.id = a.run_id
+      WHERE a.id = NEW.run_attempt_id
+        AND a.dispatcher_generation = NEW.prior_dispatcher_generation
+        AND r.contract_version = 4
+    ) THEN RAISE(ABORT, 'recovery action attempt or generation mismatch') END;
+  END;
+  CREATE TRIGGER recovery_action_digest_insert_v6
+  BEFORE INSERT ON run_recovery_actions
+  WHEN NEW.action_sha256 != riff_canonical_sha256(NEW.action_json)
+  BEGIN SELECT RAISE(ABORT, 'recovery action digest mismatch'); END;
+  CREATE TRIGGER recovery_action_binding_immutable_v6
+  BEFORE UPDATE OF id, run_attempt_id, prior_dispatcher_generation,
+    candidate_dispatcher_generation, action_json, action_sha256, created_at ON run_recovery_actions
+  BEGIN SELECT RAISE(ABORT, 'recovery action binding is immutable'); END;
+  CREATE TRIGGER recovery_action_transition_v6
+  BEFORE UPDATE OF state ON run_recovery_actions
+  WHEN OLD.state != 'started' OR NEW.state NOT IN ('completed', 'failed')
+  BEGIN SELECT RAISE(ABORT, 'invalid recovery action transition'); END;
+  CREATE TRIGGER recovery_cleanup_receipt_digest_v6
+  BEFORE UPDATE OF cleanup_receipt_json, cleanup_receipt_sha256 ON run_recovery_actions
+  WHEN NEW.cleanup_receipt_json IS NOT NULL
+    AND NEW.cleanup_receipt_sha256 != riff_canonical_sha256(NEW.cleanup_receipt_json)
+  BEGIN SELECT RAISE(ABORT, 'recovery cleanup receipt digest mismatch'); END;
+  CREATE TRIGGER recovery_action_terminal_immutable_v6
+  BEFORE UPDATE ON run_recovery_actions
+  WHEN OLD.state IN ('completed', 'failed')
+  BEGIN SELECT RAISE(ABORT, 'terminal recovery action is immutable'); END;
+  CREATE TRIGGER recovery_action_delete_v6
+  BEFORE DELETE ON run_recovery_actions
+  BEGIN SELECT RAISE(ABORT, 'recovery actions are immutable evidence'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
   Object.freeze({ version: 3, sql: PRODUCT_SCHEMA_V3_SQL }),
   Object.freeze({ version: 4, sql: PRODUCT_SCHEMA_V4_SQL }),
   Object.freeze({ version: 5, sql: PRODUCT_SCHEMA_V5_SQL }),
+  Object.freeze({ version: 6, sql: PRODUCT_SCHEMA_V6_SQL }),
 ]);

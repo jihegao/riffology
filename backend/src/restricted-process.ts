@@ -317,11 +317,22 @@ export const macosBatchSandboxProfile = (input: Readonly<{
   inputPath: string;
   outputRoot: string;
   tempRoot: string;
+  launchReceiptPath?: string;
   executable: string;
   runtimeReadRoots: readonly string[];
 }>): string => macosSandboxProfileForRoots({
-  readableRoots: [input.projectRoot, input.inputPath, input.outputRoot, input.tempRoot],
-  writableRoots: [input.outputRoot, input.tempRoot],
+  readableRoots: [
+    input.projectRoot,
+    input.inputPath,
+    input.outputRoot,
+    input.tempRoot,
+    ...(input.launchReceiptPath ? [input.launchReceiptPath] : []),
+  ],
+  writableRoots: [
+    input.outputRoot,
+    input.tempRoot,
+    ...(input.launchReceiptPath ? [input.launchReceiptPath] : []),
+  ],
   executable: input.executable,
   runtimeReadRoots: input.runtimeReadRoots,
 });

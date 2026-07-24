@@ -6,7 +6,7 @@ The current authority is the
 [`Milestone A product contract`](milestone-a-product-contract.md), the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
-`ProductStoreV2` over SQLite schema migration v5, execution contract v4, and
+`ProductStoreV2` over SQLite schema migration v6, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
@@ -65,20 +65,31 @@ atomic-success context for both v4 run output objects and indexes, and make
 terminal run/process evidence immutable. Schema migration v5 binds the first
 cancel timestamp to one exact committed `run.cancel.v1` receipt and requires
 every registered process to have `cleanup_complete` before run terminalization.
+Schema migration v6 adds immutable scratch leases, launch manifests/receipts,
+and recovery actions so spawn intent exists before directory creation and Model
+code remains behind a one-use gate until its exact process identity is durable.
 Dispatcher errors can terminalize only after registered processes have durable
 exit and verified cleanup evidence; otherwise
-the live attempt stays fail-closed for A3-1c recovery.
+the live attempt stays fail-closed for operator repair.
 
 The official generic scaffold now emits execution-description v2 and declares
 batch only. Visual starts fail with `capability_not_available`; batch
 `domainEvents` fail with `domain_events_not_supported`. Same-process backend
 shutdown aborts the supervisor, terminates the verified process group, cleans
-owned scratch, and records `dispatcher_shutdown`. Startup with unresolved
-prior live attempts fails closed with `dispatcher_recovery_required`.
-A3-1c-a cancellation immediately aborts the matching active in-process run and
-uses heartbeat observation only as a fallback. Full cross-restart
-attempt/process/scratch recovery and exactly-once completion cards remain later
-A3-1c work rather than current recovery claims.
+owned scratch, and records `dispatcher_shutdown`. A3-1c-a cancellation
+immediately aborts the matching active in-process run and uses heartbeat
+observation only as a fallback. A3-1c-b startup audits recovered successes,
+drains committed queued cancellations, then reconciles only durable v4 prior
+attempts before activating a new dispatcher generation. It verifies PID,
+start-token, and process group before signalling; removes only an exact
+registered scratch lease; preserves untracked directories; and fails closed
+with `dispatcher_recovery_required` on absent or contradictory evidence.
+An unfinished recovery action is adopted by the next random dispatcher
+generation using its stable prior-attempt identity. One in-process dispatcher
+owns a `ProductStoreV2` until stop releases that guard; the Store writer lock
+provides the cross-process singleton boundary. Migrated schema-v5 live process
+rows have no v6 launch/scratch identity and intentionally fail recovery closed.
+Exactly-once completion cards remain later A3-1c work.
 Visual supervision, scoped browser/Playwright access, and wind import also
 remain later Stage 3 slices.
 
@@ -107,8 +118,8 @@ executability is digest-bound evidence that a thin interface runs; it is not
 scientific validity, calibration, trust, or decision suitability.
 
 Legacy Gate/wind and queue components still coexist and are retired only by an
-explicit later audit. A3-1b is not completion evidence for Stage 3. #14 still
-owns the remaining recovery/cancellation/card, visual, and wind work; #15 owns
+explicit later audit. A3-1c-b is not completion evidence for Stage 3. #14 still
+owns the remaining completion-card, visual, and wind work; #15 owns
 the final Models/Projects home and shared two-pane browser shell.
 
 ---

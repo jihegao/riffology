@@ -508,6 +508,65 @@ test("leader exit does not skip hard-kill of a descendant that closes stdio and 
   assert.equal(supervisor.cleanup(result).verified, true);
 });
 
+test("cross-restart recovery terminates an exact process group after its leader exits", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const launched = spawnSync(SYSTEM_PYTHON, ["-c", `
+import json,os,signal,subprocess,time
+token=subprocess.check_output(["/bin/ps","-o","lstart=","-p",str(os.getpid())],text=True).strip()
+child=os.fork()
+if child == 0:
+    for descriptor in (0,1,2):
+        try: os.close(descriptor)
+        except OSError: pass
+    signal.signal(signal.SIGTERM,signal.SIG_IGN)
+    while True: time.sleep(1)
+print(json.dumps({"childPid":child,"startToken":token}),flush=True)
+`], {
+    detached: true,
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.ok(Number.isSafeInteger(launched.pid));
+  const payload = JSON.parse(launched.stdout);
+  const processGroupId = launched.pid!;
+  const scratchRoot = mkdtempSync(join(tmpdir(), "riff-recovery-supervisor-"));
+  const identity = {
+    runId: "run_recovery_descendant",
+    sampleIndex: 0,
+    sampleId: "a".repeat(64),
+    scratchId: "scratch_recovery_descendant",
+    pid: processGroupId,
+    processGroupId,
+    startToken: payload.startToken as string,
+  };
+  try {
+    const supervisor = new GenericBatchSupervisor({
+      pythonExecutable: SYSTEM_PYTHON,
+      scratchRoot,
+    });
+    assert.equal(supervisor.inspectRecordedProcess(identity), "present");
+    const receipt = await supervisor.terminateRecordedProcess(
+      identity,
+      50,
+      "2026-07-25T04:10:00.000Z",
+    );
+    assert.equal(receipt.termSent, true);
+    assert.equal(receipt.killSent, true);
+    assert.equal(receipt.groupGone, true);
+    assert.equal(supervisor.verifyRecordedProcessGroupGone(identity), true);
+    assert.equal(await waitForProcessTargetGone(payload.childPid), true);
+  } finally {
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+    }
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+});
+
 test("dispatcher shutdown aborts an active leader and descendant without orphaning the process group", {
   skip: process.platform !== "darwin",
 }, async (t) => {
@@ -685,6 +744,77 @@ test("output consumption rechecks replacement and hardlink identity, then exact 
   const failedReceipt = failedSupervisor.cleanup(failed);
   assert.equal(failedReceipt.verified, true);
   assert.equal(existsSync(failedPath), false);
+});
+
+test("durable recovery cleanup accepts exact or missing leases and rejects planned, symlink, and ownership drift", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), "riff-durable-scratch-"));
+  const scratchRoot = join(root, "scratch");
+  mkdirSync(scratchRoot, { mode: 0o700 });
+  try {
+    const supervisor = new GenericBatchSupervisor({
+      pythonExecutable: SYSTEM_PYTHON,
+      scratchRoot,
+    });
+    const base = {
+      runId: "run_durable_scratch",
+      sampleIndex: 0,
+      sampleId: "a".repeat(64),
+      scratchId: "scratch_durable_scratch",
+      relativePath: "riff-run_durable_scratch-0-exact",
+      registeredAt: "2026-07-25T04:00:00.000Z",
+    };
+    const missing = supervisor.cleanupDurableScratch({
+      ...base,
+      ownerUid: 501,
+      device: 1,
+      inode: 1,
+    }, "2026-07-25T04:00:01.000Z");
+    assert.equal(missing.disposition, "already_absent");
+
+    const exactPath = join(scratchRoot, base.relativePath);
+    mkdirSync(exactPath, { mode: 0o700 });
+    const exactInfo = lstatSync(exactPath);
+    assert.throws(() => supervisor.cleanupDurableScratch({
+      ...base,
+      ownerUid: exactInfo.uid + 1,
+      device: exactInfo.dev,
+      inode: exactInfo.ino,
+    }), /exact durable scratch directory changed/u);
+    const exact = supervisor.cleanupDurableScratch({
+      ...base,
+      ownerUid: exactInfo.uid,
+      device: exactInfo.dev,
+      inode: exactInfo.ino,
+    });
+    assert.equal(exact.disposition, "removed");
+    const unrelated = join(scratchRoot, "untracked-sentinel");
+    mkdirSync(unrelated, { mode: 0o700 });
+    writeFileSync(join(unrelated, "keep.txt"), "keep");
+    assert.equal(readFileSync(join(unrelated, "keep.txt"), "utf8"), "keep");
+
+    const target = join(scratchRoot, "target");
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, exactPath);
+    assert.throws(() => supervisor.cleanupDurableScratch({
+      ...base,
+      ownerUid: lstatSync(target).uid,
+      device: lstatSync(target).dev,
+      inode: lstatSync(target).ino,
+    }), /exact durable scratch directory changed/u);
+    unlinkSync(exactPath);
+    assert.throws(() => supervisor.cleanupPlannedScratch({
+      runId: base.runId,
+      sampleIndex: base.sampleIndex,
+      sampleId: base.sampleId,
+      scratchId: base.scratchId,
+      relativePath: "target",
+    }), /exists without a durable directory identity/u);
+    assert.equal(readFileSync(join(unrelated, "keep.txt"), "utf8"), "keep");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("verified Project execution capability requires code/ and environment/ directly under model-snapshot root", () => {

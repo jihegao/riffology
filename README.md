@@ -31,16 +31,22 @@ The official generic Model scaffold now emits execution-description v2 with a
 batch-only capability; existing v1 Models are not silently upgraded.
 
 A3-1b explicitly rejects visual runs with `capability_not_available` and batch
-`domainEvents` with `domain_events_not_supported`. A3-1c-a now implements
+`domainEvents` with `domain_events_not_supported`. A3-1c-a implements
 schema migration v5 plus strict same-process queued/running cancellation,
 durable replayable receipts, SQLite commit-order terminal precedence, and
-no-successful-output publication after cancel-first. Cross-restart
-attempt/process/scratch recovery and exactly-once completion-card delivery
-remain later A3-1c work. Visual execution, scoped Playwright
+no-successful-output publication after cancel-first. A3-1c-b adds schema
+migration v6 and fail-closed cross-restart reconciliation for v4 run attempts,
+durable pre-spawn scratch/launch evidence, exact PID/start-token/process-group
+cleanup, cancellation precedence, and recovery-before-dispatcher-generation
+handoff. Exactly-once completion-card delivery remains later A3-1c work.
+Visual execution, scoped Playwright
 access, and ordinary wind import are later #14 slices. Their active contract and
 negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
-This lifecycle slice is not completion evidence for Stage 3, cross-restart recovery, completion cards, visual execution, wind
+Live process rows created under schema v5 lack the v6 scratch/launch evidence
+needed for safe signalling and therefore fail restart recovery closed rather
+than being automatically cleaned.
+This lifecycle slice is not completion evidence for Stage 3, completion cards, visual execution, wind
 import, or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
