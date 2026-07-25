@@ -292,8 +292,8 @@ success evidence, and the real-process public vertical plus secrecy gate pass.
 The final full backend gate reports 385 total with 384 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; the focused 13/13 gate
 covers the review regressions; web passes 104/104 and the production build
-succeeds. A3-2b and A3-2c remain
-target contracts, not current routes or acceptance evidence:
+succeeds. A3-2b is published; A3-2c and A3-2d remain target contracts, not
+current routes or acceptance evidence:
 
 1. **A3-2a1 schema-v8/Store/recovery:** schema v8 now extends schema-v6 scratch
    and launch evidence to the existing schema-v4 visual process shape, makes
@@ -371,6 +371,11 @@ target contracts, not current routes or acceptance evidence:
    remote/HTTPS acceptance.
 9. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
    observation and explicit one-turn interaction authority.
+10. **A3-2d generic outputs/events/direct controls — pending:** add exact
+    same-run output list/download, bounded declared diagnostic-event ingestion
+    with opaque run-bound cursors, add the missing download/trash/restore
+    routes, and close Agent-independent direct-control acceptance including
+    the existing cancel route.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
 input envelope as batch through `--riff-input`, an assigned
@@ -571,7 +576,55 @@ frame HTML/JavaScript is an operator-provided, trusted-browser-code input to
 A3-2b; this is a local deployment assumption, not a runtime review assertion. An
 arbitrary adversarial active payload requires a future trusted data-only wrapper
 or browser-inaccessible transport and is not enabled by this contract.
-A3-2c is subsequent and never reuses a user frame URL or cookie.
+A3-2c is subsequent and never reuses a user frame URL or cookie. It does not
+reuse the ambient legacy `RIFF_CDP_URL` projector. Its internal capability is
+derived from the durable conversation and originating turn, is one-turn and
+one-use for interaction, and resolves the current Project/current healthy
+attempt on the server. Observation metadata is a dedicated immutable bounded
+audit fact; large observation bytes are ephemeral or an explicitly retained
+temporary document. Typed interaction accepts only accessibility role plus
+bounded accessible name, or a bounded label—not CSS, XPath, arbitrary text
+selectors, JavaScript, or caller-supplied URLs.
+
+On the current unpublished working branch, A3-2c1 implements only the
+backend-private authority and audit foundation. It derives scope from the
+durable conversation and originating turn, requires exactly one current healthy
+Project visual attempt, consumes before revalidation or side effect, and
+revokes on turn release, dispatcher run revocation, backend close, expiry, and
+restart. Its append-only audit stores bound IDs, finite lifecycle/operation/
+action/locator kinds, and SHA-256 commitments for process identity, capability
+epoch/reference, locator role/name-or-label, and typed value. It stores no
+capability, browser URL/port/cookie/nonce, locator text, typed value,
+observation summary/content, DOM, or screenshot bytes. A3-2c1 adds no HTTP
+route, Playwright runner, or OpenCode observation/interaction tool; those remain
+A3-2c2+ work and this branch is not merge evidence.
+
+A3-2d follows the existing committed output index but adds the missing generic
+public surface: same-run list/download with path/size/digest revalidation,
+declared diagnostic NDJSON ingestion with structural/schema/count/byte limits
+and opaque run/filter-bound cursors, plus Agent-independent cancel/download/
+trash/restore acceptance. Cancel already exists; A3-2d adds the missing generic
+download/trash/restore routes and proves the complete control set without
+OpenCode. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
+A3-3 diagnostic-event acceptance therefore begins only after A3-2d is
+published.
+
+A3-2d list/download/event reads require the exact app session/owner/Host and
+same-origin Fetch Metadata and emit private no-store responses; mutation routes
+additionally require exact Origin, CSRF, JSON non-simple content type, command
+idempotency, and expected run revision or terminal closure digest.
+Project/run/output IDs are not bearer credentials. Output download is
+attachment-only and verifies the complete digest before sending bytes from the
+same no-follow open descriptor. Diagnostic event content is untrusted model
+output and cannot become a user instruction or tool authority. Event cursors
+are bounded MACed values bound to Project/run/contract/event-set/trash
+generation/direction/limit/all normalized filters and remain valid across
+ordinary restart until expiry or key-epoch rotation. Their restart-stable
+installation key is atomically generated with owner-only permissions, excluded
+from public/storage/export/log/child surfaces, and missing/corrupt state fails
+closed rather than silently regenerating. Trash revokes live downloads,
+cursors, confirmations, completion-link dereference, and Playwright
+capabilities; restore never revives old authority.
 
 ---
 

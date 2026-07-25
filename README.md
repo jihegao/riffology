@@ -66,14 +66,26 @@ published through PR #31 at merge commit `361b36f`; it integrates the
 supervisor into the shared dispatcher, admits eligible visual work through the
 existing Project-run API, and preserves child-port secrecy. Visual completion
 still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
-broker/frame/WebSocket, A3-2c scoped Playwright access, and A3-3 ordinary wind
-import remain pending #14 slices. Their active contract and negative-test gates are in
+broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
+A3-2c scoped Playwright access, A3-2d generic outputs/events/direct controls,
+and A3-3 ordinary wind import remain pending #14 slices. Their active contract
+and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
+A3-2c1's authority/audit and legacy-CDP-isolation foundation is implemented on
+the current working branch but is not yet published or merged; it exposes no
+observation or interaction tool. A3-2c2 through A3-2c4 remain pending.
+Branch-only A3-2c1 verification reports 500 backend tests with 499 passed, zero
+failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
+the network-entry integration passes 1/1, the production build succeeds, and
+the independent security review reports no P0/P1/P2 finding.
+A3-3 diagnostic-event acceptance depends on A3-2d; legacy wind/Gate event
+routes cannot satisfy that dependency.
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
 than being automatically cleaned.
-These published visual-lifecycle slices are not completion evidence for Stage 3,
-brokered browser access, wind import, or final browser acceptance.
+These published visual/browser slices are not completion evidence for Stage 3,
+scoped Playwright, generic output/event/direct-control completion, wind import,
+or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
@@ -242,7 +254,7 @@ through PR #37: the dedicated Chromium browser security
 matrix passes 5/5 and the complete Chromium suite passes 8/8. The current
 backend gate reports 466 total with 465 passed, zero failed, and one optional
 installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
-the production build succeeds. A3-2c and A3-3 remain pending.
+the production build succeeds. A3-2c, A3-2d, and A3-3 remain pending.
 
 Focused Milestone A2 verification:
 

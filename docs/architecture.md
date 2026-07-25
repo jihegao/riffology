@@ -96,8 +96,10 @@ in the same SQLite transaction as terminal batch state, or records
 `pending` rows after mutation recovery, then audits message/receipt/card
 agreement and fails closed on drift. Agent turns cannot own platform cards;
 bounded Agent context serializes only their five allowlisted fields.
-Visual supervision, scoped browser/Playwright access, and wind import also
-remain later Stage 3 slices.
+A3-2a2 visual supervision and A3-2b scoped browser access are published.
+A3-2c scoped Playwright, A3-2d generic result access/direct controls, and
+A3-3 ordinary wind import remain later Stage 3 slices. Wind diagnostic-event
+acceptance starts only after A3-2d publishes generic event ingestion.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:
@@ -125,7 +127,19 @@ A3-2b isolated broker / frame / WebSocket
 A3-2c scoped Playwright
   -> current Project + current healthy attempt -> bounded observation
   -> explicit one-turn, one-use typed interaction
+
+A3-2d generic result access
+  -> exact same-run output list/download with byte/digest revalidation
+  -> bounded diagnostic NDJSON ingestion + opaque run-bound cursors
+  -> Agent-independent cancel/download/trash/restore controls
 ```
+
+A3-2c1 is implemented only on the current unpublished working branch. It adds
+the backend-private conversation/turn/current-healthy-attempt authority,
+single-consume capability lifecycle, digest-only append-only audit facts,
+run/turn/shutdown/restart revocation, and legacy-CDP isolation. It adds no
+Playwright runner and exposes neither observation nor interaction to OpenCode;
+those begin at A3-2c2 and A3-2c3.
 
 Port selection closes a local probe socket before child bind and therefore has
 a bounded TOCTOU window; it is not a strong reservation claim. Health cannot
@@ -183,7 +197,10 @@ document permits framing only through CSP
 `X-Frame-Options: SAMEORIGIN` are forbidden. The capability registry
 binds browser-session generation, Project, run, attempt generation, expiry, and
 socket set. Revocation closes sockets before deleting state. Cookie `Path` is
-not authority, and A3-2c does not reuse user frame secrets.
+not authority, and A3-2c does not reuse user frame secrets. The pre-existing
+ambient `RIFF_CDP_URL`/`PlaywrightCdpProjector` projection is legacy UI
+mirroring and cannot satisfy A3-2c authority because it may discover an
+arbitrary localhost page.
 
 Visual completion cards are intentionally absent. A visual start that supplies
 `completionConversationId` fails with `visual_completion_not_supported`;

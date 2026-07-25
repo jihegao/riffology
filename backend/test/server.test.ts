@@ -8,7 +8,16 @@ import { HttpOpenCodeAdapter, type OpenCodeAdapter, type OpenCodePrompt, type Op
 import { BackendApp, configuredBatchPythonExecutable } from "../src/server.ts";
 import { HttpMesaAdapter } from "../src/mesa-adapter.ts";
 import { ApiError } from "../src/errors.ts";
+import {
+  VisualAgentAuthority,
+  VisualAgentAuthorityError,
+  type VisualAgentAuditFactInput,
+  type VisualAgentAuthorityStore,
+  type VisualAgentTarget,
+  type VisualAgentTurnScope,
+} from "../src/agent-visual-authority.ts";
 import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
+import { ProductStoreV2 } from "../src/product-store-v2.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
 class FakeMesa implements MesaAdapter {
@@ -462,6 +471,127 @@ test("Mesa adapter exposes only stable allowlisted errors and redacts upstream p
   await assert.rejects(() => unknown.getWindRunEvidence!("project", "run"), (error: unknown) => error instanceof ApiError && error.code === "mesa_upstream_failure" && error.message === "Mesa failed while processing the request." && !JSON.stringify(error).includes("secret"));
   const known = new HttpMesaAdapter("http://mesa.test", async () => Response.json({ error: { code: "receipt_not_found", message: "leak /private/path" } }, { status: 404 }));
   await assert.rejects(() => known.getWindRunReceipt!("project", "rk"), (error: unknown) => error instanceof ApiError && error.code === "receipt_not_found" && error.message === "The Mesa run receipt was not found." && !error.message.includes("private"));
+});
+
+test("Backend close revokes before a failing drain and still stops the dispatcher and Product Store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "riff-close-order-"));
+  const productStore = ProductStoreV2.open(join(root, "product"));
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode: new FakeOpenCode(),
+    workspaceRoot: root,
+    productStore,
+    a2OpenCode: {} as never,
+    a3ScratchRoot: join(root, "scratch"),
+    a3BatchSupervisor: {} as never,
+    a3VisualSupervisor: {} as never,
+  });
+  const events: string[] = [];
+  const originalMcpRevokeAll = app.mcp.revokeAll.bind(app.mcp);
+  app.mcp.revokeAll = () => {
+    events.push("mcp_revoked");
+    originalMcpRevokeAll();
+  };
+  const originalGate2Close = app.gate2.close.bind(app.gate2);
+  app.gate2.close = async () => {
+    events.push("gate2_close");
+    await originalGate2Close();
+    throw new Error("injected gate2 close failure");
+  };
+  app.productRunDispatcher!.stop = async () => {
+    events.push("dispatcher_stop");
+  };
+  const originalProductClose = productStore.close.bind(productStore);
+  productStore.close = () => {
+    events.push("product_close");
+    originalProductClose();
+  };
+  try {
+    await assert.rejects(() => app.close(), /injected gate2 close failure/u);
+    assert.deepEqual(events, [
+      "mcp_revoked",
+      "gate2_close",
+      "dispatcher_stop",
+      "product_close",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatcher cancellation revokes the exact real visual Agent authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "riff-run-authority-"));
+  const scope: VisualAgentTurnScope = Object.freeze({
+    conversationId: "conversation_server_revoke",
+    turnId: "turn_server_revoke",
+    immutableUserMessageId: "message_server_revoke",
+    externalSessionGeneration: 1,
+    projectId: "project_server_revoke",
+  });
+  const target: VisualAgentTarget = Object.freeze({
+    projectId: scope.projectId,
+    runId: "run_server_revoke",
+    attemptId: "attempt_server_revoke",
+    attemptGeneration: 1,
+    dispatcherGeneration: "a".repeat(64),
+    attemptExpiresAt: "2026-07-25T17:01:00.000Z",
+    processAttemptId: "process_server_revoke",
+    pid: 9_001,
+    processStartToken: "server-revoke-token",
+    processGroupId: 9_001,
+    loopbackHost: "127.0.0.1",
+    loopbackPort: 41_237,
+    healthPath: "/healthz",
+    healthyAt: "2026-07-25T16:59:59.000Z",
+  });
+  const facts: VisualAgentAuditFactInput[] = [];
+  const authorityStore: VisualAgentAuthorityStore = {
+    resolveVisualAgentTurnScope: () => scope,
+    currentHealthyVisualAgentTarget: () => target,
+    recordVisualAgentAuditFact: (fact) => facts.push(fact),
+  };
+  const authority = new VisualAgentAuthority(authorityStore, {
+    now: () => new Date("2026-07-25T17:00:00.000Z"),
+    epochSecret: Buffer.alloc(32, 4),
+  });
+  const operation = { kind: "observe_structured" } as const;
+  const capability = authority.mint({
+    conversationId: scope.conversationId,
+    turnId: scope.turnId,
+    externalSessionGeneration: 1,
+    operation,
+    intentAuthority: "proposal_only",
+  });
+  const productStore = ProductStoreV2.open(join(root, "product"));
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode: new FakeOpenCode(),
+    workspaceRoot: root,
+    productStore,
+    a2OpenCode: {} as never,
+    a3ScratchRoot: join(root, "scratch"),
+    a3BatchSupervisor: {} as never,
+    a3VisualSupervisor: {} as never,
+    a3VisualAuthority: authority,
+  });
+  try {
+    app.productRunDispatcher!.requestCancellation(target.runId);
+    assert.deepEqual(facts.map((fact) => [
+      fact.factKind,
+      fact.outcomeCode,
+    ]), [
+      ["mint", null],
+      ["consume", null],
+      ["failure", "run_revoked"],
+    ]);
+    assert.throws(
+      () => authority.consume(capability, operation),
+      VisualAgentAuthorityError,
+    );
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const getJson = async (url: string): Promise<any> => {

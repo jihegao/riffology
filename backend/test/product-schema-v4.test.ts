@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { canonicalDigest, parseCanonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   initializeProductSchema,
   openProductDatabase,
@@ -90,7 +91,7 @@ test("v3 execution rows migrate transactionally to read-only version-3 contracts
     ).run(NOW);
 
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, PRODUCT_SCHEMA_VERSION);
     const expectedDigests = new Map([
       ["experiment_configurations", canonicalDigest({
         contractVersion: 3,
@@ -223,6 +224,7 @@ test("a failed v4 migration rolls back columns, tables, legacy markers, and vers
       PRODUCT_SCHEMA_MIGRATIONS[6],
       PRODUCT_SCHEMA_MIGRATIONS[7],
       PRODUCT_SCHEMA_MIGRATIONS[8],
+      PRODUCT_SCHEMA_MIGRATIONS[9],
     ]), /missing_v4_table/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);

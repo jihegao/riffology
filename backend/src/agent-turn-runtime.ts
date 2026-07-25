@@ -7,6 +7,7 @@ import type { AgentContextInput } from "./agent-context.ts";
 import type { ConversationOwner, ModelFileMutation } from "./agent-domain.ts";
 import { ProductStoreV2, ProductStoreV2Error } from "./product-store-v2.ts";
 import { SimulationSkillCatalog, type LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
+import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 
 export type PreparedAgentTurnRuntime = Readonly<{
   capability: string;
@@ -22,13 +23,19 @@ export class AgentTurnRuntime implements AgentToolExecutor {
   readonly store: ProductStoreV2;
   readonly skills: SimulationSkillCatalog;
   readonly mcp: AgentMcpServer;
+  readonly visualAuthority?: VisualAgentAuthority;
   readonly #now: () => string;
 
-  constructor(store: ProductStoreV2, skills: SimulationSkillCatalog, options: { now?: () => string; capabilityTtlMs?: number } = {}) {
+  constructor(store: ProductStoreV2, skills: SimulationSkillCatalog, options: {
+    now?: () => string;
+    capabilityTtlMs?: number;
+    visualAuthority?: VisualAgentAuthority;
+  } = {}) {
     this.store = store;
     this.skills = skills;
     this.#now = options.now ?? (() => new Date().toISOString());
     this.mcp = new AgentMcpServer(this, { ttlMs: options.capabilityTtlMs });
+    this.visualAuthority = options.visualAuthority;
   }
 
   async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[] }): Promise<PreparedAgentTurnRuntime> {
@@ -78,8 +85,20 @@ export class AgentTurnRuntime implements AgentToolExecutor {
         selectedSkills: loadedSkill ? [{ id: loadedSkill.id, version: loadedSkill.version, instructions: loadedSkill.instructions }] : [],
       },
       promptAttachments: attachments.map(({ metadata }) => ({ id: metadata.id, mediaType: metadata.mediaType, workspaceRelativePath: metadata.relativePath })),
-      release: () => this.mcp.revoke(capability),
+      release: () => {
+        this.mcp.revoke(capability);
+        this.visualAuthority?.revokeTurn(input.conversationId, input.turnId);
+      },
     });
+  }
+
+  revokeAll(): void {
+    this.mcp.revokeAll();
+    this.visualAuthority?.revokeAll();
+  }
+
+  revokeVisualRun(runId: string): void {
+    this.visualAuthority?.revokeRun(runId);
   }
 
   handle(capability: string | undefined, request: unknown) {

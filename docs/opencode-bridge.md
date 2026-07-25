@@ -131,7 +131,8 @@ Agent changes are proposals or domain actions, not prose side effects:
 | `run_experiment_revision` | Start an exact saved experiment revision; backend derives workflow labels from current scoped policy facts. |
 | `get_run_status` | Read bounded backend status/log facts. |
 | `read_run_evidence` | Read declared summaries, events, metrics, and view manifests. |
-| `drive_workbench_ui` | After domain success, mirror an allowlisted UI intent and report observation. |
+| `observe_current_visual` | Future A3-2c2 target, not exposed by A3-2c1: derive the current Project/current healthy attempt and return one bounded audited observation. |
+| `interact_current_visual` | Future A3-2c3 target, not exposed by A3-2c1: consume one explicit current-turn capability for one typed role/name or label interaction, then return bounded audited evidence. |
 
 The Agent cannot record a human endorsement, alter actor type/role, set
 `policySatisfied`, set trust, close an issue without a recorded resolution, or
@@ -144,12 +145,51 @@ exact subject revisions must be explicit; no endorsement is silently reused.
 
 ## Browser verification
 
-Domain mutations commit first. `drive_workbench_ui` may then use an allowlisted
-intent such as opening a view, focusing a parameter, opening an issue, or
-opening results. Playwright observation is evidence that the projection is
-visible, not evidence that the domain action happened. A mirror failure leaves
-committed backend state intact, emits a safe warning, and permits manual
-continuation.
+Domain mutations commit first. The platform-internal legacy mirror may then use
+an allowlisted intent such as opening a view, focusing a parameter, opening an
+issue, or opening results. Playwright observation is evidence that the
+projection is visible, not evidence that the domain action happened. A mirror
+failure leaves committed backend state intact, emits a safe warning, and
+permits manual continuation.
+
+`drive_workbench_ui` and its ambient `RIFF_CDP_URL` projector remain
+platform-internal legacy projection behavior, not an OpenCode tool. Project
+and A3-2c turn schemas and server-side dispatch allowlists never grant or
+dispatch it. A live-CDP negative remains part of A3-2c4 browser acceptance;
+A3-2c1 does not claim that evidence.
+Only the platform may invoke a fixed legacy mirror intent after the matching
+domain commit.
+
+The current unpublished A3-2c1 branch stops at a backend-private authority,
+append-only audit, revocation, and legacy-projector-isolation foundation. It has
+no Playwright runner/transport and does not expose either future A3-2c tool.
+Audit facts retain only bound IDs, finite lifecycle/operation/action/locator
+kinds, and SHA-256 commitments; locator role/name-or-label, typed value,
+observation content/summary, DOM, and screenshot bytes are not retained.
+
+The future A3-2c target tools derive scope from the durable conversation and originating turn;
+they never accept a Project, run, URL, port, cookie, nonce, filesystem path, or
+generic selector from OpenCode. Observation uses a separately minted internal
+capability. Interaction additionally requires one explicit current-turn
+instruction, consumes the capability once, and accepts only accessibility role
+plus bounded accessible name, or a bounded label. The immutable audit metadata
+records conversation, turn, Project, run, attempt, finite kinds, timestamps,
+and commitments without making the observation authoritative Project state.
+The capability also binds attempt generation/process identity, capability
+epoch, exactly one complete normalized action commitment, and expiry. The
+commitment covers action kind, role/name-or-label locator, and a digest of any
+input or selection value; every field is compared at use. The server requires exactly one
+healthy candidate, revalidates the complete tuple immediately before use, and
+atomically consumes before side effect; failure and timeout consume it too.
+The new runner is structurally unable to attach the legacy CDP profile.
+Locator matching is NFC-normalized, case-sensitive, bounded, exact, unique,
+visible, and enabled, with no regex/glob/substring/index fallback. Page content
+is untrusted data and never authorizes a tool action.
+
+Diagnostic event type, payload, URL-shaped text, instruction-shaped text, and
+tool-call-shaped text are likewise untrusted model output. They use a separate
+bounded Agent-context section and safe text/structured UI rendering; they
+cannot authorize tools, change scope, or become a user instruction.
 
 The bridge maps provider/tool events into the canonical project snapshot/patch,
 conversation delta, agent status, and connection status vocabulary. It

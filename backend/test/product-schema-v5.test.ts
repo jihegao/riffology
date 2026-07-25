@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   configureProductDatabase,
   initializeProductSchema,
@@ -104,8 +105,8 @@ test("schema v5 upgrades a clean v4 database without changing execution contract
     installV4(database);
     const { runId } = insertV4Run(database);
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 9);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, PRODUCT_SCHEMA_VERSION);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, PRODUCT_SCHEMA_VERSION);
     assert.equal((database.prepare("SELECT contract_version FROM runs WHERE id = ?").get(runId) as { contract_version: number }).contract_version, 4);
     assert.equal((database.prepare("SELECT first_cancel_command_id FROM runs WHERE id = ?").get(runId) as { first_cancel_command_id: string | null }).first_cancel_command_id, null);
     assert.equal(Boolean(database.prepare(

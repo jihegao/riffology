@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
 import { planExperiment, type ExperimentPlan } from "../src/experiment-planner.ts";
 import { openProductDatabase, type ProductDatabase } from "../src/product-schema.ts";
@@ -353,6 +354,217 @@ test("currentHealthyVisualFrameTarget returns only the exact healthy current vis
     );
   } finally {
     closeFixture(fixture);
+  }
+});
+
+test("currentHealthyVisualAgentTarget derives the sole healthy attempt without a caller run ID", () => {
+  const fixture = createFixture("agent_target");
+  try {
+    assert.throws(
+      () => fixture.store.currentHealthyVisualAgentTarget(fixture.projectId, { now: HEALTHY_AT }),
+      /visual_agent_unavailable/u,
+    );
+    makeHealthy(fixture);
+    const target = fixture.store.currentHealthyVisualAgentTarget(
+      fixture.projectId,
+      { now: HEALTHY_AT },
+    );
+    assert.equal(target.runId, fixture.runId);
+    assert.equal(target.attemptId, fixture.attempt.attemptId);
+    assert.equal(target.processAttemptId, fixture.process.processAttemptId);
+    assert.equal(target.processStartToken, fixture.process.processStartToken);
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test("currentHealthyVisualAgentTarget rejects an ambiguous Project candidate set", () => {
+  const fixture = createFixture("agent_ambiguous");
+  try {
+    makeHealthy(fixture);
+    fixture.store.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      database.prepare(`INSERT INTO runs
+        (id, project_id, experiment_configuration_id, status,
+          frozen_configuration_json, requested_sample_count, created_at,
+          updated_at, started_at, contract_version, run_kind,
+          completion_conversation_id, execution_description_sha256,
+          project_snapshot_sha256, frozen_configuration_sha256,
+          sample_plan_json, sample_plan_sha256, limits_json, limits_sha256,
+          start_receipt_sha256, completion_card_disposition)
+        SELECT ?, project_id, experiment_configuration_id, 'queued',
+          frozen_configuration_json, requested_sample_count, created_at,
+          updated_at, NULL, contract_version, run_kind, NULL,
+          execution_description_sha256, project_snapshot_sha256,
+          frozen_configuration_sha256, sample_plan_json, sample_plan_sha256,
+          limits_json, limits_sha256, ?, 'not_requested'
+        FROM runs WHERE id = ?`
+      ).run(
+        "run_visual_agent_ambiguous_second",
+        DIGEST_A,
+        fixture.runId,
+      );
+      database.prepare(`UPDATE runs
+        SET status = 'running', started_at = ?, updated_at = ?
+        WHERE id = ?`
+      ).run(
+        STARTED_AT,
+        STARTED_AT,
+        "run_visual_agent_ambiguous_second",
+      );
+    } finally {
+      database.close();
+    }
+    const reopened = ProductStoreV2.open(fixture.root);
+    try {
+      assert.throws(
+        () => reopened.currentHealthyVisualAgentTarget(
+          fixture.projectId,
+          { now: HEALTHY_AT },
+        ),
+        /visual_agent_unavailable/u,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("visual authority uses durable Project turn scope and persists a secret-free lifecycle", () => {
+  const fixture = createFixture("agent_authority");
+  try {
+    makeHealthy(fixture);
+    fixture.store.createConversation({
+      id: "conversation_visual_agent_authority",
+      owner: { kind: "project", id: fixture.projectId },
+      name: "Visual Agent",
+      providerId: "provider",
+      providerModelId: "model",
+      createdAt: NOW,
+    });
+    fixture.store.startAgentTurn({
+      turnId: "turn_visual_agent_authority",
+      userMessageId: "message_visual_agent_authority",
+      conversationId: "conversation_visual_agent_authority",
+      requestKey: "visual-agent-authority",
+      text: "Inspect the current visualization",
+      createdAt: NOW,
+    });
+    fixture.store.bindAgentSession({
+      id: "session_visual_agent_authority",
+      conversationId: "conversation_visual_agent_authority",
+      expectedGeneration: 0,
+      state: "available",
+      externalSessionRef: "opaque-session",
+      at: NOW,
+    });
+    const authority = new VisualAgentAuthority(fixture.store, {
+      now: () => new Date(HEALTHY_AT),
+      epochSecret: Buffer.alloc(32, 9),
+    });
+    const operation = { kind: "observe_structured" } as const;
+    const capability = authority.mint({
+      conversationId: "conversation_visual_agent_authority",
+      turnId: "turn_visual_agent_authority",
+      externalSessionGeneration: 1,
+      operation,
+      intentAuthority: "proposal_only",
+    });
+    const consumed = authority.consume(capability, operation);
+    authority.recordOutcome(consumed, {
+      status: "succeeded",
+      code: "observation_succeeded",
+    });
+    fixture.store.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      const facts = database.prepare(`SELECT fact_kind, action_kind,
+          capability_ref_sha256, process_identity_sha256,
+          capability_epoch_sha256, locator_value_sha256
+        FROM visual_agent_audit_facts ORDER BY rowid`
+      ).all() as Array<Record<string, unknown>>;
+      assert.deepEqual(facts.map((fact) => fact.fact_kind), [
+        "mint",
+        "consume",
+        "outcome",
+      ]);
+      assert.ok(facts.every((fact) => fact.action_kind === "structured_endpoint"));
+      const persisted = JSON.stringify(facts);
+      assert.equal(persisted.includes(capability), false);
+      assert.equal(persisted.includes(fixture.process.processStartToken), false);
+      assert.equal(persisted.includes(fixture.launch.healthPath), false);
+    } finally {
+      database.close();
+    }
+  } finally {
+    rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("reopening the Store closes an unconsumed visual capability with crash-gap audit", () => {
+  const fixture = createFixture("agent_restart");
+  try {
+    makeHealthy(fixture);
+    fixture.store.createConversation({
+      id: "conversation_visual_agent_restart",
+      owner: { kind: "project", id: fixture.projectId },
+      name: "Visual Agent",
+      providerId: "provider",
+      providerModelId: "model",
+      createdAt: NOW,
+    });
+    fixture.store.startAgentTurn({
+      turnId: "turn_visual_agent_restart",
+      userMessageId: "message_visual_agent_restart",
+      conversationId: "conversation_visual_agent_restart",
+      requestKey: "visual-agent-restart",
+      text: "Inspect the current visualization",
+      createdAt: NOW,
+    });
+    fixture.store.bindAgentSession({
+      id: "session_visual_agent_restart",
+      conversationId: "conversation_visual_agent_restart",
+      expectedGeneration: 0,
+      state: "available",
+      externalSessionRef: "opaque-session",
+      at: NOW,
+    });
+    const authority = new VisualAgentAuthority(fixture.store, {
+      now: () => new Date(HEALTHY_AT),
+      epochSecret: Buffer.alloc(32, 10),
+    });
+    authority.mint({
+      conversationId: "conversation_visual_agent_restart",
+      turnId: "turn_visual_agent_restart",
+      externalSessionGeneration: 1,
+      operation: { kind: "observe_screenshot" },
+      intentAuthority: "proposal_only",
+    });
+    fixture.store.close();
+    const reopened = ProductStoreV2.open(fixture.root);
+    reopened.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      assert.deepEqual(
+        (database.prepare(`SELECT fact_kind FROM visual_agent_audit_facts
+          ORDER BY rowid`).all() as Array<{ fact_kind: string }>)
+          .map((row) => row.fact_kind),
+        ["mint", "crash_gap"],
+      );
+      assert.equal(
+        (database.prepare(`SELECT outcome_code FROM visual_agent_audit_facts
+          WHERE fact_kind = 'crash_gap'`).get() as { outcome_code: string })
+          .outcome_code,
+        "backend_restart",
+      );
+    } finally {
+      database.close();
+    }
+  } finally {
+    rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 

@@ -19,6 +19,7 @@ import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
+import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
 import {
   GenericVisualSupervisor,
@@ -95,6 +96,7 @@ export type BackendOptions = {
   a3BatchOutputConsumer?: (candidate: BatchOutputCandidate) => Buffer;
   a3VisualSupervisor?: VisualSupervisorPort;
   a3VisualOutputConsumer?: (candidate: VisualOutputCandidate) => Buffer;
+  a3VisualAuthority?: VisualAgentAuthority;
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
@@ -278,6 +280,7 @@ export class BackendApp {
   readonly productStore?: ProductStoreV2;
   readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
+  readonly #agentTurnRuntime?: AgentTurnRuntime;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
@@ -317,6 +320,8 @@ export class BackendApp {
         pythonExecutable: pythonExecutable(),
         scratchRoot,
       });
+      const visualAuthority = options.a3VisualAuthority
+        ?? new VisualAgentAuthority(this.productStore);
       this.productRunDispatcher = new ProductRunDispatcher({
         store: this.productStore,
         supervisor: batchSupervisor,
@@ -326,10 +331,16 @@ export class BackendApp {
         ...(options.a3VisualOutputConsumer
           ? { consumeVisualOutput: options.a3VisualOutputConsumer }
           : {}),
-        revokeVisualAccess: (runId) => this.#browserFrames?.revokeRun(runId),
+        revokeVisualAccess: (runId) => {
+          this.#browserFrames?.revokeRun(runId);
+          visualAuthority.revokeRun(runId);
+        },
       });
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
-      const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
+      const turnRuntime = new AgentTurnRuntime(this.productStore, skills, {
+        visualAuthority,
+      });
+      this.#agentTurnRuntime = turnRuntime;
       this.a2 = new MilestoneA2Api(new AgentWorkspaceService(
         this.productStore,
         a2OpenCode,
@@ -453,29 +464,54 @@ export class BackendApp {
   }
 
   async close(): Promise<void> {
-    await this.#withListenerLock(async () => {
+    // Revoke every process-local authority synchronously before any fallible
+    // asynchronous drain can yield or reject.
+    this.#agentTurnRuntime?.revokeAll();
+    for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
+    this.mcp.revokeAll();
+    this.#unsubscribeOpenCode?.();
+    this.#unsubscribeOpenCode = undefined;
+
+    let firstError: unknown;
+    const attempt = async (action: () => Promise<void> | void): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        firstError ??= error;
+      }
+    };
+    await attempt(() => this.#withListenerLock(async () => {
       if (this.#listenerMode === "closed") return;
       this.#listenerMode = "closed";
+      let listenerError: unknown;
       if (this.#server) {
-        await closeServerWithDrain(this.#server, this.#legacyCloseDrainTimeoutMs);
-        this.#server = undefined;
+        try {
+          await closeServerWithDrain(this.#server, this.#legacyCloseDrainTimeoutMs);
+        } catch (error) {
+          listenerError ??= error;
+        } finally {
+          this.#server = undefined;
+        }
       }
       if (this.#browserNetwork) {
         this.#browserFrames?.clear();
         this.#browserFrames = undefined;
         this.#browserWebSockets = undefined;
         this.#browserBrokerOrigin = undefined;
-        await this.#browserNetwork.close();
-        this.#browserNetwork = undefined;
+        try {
+          await this.#browserNetwork.close();
+        } catch (error) {
+          listenerError ??= error;
+        } finally {
+          this.#browserNetwork = undefined;
+        }
       }
-    });
-    this.#unsubscribeOpenCode?.();
-    this.#unsubscribeOpenCode = undefined;
-    for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
-    this.mcp.revokeAll();
-    await this.gate2.close();
-    await this.productRunDispatcher?.stop();
-    this.productStore?.close();
+      if (listenerError) throw listenerError;
+    }));
+    await attempt(() => this.gate2.close());
+    await attempt(() => this.productRunDispatcher?.stop());
+    await attempt(() => this.productStore?.close());
+    if (firstError) throw firstError;
   }
 
   async #withListenerLock<T>(action: () => Promise<T>): Promise<T> {

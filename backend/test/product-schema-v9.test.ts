@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   configureProductDatabase,
   initializeProductSchema,
@@ -135,13 +136,13 @@ test("schema v9 migrates a real v8 database, preserves batch success/output sema
 
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-      9,
+      PRODUCT_SCHEMA_VERSION,
     );
     assert.equal(
       (database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as {
         version: number;
       }).version,
-      9,
+      PRODUCT_SCHEMA_VERSION,
     );
     assert.deepEqual(database.prepare("SELECT * FROM runs WHERE id = ?").get(batch.runId), before);
     assert.equal(Boolean(database.prepare(
@@ -203,6 +204,7 @@ test("schema v9 migration failure restores v8 triggers and both version markers"
         version: 9,
         sql: `${PRODUCT_SCHEMA_V9_SQL}\nSELECT * FROM missing_v9_guard;`,
       },
+      PRODUCT_SCHEMA_MIGRATIONS[9],
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v9_guard/u);
     assert.equal(

@@ -82,7 +82,14 @@ regression combination passes 32/32; the serial official backend gate reports
 464 total with 463 passed, zero failed, and one optional smoke skipped. Web remains
 104/104, the network-entry integration passes 1/1, and the production build
 succeeds. A3-2b4 was merged and published through PR #37; its dedicated
-real-browser matrix passes 5/5. A3-2c remains pending.
+real-browser matrix passes 5/5. A3-2c1's authority/audit and legacy-CDP-
+isolation foundation is implemented on the current working branch but is not
+published or merged and exposes no observation/interaction tool. A3-2c2
+through A3-2c4 and A3-2d remain pending.
+Its branch-only gate reports 500 backend tests with 499 passed, zero failed,
+and one optional installed-OpenCode smoke skipped; web passes 104/104, network
+entry 1/1, the production build succeeds, and independent security review has
+no P0/P1/P2 finding.
 The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
@@ -206,9 +213,9 @@ re-scaffold/upgrade path.
 The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- batch domain-event ingestion or public output list/download routes;
-- a scoped visual proxy, frame, WebSocket forwarding, broker/browser
-  capability, or Playwright authority; and
+- batch domain-event ingestion, public output list/download routes, or direct
+  Agent-independent trash/restore routes;
+- scoped Playwright observation or interaction authority; and
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
@@ -934,11 +941,36 @@ Project APIs and records `not_requested`.
 
 ## Outputs, downloads, and bounded domain events
 
+This section is the pending A3-2d contract. Existing successful-run DTOs may
+project their committed output index, and Store trash primitives already
+exist, but no current generic public output download, declared diagnostic-event
+ingestion, or complete Agent-independent direct-control surface satisfies this
+contract. Legacy wind/Gate event and download routes are not A3-2d evidence.
+
 Output listing returns only `id`, `runId`, sample index/ID, logical name,
 declared role/type, media type, byte size, SHA-256, and created time. Download
 resolves the same-run owned file, rechecks path/size/digest, emits a safe
 attachment name, and applies size/range limits. It never accepts a path or media
 type from the browser.
+
+List/download/event reads require the exact app session and owner plus exact
+Host, same-origin Fetch Metadata, and current Project/run binding; an ID is
+never a bearer credential. List and event-read responses are private,
+`no-store`. Mutation routes additionally require exact Origin, CSRF, JSON
+non-simple content type, command ID, and expected run revision or terminal
+closure digest. Trash requires explicit confirmation bound to that closure.
+Command retry is idempotent; changed intent fails.
+
+Download opens the allowlisted output with no symlink following, verifies
+same-run manifest identity and succeeded/not-trashed state, and uses that one
+open file descriptor for `fstat`, complete SHA-256 verification, rewind, and
+streaming. Identity and size are rechecked after hashing and before response
+headers. The child cannot select response headers. Responses are attachment-
+only with a server-safe name, `X-Content-Type-Options: nosniff`, a safe
+allowlisted content type, no-store policy, and response/concurrency/rate
+limits. Only one normalized byte range is accepted; malformed or unsatisfiable
+ranges return deterministic `416`. The complete digest is verified before the
+first response byte, including for a range request.
 
 Optional batch events use bounded NDJSON records:
 
@@ -953,12 +985,44 @@ checks each payload; without it, Riff applies only structural limits. The
 platform does not infer semantic meaning from event type names or payload
 shape, guess whether content resembles replay state, or promote model-defined
 events into a product schema. The declared role remains `diagnostic`.
+Event type, payload, URL-shaped text, instruction-shaped text, and
+tool-call-shaped text are untrusted model output. The UI renders them only as
+safe text or structured values. Any Agent context uses a separate bounded
+diagnostic section; event content cannot authorize a tool, widen scope, select
+a target, or become a user instruction.
 
 Listing uses immutable sequence order and a server-authenticated opaque cursor
 bound to run ID and normalized filters. Filters are limited to type, sample
 index, and bounded occurred-time range. Cross-run, mismatched, or tampered
 cursors fail closed. Responses expose `items`, `nextCursor`, and `truncated`,
 never file offsets or index paths.
+
+NDJSON is strict UTF-8 with LF-delimited records; empty lines, duplicate JSON
+keys, invalid Unicode, unsafe numbers, external schema references, and
+noncanonical object/array depth, key count, item count, string length, event
+type vocabulary, or UTC `occurredAt` range fail before terminal publication.
+Ingestion and the immutable terminal event-set digest/count commit atomically.
+
+The cursor is bounded, versioned, expiry-bearing, and MACed with a private
+restart-stable installation key using constant-time verification. Its payload
+binds route Project ID, run ID, execution contract/schema version, immutable
+event-set digest, terminal/trash generation, direction, page limit, and every
+normalized filter. Cursor parsing is byte-bounded before decoding. Explicit
+key-epoch rotation, expiry, trash, or tuple mismatch invalidates it; ordinary
+backend restart does not. The installation key is generated atomically on
+first start with owner-only filesystem permissions. It is excluded from
+SQLite, public DTOs, backups, exports, logs, errors, and child-process
+environments. A missing or corrupt key after initialization fails startup and
+cursor verification closed until an explicit operator rotation; the service
+never silently regenerates it. Concurrent first starts converge on one key.
+
+Cancel is the existing A3-1c-a authority. A3-2d adds no parallel cancel route;
+it proves that cancel and the new download/trash/restore controls remain
+available without OpenCode. Trash atomically revokes Playwright capabilities,
+event cursors, confirmation tokens, active downloads, and dereference
+authority for completion links before committing the recoverable state.
+Restore returns only the original immutable terminal outputs/events and never
+revives an old capability, cursor, confirmation, or download.
 
 ## Visual execution and scoped WebSocket access
 
@@ -1252,15 +1316,81 @@ It does not reuse or receive a user's frame URL, nonce, app cookie, or broker
 cookie; A3-2c mints a separate internal one-turn capability only after A3-2b is
 complete.
 
+The existing `RIFF_CDP_URL`/`PlaywrightCdpProjector` path is legacy UI
+projection and is not reusable as A3-2c authority: it can discover an ambient
+localhost page and is not bound to the durable conversation, originating turn,
+current Project, current run, or current healthy attempt.
+
+The current unpublished A3-2c1 implementation stops at authority and audit. It
+derives the durable conversation/turn/current-Project scope, requires exactly
+one current healthy visual attempt, binds one process-local capability to the
+full scope/target/operation tuple and process epoch, returns only an opaque
+consumed handle, consumes before revalidation, and revokes on turn release,
+dispatcher run revocation, backend close, expiry, and restart. The append-only
+audit retains bound IDs, finite lifecycle/operation/action/locator kinds, and
+SHA-256 commitments only. It does not retain capability/browser secrets,
+locator role/name-or-label, typed value, observation summary/content, DOM, or
+screenshot bytes. There is no Playwright runner/transport and no OpenCode
+observe/interact tool in A3-2c1. The runner and real observation begin at
+A3-2c2; live-CDP isolation evidence remains an A3-2c4 browser gate.
+
+The new runner is structurally separate: its capability issuer, browser
+context/profile, page registry, and transport cannot call or attach to the
+legacy projector/CDP session even when `RIFF_CDP_URL` is configured. Issuance
+derives exactly one healthy attempt; zero or multiple candidates fail closed.
+The capability binds
+`{conversationId, immutableUserTurnId, projectId, runId, attemptGeneration,
+processIdentity, capabilityEpoch, oneAllowedOperation, expiry}`. For an
+interaction, `oneAllowedOperation` is a complete normalized action commitment:
+action kind, normalized role/name-or-label locator, and a digest commitment of
+the bounded input or selection value. Immediately before observation or
+interaction, the server re-resolves and compares every field in the complete
+tuple and action commitment. Action, locator, or value substitution fails
+closed. Project selection change, attempt replacement, unhealthy or terminal
+state, turn end, capability epoch rotation, backend restart, or expiry revokes
+it.
+
 Read-only observation may capture the declared structured endpoint,
 accessibility tree, bounded DOM text, and screenshots. Each observation records
 run/attempt identity, timestamp, kind, bounded digest/summary, and originating
-turn. It is conversation context, never authoritative Project state.
+turn in a dedicated immutable audit fact. Large observation bytes are not
+stored in the audit row; they remain ephemeral or use an explicitly retained
+bounded temporary document. The audit is conversation context, never
+authoritative Project state.
+
+The complete A3-2c target audit covers mint, atomic consume,
+observation/action outcome, bounded failure, and detected crash-gap
+reconciliation. A3-2c1 currently records only capability lifecycle,
+revocation/failure, and crash-gap facts; observation/action outcomes start with
+the runner. Audit stores the bound tuple, finite operation/action/locator kinds,
+and digest commitments, never raw locator text, input/selection value,
+capability, input secret, observation summary/content, credential-bearing DOM,
+or screenshot bytes. Any future retained temporary document remains a c2+
+contract and must be owner/turn bound with explicit TTL, media type,
+byte/dimension limits, digest, deletion, and restart behavior.
+Page content is untrusted observation data and never becomes an instruction;
+only the persisted human turn can authorize interaction.
 
 Click, type, or selection requires an explicit current-turn instruction and a
-one-turn capability. Navigation outside the exact proxy, upload, clipboard,
-permission prompts, arbitrary script evaluation, credentials, and unrestricted
-downloads are denied.
+one-turn, one-use capability. Interaction locators use only typed
+accessibility role plus bounded accessible name, or a bounded label; CSS,
+XPath, text-as-selector, arbitrary JavaScript, and model-supplied URLs are not
+accepted. Navigation outside the exact proxy, popup, upload, clipboard,
+permission prompts, credentials, and unrestricted downloads are denied.
+`drive_workbench_ui` is absent from the Project/A3-2c OpenCode tool schemas and
+server dispatch allowlists; dispatch rejects it even when `RIFF_CDP_URL` is
+configured and the legacy projector is live. The legacy projector remains only
+a platform-internal fixed mirror intent after the matching domain commit.
+
+Capability consumption is an atomic consume-before-side-effect transition.
+Success, locator mismatch, policy denial, browser error, timeout, and bounded
+failure all consume it; concurrent/retried use admits at most one attempt.
+Locator strings are valid UTF-8, NFC-normalized, case-sensitive exact matches
+with fixed byte limits; regex, glob, substring matching, and index/`nth`
+fallback are forbidden. Click roles are allowlisted to non-navigation controls;
+type/select roles and input values have separate role, type, and byte limits.
+The locator is re-resolved at action time and must match exactly one visible,
+enabled element; zero or multiple matches fail closed.
 
 ## Project Agent permission matrix
 
@@ -1275,7 +1405,7 @@ Agent-provided Project or Model ID.
 | Observe healthy visual attempt | Bounded current run | Embedded frame |
 | Interact with healthy visual attempt | Explicit current-turn one-use capability | User interacts in frame |
 | Create/adopt an analysis document | Stage 2 document/action rules | Existing controls when exposed |
-| Trash run/output | Deny; may suggest only | Explicit recoverable action |
+| Trash run and its owned output set | Deny; may suggest only | Explicit recoverable action |
 | Modify copied Model/schema/dependencies/execution description/snapshot | Deny | Deny |
 | Mutate frozen run/output/event/terminal status | Deny | Deny |
 | Access another object, path, URL, source tree, shell, SQL, credentials, or child port | Deny | Deny |
@@ -1286,29 +1416,39 @@ chooses metrics, interprets results, ranks scenarios, or recommends a decision.
 ## HTTP API target
 
 Existing names remain canonical; implementation must not introduce a parallel
-`/experiments` resource. A3-1b implements the two run routes marked current;
-the remaining run-control/output/event/visual routes stay target-only:
+`/experiments` resource. Current comments identify the merged authority;
+A3-2d owns only the output/event/direct-control routes still marked target:
 
 ```text
-POST   /api/projects
-GET    /api/projects/:projectId/workspace
+POST   /api/projects                                            # current foundation
+GET    /api/projects/:projectId/workspace                       # current foundation
 
-POST   /api/projects/:projectId/experiment-configs
-PATCH  /api/projects/:projectId/experiment-configs/:configId
+POST   /api/projects/:projectId/experiment-configs              # current A3-1a
+PATCH  /api/projects/:projectId/experiment-configs/:configId    # current A3-1a
 
 POST   /api/projects/:projectId/runs                 # current A3-1b
 GET    /api/projects/:projectId/runs/:runId          # current A3-1b
 POST   /api/projects/:projectId/runs/:runId/cancel   # current A3-1c-a
-POST   /api/projects/:projectId/runs/:runId/trash    # target
-POST   /api/projects/:projectId/runs/:runId/restore  # target
+POST   /api/projects/:projectId/runs/:runId/trash    # target A3-2d
+POST   /api/projects/:projectId/runs/:runId/restore  # target A3-2d
 
-POST   /api/browser-session/bootstrap                              # target
-GET    /api/projects/:projectId/runs/:runId/outputs                # target
-GET    /api/projects/:projectId/runs/:runId/outputs/:outputId/download
-GET    /api/projects/:projectId/runs/:runId/events                 # target
-POST   /api/projects/:projectId/runs/:runId/visual-frame-session   # target
-GET|WS /api/projects/:projectId/runs/:runId/visual/<server-scoped-path>
+GET|HEAD /browser/projects/:projectId/runs/:runId/visual           # current A3-2b4
+POST   /api/browser-session/bootstrap                              # current A3-2b2
+POST   /api/projects/:projectId/runs/:runId/visual-frame-session   # current A3-2b2
+GET|HEAD /frame/c/:routeId/<declared-relative-path>                # current A3-2b2
+WS     /frame/c/:routeId/<declared-websocket-path>                 # current A3-2b3
+
+GET    /api/projects/:projectId/runs/:runId/outputs                # target A3-2d
+GET    /api/projects/:projectId/runs/:runId/outputs/:outputId/download # target A3-2d
+GET    /api/projects/:projectId/runs/:runId/events                 # target A3-2d
 ```
+
+The legacy Gate runtime currently occupies the same textual
+`/api/projects/:projectId/runs/:runId/events` path for its own object model.
+A3-2d must route current ProductV2 Project/run identities to the ProductV2
+handler before any legacy fallback and must return a current-surface
+not-found/ownership error rather than silently reading legacy artifacts.
+Legacy rows, files, cursors, and projections cannot satisfy the A3-2d route.
 
 The exact current start request is `{commandId, experimentConfigId,
 completionConversationId?}`. It returns `201` with
@@ -1514,12 +1654,21 @@ Output indexes never resolve outside the owning Project/run object root.
    reports 466 total with 465 passed, zero failed, and one optional
    installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
    and the production build succeeds. This is a Chromium-only claim.
-13. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
-   attempt observation, explicit one-turn interaction, bounded audit, and
-   cross-scope denial.
-14. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
+13. **A3-2c Playwright authority — in progress, unpublished:** c1 implements
+   backend-private scope/capability/audit/revocation and legacy-CDP isolation
+   on the current working branch only. It exposes no observation or interaction
+   tool. c2 read-only observation, c3 one-use typed interaction, and c4 real
+   Chromium/security/docs closeout remain pending.
+14. **A3-2d generic outputs/events/direct controls — pending:** exact same-run
+   output list/download with byte/digest revalidation, bounded declared
+   diagnostic-event ingestion with opaque run/filter-bound cursors, and
+   Agent-independent cancel/download/trash/restore acceptance. Cancel is
+   already current; this slice adds missing generic download/trash/restore
+   routes and proves the complete direct-control set without OpenCode. A3-3
+   cannot declare wind diagnostic events until this slice is published.
+15. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-15. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
+16. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
    verification and narrow browser evidence, then PR merge, Issue #14 closure,
    and local `main` synchronization.
 
@@ -1564,8 +1713,9 @@ backend gate reports 385 tests with 384 passed, zero failed, and one
 optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; web is 104/104 and the production build succeeds. Visual
 completion remains HTTP `422`
-`visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser and
-A3-2c Playwright work remain pending.
+`visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser is
+published, while A3-2c Playwright, A3-2d generic result access/direct controls,
+and A3-3 wind import remain pending.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:
