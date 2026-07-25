@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 
 export type VisualListenerInspectionInput = Readonly<{
@@ -34,7 +34,7 @@ export class VisualListenerInspectionError extends Error {
   }
 }
 
-type CommandResult = Readonly<{
+export type CommandResult = Readonly<{
   status: number | null;
   stdout: string;
   stderr: string;
@@ -43,6 +43,11 @@ type CommandResult = Readonly<{
 export type VisualListenerInspectorDependencies = Readonly<{
   platform?: NodeJS.Platform;
   runCommand?: (file: string, args: readonly string[]) => CommandResult;
+}>;
+
+export type AsyncVisualListenerInspectorDependencies = Readonly<{
+  platform?: NodeJS.Platform;
+  runCommand?: (file: string, args: readonly string[]) => Promise<CommandResult>;
 }>;
 
 export type VisualListenerReady = Readonly<{ kind: "ready" }>;
@@ -187,6 +192,48 @@ export const inspectVisualListener = (
   return READY;
 };
 
+/**
+ * Runs the bounded OS reads without blocking the Node event loop, then reuses
+ * the exact synchronous parser and identity checks over the captured results.
+ */
+export const inspectVisualListenerAsync = async (
+  input: VisualListenerInspectionInput,
+  dependencies: AsyncVisualListenerInspectorDependencies = {},
+): Promise<VisualListenerReady> => {
+  assertInput(input);
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin") {
+    throw new VisualListenerInspectionError("visual_listener_platform_unsupported");
+  }
+  const runCommand = dependencies.runCommand ?? defaultRunCommandAsync;
+  const commands = [
+    ["/bin/ps", ["-axo", "pid=", "-o", "pgid=", "-o", "lstart="]],
+    ["/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-F0pn"]],
+    ["/bin/ps", ["-axo", "pid=", "-o", "pgid=", "-o", "lstart="]],
+  ] as const;
+  const results: CommandResult[] = [];
+  for (const [file, args] of commands) {
+    try {
+      results.push(await runCommand(file, args));
+    } catch {
+      throw new VisualListenerInspectionError("visual_listener_tool_failure");
+    }
+  }
+  let index = 0;
+  return inspectVisualListener(input, {
+    platform,
+    runCommand: (file, args) => {
+      const expected = commands[index];
+      if (!expected || expected[0] !== file
+        || expected[1].length !== args.length
+        || expected[1].some((value, position) => value !== args[position])) {
+        throw new VisualListenerInspectionError("visual_listener_tool_failure");
+      }
+      return results[index++]!;
+    },
+  });
+};
+
 const assertInput = (input: VisualListenerInspectionInput): void => {
   if (!input || typeof input !== "object"
     || typeof input.runId !== "string" || input.runId.length < 3 || input.runId.length > 128
@@ -215,6 +262,27 @@ const defaultRunCommand = (file: string, args: readonly string[]): CommandResult
     stderr: typeof result.stderr === "string" ? result.stderr : "",
   });
 };
+
+const defaultRunCommandAsync = (
+  file: string,
+  args: readonly string[],
+): Promise<CommandResult> => new Promise((resolve) => {
+  execFile(file, [...args], {
+    encoding: "utf8",
+    timeout: 1_000,
+    maxBuffer: 4 * 1_024 * 1_024,
+    env: { LANG: "C", LC_ALL: "C" },
+  }, (error, stdout, stderr) => {
+    const code = error && "code" in error && typeof error.code === "number"
+      ? error.code
+      : error ? null : 0;
+    resolve(Object.freeze({
+      status: code,
+      stdout: typeof stdout === "string" ? stdout : "",
+      stderr: typeof stderr === "string" ? stderr : "",
+    }));
+  });
+});
 
 const readProcesses = (
   runCommand: NonNullable<VisualListenerInspectorDependencies["runCommand"]>,

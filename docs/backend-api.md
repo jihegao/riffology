@@ -337,7 +337,7 @@ target contracts, not current routes or acceptance evidence:
    rejects non-canonical Host counterexamples before invoking either handler.
    Startup and close are serialized and partial listener pairs do not admit
    requests. Route-specific Origin/Fetch-Site checks remain A3-2b2.
-6. **A3-2b2 frame bootstrap and HTTP proxy — pending:** add browser bootstrap,
+6. **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** add browser bootstrap,
    CSRF, cookies, one-time nonce redemption, visual frame sessions, isolated
    broker HTTP forwarding, and exact CSP on the A3-2b1 topology.
 7. **A3-2b3 WebSocket, revocation, and secrecy — pending:** add exact path and
@@ -438,17 +438,26 @@ platform `::1` cookies are not sent to the untrusted child at `127.0.0.1`.
 
 The app cookie is random, host-only, HttpOnly, SameSite=Strict, has no `Domain`,
 and uses `Path=/api/`. It may omit `Secure` on current HTTP and must set it
-under future HTTPS. Bootstrap rejects missing/`null`/wrong exact app
+under future HTTPS. The server-side session lifetime is 15 minutes, and cookie
+`Max-Age` and `Expires` encode the same lifetime. Bootstrap rejects
+missing/`null`/wrong exact app
 `Origin`, wrong `Host:port`, or a `Sec-Fetch-Site` value other than
 `same-origin`. A successful new bootstrap rotates the browser-session
 generation and revokes older frame/WS capabilities before returning.
 Frame-session requires the exact app cookie, CSRF, Origin, and Fetch-Site.
+Bootstrap and frame-session support only `POST` and preflight `OPTIONS`; CORS
+permits credentials only for the exact app origin, methods `POST, OPTIONS`, and
+headers `Content-Type, X-Riff-CSRF`. Both successful POSTs return HTTP `201`.
+The Vite origin is rejected. Origin and Fetch-Site mitigate browser CSRF and do
+not authenticate arbitrary local native clients.
 
 The first nonce-bearing broker navigation normally has no `Origin`; it requires
 the exact broker Host/path, live generation/Project/run/attempt/expiry binding,
-and atomic one-use nonce whose expiry is no later than 60 seconds after issue.
+and atomic one-use nonce whose expiry is no later than 60 seconds after issue
+or the attempt expiry.
 Redemption within 60 seconds may succeed once; expiry, restart, or a new browser
-generation invalidates it immediately. After its nonce-free redirect, HTTP navigation and
+generation invalidates it immediately. Redemption returns HTTP `303` with a
+relative nonce-free `Location`. After that redirect, HTTP navigation and
 subresources without `Origin` require the exact broker cookie; requests with
 `Origin` additionally require the exact broker origin. WS always requires the
 exact broker Origin, so missing, `null`, app, child, or another origin fails.
@@ -459,21 +468,68 @@ entry.
 
 The broker cookie has a random independent name, is host-only, HttpOnly,
 SameSite=Strict, has no `Domain`, uses the exact broker path, and expires at
-`min(attempt expiry, 15 minutes)`. It may omit `Secure` on current HTTP and must
+`min(attempt claimedAt + frozen wallTimeMs, issue time + 15 minutes)`. It may
+omit `Secure` on current HTTP and must
 set it under future HTTPS. Cookie `Path`
 is not a trusted authorization boundary: the app never accepts the broker
 cookie and the broker ignores all other cookies. Authorization is the one-use
 capability plus live binding, CSRF/Origin, exact Host/port/path, and expiry.
+
+`riff-visual-v1` adds no execution-description field for frame HTTP. Beneath
+the minted nonce-free capability base, only `GET` and `HEAD` with a normalized
+same-origin suffix are forwarded. Query is allowed when normalized path plus
+query is at most 4,096 bytes; request bodies are denied. Visual applications
+must use relative document, CSS, script, and fetch references beneath the
+capability base. Root-absolute application routes are not rewritten and remain
+denied by the broker. Child request headers
+are limited to `Accept`, `Accept-Language`, `If-None-Match`,
+`If-Modified-Since`, and `Range`, with exact child `Host` and
+`Accept-Encoding: identity`. Child response headers are limited to
+`Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`,
+`Last-Modified`, and `Cache-Control`. `Set-Cookie`, `Location`, `Refresh`,
+authentication, CORS, credentials, nonce/capability, and hop-by-hop headers are
+removed.
+The broker replaces child `Cache-Control` with `private, no-store`; a cached
+nonce-free route must never bypass generation, cookie, Store, or listener
+admission after rotation or revocation.
+
+Every child `3xx` is rejected without following. Request and response headers
+are each bounded to 32,768 bytes, response body to 8 MiB, the child exchange to
+5,000 milliseconds, and concurrent HTTP requests to eight per capability.
+Current Store generation, unexpired dispatcher lease, matching process
+heartbeat, and exact OS listener ownership are checked before and after each
+exchange. OS inspection is asynchronous, serialized, globally bounded, and has
+a 5,000 millisecond queue-plus-inspection deadline.
+Stable errors are `browser_method_denied` (`405`),
+`browser_session_denied` (`403`), `visual_frame_unavailable` (`409`),
+`visual_frame_nonce_invalid` (`404`), `visual_frame_session_denied` (`403`),
+`visual_frame_proxy_denied` (`404` or `405`),
+`visual_frame_proxy_redirect_denied` (`502`),
+`visual_frame_proxy_limit_exceeded` (`502`),
+`visual_frame_proxy_timeout` (`504`), and
+`visual_frame_proxy_failed` (`502`).
+
 Real-browser evidence proves the iframe sends the cookie, JavaScript cannot
-read it, and cross-origin DOM access fails. Every broker document sends CSP
-`frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and does not
-send `X-Frame-Options: SAMEORIGIN`. Only the exact app may embed it. App,
+read it, and cross-origin DOM access fails. Every broker document replaces
+child framing policy with CSP
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+form-action 'none'; frame-src 'none'; frame-ancestors
+http://[::1]:<exact-app-port>`, with no wildcard, and sends no
+`X-Frame-Options`. Only the exact app may embed it. App,
 broker, and child headers/logs are scanned for all cookie, nonce, including
 expired nonce values, capability, URL, and child-port secrets; those values are
 also absent from public DTOs. SQLite contains no browser nonce, cookie, frame
 URL, or capability. It retains child ports only in the schema-defined private
 process-attempt, launch, and health evidence required for exact recovery; that
 evidence cannot restore browser access after restart.
+The scan covers broker-generated metadata and transport headers/logs, not
+arbitrary model-authored response bytes: the child already knows its own
+listener, and a literal payload scan is not an authorization control. Active
+frame HTML/JavaScript is an operator-provided, trusted-browser-code input to
+A3-2b; this is a local deployment assumption, not a runtime review assertion. An
+arbitrary adversarial active payload requires a future trusted data-only wrapper
+or browser-inaccessible transport and is not enabled by this contract.
 A3-2c is subsequent and never reuses a user frame URL or cookie.
 
 ---

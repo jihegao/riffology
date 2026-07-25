@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
   inspectVisualListener,
+  inspectVisualListenerAsync,
   selectVisualLoopbackPort,
   VisualListenerInspectionError,
   type VisualListenerInspectionCode,
@@ -94,6 +95,23 @@ test("selectVisualLoopbackPort uses literal IPv4 loopback and releases the non-r
   assert.equal(address.address, "127.0.0.1");
   await new Promise<void>((resolveClose, rejectClose) =>
     server.close((error) => error ? rejectClose(error) : resolveClose()));
+});
+
+test("async inspector performs bounded OS reads without blocking the event loop", async () => {
+  const sync = dependencies({ lsof: lsof([100, `127.0.0.1:${ASSIGNED_PORT}`]) });
+  let ticked = false;
+  const pending = inspectVisualListenerAsync(BASE_INPUT, {
+    platform: "darwin",
+    runCommand: async (file, args) => {
+      await delay(1);
+      return sync.runCommand!(file, args);
+    },
+  });
+  setImmediate(() => {
+    ticked = true;
+  });
+  assert.deepEqual(await pending, { kind: "ready" });
+  assert.equal(ticked, true);
 });
 
 test("injected OS evidence classifies exact readiness and every fail-closed listener shape", async (t) => {
@@ -320,6 +338,7 @@ test("Darwin inspector observes real exact, wildcard, extra, and foreign-replace
     );
     try {
       assert.deepEqual(inspectVisualListener(fixture.input), { kind: "ready" });
+      assert.deepEqual(await inspectVisualListenerAsync(fixture.input), { kind: "ready" });
       await delay(50);
       assert.equal(fixture.lines.includes("connection"), false);
     } finally {

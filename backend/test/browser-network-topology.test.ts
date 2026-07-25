@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -124,6 +125,53 @@ test("invalid or colliding configured ports fail closed", async () => {
   );
 });
 
+test("beforeReady completes before either listener admits requests and rolls back on failure", async () => {
+  let hookEntered!: () => void;
+  let releaseHook!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    hookEntered = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseHook = resolve;
+  });
+  let appAddress: BrowserNetworkAddress | undefined;
+  const starting = BrowserNetworkTopology.start({
+    beforeReady: async ({ app }) => {
+      appAddress = app;
+      hookEntered();
+      await blocked;
+    },
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+  });
+  await entered;
+  assert.ok(appAddress);
+  const denied = await raw(appAddress, { method: "GET", path: "/" });
+  assert.equal(denied.status, 503);
+  releaseHook();
+  const topology = await starting;
+  assert.equal((await raw(topology.app, { method: "GET", path: "/" })).status, 204);
+  await topology.close();
+
+  let rejectedAddress: BrowserNetworkAddress | undefined;
+  await assert.rejects(
+    BrowserNetworkTopology.start({
+      beforeReady: ({ app }) => {
+        rejectedAddress = app;
+        throw new Error("configuration rejected");
+      },
+      appHandler: (_request, response) => networkJson(response, 204, {}),
+      brokerHandler: (_request, response) => networkJson(response, 204, {}),
+    }),
+    /configuration rejected/u,
+  );
+  assert.ok(rejectedAddress);
+  await assert.rejects(
+    rawAt(BROWSER_LOOPBACK_HOST, 6, rejectedAddress, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+});
+
 test("broker bind failure never admits an app request and releases partial startup", async () => {
   const appReservation = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -189,6 +237,37 @@ test("sync and async handler failures return bounded generic errors", async (t) 
   assert.equal(broker.status, 500);
   assert.equal(broker.body.error.code, "broker_request_failed");
   assert.doesNotMatch(JSON.stringify(broker.body), /sensitive/u);
+});
+
+test("broker header overflow returns the frozen bounded limit error", async (t) => {
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+  });
+  t.after(() => topology.close());
+  const response = await new Promise<string>((resolve, reject) => {
+    const socket = connect({
+      family: 6,
+      host: topology.broker.host,
+      port: topology.broker.port,
+    });
+    const chunks: Buffer[] = [];
+    socket.once("connect", () => {
+      socket.write([
+        "GET /frame/c/not-real/ HTTP/1.1",
+        `Host: ${topology.broker.authority}`,
+        `X-Oversized: ${"x".repeat(33 * 1_024)}`,
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    socket.once("error", reject);
+  });
+  assert.match(response, /^HTTP\/1\.1 502 Bad Gateway\r\n/u);
+  assert.match(response, /"code":"visual_frame_proxy_limit_exceeded"/u);
+  assert.doesNotMatch(response, /x{128}/u);
 });
 
 test("close stops admission, drains an in-flight handler, and releases both ports", async () => {
