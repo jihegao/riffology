@@ -7,6 +7,13 @@ The current product authority is the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md) and
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md)
 refine its implemented storage and Agent boundaries.
+The documentation-only
+[`Stage 4 shared-shell design`](milestone-a4-shared-product-shell-design.md)
+defines the target Home, router, shell state, renderer registry, lifecycle,
+browser-admission, recovery, and cutover architecture. A4-0 is a design gate
+only: it has not changed startup, routing, HTTP
+admission, Store behavior, or the browser UI, and A4-1 through A4-6 remain
+pending.
 `ProductStoreV2` over SQLite schema migration v13, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
@@ -118,6 +125,26 @@ one isolated Chromium context: create fixed-copy Project, create/edit
 Experiment, complete batch, page events, download output, same-port backend
 restart, fresh browser authority, and durable reads. It adds no Product DOM
 renderer and does not implement the Stage 4 shared shell.
+
+The Stage 4 target preserves the same durable authority while adding one
+ProductStoreV2-first browser boundary:
+
+```text
+Home collections
+  -> one Model/Project router and shared two-pane shell
+       -> persistent owner-scoped Conversations on the left
+       -> declared bounded renderers or restricted visual frame on the right
+  -> one browser-session Host/Origin/Fetch/CSRF admission boundary
+  -> ProductStoreV2 lifecycle, mutation, deletion, and recovery authority
+```
+
+This diagram is target architecture, not current implementation evidence.
+A4-1 owns the common API/admission/lifecycle boundary, A4-2 through A4-4 own
+the visible shell, and A4-5 owns startup cutover and manifest-proven retirement.
+If Product recovery fails closed, A4-5 permits only the exact-app static shell,
+browser bootstrap, health, and one closed path-free recovery-status DTO; all
+resource reads, writes, dispatch, Agent, frame, and WebSocket routes remain
+`503 recovery_required`.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:
@@ -282,9 +309,9 @@ executability is digest-bound evidence that a thin interface runs; it is not
 scientific validity, calibration, trust, or decision suitability.
 
 Legacy Gate/wind and queue components still coexist and are retired only by an
-explicit later audit. A3-1c-c is not completion evidence for Stage 3. #14 still
-owns the remaining visual and wind work; #15 owns
-the final Models/Projects home and shared two-pane browser shell.
+explicit later audit. Stage 3 / #14 is complete; #15 owns the final
+Models/Projects home, shared two-pane browser shell, Product-first cutover, and
+precise retirement.
 
 ---
 

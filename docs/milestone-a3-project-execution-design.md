@@ -144,6 +144,8 @@ implemented [Stage 1 data foundation](milestone-a1-data-foundation-design.md),
 and preserves the
 [Stage 2 Agent and Model workspace](milestone-a2-agent-workspace-design.md)
 authority. It does not define or claim the final Stage 4 shared product shell.
+That target is now specified, without runtime changes, by the
+[`A4-0 shared product shell design`](milestone-a4-shared-product-shell-design.md).
 
 ## Current implementation boundary
 
@@ -315,7 +317,8 @@ Stage 3 does not include:
 - Linux sandbox parity, cloud execution, multi-user authorization, or
   VM/container-grade hostile-code containment.
 
-Stage 4 may change presentation but must not redefine the Project-copy,
+The A4-0 target may change presentation in later implementation slices but must
+not redefine the Project-copy,
 experiment, run, output, event, capability, or wind-import contracts below.
 
 ## Authority and trust boundaries
@@ -1816,9 +1819,11 @@ Output indexes never resolve outside the owning Project/run object root.
    A4-1 owns that all-browser-API Host/Origin/Fetch/CSRF gate.
 
 No slice used a healthy port, fixture-only run, mock Agent, file presence, or
-the historical wind-specific UI as proof of the full contract. Stage 4 / #15
-begins only after the Integration PR is merged, Issue #14 is closed, and local
-`main...origin/main` is synchronized.
+the historical wind-specific UI as proof of the full contract. Those hard
+prerequisites are now satisfied, so A4-0 may define the Stage 4 / #15 design
+gate. A4-1 coding is gated on the A4-0 design merge and a fresh synchronized
+`main...origin/main = 0 0`; Git and GitHub evidence record when that gate is
+satisfied.
 
 ## Verification and acceptance matrix
 

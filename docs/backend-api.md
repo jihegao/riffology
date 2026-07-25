@@ -2,7 +2,8 @@
 
 - Status: active
 - Role: normative contract
-- Scope: implemented Stage 2 and Stage 3 HTTP/API boundaries plus retained legacy API history
+- Scope: implemented Stage 2 and Stage 3 HTTP/API boundaries, A4-0 target
+  contracts, and retained legacy API history
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
 - Last reviewed: 2026-07-25
 
@@ -351,6 +352,49 @@ direct run controls are session guarded, while uniform Host/Origin/Fetch/CSRF
 admission for all Stage 4 browser APIs remains A4-1. The legacy Gate API below still coexists until
 separately reviewed retirement.
 
+### A4-0 target API boundary (design only)
+
+The target contracts are specified in
+[`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
+No route in this subsection is claimed as implemented by A4-0.
+
+- `GET /api/home`, `GET /api/models`, and `GET /api/projects` provide bounded,
+  stable resource summaries and executable-Model options for New Project.
+- Generic Model, Project, and Conversation rename/archive/restore/trash use
+  owner-scoped, digest-checked, idempotent commands and durable receipts.
+- Permanent deletion is a real two-step protocol: side-effect-free preview
+  returns deterministic preview/state evidence and a short-lived,
+  session-bound confirmation token; delete revalidates exact typed confirmation
+  and current closure before commit and returns a durable receipt.
+- Every Stage 4 browser API, including collection/create/workspace/Conversation/
+  Experiment/Run/lifecycle/output/event/download routes, uses one browser
+  session plus exact Host, Origin where applicable, Fetch Metadata, CSRF, and
+  Product owner/lifecycle checks.
+- Bootstrap preserves the published A3 exact-app contract: POST/OPTIONS only,
+  exact non-null Origin and Host, `same-origin/cors/empty` Fetch Metadata,
+  exact credentialed CORS, random host-only HttpOnly SameSite=Strict cookie,
+  matching 15-minute lifetimes, HTTPS `Secure`, and generation rotation plus
+  old app/frame/WebSocket/Visual-Agent revocation before response.
+- The local app session is browser admission, not a user/account principal.
+
+A4-1 owns implementation and negative tests for cross-owner use, response-loss
+replay, restart, fixed-copy isolation, preview-not-delete, stale confirmation,
+changed deletion closure, cache reuse, and exact durable-receipt replay. Public
+DTOs and errors use closed allowlist serializers; scanners are regression
+evidence, not the secrecy boundary. The exact delete/renderer/admission
+state machines remain normative in the A4 design.
+Permanent delete is blocked by every descendant in-flight turn, check, Run,
+process/lease, download, frame, WebSocket, and tool/Visual-Agent capability. It
+does not implicitly cancel or revoke them; commit uses the relevant writer and
+authority-issuance fences and rechecks quiescence before deleting any byte.
+
+Recovery failure never opens a partial Product API. The only admitted
+recovery-mode routes are the exact-app static shell, browser bootstrap, health,
+and `GET /api/recovery-status` with the closed path-free
+`{state,code,observedAt,retryable}` DTO. Every resource read or mutation,
+dispatch, Agent/tool, frame, and WebSocket route returns stable
+`503 recovery_required`.
+
 ### A3-2 visual API/runtime gates
 
 The A3-2a1 schema-v8, private Store evidence, and cross-restart visual
@@ -369,8 +413,8 @@ success evidence, and the real-process public vertical plus secrecy gate pass.
 The final full backend gate reports 385 total with 384 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; the focused 13/13 gate
 covers the review regressions; web passes 104/104 and the production build
-succeeds. A3-2b is published; A3-2c and A3-2d remain target contracts, not
-current routes or acceptance evidence:
+succeeds. A3-2b, A3-2c, and A3-2d are published; the following numbered ledger
+retains their slice history and accepted boundaries:
 
 1. **A3-2a1 schema-v8/Store/recovery:** schema v8 now extends schema-v6 scratch
    and launch evidence to the existing schema-v4 visual process shape, makes

@@ -25,6 +25,12 @@ Git history and the reviewed wind model remain retained evidence. A name match,
 directory name, age, test status, or replacement implementation is not deletion
 authority for local data.
 
+The documentation-only
+[`Stage 4 shared-shell design`](milestone-a4-shared-product-shell-design.md)
+inherits this boundary. A4-0 authorizes no deletion; only A4-5 may change
+tracked legacy code after replacement acceptance and an exact reviewed
+manifest.
+
 ## Future Stage 4 tracked-code audit candidates
 
 The following are candidate families, not a pre-approved deletion list. Stage 4
@@ -194,6 +200,12 @@ For a Stage 4 candidate patch, also require:
 5. a deletion preview for any proposed local artifact cleanup, with identity
    derived from manifests/database records rather than directory names;
 6. independent review of scope, ownership, recovery, and path safety.
+
+A4-5 must additionally record the exact identity, version, digest, and explicit
+closure for every incompatible product-data item it proposes to remove.
+`.riff-workspace*`, local output and test-result directories, virtual
+environments, caches, `.DS_Store`, every unrelated untracked or ignored file,
+and ordinary wind/Mesa/domain assets remain outside automatic cleanup.
 
 If a scan finds an ambiguous reference, unindexed file, dirty path, active lock,
 cross-owner link, or changed digest, stop. Preserve the item and resolve the

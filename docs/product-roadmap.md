@@ -57,6 +57,11 @@
 > Experiment, complete a batch, page events, download output, and verify
 > restart recovery. #15 still owns the final shared shell and complete MVP
 > browser acceptance.
+> A4-0 establishes a documentation-only design gate in
+> [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
+> It fixes slice ownership and PRD/API/UI/test traceability but changes no
+> runtime behavior. A4-1 through A4-6 remain pending; only A4-6 may claim the
+> complete MVP or close #15.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

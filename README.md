@@ -110,6 +110,14 @@ than being automatically cleaned.
 The Integration browser gate is intentionally an API/session acceptance surface,
 not the Stage 4 Home or shared-shell UX.
 
+Stage 4 starts with the documentation-only A4-0 design gate in
+[`docs/milestone-a4-shared-product-shell-design.md`](docs/milestone-a4-shared-product-shell-design.md).
+It fixes the PRD-to-API-to-UI-to-test traceability,
+Home and shared-shell target contracts, browser admission, lifecycle/deletion,
+recovery, and precise retirement boundaries. It changes no runtime behavior;
+every A4 implementation row remains pending, and only A4-6 may claim the
+complete MVP or close #15.
+
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
 Stage 3 does not authorize their deletion. The final Models/Projects home,

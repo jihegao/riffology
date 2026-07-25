@@ -667,6 +667,62 @@ It does not claim uniform browser admission for create/edit/start; A4-1 owns
 that Host/Origin/Fetch/CSRF contract. Existing focused browser-capability tests
 remain the negative evidence for the guarded reads and direct controls.
 
+## Stage 4 design and future acceptance
+
+A4-0 is documentation only and is governed by
+[`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
+Its gate is complete document linkage, a PRD-ID-to-API-to-UI-to-test matrix
+whose implementation rows all remain `pending`, and independent Product,
+Architecture, and Security review with P0=0/P1=0. It does not add or satisfy a
+runtime/browser test.
+
+A4-1 through A4-5 must add focused contract, owner-scope, failure, idempotency,
+restart, secrecy, lifecycle/deletion, responsive, keyboard, renderer, Agent,
+Run, recovery, and exact legacy-manifest evidence in their owning slices. A4-6
+alone owns one continuous real-Chromium exit scenario covering Home/four
+entries, creation and opening of a functional generic New Model workspace,
+ordinary wind Model, real multi-turn provider use, a second persistent
+Conversation, fixed-copy Project, Conversation-led Experiment edit, real batch
+outputs/events/download, user-requested analysis, restricted visual frame,
+backend restart, provider-unavailable read-only behavior, 1440x900, narrow
+viewport, keyboard, 200% zoom, and zero unexpected console errors. None of
+those Stage 4 acceptance rows is complete on A4-0.
+
+A4-1 deletion negatives include Model, Project, and Conversation targets with
+in-flight turns/checks/Runs/processes plus active download/frame/WebSocket/tool
+authority. Preview and commit must block without implicit cancellation; after
+typed terminalization/revocation, a concurrent issuance or activity drift still
+fails before the first delete byte.
+
+A4-4 renderer negatives enforce the exact A4 byte/node/depth/row/line/mark
+limits and the non-weakening CSP. Oversized or deeply nested persisted content,
+unsafe URLs, active attachments, and content-derived CSP sources must not create
+unbounded parsing/DOM work, remote loads, or script execution.
+
+### A4-0 design-gate evidence
+
+The 2026-07-25 A4-0 documentation-only gate records:
+
+- PRD traceability: all 69 active PRD IDs occur in the A4 matrix; every
+  implementation status remains `pending`;
+- independent Product, Architecture, and Security final review:
+  P0=0/P1=0/P2=0 for each;
+- backend: 570 total, 569 passed, zero failed, one optional installed-OpenCode
+  smoke skipped;
+- web: 104/104 component tests and network entry 1/1;
+- production web build: passed;
+- retained Chromium: 15/15;
+- isolated A3 Product Chromium regression: 1/1;
+- Mesa service: 121/121;
+- docs: 26 Markdown files and `git diff --check` passed; and
+- Issue #15 remained OPEN with every browser/cleanup exit checkbox unchecked.
+
+Sandbox-only attempts that could not use `ps` process identity or bind `::1`
+were not accepted as gate results; the recorded backend and network/browser
+results are the successful local runs with those required OS capabilities.
+These regressions prove the design change did not alter existing behavior; they
+do not satisfy any Stage 4 implementation or MVP exit row.
+
 ---
 
 # Legacy wind-turbine delivery test plan
