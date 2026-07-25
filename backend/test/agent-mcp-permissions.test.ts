@@ -16,12 +16,16 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   const listed = await server.handle(projectCapability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes"));
+  assert.ok(names.includes("riff_list_experiment_configurations"));
+  assert.ok(names.includes("riff_update_experiment_configuration"));
+  assert.ok(names.includes("riff_create_analysis_document"));
+  assert.ok(!names.includes("riff_create_temporary_document"));
   assert.ok(names.includes("riff_observe_current_visual"));
   assert.ok(!names.includes("riff_interact_current_visual"));
   assert.ok(!names.includes("riff_drive_workbench_ui"));
   const denied = await server.handle(projectCapability, call("riff_apply_model_changes", { requestKey: "r", changes: [{}] }));
   assert.equal((denied?.result as any).isError, true);
-  const allowed = await server.handle(projectCapability, call("riff_create_temporary_document", { name: "Draft", mediaType: "text/markdown", content: "x" }));
+  const allowed = await server.handle(projectCapability, call("riff_create_analysis_document", { name: "Analysis", mediaType: "text/markdown", content: "x" }));
   assert.equal((allowed?.result as any).isError, undefined);
   assert.deepEqual(seen[0]?.owner, { kind: "project", id: "project_a" });
   assert.equal(seen[0]?.externalSessionGeneration, 2);

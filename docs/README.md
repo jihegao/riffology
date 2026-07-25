@@ -71,7 +71,7 @@ implementation authority.
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
 | **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
-| **4 — shared product shell** | A4-0 through A4-4 are merged. A4-5 implements Product-first startup/recovery, direct static Product serving, global recovery-only admission, read-only legacy preflight, and manifest-proven old Web product retirement on its narrow branch. A4-6 and every final trace row remain pending. No complete-MVP claim. |
+| **4 — shared product shell** | A4-0 through A4-5 are merged. A4-6 local branch gate, final independent reviews, and the 31.2s continuous Chromium 12-step run have passed with explicit live discovery/fallback evidence; merge, merged-revision rerun, and Issue closure remain ordered. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -127,14 +127,18 @@ message/attachment/document/activity projections, lifecycle recovery and
 preview/confirm deletion, plus explicit no-fabrication read-only behavior.
 A4-4 supplies the dynamic workspace/execution slice described above. A4-5
 supplies recovery/cutover/retirement without touching protected local state.
-A4-6 continuous exit acceptance remains pending, and no Issue #15 exit item is
-complete.
+A4-6 local gate evidence is recorded in
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md); Issue #15 remains OPEN until
+merge and the merged-revision rerun complete.
 
 ## Active product and stage documents
 
 - [`product-requirements.md`](product-requirements.md): the Chinese single MVP
   PRD, including Platform/Domain Pack ownership, requirement-ID lifecycle, and
   PRD/Roadmap/Architecture/Code authority boundaries.
+- [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md): redacted provider
+  selection, continuous Chromium, cumulative full-gate, and ordered closeout
+  evidence for the only slice allowed to close Issue #15.
 - [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md):
   implemented Stage 1 SQLite/object-directory, atomic mutation, lifecycle,
   recovery, and fixed-copy Project design.

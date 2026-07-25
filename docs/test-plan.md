@@ -862,6 +862,29 @@ that evidence in the next narrow section. It is not the continuous A4-6
 real-provider/browser exit matrix. All 69 final trace rows remain `pending`,
 Issue #15 remains OPEN, and no complete-MVP claim is made.
 
+### A4-6 local branch and continuous exit evidence
+
+The final aggregate invocation of `test:e2e:a4-6` completed its continuous
+Chromium scenario in 31.2 seconds.
+It covered all twelve design steps: Home/four entries, ordinary wind, real two
+Conversation OpenCode work with two documents and attachment, fixed-copy Project
+CAS, two batch Runs with outputs/events/download, requested analysis, restricted
+visual frame, same-root restart, provider-down read-only/no fabricated reply with
+direct Run retained, and desktop/narrow, keyboard-only pane operation while CDP
+scale 2 remained active, no document horizontal overflow, and zero console/page
+errors.
+OpenCode 1.18.4 discovery first found `opencode-go/deepseek-v4-pro`; weekly usage
+limit was explicit. After user authorization a second discovery selected
+`deepseek/deepseek-v4-flash`; no silent fallback occurred. The cumulative
+branch gate passed backend 598 total/597 passed/zero failed/one optional skip,
+focused backend 28/28, Web 28/28, production-entry 1/1, production build, and
+retained Chromium 18/18. The continuous test is the twelve-step integration
+proof, not the sole evidence for every negative trace row. Redacted evidence is
+in [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). Final independent
+correctness/security, accessibility, and product/architecture review gates
+report P0/P1=0. Merge, merged-revision rerun, and Issue closure are not claimed
+here.
+
 ### A4-5 Product-first recovery, cutover, and retirement evidence
 
 Focused backend coverage includes:

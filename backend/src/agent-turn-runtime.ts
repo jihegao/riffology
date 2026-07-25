@@ -5,7 +5,12 @@ import { AgentMcpServer } from "./agent-mcp.ts";
 import { toolsForOwner, type AgentToolExecutor, type AgentToolGrant, type AgentToolName } from "./agent-tools.ts";
 import type { AgentContextInput } from "./agent-context.ts";
 import type { ConversationOwner, ModelFileMutation } from "./agent-domain.ts";
-import { ProductStoreV2, ProductStoreV2Error } from "./product-store-v2.ts";
+import {
+  experimentConfigurationRecordDigest,
+  ProductStoreV2,
+  type ExperimentConfigurationRecordV4,
+} from "./product-store-v2.ts";
+import { planExperiment } from "./experiment-planner.ts";
 import { SimulationSkillCatalog, type LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 
@@ -110,8 +115,18 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     }
     if (intentAuthority !== "explicit") {
       allowedTools.delete("riff_apply_model_changes");
+      allowedTools.delete("riff_update_experiment_configuration");
+      allowedTools.delete("riff_create_analysis_document");
       allowedTools.delete("riff_transition_temporary_document");
       allowedTools.delete("riff_adopt_attachment");
+    }
+    if (conversation.owner.kind === "project") {
+      if (!explicitExperimentUpdateIntent(intentText)) {
+        allowedTools.delete("riff_update_experiment_configuration");
+      }
+      if (!explicitAnalysisDocumentIntent(intentText)) {
+        allowedTools.delete("riff_create_analysis_document");
+      }
     }
     if (!this.#authorityIssuanceAllowed(authorityScope)) {
       throw new ApiError(
@@ -179,6 +194,12 @@ export class AgentTurnRuntime implements AgentToolExecutor {
   async execute(grant: AgentToolGrant, tool: AgentToolName, input: Readonly<Record<string, unknown>>): Promise<unknown> {
     const conversation = this.store.getConversation(grant.conversationId);
     if (conversation.owner.kind !== grant.owner.kind || conversation.owner.id !== grant.owner.id) throw new AgentRuntimeError("scope_changed", "The durable conversation scope changed.");
+    if (!grant.allowedTools.has(tool)) {
+      throw new AgentRuntimeError(
+        "operation_not_authorized",
+        "The user did not authorize this operation in the current turn.",
+      );
+    }
     try {
       this.store.assertActiveAgentToolGrant({
         conversationId: grant.conversationId,
@@ -189,13 +210,28 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       throw new AgentRuntimeError("stale_capability", "The Agent capability no longer matches the active turn and session generation.");
     }
     if (grant.intentAuthority !== "explicit" && new Set<AgentToolName>([
-      "riff_apply_model_changes", "riff_transition_temporary_document", "riff_adopt_attachment",
+      "riff_apply_model_changes",
+      "riff_update_experiment_configuration",
+      "riff_create_analysis_document",
+      "riff_transition_temporary_document",
+      "riff_adopt_attachment",
     ]).has(tool)) throw new AgentRuntimeError("explicit_intent_required", "This durable action requires an explicit imperative.");
     switch (tool) {
       case "riff_read_owner_summary": return this.#ownerSummary(grant.owner);
       case "riff_list_model_workspace": return this.#listModelWorkspace(grant);
       case "riff_read_model_file": return this.#readModelFile(grant, String(input.fileId));
       case "riff_apply_model_changes": return this.#applyModelChanges(grant, input);
+      case "riff_list_experiment_configurations":
+        return this.#listExperimentConfigurations(grant);
+      case "riff_update_experiment_configuration":
+        return this.#updateExperimentConfiguration(grant, input);
+      case "riff_create_analysis_document":
+        return this.#createTemporaryDocument(
+          grant,
+          input,
+          "analysis_document_create",
+          true,
+        );
       case "riff_create_temporary_document": return this.#createTemporaryDocument(grant, input);
       case "riff_transition_temporary_document": return this.#transitionTemporaryDocument(grant, input);
       case "riff_adopt_attachment": return this.#adoptAttachment(grant, input);
@@ -327,9 +363,170 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     }
   }
 
-  #createTemporaryDocument(grant: AgentToolGrant, input: Readonly<Record<string, unknown>>) {
-    const actionId = stableId("action", `${grant.turnId}:document:${canonical(input)}`);
-    this.#recordProposed(actionId, grant, "temporary_document_create", input);
+  #listExperimentConfigurations(grant: AgentToolGrant) {
+    this.#requireProject(grant);
+    return this.store.listExperimentConfigurations(grant.owner.id)
+      .filter((record): record is ExperimentConfigurationRecordV4 =>
+        record.contractVersion === 4 && record.lifecycleState === "active")
+      .map((record) => ({
+        id: record.id,
+        name: record.name,
+        configuration: record.configuration,
+        configurationDigest: record.configurationDigest,
+        recordDigest: experimentConfigurationRecordDigest(record),
+        sampleCount: record.sampleCount,
+      }));
+  }
+
+  #updateExperimentConfiguration(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+  ) {
+    this.#requireProject(grant);
+    const actionId = stableId("action", `${grant.turnId}:experiment:${canonical(input)}`);
+    const action = this.#recordProposed(
+      actionId,
+      grant,
+      "experiment_configuration_update",
+      input,
+    );
+    if (grant.intentAuthority !== "explicit") {
+      return this.#deny(actionId, "explicit_imperative_required");
+    }
+    const configurationId = boundedId(input.configurationId);
+    const expectedConfigurationDigest = boundedDigest(input.expectedConfigurationDigest);
+    const expectedRecordDigest = boundedDigest(input.expectedRecordDigest);
+    const requestKey = boundedText(input.requestKey, 256);
+    const configuration = input.configuration;
+    if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)) {
+      return this.#deny(actionId, "invalid_experiment_configuration");
+    }
+    const transactionId =
+      `mutation_agent_${createHash("sha256").update(actionId).digest("hex").slice(0, 32)}`;
+    const updateIntent = {
+      commandId: stableId("command", `${grant.turnId}:${requestKey}`),
+      transactionId,
+      id: configurationId,
+      projectId: grant.owner.id,
+      expectedConfigurationDigest,
+      expectedRecordDigest,
+      ...(input.name === undefined ? {} : { name: boundedText(input.name, 200) }),
+      configuration: configuration as Record<string, unknown>,
+    };
+    const current = this.#listExperimentConfigurations(grant)
+      .find((record) => record.id === configurationId);
+    if (!current) return this.#deny(actionId, "experiment_configuration_missing");
+    const project = this.store.getProject(grant.owner.id);
+    const inputs = project.executionDescription.inputs;
+    if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)
+      || !Object.hasOwn(inputs, "schema")) {
+      return this.#deny(actionId, "project_input_schema_missing");
+    }
+    const plan = planExperiment({
+      configuration,
+      inputSchema: (inputs as Record<string, unknown>).schema,
+      maxSamples: 10_000,
+    });
+    const normalizedUpdateIntent = {
+      ...updateIntent,
+      configuration: plan.configuration,
+    };
+    const replayed = this.store.getExperimentUpdateReceipt(
+      normalizedUpdateIntent,
+    );
+    if (replayed) {
+      const affectedResources = [{
+        kind: "experiment_configuration",
+        id: replayed.id,
+        sha256: replayed.configurationDigest,
+      }];
+      if (action.state === "staging") {
+        this.store.transitionActionRecord({
+          id: actionId,
+          expectedState: "staging",
+          state: "committed",
+          mutationTransactionId: transactionId,
+          affectedResources,
+          at: this.#now(),
+        });
+      } else if (action.state !== "committed") {
+        throw new AgentRuntimeError(
+          "experiment_replay_state_invalid",
+          "The durable Experiment receipt does not match the action state.",
+        );
+      }
+      return experimentUpdateResult(replayed);
+    }
+    if (action.state !== "proposed") {
+      throw new AgentRuntimeError(
+        "experiment_replay_receipt_missing",
+        "The prior Experiment action has no matching durable receipt.",
+      );
+    }
+    const at = this.#now();
+    this.store.transitionActionRecord({
+      id: actionId,
+      expectedState: "proposed",
+      state: "authorized",
+      at,
+    });
+    this.store.transitionActionRecord({
+      id: actionId,
+      expectedState: "authorized",
+      state: "staging",
+      mutationTransactionId: transactionId,
+      at,
+    });
+    try {
+      const updated = this.store.updateExperimentV4({
+        ...normalizedUpdateIntent,
+        plan,
+        updatedAt: at,
+      });
+      this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "staging",
+        state: "committed",
+        mutationTransactionId: transactionId,
+        affectedResources: [{
+          kind: "experiment_configuration",
+          id: updated.id,
+          sha256: updated.configurationDigest,
+        }],
+        at,
+      });
+      return experimentUpdateResult(updated);
+    } catch (error) {
+      try {
+        this.store.transitionActionRecord({
+          id: actionId,
+          expectedState: "staging",
+          state: "rolled_back",
+          mutationTransactionId: transactionId,
+          errorCode: "experiment_configuration_update_failed",
+          at,
+        });
+      } catch {
+        // Startup reconciliation owns ambiguous staging.
+      }
+      throw error;
+    }
+  }
+
+  #createTemporaryDocument(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+    actionKind = "temporary_document_create",
+    explicitOnly = false,
+  ) {
+    const actionId = stableId(
+      "action",
+      `${grant.turnId}:${actionKind}:${canonical(input)}`,
+    );
+    this.#recordProposed(actionId, grant, actionKind, input);
+    if (explicitOnly && grant.intentAuthority !== "explicit") {
+      return this.#deny(actionId, "explicit_imperative_required");
+    }
     const name = boundedText(input.name, 200); const mediaType = boundedText(input.mediaType, 200); const content = boundedText(input.content, 1_000_000, true);
     const documentId = stableId("document", actionId);
     const at = this.#now();
@@ -382,6 +579,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
   }
   #deny(id: string, code: string) { return this.store.transitionActionRecord({ id, expectedState: "proposed", state: "denied", errorCode: code, at: this.#now() }); }
   #requireModel(grant: AgentToolGrant): void { if (grant.owner.kind !== "model") throw new AgentRuntimeError("project_model_mutation_forbidden", "Project conversations cannot read or change Model workspace files."); }
+  #requireProject(grant: AgentToolGrant): void { if (grant.owner.kind !== "project") throw new AgentRuntimeError("model_project_mutation_forbidden", "Model conversations cannot change Project Experiment configurations."); }
 }
 
 export class AgentRuntimeError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "AgentRuntimeError"; this.code = code; } }
@@ -391,6 +589,45 @@ export const explicitImperative = (text: string): boolean => {
   if (!normalized || /\?|\b(?:if|maybe|might|could|would|should we|discuss|explain|suggest|consider|how|what|why)\b|(?:如果|也许|可能|是否|能否|可以吗|讨论|解释|建议|如何|为什么)/u.test(normalized)) return false;
   return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|创建|写入|应用|采用|拒绝|取代|删除)/u.test(normalized);
 };
+
+const PROJECT_OPERATION_BOUNDARY =
+  "(?:^|[.!?;]\\s*|\\b(?:and|then)\\s+|[。！？；]\\s*|(?:并且|然后)\\s*)";
+
+const explicitExperimentUpdateIntent = (text: string): boolean =>
+  explicitImperative(text)
+  && new RegExp(
+    `${PROJECT_OPERATION_BOUNDARY}(?:please\\s+)?`
+      + "(?:set|change|update|replace|modify|edit|apply)\\s+"
+      + "(?:the\\s+)?(?:active\\s+)?"
+      + "(?:experiment(?:\\s+configuration)?|configuration)"
+      + "|"
+      + `${PROJECT_OPERATION_BOUNDARY}(?:请)?`
+      + "(?:设置|修改|更新|替换|应用)"
+      + "(?:当前)?(?:实验配置|实验|配置)",
+    "iu",
+  ).test(text);
+
+const explicitAnalysisDocumentIntent = (text: string): boolean =>
+  explicitImperative(text)
+  && new RegExp(
+    `${PROJECT_OPERATION_BOUNDARY}(?:please\\s+)?`
+      + "(?:add|create|write|generate)\\s+"
+      + "(?:an?\\s+|the\\s+)?(?:analysis|analytical)"
+      + "(?:\\s+report)?\\s+(?:document|file)"
+      + "|"
+      + `${PROJECT_OPERATION_BOUNDARY}(?:请)?`
+      + "(?:新增|创建|写入|生成)(?:一份)?(?:分析文档|分析报告)",
+    "iu",
+  ).test(text);
+
+const experimentUpdateResult = (updated: ExperimentConfigurationRecordV4) => ({
+  id: updated.id,
+  name: updated.name,
+  configuration: updated.configuration,
+  configurationDigest: updated.configurationDigest,
+  recordDigest: experimentConfigurationRecordDigest(updated),
+  sampleCount: updated.sampleCount,
+});
 
 const parseModelFileMutation = (value: unknown): ModelFileMutation => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid");
@@ -403,6 +640,12 @@ const parseModelFileMutation = (value: unknown): ModelFileMutation => {
   return { objectFileId, kind: kind as ModelFileMutation["kind"], relativePath, mediaType, bytes: Buffer.from(text), expectedPriorSha256: expected as string | null };
 };
 const boundedId = (value: unknown): string => { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value)) throw new Error("invalid"); return value; };
+const boundedDigest = (value: unknown): string => {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) {
+    throw new AgentRuntimeError("invalid_tool_input", "Agent tool digest is invalid.");
+  }
+  return value;
+};
 const boundedText = (value: unknown, max: number, empty = false): string => { if (typeof value !== "string" || (!empty && !value.trim()) || Buffer.byteLength(value) > max || value.includes("\0")) throw new AgentRuntimeError("invalid_tool_input", "Agent tool text is invalid."); return empty ? value : value.trim(); };
 const safeLogicalName = (value: string): string => { if (value.startsWith("/") || value.includes("\\") || value.split("/").some((part) => !part || part === "." || part === "..")) throw new AgentRuntimeError("invalid_logical_path", "Agent logical path is invalid."); return value; };
 const stripOwnedPrefix = (kind: string, value: string): string => {

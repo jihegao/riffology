@@ -21,6 +21,37 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     changes: { type: "array", minItems: 1, maxItems: 64, items: { type: "object" } },
     executionDescription: { type: "object" },
   }, ["requestKey", "changes"]),
+  riff_list_experiment_configurations: definition(
+    "List active, digest-bound Experiment configurations for the current Project.",
+    {},
+  ),
+  riff_update_experiment_configuration: definition(
+    "Apply one explicit, validated, compare-and-set Experiment configuration update.",
+    {
+      requestKey: { type: "string" },
+      configurationId: { type: "string" },
+      expectedConfigurationDigest: { type: "string" },
+      expectedRecordDigest: { type: "string" },
+      name: { type: "string" },
+      configuration: { type: "object" },
+    },
+    [
+      "requestKey",
+      "configurationId",
+      "expectedConfigurationDigest",
+      "expectedRecordDigest",
+      "configuration",
+    ],
+  ),
+  riff_create_analysis_document: definition(
+    "Create a persistent draft analysis document only after an explicit user request.",
+    {
+      name: { type: "string" },
+      mediaType: { type: "string" },
+      content: { type: "string" },
+    },
+    ["name", "mediaType", "content"],
+  ),
   riff_create_temporary_document: definition("Create a persistent draft document in this conversation.", {
     name: { type: "string" }, mediaType: { type: "string" }, content: { type: "string" },
   }, ["name", "mediaType", "content"]),
@@ -192,6 +223,16 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_list_model_workspace: [],
     riff_read_model_file: ["fileId"],
     riff_apply_model_changes: ["requestKey", "changes", "executionDescription"],
+    riff_list_experiment_configurations: [],
+    riff_update_experiment_configuration: [
+      "requestKey",
+      "configurationId",
+      "expectedConfigurationDigest",
+      "expectedRecordDigest",
+      "name",
+      "configuration",
+    ],
+    riff_create_analysis_document: ["name", "mediaType", "content"],
     riff_create_temporary_document: ["name", "mediaType", "content"],
     riff_transition_temporary_document: ["documentId", "transition"],
     riff_adopt_attachment: ["attachmentId", "purpose", "logicalName"],
@@ -212,6 +253,26 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     if (input.executionDescription !== undefined && (!input.executionDescription || typeof input.executionDescription !== "object" || Array.isArray(input.executionDescription))) {
       throw new AgentToolPermissionError("Agent execution description is invalid.");
     }
+  }
+  if (name === "riff_update_experiment_configuration") {
+    text("requestKey", 256);
+    text("configurationId", 256);
+    text("expectedConfigurationDigest", 64);
+    text("expectedRecordDigest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(String(input.expectedConfigurationDigest))
+      || !/^[0-9a-f]{64}$/u.test(String(input.expectedRecordDigest))) {
+      throw new AgentToolPermissionError("Agent Experiment digests are invalid.");
+    }
+    if (input.name !== undefined) text("name", 200);
+    if (!input.configuration || typeof input.configuration !== "object"
+      || Array.isArray(input.configuration)) {
+      throw new AgentToolPermissionError("Agent Experiment configuration is invalid.");
+    }
+  }
+  if (name === "riff_create_analysis_document") {
+    text("name", 400);
+    text("mediaType", 200);
+    text("content", 1_000_000);
   }
   if (name === "riff_create_temporary_document") { text("name", 400); text("mediaType", 200); text("content", 1_000_000); }
   if (name === "riff_transition_temporary_document") {

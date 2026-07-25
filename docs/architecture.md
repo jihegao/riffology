@@ -15,7 +15,9 @@ documentation-only design gate. A4-1 implements the Product API, Store
 lifecycle/delete, and browser-admission portion. A4-2 consumes that
 boundary for the default Home, Model/Project routes, one
 responsive two-pane shell, and subordinate Conversation URL state. Startup
-cutover is implemented by A4-5; final acceptance remains A4-6 work. A4-3 adds the persistent
+cutover is implemented by A4-5; A4-6 has passed its local cumulative and
+continuous gates, while merge and merged-revision acceptance remain pending.
+A4-3 adds the persistent
 Conversation browser projection and immutable provider-binding receipts. A4-4
 adds the bounded renderer registry and dynamic Model/Project Experiment/Run
 workspace while preserving all Stage 3 execution and broker authority. A4-5

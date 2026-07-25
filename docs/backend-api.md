@@ -7,6 +7,12 @@
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
 - Last reviewed: 2026-07-25
 
+The passed A4-6 local cumulative gate and continuous Chromium exit cover
+browser admission, same-root restart, and provider-down read-only projection
+without exposing credentials, session IDs, paths, or raw tool payloads.
+Merge and the merged-revision rerun remain before Issue closure; see
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
+
 ## Milestone A2 authority and current A3 execution
 
 The current product authority is the

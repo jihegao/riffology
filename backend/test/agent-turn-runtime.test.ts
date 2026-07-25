@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentAuthority } from "../src/agent-visual-authority.ts";
+import { planExperiment } from "../src/experiment-planner.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
 import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 
@@ -80,6 +81,244 @@ test("Project capability never exposes Model workspace mutation and attachment a
   const projectFiles = store.listObjectFiles({ kind: "project", id: "project_alpha" });
   assert.ok(projectFiles.some((file) => file.kind === "adopted_attachment" && file.sourceAttachmentId === "attachment_project"));
   assert.equal(store.readObjectFile("file_model_alpha").toString("utf8"), "value = 1\n");
+});
+
+test("explicit Project turn compare-and-set updates an Experiment and creates requested analysis only", async (t) => {
+  const { store, runtime } = setup(t, true);
+  store.startAgentTurn({
+    turnId: "turn_project_experiment",
+    userMessageId: "message_project_experiment",
+    conversationId: "conversation_project",
+    requestKey: "project-experiment",
+    text: "Update the Experiment horizon to 2 and create an analysis document now",
+    createdAt: NOW,
+  });
+  store.bindAgentSession({
+    id: "session_project_experiment",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-experiment",
+    at: NOW,
+  });
+  const prepared = await runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_experiment",
+    text: "Update the Experiment horizon to 2 and create an analysis document now",
+    attachmentIds: [],
+  });
+  t.after(() => prepared.release());
+  assert.equal(prepared.intentAuthority, "explicit");
+  const listed = await runtime.handle(prepared.capability, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
+  assert.ok(names.includes("riff_list_experiment_configurations"));
+  assert.ok(names.includes("riff_update_experiment_configuration"));
+  assert.ok(names.includes("riff_create_analysis_document"));
+  assert.ok(!names.includes("riff_create_temporary_document"));
+
+  const configurations = await runtime.handle(
+    prepared.capability,
+    call("riff_list_experiment_configurations"),
+  );
+  const current = JSON.parse((configurations?.result as any).content[0].text)[0];
+  const nextConfiguration = structuredClone(current.configuration);
+  nextConfiguration.parameters.horizon = 2;
+  delete nextConfiguration.parameters.crewCount;
+  const updateArguments = {
+    requestKey: "agent-experiment-update",
+    configurationId: current.id,
+    expectedConfigurationDigest: current.configurationDigest,
+    expectedRecordDigest: current.recordDigest,
+    configuration: nextConfiguration,
+  };
+  const updated = await runtime.handle(
+    prepared.capability,
+    call("riff_update_experiment_configuration", updateArguments),
+  );
+  assert.equal((updated?.result as any).isError, undefined, JSON.stringify(updated));
+  const replayed = await runtime.handle(
+    prepared.capability,
+    call("riff_update_experiment_configuration", updateArguments),
+  );
+  assert.equal(
+    (replayed?.result as any).content[0].text,
+    (updated?.result as any).content[0].text,
+    "an exact retry after response loss must replay the durable result",
+  );
+  assert.equal(
+    store.listExperimentConfigurations("project_alpha")[0]?.configuration.parameters.horizon,
+    2,
+  );
+  assert.equal(
+    store.listExperimentConfigurations("project_alpha")[0]?.configuration.parameters.crewCount,
+    1,
+    "schema defaults must normalize once and still replay exactly",
+  );
+
+  const analysis = await runtime.handle(
+    prepared.capability,
+    call("riff_create_analysis_document", {
+      name: "Requested analysis",
+      mediaType: "text/markdown",
+      content: "# Analysis\n\nUser requested this document.",
+    }),
+  );
+  assert.equal((analysis?.result as any).isError, undefined, JSON.stringify(analysis));
+  assert.equal(
+    store.listTemporaryDocuments("conversation_project")[0]?.name,
+    "Requested analysis",
+  );
+  const actions = store.startAgentTurn({
+    turnId: "turn_project_experiment",
+    userMessageId: "message_project_experiment",
+    conversationId: "conversation_project",
+    requestKey: "project-experiment",
+    text: "Update the Experiment horizon to 2 and create an analysis document now",
+    createdAt: NOW,
+  }).actions;
+  assert.deepEqual(
+    actions
+      .map((action) => [action.actionKind, action.state])
+      .sort(([left], [right]) => String(left).localeCompare(String(right))),
+    [
+      ["analysis_document_create", "committed"],
+      ["experiment_configuration_update", "committed"],
+    ],
+  );
+});
+
+test("explicit Project operations receive separate mutation and analysis authority", async (t) => {
+  const updateFixture = setup(t, true);
+  updateFixture.store.startAgentTurn({
+    turnId: "turn_project_update_only",
+    userMessageId: "message_project_update_only",
+    conversationId: "conversation_project",
+    requestKey: "project-update-only",
+    text: "Update the Experiment configuration horizon now",
+    createdAt: NOW,
+  });
+  updateFixture.store.bindAgentSession({
+    id: "session_project_update_only",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-update-only",
+    at: NOW,
+  });
+  const updatePrepared = await updateFixture.runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_update_only",
+    text: "Update the Experiment configuration horizon now",
+    attachmentIds: [],
+  });
+  t.after(() => updatePrepared.release());
+  const updateTools = await updateFixture.runtime.handle(
+    updatePrepared.capability,
+    { jsonrpc: "2.0", id: 1, method: "tools/list" },
+  );
+  const updateNames = ((updateTools?.result as any).tools as any[])
+    .map((item) => item.name);
+  assert.ok(updateNames.includes("riff_update_experiment_configuration"));
+  assert.ok(!updateNames.includes("riff_create_analysis_document"));
+  const forgedAnalysis = await updateFixture.runtime.handle(
+    updatePrepared.capability,
+    call("riff_create_analysis_document", {
+      name: "Unrequested analysis",
+      mediaType: "text/markdown",
+      content: "# Must not exist",
+    }),
+  );
+  assert.equal((forgedAnalysis?.result as any).isError, true);
+  assert.deepEqual(
+    updateFixture.store.listTemporaryDocuments("conversation_project"),
+    [],
+  );
+  const crossKeywordFixture = setup(t, true);
+  crossKeywordFixture.store.startAgentTurn({
+    turnId: "turn_project_cross_keyword",
+    userMessageId: "message_project_cross_keyword",
+    conversationId: "conversation_project",
+    requestKey: "project-cross-keyword",
+    text: "Create an analysis report document describing the turbine configuration.",
+    createdAt: NOW,
+  });
+  crossKeywordFixture.store.bindAgentSession({
+    id: "session_project_cross_keyword",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-cross-keyword",
+    at: NOW,
+  });
+  const crossKeywordPrepared = await crossKeywordFixture.runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_cross_keyword",
+    text: "Create an analysis report document describing the turbine configuration.",
+    attachmentIds: [],
+  });
+  t.after(() => crossKeywordPrepared.release());
+  const crossKeywordTools = await crossKeywordFixture.runtime.handle(
+    crossKeywordPrepared.capability,
+    { jsonrpc: "2.0", id: 1, method: "tools/list" },
+  );
+  const crossKeywordNames = ((crossKeywordTools?.result as any).tools as any[])
+    .map((item) => item.name);
+  assert.ok(crossKeywordNames.includes("riff_create_analysis_document"));
+  assert.ok(!crossKeywordNames.includes("riff_update_experiment_configuration"));
+
+  const analysisFixture = setup(t, true);
+  analysisFixture.store.startAgentTurn({
+    turnId: "turn_project_analysis_only",
+    userMessageId: "message_project_analysis_only",
+    conversationId: "conversation_project",
+    requestKey: "project-analysis-only",
+    text: "Create an analysis document now",
+    createdAt: NOW,
+  });
+  analysisFixture.store.bindAgentSession({
+    id: "session_project_analysis_only",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-analysis-only",
+    at: NOW,
+  });
+  const analysisPrepared = await analysisFixture.runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_analysis_only",
+    text: "Create an analysis document now",
+    attachmentIds: [],
+  });
+  t.after(() => analysisPrepared.release());
+  const analysisTools = await analysisFixture.runtime.handle(
+    analysisPrepared.capability,
+    { jsonrpc: "2.0", id: 1, method: "tools/list" },
+  );
+  const analysisNames = ((analysisTools?.result as any).tools as any[])
+    .map((item) => item.name);
+  assert.ok(analysisNames.includes("riff_create_analysis_document"));
+  assert.ok(!analysisNames.includes("riff_update_experiment_configuration"));
+  const forgedUpdate = await analysisFixture.runtime.handle(
+    analysisPrepared.capability,
+    call("riff_update_experiment_configuration", {
+      requestKey: "forged-update",
+      configurationId: "experiment_alpha",
+      expectedConfigurationDigest: "0".repeat(64),
+      expectedRecordDigest: "1".repeat(64),
+      configuration: {},
+    }),
+  );
+  assert.equal((forgedUpdate?.result as any).isError, true);
+  assert.equal(
+    analysisFixture.store
+      .listExperimentConfigurations("project_alpha")[0]
+      ?.configuration.parameters.horizon,
+    1,
+  );
 });
 
 test("Project-only visual observation keeps target authority server-side", async (t) => {
@@ -239,12 +478,61 @@ function setup(
   writeFileSync(join(skillRoot, "abm-modeling/SKILL.md"), "---\nname: abm-modeling\ndescription: agent model simulation\n---\n\nBounded instructions.\n");
   const store = ProductStoreV2.open(root);
   t.after(() => store.close());
-  store.createModel({ id: "model_alpha", name: "Generic", technicalStatus: "executable", runMode: "batch", executionDescription: { entry: "model.py" }, createdAt: NOW,
-    files: [{ id: "file_model_alpha", kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("value = 1\n") }] });
+  const inputSchema = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: ["horizon"],
+    properties: {
+      horizon: { type: "integer", minimum: 1, maximum: 10 },
+      crewCount: { type: "integer", minimum: 1, maximum: 10, default: 1 },
+    },
+  };
+  store.createModel({ id: "model_alpha", name: "Generic", technicalStatus: "executable", runMode: "batch", executionDescription: {
+    schemaVersion: 2,
+    runtime: "python",
+    runMode: "batch",
+    dependencyFile: "environment/requirements.txt",
+    inputs: {
+      schemaProfile: "riff-json-schema-2020-12-v1",
+      schema: inputSchema,
+      smoke: { horizon: 1 },
+    },
+    outputs: [{
+      logicalName: "summary",
+      relativePath: "summary.json",
+      mediaType: "application/json",
+      required: true,
+      role: "data",
+    }],
+    batch: { entryPoint: "code/model.py", protocol: "riff-batch-v1" },
+    cancellation: { signal: "SIGTERM", graceMs: 100 },
+  }, createdAt: NOW,
+    files: [
+      { id: "file_model_alpha", kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("value = 1\n") },
+      { id: "file_model_environment", kind: "model_environment", relativePath: "requirements.txt", mediaType: "text/plain", bytes: Buffer.from("") },
+    ] });
   store.createConversation({ id: "conversation_model", owner: { kind: "model", id: "model_alpha" }, name: "Model", providerId: "provider", providerModelId: "model", createdAt: NOW });
   if (withProject) {
     store.createProjectFromModel({ projectId: "project_alpha", projectName: "Project", sourceModelId: "model_alpha", createdAt: NOW });
     store.createConversation({ id: "conversation_project", owner: { kind: "project", id: "project_alpha" }, name: "Project", providerId: "provider", providerModelId: "model", createdAt: NOW });
+    store.createExperimentV4({
+      commandId: "command_project_experiment",
+      id: "experiment_project",
+      projectId: "project_alpha",
+      name: "Project Experiment",
+      plan: planExperiment({
+        configuration: {
+          schemaVersion: 1,
+          runKind: "batch",
+          parameters: { horizon: 1 },
+          sampling: { kind: "single", seed: 1 },
+        },
+        inputSchema,
+        maxSamples: 10,
+      }),
+      createdAt: NOW,
+    });
   }
   const skills = new SimulationSkillCatalog(skillRoot, ["abm-modeling"]);
   return {
