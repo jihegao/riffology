@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import {
+  consumeBatchDiagnosticEventFileCandidate,
   consumeBatchOutputCandidate,
+  type BatchDiagnosticEventFileCandidate,
   type BatchOutputCandidate,
   type BatchScratchCleanupReceipt,
   type BatchSupervisionResult,
@@ -47,6 +49,9 @@ export type ProductRunDispatcherOptions = Readonly<{
   now?: () => Date;
   leaseMs?: number;
   consumeOutput?: (candidate: BatchOutputCandidate) => Buffer;
+  consumeDiagnosticEvents?: (
+    candidate: BatchDiagnosticEventFileCandidate,
+  ) => ReturnType<typeof consumeBatchDiagnosticEventFileCandidate>;
   consumeVisualOutput?: (candidate: VisualOutputCandidate) => Buffer;
 }>;
 
@@ -59,6 +64,9 @@ export class ProductRunDispatcher {
   readonly #now: () => Date;
   readonly #leaseMs: number;
   readonly #consumeOutput: (candidate: BatchOutputCandidate) => Buffer;
+  readonly #consumeDiagnosticEvents: (
+    candidate: BatchDiagnosticEventFileCandidate,
+  ) => ReturnType<typeof consumeBatchDiagnosticEventFileCandidate>;
   readonly #consumeVisualOutput: (candidate: VisualOutputCandidate) => Buffer;
   readonly #revokeVisualAccessHook: (runId: string) => void;
   readonly #generation = canonicalDigest({ dispatcher: randomUUID(), startedAt: Date.now() });
@@ -77,6 +85,8 @@ export class ProductRunDispatcher {
     this.#now = options.now ?? (() => new Date());
     this.#leaseMs = options.leaseMs ?? 30_000;
     this.#consumeOutput = options.consumeOutput ?? consumeBatchOutputCandidate;
+    this.#consumeDiagnosticEvents = options.consumeDiagnosticEvents
+      ?? consumeBatchDiagnosticEventFileCandidate;
     this.#consumeVisualOutput = options.consumeVisualOutput ?? consumeVisualOutputCandidate;
     this.#revokeVisualAccessHook = options.revokeVisualAccess ?? (() => undefined);
     if (!Number.isSafeInteger(this.#leaseMs) || this.#leaseMs < 1_000 || this.#leaseMs > 300_000) {
@@ -315,12 +325,20 @@ export class ProductRunDispatcher {
       );
 
       let outputBytes: Array<{ candidate: BatchOutputCandidate; bytes: Buffer }> = [];
+      let diagnosticEventFiles: Array<{
+        candidate: BatchDiagnosticEventFileCandidate;
+        consumed: ReturnType<typeof consumeBatchDiagnosticEventFileCandidate>;
+      }> = [];
       let terminalOverride: { status: "failed"; code: string; diagnostic: string } | null = null;
       if (result.status === "succeeded") {
         try {
           outputBytes = result.outputs.map((candidate) => ({
             candidate,
             bytes: this.#consumeOutput(candidate),
+          }));
+          diagnosticEventFiles = (result.diagnosticEventFiles ?? []).map((candidate) => ({
+            candidate,
+            consumed: this.#consumeDiagnosticEvents(candidate),
           }));
         } catch {
           terminalOverride = {
@@ -350,6 +368,13 @@ export class ProductRunDispatcher {
               logicalName: candidate.logicalName,
               outputType: candidate.role,
               bytes,
+            })),
+            diagnosticEventFiles: diagnosticEventFiles.map(({ candidate, consumed }) => ({
+              sampleIndex: candidate.sampleIndex,
+              sampleId: candidate.sampleId,
+              bytes: consumed.bytes,
+              fileEventSetDigest: consumed.parsed.eventSetDigest,
+              events: consumed.parsed.events,
             })),
             terminalDiagnostics: diagnostics,
             resourceOverview: result.resources,

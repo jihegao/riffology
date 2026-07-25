@@ -51,6 +51,8 @@ import type {
 import type { DurableConversationRuntime } from "./agent-session-manager.ts";
 import type {
   CreateProjectFromModelInput,
+  DiagnosticEventRecord,
+  DiagnosticEventSetRecord,
   ExperimentConfigurationRecord,
   IsoTimestamp,
   LifecycleState,
@@ -95,10 +97,20 @@ import type {
   VisualAgentTurnScope,
 } from "./agent-visual-authority.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment } from "./agent-visual-authority.ts";
+import { parseDiagnosticEventNdjson } from "./diagnostic-events.ts";
 
 const DATABASE_NAME = "product.sqlite3";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
 const FILE_KINDS = new Set<ObjectFileKind>(["model_code", "model_environment", "model_visual_asset"]);
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value)
+  && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+const isExactIsoTimestamp = (value: unknown): value is string => {
+  if (typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+};
 
 export type ProductStoreFaultPoint = "after_staging_root" | "after_schema" | "before_root_publish" | "after_root_publish";
 export type ProductStoreV2Options = {
@@ -580,6 +592,21 @@ export type BatchOutputCommit = Readonly<{
   bytes: Uint8Array;
 }>;
 
+export type BatchDiagnosticEventCommit = Readonly<{
+  sampleIndex: number;
+  sampleId: string;
+  bytes: Uint8Array;
+  fileEventSetDigest: string;
+  events: readonly Readonly<{
+    sourceOrdinal: number;
+    type: string;
+    occurredAt: IsoTimestamp | null;
+    payload: Record<string, unknown> | readonly unknown[];
+    payloadDigest: string;
+    byteCount: number;
+  }>[];
+}>;
+
 export type VisualOutputCommit = BatchOutputCommit;
 
 export type VerifiedRunOutputDownload = Readonly<{
@@ -590,6 +617,17 @@ export type VerifiedRunOutputDownload = Readonly<{
 export type BatchSuccessCommitReceipt = Readonly<{
   run: Extract<RunRecord, { contractVersion: 4 }>;
   outputs: readonly Extract<OutputIndexRecord, { contractVersion: 4 }>[];
+}>;
+
+export type DiagnosticEventReadBinding = Readonly<{
+  eventSet: DiagnosticEventSetRecord;
+  lifecycleDigest: string;
+}>;
+
+export type DiagnosticEventPageRecord = Readonly<{
+  items: readonly DiagnosticEventRecord[];
+  hasMore: boolean;
+  binding: DiagnosticEventReadBinding;
 }>;
 
 export type VisualSuccessCommitReceipt = BatchSuccessCommitReceipt;
@@ -2839,6 +2877,7 @@ export class ProductStoreV2 {
 
   commitBatchRunSuccess(input: RunAttemptIdentity & {
     outputs: readonly BatchOutputCommit[];
+    diagnosticEventFiles?: readonly BatchDiagnosticEventCommit[];
     terminalDiagnostics: Record<string, unknown>;
     resourceOverview: Record<string, unknown>;
     finishedAt: IsoTimestamp;
@@ -2933,16 +2972,142 @@ export class ProductStoreV2 {
         }
       }
     }
+    const eventDeclaration = execution.batch?.domainEvents;
+    const eventFileInputs = [...(input.diagnosticEventFiles ?? [])];
+    if (!eventDeclaration && eventFileInputs.length !== 0) {
+      throw new ProductStoreV2Error(
+        "run_event_invalid: diagnostic events were supplied without a frozen declaration.",
+      );
+    }
+    if (eventDeclaration && eventFileInputs.length !== samples.length) {
+      throw new ProductStoreV2Error(
+        "run_event_invalid: every frozen sample must publish one declared diagnostic event file.",
+      );
+    }
+    const seenEventSamples = new Set<number>();
+    const eventFiles = eventFileInputs.map((file) => {
+      const sample = samples[file.sampleIndex];
+      if (!sample || sample.sampleIndex !== file.sampleIndex || sample.sampleId !== file.sampleId
+        || seenEventSamples.has(file.sampleIndex) || !(file.bytes instanceof Uint8Array)
+        || file.bytes.byteLength < 1 || !/^[0-9a-f]{64}$/u.test(file.fileEventSetDigest)) {
+        throw new ProductStoreV2Error(
+          "run_event_invalid: a diagnostic event file is duplicated or bound to the wrong sample.",
+        );
+      }
+      seenEventSamples.add(file.sampleIndex);
+      const bytes = Buffer.from(file.bytes);
+      const events = file.events.map((event, index) => {
+        if (!event || typeof event !== "object" || Array.isArray(event)
+          || Object.keys(event).sort().join("\n") !== [
+            "byteCount", "occurredAt", "payload", "payloadDigest", "sourceOrdinal", "type",
+          ].join("\n")
+          || event.sourceOrdinal !== index
+          || typeof event.type !== "string"
+          || !/^[A-Za-z][A-Za-z0-9._:-]{0,127}$/u.test(event.type)
+          || (event.occurredAt !== null && !isExactIsoTimestamp(event.occurredAt))
+          || (!isPlainRecord(event.payload) && !Array.isArray(event.payload))
+          || !/^[0-9a-f]{64}$/u.test(event.payloadDigest)
+          || canonicalDigest(event.payload as any) !== event.payloadDigest
+          || !Number.isSafeInteger(event.byteCount)
+          || event.byteCount < 2 || event.byteCount > 1_048_576) {
+          throw new ProductStoreV2Error(
+            "run_event_invalid: a diagnostic event candidate is invalid.",
+          );
+        }
+        return Object.freeze({
+          sourceOrdinal: event.sourceOrdinal,
+          type: event.type,
+          occurredAt: event.occurredAt,
+          payload: JSON.parse(json(event.payload)) as Record<string, unknown> | readonly unknown[],
+          payloadDigest: event.payloadDigest,
+          byteCount: event.byteCount,
+        });
+      });
+      const expectedFileEventSetDigest = canonicalDigest(events.map((event) => ({
+        sourceOrdinal: event.sourceOrdinal,
+        type: event.type,
+        occurredAt: event.occurredAt,
+        payload: event.payload,
+      })));
+      if (events.length < 1 || events.length > 10_000
+        || expectedFileEventSetDigest !== file.fileEventSetDigest) {
+        throw new ProductStoreV2Error(
+          "run_event_invalid: a diagnostic event file semantic digest is invalid.",
+        );
+      }
+      const identity = {
+        runId: input.runId,
+        sampleIndex: file.sampleIndex,
+        sampleId: file.sampleId,
+        kind: "diagnostic_events",
+      };
+      return Object.freeze({
+        sampleIndex: file.sampleIndex,
+        sampleId: file.sampleId,
+        bytes,
+        digest: sha256(bytes),
+        fileEventSetDigest: file.fileEventSetDigest,
+        events: Object.freeze(events),
+        objectFileId: `file_${canonicalDigest(identity).slice(0, 32)}`,
+        relativePath: `diagnostic-events/${file.sampleIndex}/${eventDeclaration!.relativePath}`,
+      });
+    }).sort((left, right) => left.sampleIndex - right.sampleIndex);
+    const diagnosticEvents = eventFiles.flatMap((file) => file.events.map((event) => ({
+      ...event,
+      sampleIndex: file.sampleIndex,
+      sampleId: file.sampleId,
+    }))).map((event, sequence) => Object.freeze({ ...event, sequence }));
+    const eventDeclarationDigest = eventDeclaration
+      ? canonicalDigest(eventDeclaration)
+      : null;
+    const eventSetDigest = eventDeclaration ? canonicalDigest({
+      runId: input.runId,
+      executionDescriptionDigest: run.executionDescriptionDigest,
+      declarationDigest: eventDeclarationDigest,
+      files: eventFiles.map((file) => ({
+        sampleIndex: file.sampleIndex,
+        sampleId: file.sampleId,
+        sizeBytes: file.bytes.byteLength,
+        sha256: file.digest,
+        eventCount: file.events.length,
+        fileEventSetDigest: file.fileEventSetDigest,
+      })),
+      events: diagnosticEvents.map((event) => ({
+        sequence: event.sequence,
+        sampleIndex: event.sampleIndex,
+        sampleId: event.sampleId,
+        sourceOrdinal: event.sourceOrdinal,
+        type: event.type,
+        occurredAt: event.occurredAt,
+        payload: event.payload,
+        payloadDigest: event.payloadDigest,
+        byteCount: event.byteCount,
+      })),
+    }) : null;
     const limits = run.limits as RunLimitsV1;
-    const totalBytes = outputs.reduce((sum, output) => sum + output.bytes.byteLength, 0);
-    if (outputs.length > limits.maxOutputFiles) {
+    const diagnosticEventBytes = eventFiles
+      .reduce((sum, file) => sum + file.bytes.byteLength, 0);
+    if (diagnosticEvents.length > limits.maxEventCount) {
+      throw new ProductStoreV2Error(
+        "run_event_count_limit: diagnostic events exceed the frozen run count limit.",
+      );
+    }
+    if (!Number.isSafeInteger(diagnosticEventBytes)
+      || diagnosticEventBytes > limits.maxEventBytes) {
+      throw new ProductStoreV2Error(
+        "run_event_byte_limit: diagnostic event bytes exceed the frozen run byte limit.",
+      );
+    }
+    const totalBytes = [...outputs, ...eventFiles]
+      .reduce((sum, output) => sum + output.bytes.byteLength, 0);
+    if (outputs.length + eventFiles.length > limits.maxOutputFiles) {
       throw new ProductStoreV2Error("run_output_file_limit: successful outputs exceed the frozen file limit.");
     }
     if (!Number.isSafeInteger(totalBytes) || totalBytes > limits.maxOutputBytes) {
       throw new ProductStoreV2Error("run_output_byte_limit: successful outputs exceed the frozen byte limit.");
     }
     const owner = { kind: "run" as const, id: input.runId };
-    const files = outputs.map((output) => ({
+    const files = [...outputs, ...eventFiles].map((output) => ({
       operation: "write" as const,
       target: {
         owner,
@@ -3044,6 +3209,72 @@ export class ProductStoreV2 {
           expectedChanges: 1,
         },
       ]),
+      ...eventFiles.flatMap((file): DatabaseMutationStatement[] => [
+        objectInsert({
+          id: file.objectFileId,
+          owner,
+          kind: "run_file",
+          relativePath: file.relativePath,
+          mediaType: "application/x-ndjson",
+          sizeBytes: file.bytes.byteLength,
+          digest: file.digest,
+          createdAt: input.finishedAt,
+        }),
+      ]),
+      ...(eventDeclaration && eventDeclarationDigest && eventSetDigest ? [{
+        sql: `INSERT INTO diagnostic_event_sets
+          (run_id, execution_description_sha256, declaration_sha256,
+            event_set_sha256, event_count, total_bytes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.runId,
+          run.executionDescriptionDigest,
+          eventDeclarationDigest,
+          eventSetDigest,
+          diagnosticEvents.length,
+          diagnosticEventBytes,
+          input.finishedAt,
+        ],
+        expectedChanges: 1,
+      } satisfies DatabaseMutationStatement] : []),
+      ...eventFiles.map((file): DatabaseMutationStatement => ({
+        sql: `INSERT INTO diagnostic_event_files
+          (run_id, sample_index, sample_id, object_file_id, file_sha256,
+            size_bytes, event_count, file_event_set_sha256, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.runId,
+          file.sampleIndex,
+          file.sampleId,
+          file.objectFileId,
+          file.digest,
+          file.bytes.byteLength,
+          file.events.length,
+          file.fileEventSetDigest,
+          input.finishedAt,
+        ],
+        expectedChanges: 1,
+      })),
+      ...diagnosticEvents.map((event): DatabaseMutationStatement => ({
+        sql: `INSERT INTO diagnostic_events
+          (run_id, sequence, sample_index, sample_id, source_ordinal, type,
+            occurred_at, payload_json, payload_sha256, byte_count, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.runId,
+          event.sequence,
+          event.sampleIndex,
+          event.sampleId,
+          event.sourceOrdinal,
+          event.type,
+          event.occurredAt,
+          json(event.payload),
+          event.payloadDigest,
+          event.byteCount,
+          input.finishedAt,
+        ],
+        expectedChanges: 1,
+      })),
       ...completion.statements,
     ];
     withAtomicBatchSuccessRunContext(this.#database, input.runId, () => {
@@ -4479,6 +4710,42 @@ export class ProductStoreV2 {
           }
         }
       }
+      if (execution.batch?.domainEvents) {
+        try {
+          this.listRunDiagnosticEvents({
+            projectId: row.project_id,
+            runId: row.id,
+            afterSequence: -1,
+            limit: 1,
+            types: [],
+            sampleIndexes: [],
+            occurredAtFrom: null,
+            occurredAtTo: null,
+            recoveryAudit: true,
+          });
+        } catch (error) {
+          throw new ProductStoreV2Error(
+            "batch_success_recovery_invalid: the diagnostic event success closure is inconsistent.",
+            { cause: error },
+          );
+        }
+      } else {
+        const unexpected = this.#database.prepare(`SELECT
+            (SELECT count(*) FROM diagnostic_event_sets WHERE run_id = ?) AS event_sets,
+            (SELECT count(*) FROM diagnostic_event_files WHERE run_id = ?) AS event_files,
+            (SELECT count(*) FROM diagnostic_events WHERE run_id = ?) AS events`
+        ).get(row.id, row.id, row.id) as {
+          event_sets: number;
+          event_files: number;
+          events: number;
+        };
+        if (unexpected.event_sets !== 0 || unexpected.event_files !== 0
+          || unexpected.events !== 0) {
+          throw new ProductStoreV2Error(
+            "batch_success_recovery_invalid: an undeclared diagnostic event closure exists.",
+          );
+        }
+      }
     }
   }
 
@@ -4897,6 +5164,13 @@ export class ProductStoreV2 {
     });
   }
 
+  hasDiagnosticEventSets(): boolean {
+    this.#assertOpen();
+    return Boolean(this.#database.prepare(
+      "SELECT 1 FROM diagnostic_event_sets LIMIT 1",
+    ).get());
+  }
+
   listRunOutputs(runId: string): OutputIndexRecord[] {
     assertId(runId);
     return (this.#database.prepare(`SELECT
@@ -4935,6 +5209,320 @@ export class ProductStoreV2 {
           declaredRole: row.declared_role,
           outputContractDigest: row.output_contract_sha256,
         });
+    });
+  }
+
+  diagnosticEventCursorBinding(
+    projectId: string,
+    runId: string,
+  ): DiagnosticEventReadBinding {
+    this.#assertOpen();
+    assertId(projectId);
+    assertId(runId);
+    const row = this.#database.prepare(`SELECT
+        p.lifecycle_state AS project_lifecycle_state,
+        p.updated_at AS project_updated_at,
+        p.execution_description_json,
+        r.status, r.updated_at AS run_updated_at, r.execution_description_sha256,
+        (SELECT json_group_array(id) FROM (
+          SELECT id FROM trash_entries WHERE project_id = p.id ORDER BY id
+        )) AS project_trash_history_json,
+        (SELECT json_group_array(id) FROM (
+          SELECT id FROM trash_entries WHERE run_id = r.id ORDER BY id
+        )) AS run_trash_history_json,
+        s.declaration_sha256, s.event_set_sha256, s.event_count,
+        s.total_bytes, s.created_at AS event_set_created_at
+      FROM projects p
+      JOIN runs r ON r.project_id = p.id
+      JOIN diagnostic_event_sets s ON s.run_id = r.id
+      WHERE p.id = ? AND p.lifecycle_state != 'trashed'
+        AND r.id = ? AND r.contract_version = 4
+        AND r.run_kind = 'batch' AND r.status = 'succeeded'`
+    ).get(projectId, runId) as any;
+    if (!row) {
+      throw new ProductStoreV2Error(
+        "events_not_available: diagnostic events are unavailable for this run.",
+      );
+    }
+    const execution = validateExecutionDescriptionV2(
+      JSON.parse(row.execution_description_json),
+    );
+    if (!execution.batch?.domainEvents
+      || canonicalDigest(execution) !== row.execution_description_sha256
+      || canonicalDigest(execution.batch.domainEvents) !== row.declaration_sha256) {
+      throw new ProductStoreV2Error(
+        "run_event_integrity_failed: the frozen diagnostic event declaration is inconsistent.",
+      );
+    }
+    return Object.freeze({
+      eventSet: Object.freeze({
+        runId,
+        executionDescriptionDigest: row.execution_description_sha256,
+        declarationDigest: row.declaration_sha256,
+        eventSetDigest: row.event_set_sha256,
+        eventCount: row.event_count,
+        totalBytes: row.total_bytes,
+        createdAt: row.event_set_created_at,
+      }),
+      lifecycleDigest: canonicalDigest({
+        projectId,
+        projectLifecycleState: row.project_lifecycle_state,
+        projectUpdatedAt: row.project_updated_at,
+        runId,
+        runStatus: row.status,
+        runUpdatedAt: row.run_updated_at,
+        projectTrashHistory: JSON.parse(row.project_trash_history_json),
+        runTrashHistory: JSON.parse(row.run_trash_history_json),
+        eventSetDigest: row.event_set_sha256,
+      }),
+    });
+  }
+
+  listRunDiagnosticEvents(input: Readonly<{
+    projectId: string;
+    runId: string;
+    afterSequence: number;
+    limit: number;
+    types: readonly string[];
+    sampleIndexes: readonly number[];
+    occurredAtFrom: IsoTimestamp | null;
+    occurredAtTo: IsoTimestamp | null;
+    recoveryAudit?: true;
+  }>): DiagnosticEventPageRecord {
+    this.#assertOpen();
+    assertId(input.projectId);
+    assertId(input.runId);
+    if (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < -1
+      || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100
+      || input.types.length > 32 || input.sampleIndexes.length > 256
+      || input.types.some((value) =>
+        typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9._:-]{0,127}$/u.test(value))
+      || input.sampleIndexes.some((value) => !Number.isSafeInteger(value) || value < 0)
+      || new Set(input.types).size !== input.types.length
+      || new Set(input.sampleIndexes).size !== input.sampleIndexes.length
+      || (input.occurredAtFrom !== null && !isExactIsoTimestamp(input.occurredAtFrom))
+      || (input.occurredAtTo !== null && !isExactIsoTimestamp(input.occurredAtTo))
+      || (input.occurredAtFrom !== null && input.occurredAtTo !== null
+        && input.occurredAtFrom > input.occurredAtTo)) {
+      throw new ProductStoreV2Error("run_event_query_invalid: the diagnostic event query is invalid.");
+    }
+    const availability = input.recoveryAudit
+      ? `(r.status = 'succeeded'
+        OR (r.status = 'trashed' AND r.pre_trash_status = 'succeeded'))`
+      : `p.lifecycle_state != 'trashed' AND r.status = 'succeeded'`;
+    const binding = this.#database.prepare(`SELECT
+        p.lifecycle_state AS project_lifecycle_state,
+        p.updated_at AS project_updated_at,
+        p.execution_description_json,
+        r.project_id, r.contract_version, r.run_kind, r.status,
+        r.updated_at AS run_updated_at, r.execution_description_sha256,
+        (SELECT json_group_array(id) FROM (
+          SELECT id FROM trash_entries WHERE project_id = p.id ORDER BY id
+        )) AS project_trash_history_json,
+        (SELECT json_group_array(id) FROM (
+          SELECT id FROM trash_entries WHERE run_id = r.id ORDER BY id
+        )) AS run_trash_history_json,
+        r.sample_plan_json, r.limits_json,
+        s.declaration_sha256, s.event_set_sha256, s.event_count,
+        s.total_bytes, s.created_at AS event_set_created_at
+      FROM projects p
+      JOIN runs r ON r.project_id = p.id
+      JOIN diagnostic_event_sets s ON s.run_id = r.id
+      WHERE p.id = ? AND ${availability}
+        AND r.id = ? AND r.contract_version = 4
+        AND r.run_kind = 'batch'`
+    ).get(input.projectId, input.runId) as any;
+    if (!binding) {
+      throw new ProductStoreV2Error(
+        "events_not_available: diagnostic events are unavailable for this run.",
+      );
+    }
+    const execution = validateExecutionDescriptionV2(
+      JSON.parse(binding.execution_description_json),
+    );
+    const declaration = execution.batch?.domainEvents;
+    if (!declaration
+      || canonicalDigest(execution) !== binding.execution_description_sha256
+      || canonicalDigest(declaration) !== binding.declaration_sha256) {
+      throw new ProductStoreV2Error(
+        "run_event_integrity_failed: the frozen diagnostic event declaration is inconsistent.",
+      );
+    }
+    const samples = JSON.parse(binding.sample_plan_json) as Array<{
+      sampleIndex: number;
+      sampleId: string;
+    }>;
+    const limits = JSON.parse(binding.limits_json) as RunLimitsV1;
+    const fileRows = this.#database.prepare(`SELECT
+        ef.sample_index, ef.sample_id, ef.file_sha256, ef.size_bytes,
+        ef.event_count, ef.file_event_set_sha256,
+        f.*, r.project_id AS run_project_id
+      FROM diagnostic_event_files ef
+      JOIN object_files f ON f.id = ef.object_file_id
+      JOIN runs r ON r.id = ef.run_id
+      WHERE ef.run_id = ?
+      ORDER BY ef.sample_index`
+    ).all(input.runId) as any[];
+    if (fileRows.length !== samples.length) {
+      throw new ProductStoreV2Error(
+        "run_event_integrity_failed: the diagnostic event file set is incomplete.",
+      );
+    }
+    const parsedFiles = fileRows.map((row, index) => {
+      const sample = samples[index];
+      const file = metadata(row);
+      if (!sample || sample.sampleIndex !== row.sample_index
+        || sample.sampleId !== row.sample_id
+        || file.owner.kind !== "run" || file.owner.id !== input.runId
+        || file.kind !== "run_file" || file.mediaType !== "application/x-ndjson"
+        || file.sha256 !== row.file_sha256 || file.sizeBytes !== row.size_bytes
+        || file.relativePath
+          !== `diagnostic-events/${row.sample_index}/${declaration.relativePath}`) {
+        throw new ProductStoreV2Error(
+          "run_event_integrity_failed: a diagnostic event file binding is invalid.",
+        );
+      }
+      const inspected = this.#objects.readWithInspection({
+        owner: { kind: "run", id: input.runId },
+        runProjectId: input.projectId,
+        relativePath: file.relativePath,
+      });
+      if (!inspected || inspected.sha256 !== file.sha256
+        || inspected.sizeBytes !== file.sizeBytes) {
+        throw new ProductStoreV2Error(
+          "run_event_integrity_failed: diagnostic event bytes drifted.",
+        );
+      }
+      const parsed = parseDiagnosticEventNdjson(inspected.bytes, {
+        limits: {
+          maxEventCount: limits.maxEventCount,
+          maxEventBytes: Math.min(
+            16_000_000,
+            limits.maxOutputBytes,
+            limits.maxEventBytes,
+          ),
+        },
+        payloadSchema: declaration.payloadSchema ?? null,
+      });
+      if (parsed.eventCount !== row.event_count
+        || parsed.eventSetDigest !== row.file_event_set_sha256) {
+        throw new ProductStoreV2Error(
+          "run_event_integrity_failed: a diagnostic event file digest is inconsistent.",
+        );
+      }
+      return {
+        sampleIndex: row.sample_index as number,
+        sampleId: row.sample_id as string,
+        sizeBytes: row.size_bytes as number,
+        sha256: row.file_sha256 as string,
+        eventCount: row.event_count as number,
+        fileEventSetDigest: row.file_event_set_sha256 as string,
+        parsed,
+      };
+    });
+    const rows = this.#database.prepare(`SELECT *
+      FROM diagnostic_events WHERE run_id = ? ORDER BY sequence`
+    ).all(input.runId) as any[];
+    const events: DiagnosticEventRecord[] = rows.map((row, sequence) => {
+      const source = parsedFiles[row.sample_index]?.parsed.events[row.source_ordinal];
+      const payload = JSON.parse(row.payload_json) as Record<string, unknown> | readonly unknown[];
+      if (!source || row.sequence !== sequence || source.sourceOrdinal !== row.source_ordinal
+        || source.type !== row.type || source.occurredAt !== row.occurred_at
+        || source.payloadDigest !== row.payload_sha256
+        || source.byteCount !== row.byte_count
+        || canonicalDigest(payload as any) !== row.payload_sha256
+        || canonicalDigest(source.payload) !== row.payload_sha256
+        || json(source.payload) !== row.payload_json
+        || parsedFiles[row.sample_index]?.sampleId !== row.sample_id) {
+        throw new ProductStoreV2Error(
+          "run_event_integrity_failed: a diagnostic event row is inconsistent.",
+        );
+      }
+      return Object.freeze({
+        runId: input.runId,
+        sequence: row.sequence,
+        sampleIndex: row.sample_index,
+        sampleId: row.sample_id,
+        sourceOrdinal: row.source_ordinal,
+        type: row.type,
+        occurredAt: row.occurred_at,
+        payload,
+        payloadDigest: row.payload_sha256,
+        byteCount: row.byte_count,
+        createdAt: row.created_at,
+      });
+    });
+    const expectedEventSetDigest = canonicalDigest({
+      runId: input.runId,
+      executionDescriptionDigest: binding.execution_description_sha256,
+      declarationDigest: binding.declaration_sha256,
+      files: parsedFiles.map((file) => ({
+        sampleIndex: file.sampleIndex,
+        sampleId: file.sampleId,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        eventCount: file.eventCount,
+        fileEventSetDigest: file.fileEventSetDigest,
+      })),
+      events: events.map((event) => ({
+        sequence: event.sequence,
+        sampleIndex: event.sampleIndex,
+        sampleId: event.sampleId,
+        sourceOrdinal: event.sourceOrdinal,
+        type: event.type,
+        occurredAt: event.occurredAt,
+        payload: event.payload,
+        payloadDigest: event.payloadDigest,
+        byteCount: event.byteCount,
+      })),
+    });
+    const totalBytes = parsedFiles.reduce((sum, file) => sum + file.sizeBytes, 0);
+    if (events.length !== binding.event_count
+      || events.length > limits.maxEventCount
+      || totalBytes !== binding.total_bytes
+      || totalBytes > limits.maxEventBytes
+      || totalBytes > limits.maxOutputBytes
+      || expectedEventSetDigest !== binding.event_set_sha256) {
+      throw new ProductStoreV2Error(
+        "run_event_integrity_failed: the terminal diagnostic event set is inconsistent.",
+      );
+    }
+    const filtered = events.filter((event) =>
+      event.sequence > input.afterSequence
+      && (input.types.length === 0 || input.types.includes(event.type))
+      && (input.sampleIndexes.length === 0
+        || input.sampleIndexes.includes(event.sampleIndex))
+      && (input.occurredAtFrom === null
+        || event.occurredAt !== null && event.occurredAt >= input.occurredAtFrom)
+      && (input.occurredAtTo === null
+        || event.occurredAt !== null && event.occurredAt <= input.occurredAtTo));
+    const selected = filtered.slice(0, input.limit);
+    const eventSet: DiagnosticEventSetRecord = Object.freeze({
+      runId: input.runId,
+      executionDescriptionDigest: binding.execution_description_sha256,
+      declarationDigest: binding.declaration_sha256,
+      eventSetDigest: binding.event_set_sha256,
+      eventCount: binding.event_count,
+      totalBytes: binding.total_bytes,
+      createdAt: binding.event_set_created_at,
+    });
+    return Object.freeze({
+      items: Object.freeze(selected),
+      hasMore: filtered.length > selected.length,
+      binding: Object.freeze({
+        eventSet,
+        lifecycleDigest: canonicalDigest({
+          projectId: input.projectId,
+          projectLifecycleState: binding.project_lifecycle_state,
+          projectUpdatedAt: binding.project_updated_at,
+          runId: input.runId,
+          runStatus: binding.status,
+          runUpdatedAt: binding.run_updated_at,
+          projectTrashHistory: JSON.parse(binding.project_trash_history_json),
+          runTrashHistory: JSON.parse(binding.run_trash_history_json),
+          eventSetDigest: binding.event_set_sha256,
+        }),
+      }),
     });
   }
 
@@ -5191,6 +5779,15 @@ export class ProductStoreV2 {
   ): void {
     for (const runId of runIds) {
       fileRows.push(...this.#objectRows("owner_run_id = ?", [runId]));
+      addRows("diagnostic_events",
+        this.#database.prepare("SELECT * FROM diagnostic_events WHERE run_id = ? ORDER BY sequence").all(runId) as any[],
+        (event) => ({ run_id: event.run_id, sequence: event.sequence }));
+      addRows("diagnostic_event_files",
+        this.#database.prepare("SELECT * FROM diagnostic_event_files WHERE run_id = ? ORDER BY sample_index").all(runId) as any[],
+        (file) => ({ run_id: file.run_id, sample_index: file.sample_index }));
+      addRows("diagnostic_event_sets",
+        this.#database.prepare("SELECT * FROM diagnostic_event_sets WHERE run_id = ?").all(runId) as any[],
+        (set) => ({ run_id: set.run_id }));
       addRows("output_indexes", this.#database.prepare("SELECT * FROM output_indexes WHERE run_id = ? ORDER BY id").all(runId) as any[]);
       const attempts = this.#database.prepare("SELECT * FROM run_attempts WHERE run_id = ? ORDER BY id").all(runId) as any[];
       addRows("run_attempts", attempts);
@@ -6993,10 +7590,6 @@ const assertRunnableExecutionDescription = (
   try {
     description = validateExecutionDescriptionV2(input);
     assertRunCapabilityV2(description, plan.configuration.runKind);
-    if (plan.configuration.runKind === "batch"
-      && description.batch?.domainEvents) {
-      throw new ProductStoreV2Error("domain_events_not_supported: batch domain events are not supported by this run dispatcher.");
-    }
   } catch (error) {
     if (error instanceof ExecutionProtocolV2Error) {
       throw new ProductStoreV2Error(`${error.code}: ${error.message}`, { cause: error });

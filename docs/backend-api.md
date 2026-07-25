@@ -221,17 +221,17 @@ currently supported hard limits, and atomically publishes successful outputs.
 wall time, termination grace, stdout bytes, stderr bytes, output file count,
 output bytes, and scratch/Project integrity. CPU time, resident memory, and
 model-spawned process-count limits are not accepted as supported limits.
-Published A3-2a2c enforces `startupTimeMs` for admitted visual work. Event
-count/byte fields remain frozen reserved fields: visual starts that supply
-`completionConversationId` fail with HTTP `422` and
-`visual_completion_not_supported`, and batch `domainEvents` fail with
-`domain_events_not_supported`.
+Published A3-2a2c enforces `startupTimeMs` for admitted visual work. Visual
+starts that supply `completionConversationId` fail with HTTP `422` and
+`visual_completion_not_supported`. The A3-2d2 candidate enforces frozen
+`maxEventCount` and `maxEventBytes` for declared diagnostic NDJSON; undeclared,
+invalid, or over-limit event files fail before terminal success publication.
 
 Admission and request failures use stable codes including `unknown_field`,
 `invalid_request`, `resource_not_found`, `state_conflict`,
 `idempotency_conflict`, `legacy_contract_read_only`,
 `execution_protocol_upgrade_required`, `capability_not_declared`,
-`capability_not_available`, `domain_events_not_supported`,
+`capability_not_available`, `events_not_available`,
 `project_snapshot_corrupt`, `invalid_sample_plan`, and
 `sample_limit_exceeded`. Batch terminal codes include
 `batch_run_succeeded`, `batch_process_failed`, `run_wall_timeout`,
@@ -369,15 +369,14 @@ current routes or acceptance evidence:
    installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
    and the production build succeeds. This is not Firefox/WebKit or
    remote/HTTPS acceptance.
-9. **A3-2c Playwright — in progress:** c1 authority/audit and c2 bounded
-   current-Project/current-healthy-attempt read observation are implemented;
-   c3 explicit one-turn interaction and c4 live-CDP/complete Chromium security
-   closeout remain pending.
-10. **A3-2d generic outputs/events/direct controls — pending:** add exact
-    same-run output list/download, bounded declared diagnostic-event ingestion
-    with opaque run-bound cursors, add the missing download/trash/restore
-    routes, and close Agent-independent direct-control acceptance including
-    the existing cancel route.
+9. **A3-2c Playwright — merged through PR #42:** authority/audit, bounded
+   observation, one-use typed interaction, and live-CDP Chromium security
+   closeout are published.
+10. **A3-2d generic outputs/events/direct controls — in progress:** d1
+    same-run output list/download was merged through PR #43. d2 bounded
+    declared diagnostic-event ingestion and opaque cursor reads are a review
+    candidate. Direct trash/restore and complete Agent-independent controls
+    remain pending.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
 input envelope as batch through `--riff-input`, an assigned
@@ -659,17 +658,39 @@ explicit Error fields. It excludes model-authored child response bytes from
 the persistence claim: those bytes are untrusted input, not a secret boundary.
 Two independent final reviews reported no P0/P1 blocker before PR #42 merged.
 
-A3-2d follows the existing committed output index. The A3-2d1 review branch
-implements the first narrow public surface: same-run list/download with
-path/size/digest revalidation. Later slices add declared diagnostic NDJSON
-ingestion with structural/schema/count/byte limits
-and opaque run/filter-bound cursors, plus Agent-independent cancel/download/
-trash/restore acceptance. Cancel already exists; A3-2d adds the missing generic
-download/trash/restore routes and proves the complete control set without
-OpenCode. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
-A3-3 diagnostic-event acceptance therefore begins only after A3-2d is
-published. The d1 candidate remains pending review and merge; event ingestion
-and direct trash/restore controls are not part of d1.
+A3-2d follows the existing committed output index. A3-2d1 was merged through
+PR #43 and implements same-run list/download with path/size/digest
+revalidation. The A3-2d2 review candidate adds declared diagnostic NDJSON
+ingestion with strict UTF-8/LF, structural/schema/count/byte limits, schema-v12
+atomic event-set publication, and authenticated opaque cursors bound to the
+Project/run/contract/event-set/lifecycle digest, persistent trash history,
+normalized filters, and
+limit. Direct trash/restore acceptance remains later A3-2d work. Cancel already
+exists. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
+A3-3 diagnostic-event acceptance begins only after A3-2d2 is published.
+
+The A3-2d2 candidate route is:
+
+```text
+GET /api/projects/:projectId/runs/:runId/diagnostic-events
+  ?cursor=<opaque>
+  &limit=<1..100>
+  &type=<exact-type>
+  &sampleIndex=<non-negative-integer>
+  &occurredAfter=<exact-UTC-instant>
+  &occurredBefore=<exact-UTC-instant>
+```
+
+Every query key is optional and may occur once; default `limit` is `50`.
+Pagination is forward immutable-sequence order. Success is exact JSON
+`{items,nextCursor,truncated}` where each item contains only `sequence`,
+`sampleIndex`, `type`, nullable `occurredAt`, and structured `payload`.
+Responses are `private, no-store` with `nosniff`. Cursor/filter/limit
+substitution, cross-Project/run use, expiry, key epoch change, event-set drift,
+and Project lifecycle or trash-history change fail closed. `events_not_available`
+is `409`, invalid query/cursor is `422`, and byte/row integrity drift is the
+generic `500 event_integrity_failed`; paths, SQLite identities, cursor keys,
+and expected digests are not returned.
 
 A3-2d list/download/event reads require the exact current single-user app
 session and Host, same-origin Fetch Metadata, and the exact
@@ -683,14 +704,18 @@ Project/run/output IDs are not bearer credentials. Output download is
 attachment-only and verifies the complete digest before sending bytes from the
 same no-follow open descriptor. Diagnostic event content is untrusted model
 output and cannot become a user instruction or tool authority. Event cursors
-are bounded MACed values bound to Project/run/contract/event-set/trash
+are bounded MACed values bound to Project/run/contract/event-set/lifecycle
 generation/direction/limit/all normalized filters and remain valid across
-ordinary restart until expiry or key-epoch rotation. Their restart-stable
-installation key is atomically generated with owner-only permissions, excluded
-from public/storage/export/log/child surfaces, and missing/corrupt state fails
-closed rather than silently regenerating. Trash revokes live downloads,
-cursors, confirmations, completion-link dereference, and Playwright
-capabilities; restore never revives old authority.
+ordinary restart until expiry or key-epoch rotation. The current implementation
+creates its restart-stable installation key directly at the final path with
+`O_EXCL` and owner-only permissions. Atomic publication and concurrent
+first-start convergence remain review gaps and are not current claims. The key
+is absent from SQLite, DTOs, errors, logs, and child environments; ordinary
+backup/export exclusion also remains unverified and is not claimed. Missing or
+corrupt key state fails closed rather than silently regenerating once event
+sets exist. Project trash denies event reads and changes the lifecycle binding,
+so restore does not revive an old cursor. Direct run trash/restore and active
+download revocation remain pending.
 
 ---
 

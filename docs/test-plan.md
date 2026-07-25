@@ -160,8 +160,10 @@ At the A3-1 batch-only boundary, visual starts without
 `capability_not_available`. Published A3-2a2c admits eligible visual starts
 through the existing Project-run route. If `completionConversationId` is
 present, that field-specific gate still fails with HTTP `422`
-`visual_completion_not_supported`. Batch descriptions that declare
-`domainEvents` fail with `domain_events_not_supported`.
+`visual_completion_not_supported`. The A3-2d2 review candidate admits declared
+batch `domainEvents` only after strict NDJSON validation and atomic Store
+publication; malformed or over-limit files fail the run without partial event
+rows.
 
 Run the focused A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c checks with:
 
@@ -575,10 +577,10 @@ The remaining claims begin only in the later gates:
   installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
   the production build succeeds. Independent c2 security review reports no
   P0/P1 merge blocker. The preceding c2 result is not c3 or c4 evidence.
-- **A3-2d outputs/events/direct controls:** the d1 review-branch candidate adds
-  successful-run output list/download and rechecks same-run ownership, safe
-  name, path, size, digest, MIME, range, and limits. Later slices must prove
-  declared diagnostic NDJSON ingestion is atomic and enforces schema,
+- **A3-2d outputs/events/direct controls:** d1 output list/download was merged
+  through PR #43 and rechecks same-run ownership, safe name, path, size,
+  digest, MIME, range, and limits. The d2 review candidate proves declared
+  diagnostic NDJSON ingestion is atomic and enforces schema,
   structure, depth, string, count, and byte bounds; pagination uses tamper-
   evident opaque cursors bound to run and normalized filters. Direct cancel,
   download, trash, and restore remain usable with OpenCode unavailable and
@@ -591,20 +593,23 @@ The remaining claims begin only in the later gates:
   confirmation. Download tests use one no-follow open descriptor, verify the
   complete digest before any bytes, emit attachment/nosniff/no-store policy,
   support only one normalized range, and bound concurrency/rate.
-  Cursor tests cover Project/run/contract/event-set/trash-generation/direction/
+  Current d2 cursor tests cover Project/run/contract/event-set/lifecycle-generation/direction/
   limit/all-filter binding, bounded parse, constant-time MAC, expiry/key epoch,
-  restart stability, deterministic invalidation, atomic first-start key
-  generation, owner-only permissions, concurrent first starts, missing/corrupt
-  key fail-closed behavior, and exclusion from SQLite/DTOs/backups/exports/logs/
-  errors/child environments. Strict NDJSON tests cover UTF-8/LF, duplicate
+  restart stability, deterministic invalidation, owner-only key permissions,
+  and missing/corrupt key fail-closed behavior. The current implementation
+  creates the final key path with `O_EXCL`; atomic publication and concurrent
+  first-start convergence, along with backup/export exclusion, remain review
+  gaps and are not current claims. Event reads are bounded by the frozen
+  16 MB/10,000-event limits, but a dedicated read rate/concurrency gate remains
+  a P2 follow-up. Strict NDJSON tests cover UTF-8/LF, duplicate
   keys, depth/count/string limits, time/type/schema rules, and atomic event-set
   publication. Diagnostic-event prompt-injection cases prove URL-, instruction-,
   and tool-call-shaped content remains safely rendered, separately bounded
-  untrusted context and cannot authorize an action. Trash revokes active
-  downloads, cursors, confirmations, completion-link dereference, and
-  Playwright capabilities; restore revives only original immutable
-  outputs/events. Legacy Gate/wind endpoints are excluded from this evidence,
-  including the currently overlapping textual events path.
+  untrusted context and cannot authorize an action. Project trash invalidates
+  event reads/cursors and restore does not revive an old cursor; direct run
+  trash/restore and active-download revocation remain pending A3-2d controls.
+  The legacy `/events` route remains separate from generic
+  `/diagnostic-events` and is excluded from this evidence.
 
 Installer tests in A3-3 must pin and verify the execution-v2 scaffold and wind
 manifest IDs, versions, and concrete digests, including same-ID conflicts and

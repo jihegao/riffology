@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   configureProductDatabase,
   initializeProductSchema,
@@ -110,8 +111,8 @@ test("current schema migrates v9 through the v10 audit foundation without backfi
     installVersion(database, 9);
     initializeProductSchema(database);
 
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 11);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, PRODUCT_SCHEMA_VERSION);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, PRODUCT_SCHEMA_VERSION);
     assert.equal((database.prepare("SELECT count(*) AS count FROM visual_agent_audit_facts").get() as { count: number }).count, 0);
     for (const trigger of [
       "visual_agent_audit_binding_v10",
@@ -274,7 +275,7 @@ test("schema v11 migration failure rolls back version markers and its unique ind
     const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 10), {
       version: 11,
       sql: `${PRODUCT_SCHEMA_V11_SQL}\nSELECT * FROM missing_v11_guard;`,
-    }];
+    }, PRODUCT_SCHEMA_MIGRATIONS[11]!];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v11_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 10);
@@ -292,7 +293,7 @@ test("schema v10 migration failure rolls back version markers and the new table"
     const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 9), {
       version: 10,
       sql: `${PRODUCT_SCHEMA_V10_SQL}\nSELECT * FROM missing_v10_guard;`,
-    }, PRODUCT_SCHEMA_MIGRATIONS[10]!];
+    }, PRODUCT_SCHEMA_MIGRATIONS[10]!, PRODUCT_SCHEMA_MIGRATIONS[11]!];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v10_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 9);

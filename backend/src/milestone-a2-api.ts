@@ -2,10 +2,16 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
 import type { ConversationOwner } from "./agent-domain.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import {
+  DiagnosticEventCursorCodec,
+  DiagnosticEventCursorError,
+  normalizeDiagnosticEventCursorFilters,
+} from "./diagnostic-event-cursor.ts";
 
 export class MilestoneA2Api {
   readonly service: AgentWorkspaceService;
   readonly #authorizeProductRead?: (request: IncomingMessage) => void;
+  readonly #diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
   #activeOutputDownloads = 0;
   readonly #activeOutputDownloadsByRun = new Map<string, number>();
   readonly #outputDownloadStarts: number[] = [];
@@ -15,10 +21,12 @@ export class MilestoneA2Api {
     service: AgentWorkspaceService,
     options: Readonly<{
       authorizeProductRead?: (request: IncomingMessage) => void;
+      diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
     }> = {},
   ) {
     this.service = service;
     this.#authorizeProductRead = options.authorizeProductRead;
+    this.#diagnosticEventCursorCodec = options.diagnosticEventCursorCodec;
   }
 
   async handle(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<boolean> {
@@ -91,6 +99,16 @@ export class MilestoneA2Api {
       if (request.method === "GET" && parts.length === 6 && parts[5] === "outputs") {
         this.#authorizeOutputRead(request, url);
         privateJson(response, 200, this.service.listRunOutputs(projectId, parts[4]));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 6
+        && parts[5] === "diagnostic-events") {
+        this.#authorizeEventRead(request);
+        privateJson(
+          response,
+          200,
+          this.#listDiagnosticEvents(url, projectId, parts[4]),
+        );
         return true;
       }
       if ((request.method === "GET" || request.method === "HEAD")
@@ -244,6 +262,187 @@ export class MilestoneA2Api {
     }
   }
 
+  #authorizeEventRead(request: IncomingMessage): void {
+    const contentLength = exactEventRawHeader(request, "content-length");
+    if (exactEventRawHeader(request, "transfer-encoding") !== undefined
+      || contentLength !== undefined && contentLength !== "0") {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "Diagnostic event reads require an empty request body.",
+      );
+    }
+    if (exactEventRawHeader(request, "if-none-match") !== undefined
+      || exactEventRawHeader(request, "if-modified-since") !== undefined
+      || exactEventRawHeader(request, "if-range") !== undefined
+      || exactEventRawHeader(request, "range") !== undefined) {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "Conditional and range diagnostic event reads are not supported.",
+      );
+    }
+    if (!this.#authorizeProductRead) {
+      throw new ApiError(
+        403,
+        "event_access_denied",
+        "Diagnostic events are unavailable outside the browser app session.",
+      );
+    }
+    try {
+      this.#authorizeProductRead(request);
+    } catch {
+      throw new ApiError(
+        403,
+        "event_access_denied",
+        "Diagnostic events are unavailable outside the browser app session.",
+      );
+    }
+  }
+
+  #listDiagnosticEvents(
+    url: URL,
+    projectId: string,
+    runId: string,
+  ): Readonly<{
+    items: readonly unknown[];
+    nextCursor: string | null;
+    truncated: boolean;
+  }> {
+    const codec = this.#diagnosticEventCursorCodec;
+    if (!codec) {
+      throw new ApiError(
+        503,
+        "event_cursor_unavailable",
+        "Diagnostic event pagination is unavailable.",
+      );
+    }
+    const allowed = new Set([
+      "cursor",
+      "limit",
+      "occurredAfter",
+      "occurredBefore",
+      "sampleIndex",
+      "type",
+    ]);
+    for (const key of url.searchParams.keys()) {
+      if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+        throw new ApiError(
+          422,
+          "invalid_event_request",
+          "The diagnostic event query is invalid.",
+        );
+      }
+    }
+    const limitText = url.searchParams.get("limit");
+    const limit = limitText === null ? 50 : Number(limitText);
+    if (limitText !== null && (!/^(?:[1-9]|[1-9]\d|100)$/u.test(limitText)
+      || !Number.isSafeInteger(limit))) {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "The diagnostic event limit is invalid.",
+      );
+    }
+    const sampleText = url.searchParams.get("sampleIndex");
+    const sampleIndex = sampleText === null ? null : Number(sampleText);
+    if (sampleText !== null
+      && (!/^(?:0|[1-9]\d{0,5})$/u.test(sampleText)
+        || !Number.isSafeInteger(sampleIndex))) {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "The diagnostic event sample filter is invalid.",
+      );
+    }
+    const type = url.searchParams.get("type");
+    if (type !== null
+      && (!/^[A-Za-z][A-Za-z0-9._:-]{0,127}$/u.test(type)
+        || Buffer.byteLength(type, "utf8") > 128)) {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "The diagnostic event type filter is invalid.",
+      );
+    }
+    let filters;
+    try {
+      filters = normalizeDiagnosticEventCursorFilters({
+        types: type === null ? [] : [type],
+        sampleIndexes: sampleIndex === null ? [] : [sampleIndex],
+        occurredAtFrom: url.searchParams.get("occurredAfter"),
+        occurredAtTo: url.searchParams.get("occurredBefore"),
+      });
+    } catch {
+      throw new ApiError(
+        422,
+        "invalid_event_request",
+        "The diagnostic event filters are invalid.",
+      );
+    }
+    const binding = this.service.diagnosticEventCursorBinding(projectId, runId);
+    const context = Object.freeze({
+      projectId,
+      runId,
+      frozenContractDigest: binding.eventSet.executionDescriptionDigest,
+      eventSetDigest: binding.eventSet.eventSetDigest,
+      lifecycleDigest: binding.lifecycleDigest,
+      direction: "forward" as const,
+      filters,
+      limit,
+    });
+    const cursor = url.searchParams.get("cursor");
+    let afterSequence = -1;
+    if (cursor !== null) {
+      if (!cursor || cursor.length > 2_048) {
+        throw new ApiError(
+          422,
+          "invalid_event_cursor",
+          "The diagnostic event cursor is invalid.",
+        );
+      }
+      try {
+        afterSequence = codec.verify(cursor, context).nextSequence;
+      } catch (error) {
+        if (error instanceof DiagnosticEventCursorError) {
+          throw new ApiError(
+            422,
+            "invalid_event_cursor",
+            "The diagnostic event cursor is invalid.",
+          );
+        }
+        throw error;
+      }
+    }
+    const page = this.service.listRunDiagnosticEvents({
+      projectId,
+      runId,
+      afterSequence,
+      limit,
+      types: filters.types,
+      sampleIndexes: filters.sampleIndexes,
+      occurredAtFrom: filters.occurredAtFrom,
+      occurredAtTo: filters.occurredAtTo,
+    });
+    if (page.binding.eventSet.eventSetDigest !== binding.eventSet.eventSetDigest
+      || page.binding.lifecycleDigest !== binding.lifecycleDigest) {
+      throw new ApiError(
+        409,
+        "event_cursor_stale",
+        "The diagnostic event set changed while it was read.",
+      );
+    }
+    const last = page.items.at(-1);
+    const nextCursor = page.hasMore && last
+      ? codec.issue({ ...context, nextSequence: last.sequence })
+      : null;
+    return Object.freeze({
+      items: page.items,
+      nextCursor,
+      truncated: page.hasMore,
+    });
+  }
+
   #downloadOutput(
     request: IncomingMessage,
     response: ServerResponse,
@@ -364,6 +563,18 @@ const exactRawHeader = (
       "The output request contains a duplicate header.");
   }
   return values[0];
+};
+
+const exactEventRawHeader = (
+  request: IncomingMessage,
+  name: string,
+): string | undefined => {
+  try {
+    return exactRawHeader(request, name);
+  } catch {
+    throw new ApiError(422, "invalid_event_request",
+      "The diagnostic event request contains a duplicate header.");
+  }
 };
 
 const outputRange = (

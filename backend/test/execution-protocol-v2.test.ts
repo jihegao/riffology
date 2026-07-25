@@ -42,6 +42,15 @@ test("execution-description v2 is strict, canonical, and deeply frozen", () => {
     assert.throws(() => validateExecutionDescriptionV2(value), (error: unknown) =>
       error instanceof ExecutionProtocolV2Error && error.code === "execution_protocol_upgrade_required");
   }
+
+  const collidingDomainEvents = validDescription();
+  collidingDomainEvents.batch.domainEvents = {
+    relativePath: collidingDomainEvents.outputs[0].relativePath,
+    mediaType: "application/x-ndjson",
+    role: "diagnostic",
+  };
+  assert.throws(() => validateExecutionDescriptionV2(collidingDomainEvents), (error: unknown) =>
+    error instanceof ExecutionProtocolV2Error && error.code === "execution_protocol_upgrade_required");
 });
 
 test("run capability, batch envelope, CLI arguments, and output paths share one frozen contract", () => {

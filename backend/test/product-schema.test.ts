@@ -165,7 +165,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v11 and expose Agent and execution records", () => {
+test("schema migrations advance sequentially from v1 through v12 and expose Agent and execution records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
@@ -176,7 +176,8 @@ test("schema migrations advance sequentially from v1 through v11 and expose Agen
     const columns = database.prepare("PRAGMA table_info(object_files)").all() as Array<{ name: string }>;
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
     for (const table of ["agent_turns", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
-      "experiment_command_receipts", "run_completion_cards", "visual_health_receipts"]) {
+      "experiment_command_receipts", "run_completion_cards", "visual_health_receipts",
+      "diagnostic_event_sets", "diagnostic_event_files", "diagnostic_events"]) {
       assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
   } finally {
@@ -184,7 +185,7 @@ test("schema migrations advance sequentially from v1 through v11 and expose Agen
   }
 });
 
-test("ordered v2 through v11 migration locks legacy providers and preserves execution migration atomicity", () => {
+test("ordered v2 through v12 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);
@@ -353,6 +354,7 @@ test("schema version drift and failed migrations fail closed with transactional 
       PRODUCT_SCHEMA_MIGRATIONS[8],
       PRODUCT_SCHEMA_MIGRATIONS[9],
       PRODUCT_SCHEMA_MIGRATIONS[10],
+      PRODUCT_SCHEMA_MIGRATIONS[11],
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);

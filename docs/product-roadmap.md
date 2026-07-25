@@ -59,7 +59,8 @@
 > exact process/listener/peer binding, fresh script-disabled browser snapshots,
 > and no caller-controlled target or browser authority. A3-2c3 interaction was
 > merged through PR #41. A3-2c4 live-CDP/real-Chromium security closeout was
-> merged through PR #42. A3-2d1 output list/download is a review-branch
+> merged through PR #42. A3-2d1 output list/download was merged through PR #43.
+> A3-2d2 diagnostic event ingestion and opaque cursor reads are a review-branch
 > candidate.
 
 > The current process claim is deliberately narrow: macOS, local user,

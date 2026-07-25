@@ -226,6 +226,7 @@ test("a failed v4 migration rolls back columns, tables, legacy markers, and vers
       PRODUCT_SCHEMA_MIGRATIONS[8],
       PRODUCT_SCHEMA_MIGRATIONS[9],
       PRODUCT_SCHEMA_MIGRATIONS[10],
+      PRODUCT_SCHEMA_MIGRATIONS[11],
     ]), /missing_v4_table/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);

@@ -1,6 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { accessSync, constants, mkdirSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { Duplex } from "node:stream";
@@ -17,6 +27,7 @@ import { OpenCodeEventBridge } from "./opencode-events.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
+import { DiagnosticEventCursorCodec } from "./diagnostic-event-cursor.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
@@ -77,6 +88,77 @@ export const configuredBatchPythonExecutable = (explicit?: string): string => {
   return executable;
 };
 
+const loadOrCreateDiagnosticEventCursorSecret = (
+  productRoot: string,
+  allowCreate: boolean,
+): Buffer => {
+  const keyPath = join(productRoot, ".diagnostic-event-cursor.key");
+  const readExisting = (): Buffer => {
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(keyPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const info = fstatSync(descriptor);
+      const uid = process.getuid?.();
+      if (!info.isFile() || info.nlink !== 1 || info.size !== 32
+        || uid === undefined || info.uid !== uid || (info.mode & 0o077) !== 0) {
+        throw new Error("unsafe key");
+      }
+      const bytes = readFileSync(descriptor);
+      if (bytes.byteLength !== 32) throw new Error("invalid key length");
+      return bytes;
+    } catch (error) {
+      throw new Error(
+        "The diagnostic event cursor key is missing, corrupt, or insecure.",
+        { cause: error },
+      );
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
+  };
+  try {
+    return readExisting();
+  } catch (error) {
+    const code = error instanceof Error && error.cause
+      && typeof error.cause === "object" && "code" in error.cause
+      ? String(error.cause.code)
+      : "";
+    if (code !== "ENOENT" || !allowCreate) throw error;
+  }
+  const secret = randomBytes(32);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      keyPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    if (writeSync(descriptor, secret, 0, secret.byteLength, 0) !== secret.byteLength) {
+      throw new Error("short key write");
+    }
+    fsyncSync(descriptor);
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.nlink !== 1 || info.size !== secret.byteLength
+      || (info.mode & 0o077) !== 0) {
+      throw new Error("unsafe key publication");
+    }
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error
+      ? String(error.code)
+      : "";
+    if (code === "EEXIST") return readExisting();
+    throw new Error("The diagnostic event cursor key could not be created.", { cause: error });
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  const rootDescriptor = openSync(productRoot, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    fsyncSync(rootDescriptor);
+  } finally {
+    closeSync(rootDescriptor);
+  }
+  return Buffer.from(secret);
+};
+
 export type BackendOptions = {
   mesa: MesaAdapter;
   openCode: OpenCodeAdapter;
@@ -104,6 +186,7 @@ export type BackendOptions = {
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
+  a3DiagnosticEventCursorSecret?: Uint8Array;
   legacyCloseDrainTimeoutMs?: number;
   browserFrameTargetResolver?: BrowserFrameTargetResolver;
 };
@@ -311,6 +394,20 @@ export class BackendApp {
     if (options.productStore || options.a2ProductRoot) {
       const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
+      let diagnosticEventCursorCodec: DiagnosticEventCursorCodec;
+      try {
+        diagnosticEventCursorCodec = new DiagnosticEventCursorCodec({
+          secret: options.a3DiagnosticEventCursorSecret
+            ?? loadOrCreateDiagnosticEventCursorSecret(
+              this.productStore.root,
+              !this.productStore.hasDiagnosticEventSets(),
+            ),
+          keyEpoch: 1,
+        });
+      } catch (error) {
+        this.productStore.close();
+        throw error;
+      }
       const scratchRoot = options.a3ScratchRoot ?? join(options.workspaceRoot, ".riff-batch-scratch");
       mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
       let approvedPythonExecutable: string | undefined;
@@ -371,6 +468,7 @@ export class BackendApp {
             }
             frames.authorizeAppRead(browserAdmission(request, address));
           },
+          diagnosticEventCursorCodec,
         },
       );
     }
