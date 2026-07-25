@@ -1004,6 +1004,12 @@ target.write_text(
   assert.notEqual(app.productStore!.listRunAttempts(publicStart.runId)[0]!.heartbeatAt, null);
   assert.equal("samplePlan" in publicRun, false);
   assert.equal("limits" in publicRun, false);
+  assert.equal(publicRun.seedCount, 0);
+  assert.equal(publicRun.stepOrHorizon, null);
+  assert.equal(typeof publicRun.durationMs, "number");
+  assert.deepEqual(Object.keys(publicRun.resourceOverview).sort(), [
+    "maxConcurrencyObserved", "outputBytes", "outputFiles", "stderrBytes", "stdoutBytes",
+  ]);
   const requestedCancellationRunIds: string[] = [];
   const originalRequestCancellation = app.productRunDispatcher!.requestCancellation.bind(app.productRunDispatcher);
   app.productRunDispatcher!.requestCancellation = (runId: string): void => {
@@ -1044,9 +1050,9 @@ target.write_text(
   const projectedRunWithOutput = outputWorkspace.runs.find((run: any) => run.id === publicStart.runId);
   assert.deepEqual(Object.keys(projectedRunWithOutput).sort(), [
     "cancelRequestedAt", "completionCardDisposition", "contractVersion", "createdAt",
-    "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "lifecycleDigest",
-    "outputs", "projectId", "readOnly", "requestedSampleCount", "runKind",
-    "startedAt", "status", "terminalClosureDigest", "terminalCode",
+    "durationMs", "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "lifecycleDigest",
+    "outputs", "projectId", "readOnly", "requestedSampleCount", "resourceOverview",
+    "runKind", "seedCount", "startedAt", "status", "stepOrHorizon", "terminalClosureDigest", "terminalCode",
     "terminalStatus", "updatedAt",
   ]);
   assert.deepEqual(Object.keys(projectedRunWithOutput.outputs[0]).sort(), [
@@ -1057,8 +1063,8 @@ target.write_text(
 
   const publicText = JSON.stringify({ project, workspace: workspaceWithExperiment, experiment: updatedExperiment });
   assert.doesNotMatch(publicText, /\/tmp\/|\/Users\/|workspacePath|externalSessionRef|opaque-session|capability|proxy|processCommand/u);
-  assert.doesNotMatch(publicText, /"(?:executionDescription|entryPoint|dependencyFile|relativePath|objectFileId|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
-  assert.doesNotMatch(JSON.stringify(outputWorkspace), /"(?:executionDescription|entryPoint|dependencyFile|relativePath|objectFileId|file|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
+  assert.doesNotMatch(publicText, /"(?:executionDescription|healthPath|objectFileId|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
+  assert.doesNotMatch(JSON.stringify(outputWorkspace), /"(?:executionDescription|healthPath|objectFileId|file|limits|samplePlan|startReceiptDigest|outputContractDigest)"\s*:/u);
 });
 
 test("technical-check executes the execution description captured by start, not an earlier Model read", async (t) => {

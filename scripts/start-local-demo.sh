@@ -17,6 +17,7 @@ export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$ROOT_DIR/.riff-workspaces}"
 export MESA_SERVICE_URL="${MESA_SERVICE_URL:-http://127.0.0.1:8091}"
 export RIFF_SKIP_OPENCODE="${RIFF_SKIP_OPENCODE:-true}"
 export PORT="${PORT:-8787}"
+export RIFF_VISUAL_BROKER_PORT="${RIFF_VISUAL_BROKER_PORT:-8788}"
 export RIFF_MODEL_PYTHON="${RIFF_MODEL_PYTHON:-$ROOT_DIR/mesa_service/.venv/bin/python}"
 WEB_PORT="${WEB_PORT:-5173}"
 
@@ -48,7 +49,8 @@ PIDS+=("$!")
 
 (
   cd "$ROOT_DIR/web"
-  npm run dev -- --host 127.0.0.1 --port "$WEB_PORT"
+  RIFF_PLATFORM_APP_PORT="$PORT" RIFF_VISUAL_BROKER_PORT="$RIFF_VISUAL_BROKER_PORT" \
+    npm run dev -- --host 127.0.0.1 --port "$WEB_PORT"
 ) &
 PIDS+=("$!")
 

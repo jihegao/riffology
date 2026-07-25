@@ -10,7 +10,7 @@ const root = join(fileURLToPath(new URL("..", import.meta.url)), ".riff-workspac
 mkdirSync(root, { recursive: true, mode: 0o700 });
 const mesa = process.env.MESA_SERVICE_URL ? new HttpMesaAdapter(process.env.MESA_SERVICE_URL) : new UnavailableMesaAdapter();
 const port = Number(process.env.PORT ?? 8787);
-const brokerPort = Number(process.env.RIFF_VISUAL_BROKER_PORT ?? 0);
+const brokerPort = Number(process.env.RIFF_VISUAL_BROKER_PORT ?? 8788);
 const openCode = opencodeFromEnvironment();
 const app = new BackendApp({
   mesa,

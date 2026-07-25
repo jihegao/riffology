@@ -1,0 +1,674 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import type { ProductClient } from "./api";
+import { RendererRegistry, type RendererResource } from "./RendererRegistry";
+import type {
+  DiagnosticEventPage,
+  ExperimentConfiguration,
+  ModelWorkspaceDto,
+  ProjectRun,
+  ProjectWorkspaceDto,
+  WorkspaceDto,
+} from "./types";
+
+export function WorkspacePane({
+  client,
+  workspace,
+  selectedConversationId,
+  refresh,
+}: Readonly<{
+  client: ProductClient;
+  workspace: WorkspaceDto;
+  selectedConversationId?: string;
+  refresh: () => Promise<void>;
+}>) {
+  return "digest" in workspace
+    ? <ModelWorkspace client={client} workspace={workspace} refresh={refresh} />
+    : (
+      <ProjectWorkspace
+        client={client}
+        workspace={workspace}
+        selectedConversationId={selectedConversationId}
+        refresh={refresh}
+      />
+    );
+}
+
+function ModelWorkspace({
+  client,
+  workspace,
+  refresh,
+}: Readonly<{
+  client: ProductClient;
+  workspace: ModelWorkspaceDto;
+  refresh: () => Promise<void>;
+}>) {
+  const [pending, setPending] = useState(false);
+  const [result, setResult] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [rendered, setRendered] = useState<RendererResource>();
+  const [renderedFileId, setRenderedFileId] = useState<string>();
+  const check = async () => {
+    setPending(true);
+    setError(undefined);
+    try {
+      const evidence = await client.startTechnicalCheck(workspace.owner.id, crypto.randomUUID());
+      setResult(`${evidence.aggregate} · ${evidence.checks.length} checks · ${evidence.claim}`);
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause, "The technical check could not be completed."));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <div className="product-dynamic-workspace" data-testid="model-workspace">
+      <section className="product-workspace-card" data-testid="workspace-owner-card">
+        <div className="product-section-heading">
+          <div>
+            <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
+              {workspace.owner.technicalStatus}
+            </span>
+            <h3>{workspace.owner.name}</h3>
+          </div>
+          <button type="button" className="product-primary" disabled={pending} onClick={() => void check()}>
+            {pending ? "Checking…" : "Run technical check"}
+          </button>
+        </div>
+        <p>
+          “Technically executable” means only that the thin execution contract passed.
+          It is not evidence of correctness, calibration, trust, or fitness for a decision.
+        </p>
+        {result && <p role="status">{result}</p>}
+        {error && <p role="alert" className="product-form-error">{error}</p>}
+      </section>
+      <RendererRegistry resource={{
+        kind: "diagram",
+        title: "Execution structure",
+        summary: `A ${workspace.execution.runMode} Python Model with declared inputs, outputs, and cancellation.`,
+        nodes: [
+          { id: "inputs", label: "Declared inputs" },
+          { id: "entry", label: workspace.execution.batch?.entryPoint ?? workspace.execution.visual?.entryPoint ?? "Entry point" },
+          { id: "outputs", label: "Checked outputs" },
+        ],
+        edges: [
+          { from: "inputs", to: "entry", label: "frozen envelope" },
+          { from: "entry", to: "outputs", label: "declared files" },
+        ],
+      }} />
+      <section className="product-workspace-card">
+        <h3>Declared resources</h3>
+        <p>Renderer choice comes from the server-declared kind and validated media type.</p>
+        <div className="product-downloads">
+          {workspace.files.map((file) => (
+            <button
+              type="button"
+              className="product-secondary"
+              key={file.id}
+              onClick={() => void client.modelRenderable(workspace.owner.id, file.id)
+                .then((resource) => {
+                  setRendered(resource);
+                  setRenderedFileId(file.id);
+                })
+                .catch((cause) => setError(messageOf(cause, "The declared resource could not be rendered.")))}
+            >
+              Render {file.relativePath ?? file.id}
+            </button>
+          ))}
+        </div>
+      </section>
+      {rendered && (
+        <>
+          <RendererRegistry resource={rendered} />
+          {rendered.kind === "attachment" && renderedFileId && (
+            <button type="button" className="product-secondary" onClick={() =>
+              void client.downloadModelFile(workspace.owner.id, renderedFileId)
+                .catch((cause) => setError(messageOf(cause, "The opaque resource could not be downloaded.")))}>
+              Download opaque resource
+            </button>
+          )}
+        </>
+      )}
+      <RendererRegistry resource={{
+        kind: "json",
+        title: "Input schema",
+        value: workspace.execution.inputs.schema,
+      }} />
+      <RendererRegistry resource={{
+        kind: "table",
+        title: "Declared outputs",
+        caption: `Output contract for ${workspace.owner.name}`,
+        columns: ["Logical name", "Role", "Media type", "Required"],
+        rows: workspace.execution.outputs.map((output) => [
+          output.logicalName,
+          output.role,
+          output.mediaType,
+          output.required ? "yes" : "no",
+        ]),
+      }} />
+      <RendererRegistry resource={{
+        kind: "table",
+        title: "Workspace files",
+        caption: `Safe file metadata for ${workspace.owner.name}`,
+        columns: ["File", "Kind", "Media type", "Bytes", "SHA-256"],
+        rows: workspace.files.map((file) => [
+          file.relativePath ?? file.id,
+          file.kind ?? "model file",
+          file.mediaType,
+          file.sizeBytes,
+          file.sha256,
+        ]),
+      }} />
+    </div>
+  );
+}
+
+function ProjectWorkspace({
+  client,
+  workspace,
+  selectedConversationId,
+  refresh,
+}: Readonly<{
+  client: ProductClient;
+  workspace: ProjectWorkspaceDto;
+  selectedConversationId?: string;
+  refresh: () => Promise<void>;
+}>) {
+  const [selectedExperimentId, setSelectedExperimentId] = useState(
+    workspace.experimentConfigurations[0]?.id ?? "",
+  );
+  const [selectedRunId, setSelectedRunId] = useState(workspace.runs.at(-1)?.id ?? "");
+  const [error, setError] = useState<string>();
+  const [pending, setPending] = useState(false);
+  const selectedExperiment = workspace.experimentConfigurations.find(
+    (item) => item.id === selectedExperimentId,
+  );
+  const selectedRun = workspace.runs.find((item) => item.id === selectedRunId);
+
+  useEffect(() => {
+    if (!selectedExperimentId && workspace.experimentConfigurations[0]) {
+      setSelectedExperimentId(workspace.experimentConfigurations[0].id);
+    }
+    if (!selectedRunId && workspace.runs.at(-1)) {
+      setSelectedRunId(workspace.runs.at(-1)!.id);
+    }
+  }, [selectedExperimentId, selectedRunId, workspace]);
+
+  useEffect(() => {
+    if (!selectedRun || !["queued", "running", "cancelling"].includes(selectedRun.status)) return;
+    const timer = window.setInterval(() => void refresh(), 500);
+    return () => window.clearInterval(timer);
+  }, [refresh, selectedRun]);
+
+  const act = async (action: () => Promise<unknown>) => {
+    setPending(true);
+    setError(undefined);
+    try {
+      await action();
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause, "The Project operation failed."));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="product-dynamic-workspace" data-testid="project-workspace">
+      <section className="product-workspace-card" data-testid="workspace-owner-card">
+        <span className="product-badge">fixed copy</span>
+        <h3>{workspace.owner.name}</h3>
+        <p>
+          This Project owns an immutable Model copy. It offers no active Model switch
+          or Model-version browser.
+        </p>
+        <dl className="product-facts">
+          <div><dt>Snapshot</dt><dd><code>{workspace.modelSnapshotDigest}</code></dd></div>
+          <div><dt>Execution</dt><dd>{workspace.execution.runMode}</dd></div>
+          <div><dt>Files</dt><dd>{workspace.files.length}</dd></div>
+        </dl>
+      </section>
+      {error && <p role="alert" className="product-form-error">{error}</p>}
+      <ExperimentEditor
+        client={client}
+        workspace={workspace}
+        selected={selectedExperiment}
+        selectedId={selectedExperimentId}
+        setSelectedId={setSelectedExperimentId}
+        pending={pending}
+        act={act}
+      />
+      <RunWorkspace
+        client={client}
+        workspace={workspace}
+        experiment={selectedExperiment}
+        selectedConversationId={selectedConversationId}
+        selectedRun={selectedRun}
+        selectedRunId={selectedRunId}
+        setSelectedRunId={setSelectedRunId}
+        pending={pending}
+        act={act}
+      />
+    </div>
+  );
+}
+
+function ExperimentEditor({
+  client,
+  workspace,
+  selected,
+  selectedId,
+  setSelectedId,
+  pending,
+  act,
+}: Readonly<{
+  client: ProductClient;
+  workspace: ProjectWorkspaceDto;
+  selected?: ExperimentConfiguration;
+  selectedId: string;
+  setSelectedId: (id: string) => void;
+  pending: boolean;
+  act: (action: () => Promise<unknown>) => Promise<void>;
+}>) {
+  const [name, setName] = useState("Experiment");
+  const [configuration, setConfiguration] = useState(() =>
+    JSON.stringify(defaultConfiguration(workspace), null, 2));
+  useEffect(() => {
+    if (!selected) return;
+    setName(selected.name);
+    setConfiguration(JSON.stringify(selected.configuration, null, 2));
+  }, [selected]);
+  const parsed = useMemo(() => parseObject(configuration), [configuration]);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const nextConfiguration = parsed.value;
+    if (!nextConfiguration) return;
+    void act(async () => {
+      const updated = selected?.contractVersion === 4
+        ? await client.updateExperiment({
+            projectId: workspace.owner.id,
+            configId: selected.id,
+            commandId: crypto.randomUUID(),
+            expectedConfigurationDigest: selected.configurationDigest!,
+            expectedRecordDigest: selected.recordDigest!,
+            name: name.trim(),
+            configuration: nextConfiguration,
+          })
+        : await client.createExperiment({
+            projectId: workspace.owner.id,
+            commandId: crypto.randomUUID(),
+            name: name.trim(),
+            configuration: nextConfiguration,
+          });
+      setSelectedId(updated.id);
+    });
+  };
+  return (
+    <section className="product-workspace-card" aria-labelledby="experiments-heading">
+      <div className="product-section-heading">
+        <div><p className="product-eyebrow">CONFIGURATION</p><h3 id="experiments-heading">Experiments</h3></div>
+        <select aria-label="Experiment configuration" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
+          <option value="">New configuration</option>
+          {workspace.experimentConfigurations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </div>
+      <form onSubmit={submit} className="product-experiment-form">
+        <label>Name<input required maxLength={200} value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>
+          Configuration JSON
+          <textarea rows={14} spellCheck={false} value={configuration} onChange={(event) => setConfiguration(event.target.value)} />
+        </label>
+        {parsed.error && <p role="alert" className="product-form-error">{parsed.error}</p>}
+        <button type="submit" className="product-primary" disabled={pending || !name.trim() || !parsed.value}>
+          {selected ? "Save configuration" : "Create configuration"}
+        </button>
+      </form>
+      {selected?.samplePreview && (
+        <>
+          <p role="status">
+            Deterministic preview: {selected.sampleCount} sample{selected.sampleCount === 1 ? "" : "s"}
+            {selected.samplePreviewTruncated ? " (first 100 shown)" : ""}.
+          </p>
+          <RendererRegistry resource={{
+            kind: "table",
+            title: "Sample preview",
+            caption: `Deterministic sample preview for ${selected.name}`,
+            columns: ["Index", "Seed", "Parameters"],
+            rows: selected.samplePreview.map((sample) => [
+              sample.sampleIndex,
+              sample.seed ?? "none",
+              sample.parameters,
+            ]),
+          }} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function RunWorkspace({
+  client,
+  workspace,
+  experiment,
+  selectedConversationId,
+  selectedRun,
+  selectedRunId,
+  setSelectedRunId,
+  pending,
+  act,
+}: Readonly<{
+  client: ProductClient;
+  workspace: ProjectWorkspaceDto;
+  experiment?: ExperimentConfiguration;
+  selectedConversationId?: string;
+  selectedRun?: ProjectRun;
+  selectedRunId: string;
+  setSelectedRunId: (id: string) => void;
+  pending: boolean;
+  act: (action: () => Promise<unknown>) => Promise<void>;
+}>) {
+  const [events, setEvents] = useState<DiagnosticEventPage>();
+  const [eventType, setEventType] = useState("");
+  const [eventSample, setEventSample] = useState("");
+  const [eventsPending, setEventsPending] = useState(false);
+  const [renderedOutput, setRenderedOutput] = useState<RendererResource>();
+  const [visualHostUrl, setVisualHostUrl] = useState<string>();
+  const [detailError, setDetailError] = useState<string>();
+  const requestEpoch = useRef(0);
+  const selectedRunIdRef = useRef(selectedRunId);
+  selectedRunIdRef.current = selectedRunId;
+  useEffect(() => () => { requestEpoch.current += 1; }, []);
+  const currentRequest = (epoch: number, runId: string): boolean =>
+    requestEpoch.current === epoch && selectedRunIdRef.current === runId;
+  const start = () => {
+    if (!experiment) return;
+    void act(async () => {
+      const result = await client.startRun({
+        projectId: workspace.owner.id,
+        commandId: crypto.randomUUID(),
+        experimentConfigId: experiment.id,
+        ...(experiment.configuration.runKind === "batch" && selectedConversationId
+          ? { completionConversationId: selectedConversationId }
+          : {}),
+      });
+      setSelectedRunId(result.runId);
+    });
+  };
+  const terminal = selectedRun?.terminalStatus !== null && selectedRun?.terminalStatus !== undefined;
+  return (
+    <section className="product-workspace-card" aria-labelledby="runs-heading">
+      <div className="product-section-heading">
+        <div><p className="product-eyebrow">PLATFORM EXECUTION</p><h3 id="runs-heading">Runs</h3></div>
+        <div>
+          <button type="button" className="product-primary" disabled={pending || !experiment || experiment.readOnly} onClick={start}>
+            Start {String(experiment?.configuration.runKind ?? "batch")} Run
+          </button>
+        </div>
+      </div>
+      <p>
+        Runs freeze the accepted configuration, sample plan, Project execution identity,
+        and platform limits. Results are not automatically analyzed or recommended.
+      </p>
+      {detailError && <p role="alert" className="product-form-error">{detailError}</p>}
+      <select aria-label="Run" value={selectedRunId} onChange={(event) => {
+        requestEpoch.current += 1;
+        setSelectedRunId(event.target.value);
+        setEvents(undefined);
+        setEventsPending(false);
+        setRenderedOutput(undefined);
+        setVisualHostUrl(undefined);
+        setDetailError(undefined);
+      }}>
+        <option value="">Select a Run</option>
+        {[...workspace.runs].reverse().map((run) => (
+          <option key={run.id} value={run.id}>{run.status} · {run.runKind} · {run.id.slice(0, 16)}</option>
+        ))}
+      </select>
+      {selectedRun && (
+        <div className="product-run-detail">
+          <dl className="product-facts">
+            <div><dt>Status</dt><dd>{selectedRun.status}</dd></div>
+            <div><dt>Samples</dt><dd>{selectedRun.requestedSampleCount}</dd></div>
+            <div><dt>Steps / horizon</dt><dd>{selectedRun.stepOrHorizon ?? "not declared"}</dd></div>
+            <div><dt>Seeds</dt><dd>{selectedRun.seedCount}</dd></div>
+            <div><dt>Metrics</dt><dd>{workspace.execution.overview?.metricNames?.length ?? 0}</dd></div>
+            <div><dt>Duration</dt><dd>{selectedRun.durationMs === null ? "pending" : `${selectedRun.durationMs} ms`}</dd></div>
+            <div><dt>Outputs</dt><dd>{selectedRun.outputs.length}</dd></div>
+          </dl>
+          {selectedRun.resourceOverview && (
+            <RendererRegistry resource={{
+              kind: "json",
+              title: "Resource overview",
+              value: selectedRun.resourceOverview,
+            }} />
+          )}
+          {["queued", "running", "cancelling"].includes(selectedRun.status) && (
+            <button type="button" className="product-danger" disabled={pending} onClick={() =>
+              void act(() => client.cancelRun(workspace.owner.id, selectedRun.id, crypto.randomUUID()))}>
+              Cancel Run
+            </button>
+          )}
+          {terminal && selectedRun.status !== "trashed" && (
+            <button type="button" className="product-danger" disabled={pending} onClick={() =>
+              void act(() => client.trashRun({ projectId: workspace.owner.id, run: selectedRun, commandId: crypto.randomUUID() }))}>
+              Trash Run
+            </button>
+          )}
+          {selectedRun.status === "trashed" && (
+            <button type="button" className="product-secondary" disabled={pending} onClick={() =>
+              void act(() => client.restoreRun({ projectId: workspace.owner.id, run: selectedRun, commandId: crypto.randomUUID() }))}>
+              Restore Run
+            </button>
+          )}
+          {selectedRun.status === "succeeded" && selectedRun.runKind === "batch" && (
+            <>
+              <RendererRegistry resource={{
+                kind: "table",
+                title: "Published outputs",
+                caption: `Digest-checked outputs for Run ${selectedRun.id}`,
+                columns: ["Output", "Sample", "Role", "Media type", "Bytes", "SHA-256", "Download"],
+                rows: selectedRun.outputs.map((output) => [
+                  output.logicalName,
+                  output.sampleIndex,
+                  output.declaredRole,
+                  output.mediaType,
+                  output.sizeBytes,
+                  output.sha256,
+                  "Use the download link below",
+                ]),
+              }} />
+              <div className="product-downloads">
+                {selectedRun.outputs.map((output) => (
+                  <div key={output.id}>
+                    <button type="button" className="product-link-button" onClick={() =>
+                      void client.downloadOutput(workspace.owner.id, selectedRun.id, output.id)
+                        .catch((cause) => setDetailError(messageOf(cause, "The output could not be downloaded.")))}>
+                      Download {output.logicalName} · sample {output.sampleIndex}
+                    </button>
+                    {" · "}
+                    <button type="button" className="product-link-button" onClick={() => {
+                      const epoch = requestEpoch.current;
+                      const runId = selectedRun.id;
+                      void client.outputRenderable(workspace.owner.id, runId, output.id)
+                        .then((resource) => {
+                          if (currentRequest(epoch, runId)) setRenderedOutput(resource);
+                        })
+                        .catch((cause) => {
+                          if (currentRequest(epoch, runId)) {
+                            setDetailError(messageOf(cause, "The output could not be rendered."));
+                          }
+                        });
+                    }}>
+                      Render safely
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {renderedOutput && <RendererRegistry resource={renderedOutput} />}
+              <div className="product-event-filters" aria-label="Diagnostic event filters">
+                <label>
+                  Event type
+                  <input value={eventType} onChange={(event) => setEventType(event.target.value)} />
+                </label>
+                <label>
+                  Sample index
+                  <input
+                    inputMode="numeric"
+                    value={eventSample}
+                    onChange={(event) => setEventSample(event.target.value)}
+                  />
+                </label>
+                <button type="button" className="product-secondary" disabled={eventsPending} onClick={() => {
+                  const sampleIndex = eventSample === "" ? undefined : Number(eventSample);
+                  if (sampleIndex !== undefined && (!Number.isSafeInteger(sampleIndex) || sampleIndex < 0)) {
+                    setDetailError("Sample index must be a non-negative integer.");
+                    return;
+                  }
+                  setDetailError(undefined);
+                  setEventsPending(true);
+                  const epoch = requestEpoch.current;
+                  const runId = selectedRun.id;
+                  void client.diagnosticEvents(workspace.owner.id, runId, {
+                    ...(eventType ? { type: eventType } : {}),
+                    ...(sampleIndex === undefined ? {} : { sampleIndex }),
+                  })
+                    .then((page) => {
+                      if (currentRequest(epoch, runId)) setEvents(page);
+                    })
+                    .catch((cause) => {
+                      if (currentRequest(epoch, runId)) {
+                        setDetailError(messageOf(cause, "Diagnostic events could not be loaded."));
+                      }
+                    })
+                    .finally(() => {
+                      if (currentRequest(epoch, runId)) setEventsPending(false);
+                    });
+                }}>
+                  {eventsPending ? "Loading diagnostic events…" : "Load diagnostic events"}
+                </button>
+              </div>
+              {events && <RendererRegistry resource={{
+                kind: "table",
+                title: "Diagnostic events",
+                caption: `Bounded diagnostic events for Run ${selectedRun.id}`,
+                columns: ["Sequence", "Sample", "Type", "Occurred at", "Payload"],
+                rows: events.items.map((event) => [
+                  event.sequence,
+                  event.sampleIndex,
+                  event.type,
+                  event.occurredAt ?? "model time only",
+                  event.payload,
+                ]),
+              }} />}
+              {events?.nextCursor && (
+                <button type="button" className="product-secondary" disabled={eventsPending} onClick={() => {
+                  setEventsPending(true);
+                  const epoch = requestEpoch.current;
+                  const runId = selectedRun.id;
+                  void client.diagnosticEvents(workspace.owner.id, runId, {
+                    cursor: events.nextCursor ?? undefined,
+                    ...(eventType ? { type: eventType } : {}),
+                    ...(eventSample === "" ? {} : { sampleIndex: Number(eventSample) }),
+                  }).then((page) => {
+                    if (currentRequest(epoch, runId)) {
+                      setEvents({
+                        ...page,
+                        items: [...events.items, ...page.items],
+                      });
+                    }
+                  }).catch((cause) => {
+                    if (currentRequest(epoch, runId)) {
+                      setDetailError(messageOf(cause, "More diagnostic events could not be loaded."));
+                    }
+                  }).finally(() => {
+                    if (currentRequest(epoch, runId)) setEventsPending(false);
+                  });
+                }}>
+                  Load more diagnostic events
+                </button>
+              )}
+              <p>To analyze outputs, ask in the selected Conversation. Riff never creates an analysis document automatically.</p>
+            </>
+          )}
+          {selectedRun.runKind === "visual" && ["running", "cancelling"].includes(selectedRun.status) && (
+            <>
+              <button type="button" className="product-secondary" onClick={() =>
+                {
+                  const epoch = requestEpoch.current;
+                  const runId = selectedRun.id;
+                  setDetailError(undefined);
+                  void (async () => {
+                    for (let attempt = 0; attempt < 20; attempt += 1) {
+                      try {
+                        const url = await client.visualHostUrl(workspace.owner.id, runId);
+                        if (currentRequest(epoch, runId)) setVisualHostUrl(url);
+                        return;
+                      } catch (cause) {
+                        if (!currentRequest(epoch, runId)) return;
+                        const code = cause && typeof cause === "object"
+                          ? (cause as { code?: unknown }).code
+                          : undefined;
+                        if (code !== "visual_frame_unavailable" || attempt === 19) {
+                          setDetailError(messageOf(cause, "The restricted visual frame is unavailable."));
+                          return;
+                        }
+                        await new Promise((resolve) => window.setTimeout(resolve, 100));
+                      }
+                    }
+                  })();
+                }}>
+                Open restricted visual frame
+              </button>
+              {visualHostUrl && (
+                window.location.origin === new URL(visualHostUrl).origin
+                  ? (
+                    <a
+                      className="product-primary"
+                      href={visualHostUrl}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      Continue to restricted visual frame
+                    </a>
+                    )
+                  : (
+                    <div role="status" className="product-notice">
+                      <p>
+                        The development proxy cannot impersonate the trusted platform origin.
+                        Open this exact local platform URL as a direct browser navigation.
+                      </p>
+                      <code data-testid="visual-host-url">{visualHostUrl}</code>
+                    </div>
+                    )
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+const defaultConfiguration = (workspace: ProjectWorkspaceDto): Record<string, unknown> => ({
+  schemaVersion: 1,
+  runKind: workspace.execution.runMode === "visual" ? "visual" : "batch",
+  parameters: workspace.execution.inputs.smoke,
+  sampling: { kind: "single", seed: 1 },
+});
+
+const parseObject = (value: string): Readonly<{
+  value?: Record<string, unknown>;
+  error?: string;
+}> => {
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: "Configuration must be one JSON object." };
+    }
+    return { value: parsed as Record<string, unknown> };
+  } catch {
+    return { error: "Configuration JSON is invalid." };
+  }
+};
+
+const messageOf = (cause: unknown, fallback: string): string =>
+  cause instanceof Error && cause.message ? cause.message : fallback;

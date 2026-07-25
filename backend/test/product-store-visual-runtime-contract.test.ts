@@ -359,6 +359,26 @@ test("currentHealthyVisualFrameTarget returns only the exact healthy current vis
   }
 });
 
+test("currentHealthyVisualFrameTarget accepts a healthy process started after its run-attempt heartbeat", () => {
+  const fixture = createFixture("frame_process_newer");
+  const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+  try {
+    makeHealthy(fixture);
+    database.prepare(
+      "UPDATE process_attempts SET heartbeat_at = ? WHERE id = ?",
+    ).run(HEALTHY_AT, fixture.process.processAttemptId);
+    const target = fixture.store.currentHealthyVisualFrameTarget(
+      fixture.projectId,
+      fixture.runId,
+      { now: HEALTHY_AT },
+    );
+    assert.equal(target.processAttemptId, fixture.process.processAttemptId);
+  } finally {
+    database.close();
+    closeFixture(fixture);
+  }
+});
+
 test("currentHealthyVisualAgentTarget derives the sole healthy attempt without a caller run ID", () => {
   const fixture = createFixture("agent_target");
   try {
@@ -730,14 +750,14 @@ test("currentHealthyVisualFrameTarget fails closed for every non-current or inco
     }
   });
 
-  await context.test("process heartbeat is stale relative to its run attempt", () => {
+  await context.test("process heartbeat is stale beyond the current attempt lease window", () => {
     const fixture = createFixture("frame_stale_process_heartbeat");
     const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
     try {
       makeHealthy(fixture);
       database.prepare(
         "UPDATE process_attempts SET heartbeat_at = ? WHERE id = ?",
-      ).run(HEALTHY_AT, fixture.process.processAttemptId);
+      ).run("2026-07-25T11:58:59.999Z", fixture.process.processAttemptId);
       assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
         fixture.projectId,
         fixture.runId,

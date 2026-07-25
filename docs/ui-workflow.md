@@ -55,10 +55,10 @@ Project. It uses the closed A4-1 Home and provider DTOs, creates a Model from
 only name/provider/model, creates a Project from only name/executable Model,
 and disables creation honestly when the required server option is unavailable.
 The shell lists only durable Conversation summaries returned by the backend.
-The right pane currently renders a truthful owner summary and
-explicit A4-4 boundary. A4-4 will select only server-declared, bounded Markdown, code,
-table, JSON, chart/diagram, or restricted Model-page renderers. At narrow width
-and equivalent 200% layout, a labelled pane selector retains the same owner
+The right pane began as a truthful owner summary and now delegates to the
+A4-4 server-declared bounded Markdown, code, table, JSON, chart/diagram, or
+restricted Model-page renderer path. At narrow width
+and reflow-equivalent 200% layout, a labelled pane selector retains the same owner
 state. A dedicated real-Chromium A4-2 scenario covers desktop, narrow,
 keyboard pane switching, horizontal fit, real bootstrap/cookie/CSRF, and zero
 console errors. The continuous A4-6 matrix and every final trace row remain
@@ -92,10 +92,46 @@ attachments are download-only, external HTTPS links are visibly marked with
 `noopener noreferrer`, and the app uses the exact CSP and no-store policy in
 the A4 design. Stored-XSS, unsafe-URL, remote-load, CSP, cache-rotation, and
 back/forward-cache negatives are required A4-4/A4-6 browser evidence.
-Renderer limits are fixed by the A4 design for total bytes, Markdown AST,
-code lines, table cells, JSON nodes/depth, and chart/diagram complexity.
+Renderer limits are fixed for total bytes, Markdown line grammar, code lines,
+table cells, JSON nodes/depth, and chart/diagram complexity.
 Oversized content yields a stable bounded fallback or safe source download,
 never silent truncation or an unresponsive DOM.
+
+## A4-4 dynamic Model and Project workspace
+
+The right pane is now data driven:
+
+- a Model shows the thin technical status, declared execution structure,
+  resources, an on-demand technical check, safe render controls, and an
+  attachment-only fallback for active or unsupported media;
+- a Project shows its immutable Model copy, editable named Experiment
+  configuration, deterministic sample preview, frozen Runs, status and limits,
+  outputs, filterable/paged diagnostic events, downloads, cancel, trash, and
+  restore; and
+- analysis remains an explicit Conversation request. A completed Run does not
+  silently generate a report or recommendation.
+
+Changing Conversations keeps the owner workspace mounted. Changing Runs
+increments a request epoch; late output, event, pagination, or visual-host
+responses from the former Run are discarded. Scrollable tables are labelled,
+focusable regions, and controls are usable with keyboard activation.
+
+The Vite development page deliberately does not embed the broker. It obtains
+the exact `platformOrigin` from bootstrap and displays the fixed exact-app
+visual host URL. A direct top-level navigation to that trusted host performs
+its own bootstrap and frame-session issue, waits through only the bounded
+visual startup window, validates the exact broker, and embeds the restricted
+iframe. A4-5 owns serving the final shared Shell from the Product-first startup
+path; the development proxy is never upgraded into browser authority by UI
+convenience.
+
+The dedicated A4-4 Chromium scenario covers the ordinary wind Model and
+fixed-copy Project as generic content, a real bounded batch, checked output
+render/download, paged/filterable events, a separate non-wind generic visual
+process, exact-app restricted frame, cancellation, 1440×900, narrow layout,
+keyboard use, reflow-equivalent 200% layout at a 640 CSS-pixel viewport, and zero unexpected console
+errors. This is
+A4-4 slice evidence, not the A4-6 continuous real-provider/restart exit matrix.
 
 ---
 

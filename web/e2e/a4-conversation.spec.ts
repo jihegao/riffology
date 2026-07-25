@@ -31,7 +31,7 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
   await page.getByRole("button", { name: "Update provider" }).click();
   await expect(page.getByLabel("Change provider / model before the first message"))
     .toHaveValue("fixture/model-b");
-  await page.getByLabel("File").setInputFiles({
+  await page.getByLabel("File", { exact: true }).setInputFiles({
     name: "samples.json",
     mimeType: "application/json",
     buffer: Buffer.from('{"sample":"alpha"}'),

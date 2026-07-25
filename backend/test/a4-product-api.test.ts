@@ -166,6 +166,12 @@ const addFixtureData = (app: BackendApp): void => {
       relativePath: "requirements.txt",
       mediaType: "text/plain",
       bytes: Buffer.from("# none\n"),
+    }, {
+      id: "file_a4_api_active",
+      kind: "model_visual_asset",
+      relativePath: "preview.html",
+      mediaType: "text/html",
+      bytes: Buffer.from("<script>globalThis.unsafe = true</script>\n"),
     }],
   });
   app.productStore!.createProjectFromModel({
@@ -258,6 +264,87 @@ test("A4-1 browser API exposes closed collections and replays confirmed delete a
   ]) {
     assert.equal(serializedHome.includes(forbidden), false, forbidden);
   }
+
+  const modelWorkspaceResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/workspace`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(modelWorkspaceResponse.status, 200);
+  const modelWorkspace = await modelWorkspaceResponse.json() as any;
+  assert.equal(modelWorkspace.execution.runMode, "batch");
+  assert.equal(modelWorkspace.execution.outputs[0].logicalName, "result");
+  assert.equal(modelWorkspace.files.some((file: any) => file.relativePath === "code/model.py"), true);
+
+  const modelRenderableResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/renderables/file_a4_api_model`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(modelRenderableResponse.status, 200);
+  const modelRenderable = await modelRenderableResponse.json() as any;
+  assert.deepEqual(modelRenderable, {
+    kind: "code",
+    title: "code/model.py",
+    language: "python",
+    text: "print('ok')\n",
+  });
+  const activeRenderableResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/renderables/file_a4_api_active`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(activeRenderableResponse.status, 200);
+  const activeRenderable = await activeRenderableResponse.json() as any;
+  assert.equal(activeRenderable.kind, "attachment");
+  assert.equal(activeRenderable.mediaType, "text/html");
+  assert.equal(activeRenderable.reason, "active_content");
+  assert.match(activeRenderable.sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(JSON.stringify(activeRenderable).includes("<script>"), false);
+  const activeDownloadResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/files/file_a4_api_active/download`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(activeDownloadResponse.status, 200);
+  assert.equal(activeDownloadResponse.headers.get("cache-control"), "private, no-store");
+  assert.equal(activeDownloadResponse.headers.get("content-type"), "application/octet-stream");
+  assert.equal(activeDownloadResponse.headers.get("content-security-policy"), "sandbox");
+  assert.equal(activeDownloadResponse.headers.get("x-content-type-options"), "nosniff");
+  assert.match(activeDownloadResponse.headers.get("content-disposition") ?? "", /^attachment;/u);
+  assert.equal(
+    await activeDownloadResponse.text(),
+    "<script>globalThis.unsafe = true</script>\n",
+  );
+
+  const projectWorkspaceResponse = await fetch(
+    `${baseUrl}/api/projects/project_a4_api/workspace`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(projectWorkspaceResponse.status, 200);
+  const projectWorkspace = await projectWorkspaceResponse.json() as any;
+  assert.equal(projectWorkspace.execution.runMode, "batch");
+  assert.match(projectWorkspace.executionDescriptionDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(projectWorkspace.project.sourceModelId, "model_a4_api");
+
+  const experimentCreate = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/projects/project_a4_api/experiment-configs",
+    {
+      commandId: "command_a4_experiment_create",
+      name: "Two seeds",
+      configuration: {
+        schemaVersion: 1,
+        runKind: "batch",
+        parameters: {},
+        sampling: { kind: "multiple-seeds", seeds: [3, 7] },
+      },
+    },
+  );
+  assert.equal(experimentCreate.status, 201, await experimentCreate.clone().text());
+  const experiment = await experimentCreate.json() as any;
+  assert.equal(experiment.sampleCount, 2);
+  assert.equal(experiment.samplePreview.length, 2);
+  assert.deepEqual(experiment.samplePreview.map((sample: any) => sample.seed), [3, 7]);
+  assert.equal(experiment.samplePreviewTruncated, false);
 
   const activeModels = await fetch(`${baseUrl}/api/models?lifecycle=active`, {
     headers: readHeaders(session),

@@ -681,8 +681,9 @@ secrecy, lifecycle/deletion, schema-v14, exact-file-identity, and
 authority-issuance-fence evidence. A4-2 adds the responsive Home/router/
 shared-shell foundation and its focused browser evidence. A4-3 adds persistent
 Conversation, provider-lock, safe-card, lifecycle/deletion, and honest
-read-only evidence. A4-4 through A4-5 must add renderer, Agent, Run, recovery, and exact
-legacy-manifest evidence in their owning slices. A4-6
+read-only evidence. A4-4 adds renderer, Model/Project workspace, Run/output/
+event/download, exact-app visual-host, and stale-response evidence. A4-5 must
+add recovery, startup cutover, and exact legacy-manifest evidence. A4-6
 alone owns one continuous real-Chromium exit scenario covering Home/four
 entries, creation and opening of a functional generic New Model workspace,
 ordinary wind Model, real multi-turn provider use, a second persistent
@@ -698,7 +699,7 @@ authority. Preview and commit must block without implicit cancellation; after
 typed terminalization/revocation, a concurrent issuance or activity drift still
 fails before the first delete byte.
 
-A4-4 renderer negatives enforce the exact A4 byte/node/depth/row/line/mark
+A4-4 renderer negatives enforce the implemented byte/node/depth/row/line/mark
 limits and the non-weakening CSP. Oversized or deeply nested persisted content,
 unsafe URLs, active attachments, and content-derived CSP sources must not create
 unbounded parsing/DOM work, remote loads, or script execution.
@@ -766,7 +767,7 @@ against a temporary ProductStoreV2 plus the ordinary preinstalled wind
 Model/Project. It verifies the real bootstrap/cookie/CSRF path through Vite,
 Home and four entry types, provider-unavailable honesty, the same shell for a
 Model and Project, a missing Conversation error without right-pane remount,
-desktop dual landmarks, narrow keyboard pane switching, equivalent 200%
+desktop dual landmarks, narrow keyboard pane switching, reflow-equivalent 200%
 layout with no horizontal overflow, three reviewed screenshots, and zero
 unexpected console errors. The dedicated scenario passes 1/1. The
 Visual-Agent browser security matrix, updated to use the same real Product
@@ -817,9 +818,48 @@ check, and `git diff --check` pass. Final independent Product/architecture/
 security, Accessibility/interaction, and Test/documentation reviews each
 report P0=0/P1=0/P2=0 after fixes and re-review.
 
-A4-4 through A4-6, actual 200% browser zoom, the continuous exit matrix,
-Issue closure, and complete-MVP claims remain pending. All 69 final trace rows
-remain `pending`.
+A4-5/A4-6, A4-6 continuous actual-200%-zoom evidence, the continuous exit
+matrix, Issue closure, and complete-MVP claims remain pending. All 69 final
+trace rows remain `pending`.
+
+### A4-4 dynamic workspace and execution evidence
+
+The A4-4 focused backend matrix covers server-selected renderer DTOs, invalid
+UTF-8, duplicate JSON keys, duplicate CSV headers, duplicate chart categories,
+diagram identity, size/row/node/depth/mark limits, active-content attachment
+fallback/download headers, Model/Project owner scope, technical status, frozen
+Run projection, closed content-free diagnostic-event payload summaries, real
+batch execution,
+visual heartbeat ordering, bounded running-to-healthy resolution, and hostile
+broker-origin rejection.
+
+Component/client tests cover Model technical/resource rendering, Project
+Experiment/sample/Run/output/event/direct-control UI, Run-switch epoch guards,
+filter/pagination state, focusable table regions, attachment-only behavior,
+strict URL/origin validation, exact platform-host derivation, and Product CSP.
+The full A4-4 branch gate records backend 592 total / 591 passed / zero failed
+/ one optional installed-OpenCode smoke skipped; Web 127/127; network entry
+1/1; production build; dedicated A4-4 Chromium 1/1; retained A4-2 and A4-3
+Chromium 1/1 each; retained full Chromium 15/15; independent Visual-Agent
+Chromium 6/6; and the 27-document governance check plus `git diff --check`.
+
+`cd web && npm run test:e2e:a4-4` runs one isolated Chromium scenario against a
+temporary ProductStoreV2. It opens the ordinary wind Model and fixed-copy
+Project without a wind UI branch, edits and freezes a bounded Experiment,
+completes a real batch, reads checked outputs and filterable/paged events whose
+payload is a closed content-free summary, downloads one output, then starts a
+separate generic Python visual
+Model. The Vite page derives the exact platform-host URL; direct trusted
+navigation bootstraps and embeds the broker iframe, proves generic child
+content, and cancels the Run. The same scenario checks exact CSP, 1440×900,
+narrow horizontal fit at 640 CSS pixels, keyboard activation/focus,
+reflow-equivalent 200% layout, a retained screenshot, and zero unexpected console errors. It
+currently passes 1/1.
+
+This is not startup/restart acceptance: A4-5 still owns Product-first startup,
+recovery coordination, legacy preflight, and precise retirement. It is not the
+continuous A4-6 real-provider/browser exit matrix. All 69 final trace rows
+remain `pending`, Issue #15 remains OPEN, and no complete-MVP claim is made.
 
 ---
 

@@ -249,10 +249,15 @@ export const createProductBrowserFrameTargetResolver = (
       return false;
     }
   },
+  resolutionDeadlineMs = 2_000,
 ): BrowserFrameTargetResolver => {
   if (!Number.isSafeInteger(inspectionDeadlineMs)
     || inspectionDeadlineMs < 1 || inspectionDeadlineMs > 5_000) {
     throw new Error("Browser frame inspection deadline must be between 1 and 5000 milliseconds.");
+  }
+  if (!Number.isSafeInteger(resolutionDeadlineMs)
+    || resolutionDeadlineMs < 0 || resolutionDeadlineMs > 5_000) {
+    throw new Error("Browser frame resolution deadline must be between 0 and 5000 milliseconds.");
   }
   const current = (projectId: string, runId: string): HealthyVisualFrameTarget | null => {
     try {
@@ -306,7 +311,12 @@ export const createProductBrowserFrameTargetResolver = (
   };
   return Object.freeze({
     resolve: async (projectId: string, runId: string): Promise<BrowserFrameTarget | null> => {
-      const target = current(projectId, runId);
+      const deadline = Date.now() + resolutionDeadlineMs;
+      let target = current(projectId, runId);
+      while (!target && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        target = current(projectId, runId);
+      }
       if (!target) return null;
       return Object.freeze({
         projectId: target.projectId,
@@ -807,6 +817,8 @@ export class BackendApp {
           schemaVersion: 1,
           generation: result.generation,
           csrfToken: result.csrfToken,
+          platformOrigin: address.origin,
+          brokerOrigin: this.#browserBrokerOrigin,
           expiresAt: new Date(result.expiresAtMs).toISOString(),
         }, { ...cors, "set-cookie": result.setCookie });
         return true;

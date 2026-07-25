@@ -13,6 +13,7 @@ describe("Product browser client", () => {
           schemaVersion: 1,
           generation: 1,
           csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
           expiresAt: "2026-07-25T00:05:00.000Z",
         }), { status: 201 });
       }
@@ -70,6 +71,7 @@ describe("Product browser client", () => {
           schemaVersion: 1,
           generation: 1,
           csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
           expiresAt: "2026-07-25T00:05:00.000Z",
         }), { status: 201 })
         : new Response(JSON.stringify({
@@ -92,6 +94,7 @@ describe("Product browser client", () => {
           schemaVersion: 1,
           generation: 1,
           csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
           expiresAt: "2026-07-25T00:05:00.000Z",
         }), { status: 201 });
       }
@@ -131,5 +134,73 @@ describe("Product browser client", () => {
     expect(result.messages).toHaveLength(1);
     expect(result.messages.some((message) => message.role === "assistant")).toBe(false);
     expect(calls).toContain("/api/conversations/conversation-one/turns");
+  });
+
+  it("issues a visual frame through the current browser session without a JSON body", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      if (String(input).endsWith("/bootstrap")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 7,
+          csrfToken: "csrf-token",
+          platformOrigin: "http://localhost:8787",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 });
+      }
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        frameUrl: `http://localhost:8788/frame/redeem/${"a".repeat(43)}`,
+        expiresAt: "2026-07-25T00:01:00.000Z",
+      }), { status: 201 });
+    }));
+
+    const frame = await new HttpProductClient().issueVisualFrame("project-one", "run-one");
+
+    expect(frame.frameUrl).toContain("/frame/redeem/");
+    expect(calls[1]?.init).toEqual({
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "x-riff-csrf": "csrf-token" },
+      body: undefined,
+    });
+  });
+
+  it("derives the exact visual host page from the bootstrapped platform origin", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      schemaVersion: 1,
+      generation: 7,
+      csrfToken: "csrf-token",
+      platformOrigin: "http://localhost:8787",
+      brokerOrigin: "http://localhost:8788",
+      expiresAt: "2026-07-25T00:05:00.000Z",
+    }), { status: 201 })));
+
+    await expect(new HttpProductClient().visualHostUrl("project-one", "run-one"))
+      .resolves.toBe(
+        "http://localhost:8787/browser/projects/project-one/runs/run-one/visual",
+      );
+  });
+
+  it("rejects a visual frame URL outside the bootstrapped broker origin", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/bootstrap")
+        ? new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 7,
+          csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 })
+        : new Response(JSON.stringify({
+          schemaVersion: 1,
+          frameUrl: `https://example.invalid/frame/redeem/${"a".repeat(43)}`,
+          expiresAt: "2026-07-25T00:01:00.000Z",
+        }), { status: 201 })));
+
+    await expect(new HttpProductClient().issueVisualFrame("project-one", "run-one"))
+      .rejects.toMatchObject({ code: "visual_frame_unavailable" });
   });
 });

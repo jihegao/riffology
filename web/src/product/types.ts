@@ -218,16 +218,177 @@ export type PermanentDeleteReceipt = Readonly<{
   receiptDigest: string;
 }>;
 
-export type WorkspaceDto = Readonly<{
+export type ExecutionDescription = Readonly<{
+  schemaVersion: 2;
+  runtime: "python";
+  runMode: "batch" | "visual" | "both";
+  dependencyFile: string;
+  inputs: Readonly<{
+    schemaProfile: string;
+    schema: Record<string, unknown>;
+    smoke: Record<string, unknown>;
+  }>;
+  outputs: readonly Readonly<{
+    logicalName: string;
+    relativePath: string;
+    mediaType: string;
+    required: boolean;
+    role: "metric" | "table" | "document" | "data" | "diagnostic";
+  }>[];
+  overview?: Readonly<{
+    stepOrHorizonPointer?: string;
+    metricNames?: readonly string[];
+  }>;
+  batch?: Readonly<{
+    entryPoint: string;
+    protocol: "riff-batch-v1";
+    domainEvents?: Readonly<{
+      relativePath: string;
+      mediaType: "application/x-ndjson";
+      role: "diagnostic";
+    }>;
+  }>;
+  visual?: Readonly<{
+    entryPoint: string;
+    protocol: "riff-visual-v1";
+  }>;
+  cancellation: Readonly<{ signal: "SIGTERM"; graceMs: number }>;
+}>;
+
+export type WorkspaceFile = Readonly<{
+  id: string;
+  kind?: string;
+  relativePath?: string;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt?: string;
+}>;
+
+export type TechnicalCheck = Readonly<{
+  id: string;
+  modelId: string;
+  state: "running" | "passed" | "failed" | "cancelled";
+  publication: "pending" | "published" | "superseded";
+  capturedWorkspaceDigest: string;
+  executionDescriptionDigest: string;
+  aggregate: "pending" | "executable" | "failed" | "cancelled";
+  checks: readonly Readonly<{
+    name: string;
+    state: string;
+    code: string;
+    detail: string;
+  }>[];
+  startedAt: string;
+  finishedAt: string | null;
+  claim: "technical_execution_only";
+}>;
+
+export type ExperimentConfiguration = Readonly<{
+  id: string;
+  projectId: string;
+  name: string;
+  configuration: Record<string, unknown>;
+  estimatedSampleCount: number;
+  lifecycleState: LifecycleState;
+  createdAt: string;
+  updatedAt: string;
+  contractVersion: 3 | 4;
+  readOnly: boolean;
+  legacyDigest: string | null;
+  configurationDigest?: string;
+  sampleCount?: number;
+  recordDigest: string | null;
+  samplePreview?: readonly Record<string, unknown>[];
+  samplePreviewTruncated?: boolean;
+}>;
+
+export type RunOutput = Readonly<{
+  id: string;
+  runId: string;
+  logicalName: string;
+  outputType: string;
+  contractVersion?: 3 | 4;
+  readOnly?: boolean;
+  legacyDigest?: string | null;
+  sampleIndex: number | null;
+  sampleId: string | null;
+  declaredRole: string | null;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+}>;
+
+export type ProjectRun = Readonly<{
+  id: string;
+  projectId: string;
+  experimentConfigurationId: string;
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled" | "timed_out" | "trashed";
+  requestedSampleCount: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  contractVersion: 3 | 4;
+  readOnly: boolean;
+  legacyDigest: string | null;
+  runKind: "batch" | "visual" | null;
+  cancelRequestedAt: string | null;
+  terminalCode: string | null;
+  completionCardDisposition: string | null;
+  terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out" | null;
+  terminalClosureDigest: string | null;
+  lifecycleDigest: string | null;
+  seedCount: number;
+  stepOrHorizon: string | number | null;
+  durationMs: number | null;
+  resourceOverview: Readonly<Record<string, number | boolean>> | null;
+  outputs: readonly RunOutput[];
+}>;
+
+export type RunDiagnosticEvent = Readonly<{
+  sequence: number;
+  sampleIndex: number;
+  type: string;
+  occurredAt: string | null;
+  payload: Record<string, unknown> | readonly unknown[];
+}>;
+
+export type DiagnosticEventPage = Readonly<{
+  items: readonly RunDiagnosticEvent[];
+  nextCursor: string | null;
+  truncated: boolean;
+}>;
+
+type WorkspaceBase<K extends OwnerKind> = Readonly<{
   owner: Readonly<{
     id: string;
     name: string;
-    kind: "model" | "project";
+    kind: K;
     lifecycleState: LifecycleState;
     technicalStatus?: ModelSummary["technicalStatus"];
   }>;
   conversations: readonly ConversationSummary[];
 }>;
+
+export type ModelWorkspaceDto = WorkspaceBase<"model"> & Readonly<{
+  digest: string;
+  execution: ExecutionDescription;
+  files: readonly WorkspaceFile[];
+}>;
+
+export type ProjectWorkspaceDto = WorkspaceBase<"project"> & Readonly<{
+  sourceModelId: string;
+  modelSnapshotDigest: string;
+  execution: ExecutionDescription;
+  executionDescriptionDigest: string;
+  files: readonly WorkspaceFile[];
+  experimentConfigurations: readonly ExperimentConfiguration[];
+  runs: readonly ProjectRun[];
+}>;
+
+export type WorkspaceDto = ModelWorkspaceDto | ProjectWorkspaceDto;
 
 export type ModelCreationDto = Readonly<{
   model: Readonly<{
