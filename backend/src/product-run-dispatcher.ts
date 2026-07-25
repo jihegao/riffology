@@ -70,6 +70,7 @@ export class ProductRunDispatcher {
   readonly #consumeVisualOutput: (candidate: VisualOutputCandidate) => Buffer;
   readonly #revokeVisualAccessHook: (runId: string) => void;
   readonly #generation = canonicalDigest({ dispatcher: randomUUID(), startedAt: Date.now() });
+  #recoveryPrepared = false;
   #started = false;
   #stopping = false;
   #batchTail: Promise<void> = Promise.resolve();
@@ -94,6 +95,19 @@ export class ProductRunDispatcher {
     }
   }
 
+  async recoverBeforeStart(): Promise<void> {
+    if (this.#recoveryPrepared || this.#started) return;
+    for (const unit of this.#store.listPriorDispatcherRecoveryUnits()) {
+      if (unit.run.runKind === "visual") this.#revokeVisualAccess(unit.run.id);
+    }
+    await new ProductRunRecovery({
+      store: this.#store,
+      supervisor: this.#supervisor,
+      now: this.#now,
+    }).recoverBeforeGenerationActivation(this.#generation);
+    this.#recoveryPrepared = true;
+  }
+
   async start(): Promise<void> {
     if (this.#started) return;
     const owner = activeDispatcherByStore.get(this.#store);
@@ -105,14 +119,7 @@ export class ProductRunDispatcher {
     }
     activeDispatcherByStore.set(this.#store, this);
     try {
-      for (const unit of this.#store.listPriorDispatcherRecoveryUnits()) {
-        if (unit.run.runKind === "visual") this.#revokeVisualAccess(unit.run.id);
-      }
-      await new ProductRunRecovery({
-        store: this.#store,
-        supervisor: this.#supervisor,
-        now: this.#now,
-      }).recoverBeforeGenerationActivation(this.#generation);
+      await this.recoverBeforeStart();
       const now = this.#now().toISOString();
       this.#store.activateDispatcherGeneration({ generation: this.#generation, activatedAt: now });
       this.#started = true;

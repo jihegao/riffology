@@ -29,8 +29,9 @@ a fabricated assistant response. Session-loss/rebuild, restart, scoped mutation,
 and technical-check behavior remain backend integration evidence. A mock
 conversation, screenshot, or healthy port alone is insufficient.
 
-The legacy queue/wind UI still coexists and remains runnable history. Stage 2
-does not delete it or treat its fixed tabs as the generic workspace. A3-3
+The legacy queue/wind UI is retained only in historical records after A4-5;
+the Product entry does not expose or construct it. Stage 2 did not treat its
+fixed tabs as the generic workspace. A3-3
 installs wind as an ordinary Model, fixed-copy Project, and Experiment and
 exercises the generic backend run/output/event contracts; it adds no wind tab,
 route, or browser DTO. Final Stage 3 Integration is an isolated API/session
@@ -64,9 +65,11 @@ keyboard pane switching, horizontal fit, real bootstrap/cookie/CSRF, and zero
 console errors. The continuous A4-6 matrix and every final trace row remain
 pending.
 
-Deprecated `?mode=legacy` and `?mode=evidence` entries remain isolated for
-regression only. They are not linked from Product Home and are removed only by
-the identity- and manifest-proven A4-5 retirement.
+Deprecated `?mode=legacy` and `?mode=evidence` queries now resolve to Product
+Home (or the matching Product owner route) and cannot select another product
+mode. A4-5 removes the old browser apps and dedicated Gate/Evidence launchers
+under the exact identity/version/digest
+[`retirement manifest`](milestone-a4-5-retirement-manifest.md).
 
 ## A4-3 persistent Conversation pane
 
@@ -121,9 +124,12 @@ the exact `platformOrigin` from bootstrap and displays the fixed exact-app
 visual host URL. A direct top-level navigation to that trusted host performs
 its own bootstrap and frame-session issue, waits through only the bounded
 visual startup window, validates the exact broker, and embeds the restricted
-iframe. A4-5 owns serving the final shared Shell from the Product-first startup
-path; the development proxy is never upgraded into browser authority by UI
-convenience.
+iframe. A4-5 now serves the built shared Shell directly from the Product-first
+exact app origin; the development proxy is never upgraded into browser
+authority by UI convenience. Before Home or an owner loads, the client reads
+the admitted recovery status. A contradiction renders one global
+recovery-required page with observed time and retryability, hides all
+owner/resource surfaces, and permits only rechecking recovery.
 
 The dedicated A4-4 Chromium scenario covers the ordinary wind Model and
 fixed-copy Project as generic content, a real bounded batch, checked output

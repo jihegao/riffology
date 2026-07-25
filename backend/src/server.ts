@@ -4,26 +4,29 @@ import {
   accessSync,
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   writeSync,
 } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { ApiError, asApiError } from "./errors.ts";
 import { canonicalJsonV2, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
-import { DurableProjectStore } from "./durable-project-store.ts";
+import type { DurableProjectStore } from "./durable-project-store.ts";
 import type { ProjectCommand } from "./durable-project-types.ts";
-import { Gate2Runtime } from "./gate2-runtime.ts";
-import { Gate3Runtime, type Gate3ActivationCheckpoint } from "./gate3-runtime.ts";
-import { McpToolServer } from "./mcp.ts";
+import type { Gate2Runtime } from "./gate2-runtime.ts";
+import type { Gate3Runtime, Gate3ActivationCheckpoint } from "./gate3-runtime.ts";
+import type { McpToolServer } from "./mcp.ts";
 import type { MesaAdapter } from "./mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeConversationPort, OpenCodeReadiness } from "./opencode-adapter.ts";
-import { OpenCodeEventBridge } from "./opencode-events.ts";
+import type { OpenCodeEventBridge } from "./opencode-events.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
@@ -54,8 +57,8 @@ import {
 } from "./product-run-dispatcher.ts";
 import { SimulationSkillCatalog } from "./simulation-skill-catalog.ts";
 import type { WorkbenchProjector } from "./playwright-projection.ts";
-import { ProjectStore, type StoredAttachment } from "./project-store.ts";
-import { SimulationActions } from "./simulation-actions.ts";
+import type { ProjectStore, StoredAttachment } from "./project-store.ts";
+import type { SimulationActions } from "./simulation-actions.ts";
 import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
 import {
   BrowserNetworkTopology,
@@ -81,6 +84,10 @@ import {
   inspectVisualConnectedPeerAsync,
   inspectVisualListenerAsync,
 } from "./visual-listener-inspector.ts";
+import {
+  runLegacyStatePreflight,
+  type LegacyPreflightReport,
+} from "./legacy-state-preflight.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -95,6 +102,40 @@ export const configuredBatchPythonExecutable = (explicit?: string): string => {
     );
   }
   return executable;
+};
+
+const canonicalDirectory = (
+  input: string,
+  label: string,
+  containedBy?: string,
+): string => {
+  const path = resolve(input);
+  if (!existsSync(path)) throw new Error(`${label}_unavailable`);
+  const info = lstatSync(path);
+  const uid = process.getuid?.();
+  if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(path) !== path
+    || uid === undefined || info.uid !== uid || (info.mode & 0o022) !== 0) {
+    throw new Error(`${label}_unsafe`);
+  }
+  if (containedBy) {
+    const back = relative(containedBy, path);
+    if (back === "" || back === ".." || back.startsWith(`..${sep}`) || isAbsolute(back)) {
+      throw new Error(`${label}_outside_repository`);
+    }
+    let cursor = path;
+    while (cursor !== containedBy) {
+      const cursorInfo = lstatSync(cursor);
+      if (!cursorInfo.isDirectory() || cursorInfo.isSymbolicLink()
+        || realpathSync(cursor) !== cursor || cursorInfo.uid !== uid
+        || (cursorInfo.mode & 0o022) !== 0) {
+        throw new Error(`${label}_unsafe_chain`);
+      }
+      const parent = dirname(cursor);
+      if (parent === cursor) throw new Error(`${label}_unsafe_chain`);
+      cursor = parent;
+    }
+  }
+  return path;
 };
 
 const loadOrCreateDiagnosticEventCursorSecret = (
@@ -169,9 +210,9 @@ const loadOrCreateDiagnosticEventCursorSecret = (
 };
 
 export type BackendOptions = {
-  mesa: MesaAdapter;
-  openCode: OpenCodeAdapter;
-  workspaceRoot: string;
+  mesa?: MesaAdapter;
+  openCode?: OpenCodeAdapter;
+  workspaceRoot?: string;
   defaultSessionId?: string;
   projector?: WorkbenchProjector;
   promptTimeoutMs?: number;
@@ -201,6 +242,16 @@ export type BackendOptions = {
   a3PreinstalledWindInstaller?: PreinstalledWindInstallerPort;
   legacyCloseDrainTimeoutMs?: number;
   browserFrameTargetResolver?: BrowserFrameTargetResolver;
+  productOnly?: boolean;
+  recoveryOnlyOnFailure?: boolean;
+  recoveryStatus?: Readonly<{
+    state: "recovery_required";
+    code: string;
+    observedAt: string;
+    retryable: boolean;
+  }>;
+  repositoryRoot?: string;
+  staticWebRoot?: string;
 };
 
 export type BrowserFrameListenerInspector = (
@@ -381,19 +432,24 @@ const sameBrowserWebSocketPolicy = (
     && left.subprotocols.every((value, index) => value === right.subprotocols[index]));
 
 export class BackendApp {
-  readonly store: ProjectStore;
-  readonly actions: SimulationActions;
-  readonly mcp: McpToolServer;
-  readonly gate2: Gate2Runtime;
-  readonly gate3: Gate3Runtime;
+  store?: ProjectStore;
+  actions?: SimulationActions;
+  mcp?: McpToolServer;
+  gate2?: Gate2Runtime;
+  gate3?: Gate3Runtime;
   readonly productStore?: ProductStoreV2;
   readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
   readonly #agentTurnRuntime?: AgentTurnRuntime;
   readonly #authorityDeletionFence = new ProductAuthorityDeletionFence();
   readonly #preinstalledWindInstaller?: PreinstalledWindInstallerPort;
+  readonly #productMode: boolean;
+  readonly #repositoryRoot?: string;
+  readonly #staticWebRoot?: string;
+  #legacyPreflight?: LegacyPreflightReport;
+  #recoveryStatus?: BackendOptions["recoveryStatus"];
   private readonly options: BackendOptions;
-  readonly #openCodeEvents: OpenCodeEventBridge;
+  #openCodeEvents?: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
   #unsubscribeOpenCode?: () => void;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
@@ -408,15 +464,32 @@ export class BackendApp {
 
   constructor(options: BackendOptions) {
     this.options = options;
+    this.#productMode = Boolean(
+      options.productOnly || options.productStore || options.a2ProductRoot,
+    );
+    this.#repositoryRoot = options.repositoryRoot
+      ? canonicalDirectory(options.repositoryRoot, "repository_root")
+      : undefined;
+    this.#staticWebRoot = options.staticWebRoot
+      ? canonicalDirectory(
+        options.staticWebRoot,
+        "static_web_root",
+        this.#repositoryRoot,
+      )
+      : undefined;
+    this.#recoveryStatus = options.recoveryStatus;
     this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
-    this.store = options.store ?? new ProjectStore();
-    this.gate2 = new Gate2Runtime(options.workspaceRoot, options.mesa, options.durableStore);
-    this.gate3 = new Gate3Runtime(this.gate2, options.mesa, options.workspaceRoot, options.gate3FaultInjector);
-    this.actions = new SimulationActions(this.store, options.mesa, options.projector);
-    this.mcp = new McpToolServer(this.actions);
-    this.#openCodeEvents = new OpenCodeEventBridge(this.store);
+    if (!this.#productMode) {
+      if (!options.workspaceRoot || !options.mesa || !options.openCode) {
+        throw new Error("The retired legacy test runtime requires explicit dependencies.");
+      }
+    }
     if (options.productStore || options.a2ProductRoot) {
-      const a2OpenCode = options.a2OpenCode ?? asConversationOpenCode(options.openCode);
+      const a2OpenCode = options.a2OpenCode
+        ?? (options.openCode ? asConversationOpenCode(options.openCode) : undefined);
+      if (!a2OpenCode) {
+        throw new Error("Product startup requires an OpenCode conversation adapter.");
+      }
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
       let diagnosticEventCursorCodec: DiagnosticEventCursorCodec;
       try {
@@ -432,7 +505,8 @@ export class BackendApp {
         this.productStore.close();
         throw error;
       }
-      const scratchRoot = options.a3ScratchRoot ?? join(options.workspaceRoot, ".riff-batch-scratch");
+      const scratchRoot = options.a3ScratchRoot
+        ?? join(options.workspaceRoot ?? this.productStore.root, ".riff-batch-scratch");
       mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
       let approvedPythonExecutable: string | undefined;
       const pythonExecutable = (): string =>
@@ -577,15 +651,45 @@ export class BackendApp {
     }
   }
 
-  async initialize(): Promise<ProjectState> {
-    await this.gate3.recover();
-    this.gate2.start();
-    await this.#preinstalledWindInstaller?.install();
-    await this.productRunDispatcher?.start();
-    this.#readiness = await this.options.openCode.initialize();
-    if (this.#readiness.status === "ready" && this.options.openCode.subscribeEvents) {
+  async initialize(): Promise<ProjectState | undefined> {
+    if (this.#productMode) {
+      if (this.#recoveryStatus) return undefined;
       try {
-        this.#unsubscribeOpenCode = await this.options.openCode.subscribeEvents((event) => this.#openCodeEvents.handle(event));
+        await this.productRunDispatcher?.recoverBeforeStart();
+        await this.#preinstalledWindInstaller?.install();
+        if (this.#repositoryRoot) {
+          this.#legacyPreflight = runLegacyStatePreflight(this.#repositoryRoot);
+        }
+        await this.productRunDispatcher?.start();
+      } catch (error) {
+        if (!this.options.recoveryOnlyOnFailure) throw error;
+        const failureClass = error instanceof Error ? error.name : "UnknownError";
+        console.error(`Riff Product recovery entered recovery-only mode (${failureClass}).`);
+        this.#recoveryStatus = Object.freeze({
+          state: "recovery_required",
+          code: "product_recovery_failed",
+          observedAt: new Date().toISOString(),
+          retryable: false,
+        });
+      }
+      return undefined;
+    }
+    const { createLegacyBackendRuntime } = await import("./legacy-backend-runtime.ts");
+    const legacy = createLegacyBackendRuntime(this.options);
+    this.store = legacy.store;
+    this.gate2 = legacy.gate2;
+    this.gate3 = legacy.gate3;
+    this.actions = legacy.actions;
+    this.mcp = legacy.mcp;
+    this.#openCodeEvents = legacy.openCodeEvents;
+    await this.gate3!.recover();
+    this.gate2!.start();
+    this.#readiness = await this.options.openCode!.initialize();
+    if (this.#readiness.status === "ready" && this.options.openCode!.subscribeEvents) {
+      try {
+        this.#unsubscribeOpenCode = await this.options.openCode!.subscribeEvents(
+          (event) => this.#openCodeEvents!.handle(event),
+        );
       } catch {
         this.#readiness = { status: "error", modelId: null, lastError: { code: "opencode_event_unavailable", message: "OpenCode event streaming is unavailable." } };
       }
@@ -594,6 +698,9 @@ export class BackendApp {
   }
 
   createSession(sessionId = randomUUID()): ProjectState {
+    if (!this.store || !this.mcp) {
+      throw new ApiError(404, "legacy_runtime_retired", "The legacy runtime is retired.");
+    }
     const snapshot = this.store.create(sessionId, publicAgent(this.#readiness));
     if (!this.#mcpCapabilities.has(sessionId)) this.#mcpCapabilities.set(sessionId, this.mcp.grant(sessionId));
     return snapshot;
@@ -602,10 +709,10 @@ export class BackendApp {
   /** Ends a browser session's local control authority without exposing its capability. */
   closeSession(sessionId: string): void {
     const capability = this.#mcpCapabilities.get(sessionId);
-    if (capability) this.mcp.revoke(capability);
-    this.mcp.revokeSession(sessionId);
+    if (capability) this.mcp?.revoke(capability);
+    this.mcp?.revokeSession(sessionId);
     this.#mcpCapabilities.delete(sessionId);
-    this.#openCodeEvents.unbindBrowserSession(sessionId);
+    this.#openCodeEvents?.unbindBrowserSession(sessionId);
   }
 
   async listen(port = 0, host = "127.0.0.1"): Promise<{ port: number; host: string }> {
@@ -666,6 +773,7 @@ export class BackendApp {
           },
           appHandler: async (request, response, address) => {
             if (await this.#handleBrowserFramePlatform(request, response, address)) return;
+            if (this.#handleStaticProductShell(request, response, address)) return;
             await this.#handle(request, response);
           },
           brokerHandler: (request, response, address) =>
@@ -691,7 +799,7 @@ export class BackendApp {
     // asynchronous drain can yield or reject.
     this.#agentTurnRuntime?.revokeAll();
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
-    this.mcp.revokeAll();
+    this.mcp?.revokeAll();
     this.#unsubscribeOpenCode?.();
     this.#unsubscribeOpenCode = undefined;
 
@@ -731,7 +839,7 @@ export class BackendApp {
       }
       if (listenerError) throw listenerError;
     }));
-    await attempt(() => this.gate2.close());
+    await attempt(() => this.gate2?.close());
     await attempt(() => this.productRunDispatcher?.stop());
     await attempt(() => this.productStore?.close());
     if (firstError) throw firstError;
@@ -762,16 +870,109 @@ export class BackendApp {
     return createProductBrowserFrameTargetResolver(store);
   }
 
+  #handleStaticProductShell(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): boolean {
+    if (!this.#staticWebRoot
+      || (request.method !== "GET" && request.method !== "HEAD")) return false;
+    const url = new URL(request.url ?? "/", address.origin);
+    if (url.search.length > 1024 || url.pathname.startsWith("/api/")
+      || url.pathname.startsWith("/browser/")) return false;
+    let relativePath = "index.html";
+    if (url.pathname.startsWith("/assets/")) {
+      if (url.search !== "") return false;
+      const name = url.pathname.slice("/assets/".length);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(name)) return false;
+      relativePath = `assets/${name}`;
+    } else if (url.pathname !== "/"
+      && !/^\/(?:models|projects)\/[A-Za-z0-9_-]{1,128}$/u.test(url.pathname)) {
+      return false;
+    }
+    const path = join(this.#staticWebRoot, relativePath);
+    let descriptor: number | undefined;
+    try {
+      if (realpathSync(dirname(path)) !== dirname(path)) {
+        throw new Error("unsafe static asset parent");
+      }
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const stat = fstatSync(descriptor);
+      const uid = process.getuid?.();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 8 * 1024 * 1024
+        || uid === undefined || stat.uid !== uid) {
+        throw new Error("unsafe static asset");
+      }
+      const bytes = readFileSync(descriptor);
+      const after = fstatSync(descriptor);
+      if (stat.dev !== after.dev || stat.ino !== after.ino || after.size !== bytes.byteLength) {
+        throw new Error("static asset changed while reading");
+      }
+      const contentType = relativePath.endsWith(".html")
+        ? "text/html; charset=utf-8"
+        : relativePath.endsWith(".js")
+          ? "text/javascript; charset=utf-8"
+          : relativePath.endsWith(".css")
+            ? "text/css; charset=utf-8"
+            : "application/octet-stream";
+      const brokerOrigin = this.#browserBrokerOrigin;
+      const csp = relativePath === "index.html"
+        ? [
+          "default-src 'none'",
+          "script-src 'self'",
+          "style-src 'self'",
+          "img-src 'self' data:",
+          "font-src 'self'",
+          "connect-src 'self'",
+          `frame-src ${brokerOrigin ?? "'none'"}`,
+          "object-src 'none'",
+          "base-uri 'none'",
+          "form-action 'none'",
+          "frame-ancestors 'none'",
+        ].join("; ")
+        : "default-src 'none'; sandbox";
+      response.writeHead(200, {
+        "cache-control": relativePath === "index.html"
+          ? "no-store"
+          : "public, max-age=31536000, immutable",
+        "content-security-policy": csp,
+        "content-length": bytes.byteLength,
+        "content-type": contentType,
+        "cross-origin-resource-policy": "same-origin",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      });
+      if (request.method === "GET") response.end(bytes);
+      else response.end();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
+  }
+
   async #handleBrowserFramePlatform(
     request: IncomingMessage,
     response: ServerResponse,
     address: BrowserNetworkAddress,
   ): Promise<boolean> {
     const url = new URL(request.url ?? "/", address.origin);
-    const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
-    const bootstrap = url.pathname === "/api/browser-session/bootstrap";
-    const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
-    if (!hostPage && !bootstrap && !match) return false;
+      const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
+      const bootstrap = url.pathname === "/api/browser-session/bootstrap";
+      const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
+      if (!hostPage && !bootstrap && !match) return false;
+      if (this.#recoveryStatus && !bootstrap) {
+        privateApiJson(response, 503, {
+          accepted: false,
+          error: {
+            code: "recovery_required",
+            message: "Riff requires recovery before this operation is available.",
+          },
+        });
+        return true;
+      }
     try {
       if (hostPage) {
         if (url.search !== "") throw new BrowserFrameCapabilityError(404, "browser_session_denied");
@@ -845,6 +1046,16 @@ export class BackendApp {
     response: ServerResponse,
     address: BrowserNetworkAddress,
   ): Promise<void> {
+    if (this.#recoveryStatus) {
+      privateApiJson(response, 503, {
+        accepted: false,
+        error: {
+          code: "recovery_required",
+          message: "Riff requires recovery before visual access is available.",
+        },
+      });
+      return;
+    }
     const url = new URL(request.url ?? "/", address.origin);
     const frames = this.#browserFrames;
     if (!frames) {
@@ -902,6 +1113,10 @@ export class BackendApp {
     head: Buffer,
     address: BrowserNetworkAddress,
   ): Promise<void> {
+    if (this.#recoveryStatus) {
+      rejectUpgrade(socket, 503, "recovery_required");
+      return;
+    }
     const frames = this.#browserFrames;
     const bridge = this.#browserWebSockets;
     if (!frames || !bridge) {
@@ -1002,8 +1217,37 @@ export class BackendApp {
     try {
       const url = requestUrl;
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (request.method === "GET"
+        && (url.pathname === "/health" || url.pathname === "/api/health")) {
+        return privateApiJson(response, 200, this.#recoveryStatus
+          ? { healthy: false, state: "recovery_required" }
+          : { healthy: true, state: "ready" });
+      }
+      if (request.method === "GET" && url.pathname === "/api/recovery-status") {
+        const frames = this.#browserFrames;
+        const address = this.#browserNetwork?.app;
+        if (!frames || !address) {
+          throw new ApiError(503, "recovery_required", "Riff recovery status is unavailable.");
+        }
+        frames.authorizeAppRead(browserAdmission(request, address));
+        return privateApiJson(response, 200, this.#recoveryStatus ?? {
+          state: "ready",
+          observedAt: new Date().toISOString(),
+        });
+      }
+      if (this.#recoveryStatus) {
+        if (url.pathname.startsWith("/api/") || url.pathname === "/a2/mcp") {
+          throw new ApiError(
+            503,
+            "recovery_required",
+            "Riff requires recovery before this operation is available.",
+          );
+        }
+      }
       if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
-      if (request.method === "GET" && url.pathname === "/health") return json(response, 200, { healthy: true, agent: publicAgent(this.#readiness) });
+      if (this.#productMode) {
+        throw new ApiError(404, "not_found", "The requested Product route was not found.");
+      }
       if (request.method === "POST" && url.pathname === "/mcp") return await this.#mcp(request, response, url);
       if (parts[0] === "api" && parts[1] === "projects") return await this.#gate2(request, response, url, parts);
       if (request.method === "POST" && parts[0] === "api" && parts[1] === "sessions" && parts.length === 2) return this.#createBrowserSession(request, response);
@@ -1031,11 +1275,12 @@ export class BackendApp {
         correlation_id: correlationId,
         ...(apiError.details ? { details: apiError.details } : {}),
       };
-      const gate3 = isGate3Route(request.method ?? "", requestUrl.pathname);
+      const gate3 = !this.#productMode
+        && isGate3Route(request.method ?? "", requestUrl.pathname);
       const runControl = request.method === "POST"
         && /^\/api\/projects\/[^/]+\/runs\/[^/]+\/(?:cancel|trash|restore)$/u
           .test(requestUrl.pathname);
-      const productApi = /^\/api\/(?:home|providers|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
+      const productApi = /^\/api\/(?:health|recovery-status|home|providers|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
         .test(requestUrl.pathname);
       const write = gate3
         ? canonicalJson

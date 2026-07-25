@@ -237,6 +237,16 @@ test("A4-1 browser API exposes closed collections and replays confirmed delete a
   let baseUrl = network.app.origin;
   let session = await bootstrap(baseUrl);
 
+  const retiredGate3 = await fetch(
+    `${baseUrl}/api/projects/project_a4_api/browser-projection/v1`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(retiredGate3.status, 404);
+  const retiredGate3Body = await retiredGate3.json() as any;
+  assert.equal(retiredGate3Body.error.code, "not_found");
+  assert.equal(retiredGate3Body.schema_id, undefined);
+  assert.doesNotMatch(JSON.stringify(retiredGate3Body), /evidence-studio/u);
+
   const unauthenticated = await fetch(`${baseUrl}/api/home`);
   assert.equal(unauthenticated.status, 403);
   assert.equal(unauthenticated.headers.get("cache-control"), "private, no-store");

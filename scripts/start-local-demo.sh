@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Starts the local Mesa service, demo backend, and Vite workbench together.
+# Builds the Product shell and starts the Product-first local platform.
 # Default mode is deterministic development mode; it is not live OpenCode proof.
+# This script never deletes or migrates legacy workspaces, outputs, or local files.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,13 +14,11 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$ROOT_DIR/.riff-workspaces}"
-export MESA_SERVICE_URL="${MESA_SERVICE_URL:-http://127.0.0.1:8091}"
+export RIFF_PRODUCT_ROOT="${RIFF_PRODUCT_ROOT:-$ROOT_DIR/.riff-product}"
 export RIFF_SKIP_OPENCODE="${RIFF_SKIP_OPENCODE:-true}"
 export PORT="${PORT:-8787}"
 export RIFF_VISUAL_BROKER_PORT="${RIFF_VISUAL_BROKER_PORT:-8788}"
 export RIFF_MODEL_PYTHON="${RIFF_MODEL_PYTHON:-$ROOT_DIR/mesa_service/.venv/bin/python}"
-WEB_PORT="${WEB_PORT:-5173}"
 
 if [[ ! -x "$RIFF_MODEL_PYTHON" ]]; then
   echo "Riff Demo requires an executable approved Model runtime at $RIFF_MODEL_PYTHON" >&2
@@ -27,37 +26,16 @@ if [[ ! -x "$RIFF_MODEL_PYTHON" ]]; then
   exit 1
 fi
 
-cleanup() {
-  for child_pid in "${PIDS[@]:-}"; do
-    kill "$child_pid" 2>/dev/null || true
-  done
-}
-PIDS=()
-trap cleanup EXIT INT TERM
-
-(
-  cd "$ROOT_DIR/mesa_service"
-  WORKSPACE_ROOT="$WORKSPACE_ROOT" uv run uvicorn mesa_service.app:app --host 127.0.0.1 --port 8091
-) &
-PIDS+=("$!")
-
-(
-  cd "$ROOT_DIR/backend"
-  MESA_SERVICE_URL="$MESA_SERVICE_URL" WORKSPACE_ROOT="$WORKSPACE_ROOT" RIFF_SKIP_OPENCODE="$RIFF_SKIP_OPENCODE" RIFF_MODEL_PYTHON="$RIFF_MODEL_PYTHON" PORT="$PORT" npm start
-) &
-PIDS+=("$!")
-
 (
   cd "$ROOT_DIR/web"
-  RIFF_PLATFORM_APP_PORT="$PORT" RIFF_VISUAL_BROKER_PORT="$RIFF_VISUAL_BROKER_PORT" \
-    npm run dev -- --host 127.0.0.1 --port "$WEB_PORT"
-) &
-PIDS+=("$!")
+  npm run build
+)
 
 if [[ "$RIFF_SKIP_OPENCODE" == "true" ]]; then
-  echo "Riff Demo: http://127.0.0.1:$WEB_PORT (deterministic development agent; not live OpenCode verification)"
+  echo "Riffology: http://localhost:$PORT (deterministic development agent; not live OpenCode verification)"
 else
-  echo "Riff Demo: http://127.0.0.1:$WEB_PORT (requires a configured local OpenCode server)"
+  echo "Riffology: http://localhost:$PORT (requires a configured local OpenCode server)"
 fi
 
-wait
+cd "$ROOT_DIR/backend"
+exec npm start

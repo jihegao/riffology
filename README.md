@@ -13,8 +13,9 @@ Conversation 上下文，右侧承载当前 Model 或 Project 工作区。
 > [`docs/product-requirements.md`](docs/product-requirements.md).
 > It restores this two-pane interaction as the shared shell for generic Models
 > and Projects and treats wind-turbine maintenance as the first ordinary case.
-> The legacy runtime described below predates that contract and still coexists
-> while the sequential Milestone A stages replace it.
+> The legacy runtime described below predates that contract. A4-5 removes its
+> browser product entry and keeps any remaining backend code only as an
+> explicit-dependency historical regression harness.
 
 ## Milestone A implementation status
 
@@ -136,7 +137,8 @@ selection and does not remount the right owner workspace. The UI bootstraps
 the real browser session, consumes only the closed A4-1 DTOs, reports provider
 unavailability honestly, and keeps the Model/Project workspace content
 explicitly bounded to A4-4. Deprecated `?mode=legacy` and `?mode=evidence`
-compatibility entries remain only until the manifest-proven A4-5 retirement.
+queries now resolve to the Product router; the manifest-proven A4-5 retirement
+removes the old browser implementations and their dedicated test launchers.
 
 A4-3 is merged as a narrow slice. The persistent left pane now owns
 named Conversation creation, selection, rename, archive, restore, trash, and
@@ -158,9 +160,9 @@ Runs, status, outputs, diagnostic events with content-free payload summaries,
 downloads, cancel,
 trash/restore, and the existing exact-app restricted visual host. The ordinary
 wind import remains data, while a separate generic visual fixture proves the
-Core path has no wind branch. Vite remains a development proxy and cannot
+Core path has no wind branch. Vite remains test/development infrastructure and cannot
 impersonate the exact platform origin; the exact platform host owns broker
-iframe redemption. A4-5 and A4-6 remain pending, all final trace rows remain
+iframe redemption. A4-6 remains pending, all final trace rows remain
 pending, and Issue #15 stays open. The A4-4 branch gate is backend 592
 total/591 passed/zero failed/one optional skip, Web 127/127, network 1/1,
 dedicated A4-4 Chromium 1/1, retained A4-2 and A4-3 Chromium 1/1 each,
@@ -168,11 +170,22 @@ retained Chromium 15/15, Visual-Agent Chromium 6/6, production build, and
 27-document governance. Independent A4-4 review results are recorded before
 this branch is published.
 
-The older Gate wind path and `queue-network-v1` code still coexist in the tree.
-They remain runnable history, not current Milestone A product authority, and
-Stage 3 does not authorize their deletion. The final Models/Projects home,
-shared two-pane shell, full multi-conversation story, and precise legacy
-retirement belong to #15.
+A4-5 switches the production composition root to ProductStoreV2 and serves the
+built Product shell directly from the exact app origin. Startup completes
+mutation and prior-Run recovery before Domain Pack installation, read-only
+legacy preflight, dispatcher-generation activation, or browser admission.
+Recovery contradictions expose only the static shell, browser bootstrap,
+health, and a closed path-free recovery-status DTO; Product resources, Agent,
+frame, broker, and WebSocket authority stay `503 recovery_required`. The exact
+retirement boundary is recorded in
+[`docs/milestone-a4-5-retirement-manifest.md`](docs/milestone-a4-5-retirement-manifest.md).
+No `.riff-workspace*`, output, `.DS_Store`, ignored/untracked file, ordinary
+wind asset, or generic batch/visual/broker capability is cleaned. A4-6 still
+owns continuous real-browser acceptance, the complete-MVP claim, and Issue #15
+closure. Its branch gate is backend 596 total/595 passed/one optional skip, Web
+27/27 plus production-entry 1/1 and build, retained Chromium
+1+1+1+1+1+6+6, 28-document governance, and three independent
+P0=0/P1=0/P2=0 re-reviews.
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
@@ -184,9 +197,11 @@ visual-health checks pass; it is not scientific validation or decision trust.
 
 ## Legacy implementation status
 
-`main` currently contains the completed historical Gate 0-3 wind implementation
-and the earlier `queue-network-v1` demo. Those records remain useful as wind-model
-evidence and implementation history, but they no longer define the target product.
+`main` retains completed historical Gate 0-3 backend implementation and the
+earlier `queue-network-v1` records as explicit-dependency regression history.
+They have no production browser entry and are not constructed by the Product
+composition root. Those records remain useful as wind-model evidence and
+implementation history, but they no longer define the target product.
 Where they conflict, the Riff MVP PRD above is authoritative.
 
 ## Delivery gates
@@ -229,23 +244,24 @@ Create `.env` from the example. Keep the key local and do not commit it:
 cp .env.example .env
 ```
 
-The commands below describe the legacy implementation that remains runnable
-while Milestone A is implemented; they are not the target product. For the
-default browser demonstration, no live provider is contacted. It starts
-with a deliberately limited deterministic development agent which can only load
-the legacy bundled `queue-network-v1` model from a matching chat request. Start all
-three local processes with:
+The launch script builds the Product Web bundle and then starts the Product-only
+backend app and isolated visual broker. It does not start the legacy queue/Gate
+server, a Vite proxy, or a separate Mesa HTTP service. By default no live
+provider is contacted; deterministic mode is development convenience, not live
+OpenCode evidence.
 
 ```sh
 bash scripts/start-local-demo.sh
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The standard demo path is:
-upload CSV/JSON/TXT → ask to load the queue model → save a parameter change →
-run → open Results. The backend socket exact-binds `[::1]:8787` and uses the
-browser authority `http://localhost:8787`; its empty visual broker
-uses a second server-owned `[::1]` port. Mesa remains an internal
-service at `127.0.0.1:8091` and must not be called by the browser.
+Open [http://localhost:8787](http://localhost:8787). The backend exact-binds
+`[::1]:8787`, serves the built Product shell and APIs from that authority, and
+uses a second server-owned `[::1]:8788` visual-broker port. The default Product
+root is `.riff-product`; set `RIFF_PRODUCT_ROOT` to an absolute
+application-owned ProductStoreV2 root when restoring another approved Product
+store. Startup performs no legacy-state cleanup. If safe recovery cannot be
+proved, the same URL shows the global recovery-required page and withholds
+resource and execution authority.
 
 ## Live OpenCode setup
 

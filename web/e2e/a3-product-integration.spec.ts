@@ -46,6 +46,8 @@ type Stack = Readonly<{
   brokerPort: number;
 }>;
 
+let activeCsrfToken = "";
+
 const request = async <T>(
   page: Page,
   path: string,
@@ -77,6 +79,7 @@ const bootstrap = async (page: Page): Promise<string> => {
   expect(response.status).toBe(201);
   expect(response.body.generation).toBeGreaterThan(0);
   expect(response.body.csrfToken).toMatch(/^[A-Za-z0-9_-]+$/u);
+  activeCsrfToken = response.body.csrfToken;
   return response.body.csrfToken;
 };
 
@@ -90,6 +93,7 @@ const jsonRequest = (
   method: "POST",
   headers: {
     "content-type": "application/json",
+    "x-riff-csrf": activeCsrfToken,
   },
   body: JSON.stringify(body),
 });
@@ -200,6 +204,8 @@ test("Stage 3 Product flow completes in Chromium and survives backend restart", 
       a3PythonExecutable: PYTHON,
       a3InstallPreinstalledWind: true,
       a3PreinstalledWindRepositoryRoot: REPOSITORY_ROOT,
+      repositoryRoot: REPOSITORY_ROOT,
+      staticWebRoot: join(REPOSITORY_ROOT, "web", "dist"),
     });
     await app.initialize();
     const network = await app.listenBrowserNetwork(appPort, brokerPort);
@@ -220,10 +226,11 @@ test("Stage 3 Product flow completes in Chromium and survives backend restart", 
   try {
     let stack = await start();
     current = stack.app;
-    await page.goto(`${stack.appUrl}/a2`);
+    await page.goto(stack.appUrl);
     await expect(page.getByRole("heading", {
-      name: "Milestone A2 technical acceptance surface",
+      name: "Build from a conversation.",
     })).toBeVisible();
+    await bootstrap(page);
 
     const projectResponse = await request<any>(
       page,
@@ -279,6 +286,7 @@ test("Stage 3 Product flow completes in Chromium and survives backend restart", 
         method: "PATCH",
         headers: {
           "content-type": "application/json",
+          "x-riff-csrf": activeCsrfToken,
         },
         body: JSON.stringify({
           commandId: "a3-browser-edit-experiment",

@@ -71,7 +71,7 @@ implementation authority.
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
 | **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
-| **4 — shared product shell** | A4-0 through A4-3 are merged. A4-4 implements the bounded dynamic Model/Project workspace, generic renderer registry, real batch/output/event/download flow, and exact-app visual-host handoff on its narrow branch. A4-5, A4-6, and every final trace row remain pending. No complete-MVP claim. |
+| **4 — shared product shell** | A4-0 through A4-4 are merged. A4-5 implements Product-first startup/recovery, direct static Product serving, global recovery-only admission, read-only legacy preflight, and manifest-proven old Web product retirement on its narrow branch. A4-6 and every final trace row remain pending. No complete-MVP claim. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -120,13 +120,15 @@ and collection DTOs, generic lifecycle routes, preview/confirm permanent
 deletion, and uniform Product browser admission. A4-2 consumes that boundary
 for the default Home, Model/Project routes, one shared two-pane shell, honest
 read-only creation states, and responsive/keyboard foundations. Deprecated
-Legacy/Evidence query entries remain isolated until A4-5. A4-3 adds the
+Legacy/Evidence queries now resolve to Product and their old Web
+implementations are retired under the A4-5 exact manifest. A4-3 adds the
 persistent Conversation pane, schema-v15 provider-binding receipts, safe
 message/attachment/document/activity projections, lifecycle recovery and
 preview/confirm deletion, plus explicit no-fabrication read-only behavior.
-A4-4 now supplies the dynamic workspace/execution slice described above.
-A4-5 recovery/cutover/retirement and A4-6 continuous exit acceptance remain
-pending, and no Issue #15 exit item is complete.
+A4-4 supplies the dynamic workspace/execution slice described above. A4-5
+supplies recovery/cutover/retirement without touching protected local state.
+A4-6 continuous exit acceptance remains pending, and no Issue #15 exit item is
+complete.
 
 ## Active product and stage documents
 
@@ -143,8 +145,12 @@ pending, and no Issue #15 exit item is complete.
   implemented Stage 3 execution design and implementation ledger.
 - [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md):
   A4-0 design gate, A4-1 Product API record, A4-2 Home/shared-shell record, and
-  A4-3 Conversation implementation record and A4-4 dynamic workspace/execution
-  record; cutover, retirement, and final exit remain pending.
+  A4-3 Conversation, A4-4 dynamic workspace/execution, and A4-5
+  recovery/cutover/retirement implementation records; final exit remains
+  pending.
+- [`milestone-a4-5-retirement-manifest.md`](milestone-a4-5-retirement-manifest.md):
+  exact tracked-code retirement identities, replacements, exclusions, and
+  postconditions, mechanically verified against the merged A4-4 baseline.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.

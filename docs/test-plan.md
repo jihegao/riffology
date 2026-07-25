@@ -856,10 +856,58 @@ narrow horizontal fit at 640 CSS pixels, keyboard activation/focus,
 reflow-equivalent 200% layout, a retained screenshot, and zero unexpected console errors. It
 currently passes 1/1.
 
-This is not startup/restart acceptance: A4-5 still owns Product-first startup,
-recovery coordination, legacy preflight, and precise retirement. It is not the
-continuous A4-6 real-provider/browser exit matrix. All 69 final trace rows
-remain `pending`, Issue #15 remains OPEN, and no complete-MVP claim is made.
+This is not startup/restart acceptance: A4-5 owns Product-first startup,
+recovery coordination, legacy preflight, and precise retirement and records
+that evidence in the next narrow section. It is not the continuous A4-6
+real-provider/browser exit matrix. All 69 final trace rows remain `pending`,
+Issue #15 remains OPEN, and no complete-MVP claim is made.
+
+### A4-5 Product-first recovery, cutover, and retirement evidence
+
+Focused backend coverage includes:
+
+- `test/a4-5-recovery-cutover.test.ts`: direct exact-app static Product shell,
+  index/asset CSP and cache policy, encoded traversal rejection, admitted
+  browser recovery status, denial of Home/Model/Project/Conversation/frame
+  routes, and stable recovery denial on broker HTTP and WebSocket upgrade;
+- `test/legacy-state-preflight.test.ts`: deterministic non-recursive
+  classification and before/after device/inode/size/byte equality for protected
+  `.riff-workspace*`, output, and `.DS_Store` fixtures; and
+- retained Product Store/dispatcher recovery suites, including active
+  dispatcher ownership and recovery-before-generation behavior.
+
+Web component evidence covers old mode-query routing to Product and a single
+global recovery-required page that loads neither Home nor an owner. The
+production-entry integration no longer launches Vite or `/api/sessions`; it
+starts `backend/src/index.ts`, fetches the built Product shell from the exact
+app origin, completes browser bootstrap, reads ready recovery status and Home,
+and proves the old session route is unavailable.
+
+Tracked retirement is governed by
+[`milestone-a4-5-retirement-manifest.md`](milestone-a4-5-retirement-manifest.md).
+Each deleted file has baseline commit, Git blob, SHA-256, byte count, and
+replacement evidence. Route/import/string scans are interpreted narrowly:
+expected negative tests and preflight candidate names remain, while no
+production Legacy/Evidence import or selector may remain. Ordinary wind Model
+assets, preinstalled pack, generic batch/visual/broker/WebSocket/Visual-Agent
+authority, Git history, local workspaces/outputs, `.DS_Store`, ignored, and
+untracked files are explicitly preserved.
+
+The A4-5 branch-wide gate is:
+
+- backend: 596 total, 595 passed, zero failed, one optional installed-OpenCode
+  smoke skipped;
+- Web: 27/27, production-entry integration 1/1, and production build;
+- Chromium: A4-2 1/1, A4-3 1/1, A4-4 1/1, A4-5 1/1, A3 Product restart 1/1,
+  broker/WebSocket 6/6, and Visual-Agent 6/6, aggregated by the default
+  `npm run test:e2e`;
+- governance: 28 Markdown files plus `git diff --check`; and
+- three independent final re-reviews: P0=0/P1=0/P2=0 in Product/architecture,
+  security/accessibility, and test/documentation.
+
+This slice does not run or satisfy the A4-6 continuous
+real-provider/actual-200%-zoom exit matrix. All 69 trace rows remain `pending`,
+Issue #15 remains OPEN, and no complete-MVP claim is made.
 
 ---
 

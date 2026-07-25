@@ -115,6 +115,10 @@ const workspace: WorkspaceDto = {
 };
 
 const client = (): ProductClient => ({
+  recoveryStatus: vi.fn(async () => ({
+    state: "ready" as const,
+    observedAt: "2026-07-25T00:00:00.000Z",
+  })),
   home: vi.fn(async () => home),
   providers: vi.fn(async () => providers),
   createModel: vi.fn(async () => ({
@@ -214,8 +218,8 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByRole("heading", { name: "Projects" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Model" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Project" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open Model" })).toHaveAttribute("href", "/models/model-one");
-    expect(screen.getByRole("link", { name: "Open Project" })).toHaveAttribute("href", "/projects/project-one");
+    expect(await screen.findByRole("link", { name: "Open Model" })).toHaveAttribute("href", "/models/model-one");
+    expect(await screen.findByRole("link", { name: "Open Project" })).toHaveAttribute("href", "/projects/project-one");
     expect(screen.queryByText("Wind Evidence Studio")).not.toBeInTheDocument();
     expect(screen.queryByText("Legacy queue / OpenCode")).not.toBeInTheDocument();
   });
@@ -225,7 +229,8 @@ describe("Stage 4 Product entry", () => {
     const productClient = client();
     render(<App client={productClient} />);
 
-    expect(await screen.findByTestId("shell-owner-heading")).toHaveTextContent("General maintenance");
+    await waitFor(() => expect(screen.getByTestId("shell-owner-heading"))
+      .toHaveTextContent("General maintenance"));
     const ownerCard = screen.getByTestId("workspace-owner-card");
     screen.getByRole("link", { name: "Review" }).click();
 
@@ -283,6 +288,39 @@ describe("Stage 4 Product entry", () => {
 
     expect(await screen.findByTestId("shell-owner-heading")).toHaveTextContent("General maintenance");
     expect(screen.queryByText("Wind-turbine maintenance")).not.toBeInTheDocument();
+  });
+
+  it("keeps deprecated root mode queries on Product Home", async () => {
+    history.replaceState({}, "", "/?mode=legacy");
+    render(<App client={client()} />);
+
+    expect(await screen.findByRole("heading", { name: "Build from a conversation." }))
+      .toBeInTheDocument();
+    expect(screen.queryByText("Legacy queue / OpenCode")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wind Evidence Studio")).not.toBeInTheDocument();
+  });
+
+  it("renders one global recovery-required state without loading an owner", async () => {
+    history.replaceState({}, "", "/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.recoveryStatus = vi.fn(async () => ({
+      state: "recovery_required" as const,
+      code: "product_recovery_failed",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      retryable: false,
+    }));
+    render(<App client={productClient} />);
+
+    expect(await screen.findByRole("heading", {
+      name: "Riffology is not accepting workspace changes yet.",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Models, Projects, Conversations, Runs, and visual access remain unavailable.",
+    );
+    expect(screen.getByText("2026-07-25T00:00:00.000Z")).toBeInTheDocument();
+    expect(screen.queryByTestId("shell-owner-heading")).not.toBeInTheDocument();
+    expect(productClient.workspace).not.toHaveBeenCalled();
+    expect(productClient.home).not.toHaveBeenCalled();
   });
 
   it("renders durable Conversation cards and keeps provider/lifecycle controls direct", async () => {

@@ -18,7 +18,6 @@ test("production entry exact-binds IPv6 while using CSP-compatible localhost aut
   const root = await realpath(await mkdtemp(join(tmpdir(), "riff-network-entry-")));
   const appPort = await freePort("::1");
   const brokerPort = await distinctFreePort("::1", appPort);
-  const vitePort = await freePort("127.0.0.1");
   const python = await approvedPython();
   const children = [];
   try {
@@ -32,7 +31,6 @@ test("production entry exact-binds IPv6 while using CSP-compatible localhost aut
         RIFF_PRODUCT_ROOT: join(root, "product"),
         RIFF_SKIP_OPENCODE: "true",
         RIFF_VISUAL_BROKER_PORT: String(brokerPort),
-        WORKSPACE_ROOT: join(root, "workspace"),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -58,34 +56,56 @@ test("production entry exact-binds IPv6 while using CSP-compatible localhost aut
     assert.equal(broker.status, 404);
     assert.equal(broker.body.error.code, "broker_route_denied");
 
-    const vite = spawn(
-      process.execPath,
-      [
-        join(webRoot, "node_modules", "vite", "bin", "vite.js"),
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(vitePort),
-        "--strictPort",
-      ],
-      {
-        cwd: webRoot,
-        env: {
-          ...process.env,
-          RIFF_PLATFORM_APP_PORT: String(appPort),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    children.push(vite);
-    await waitForOutput(vite, `http://127.0.0.1:${vitePort}/`);
-
-    const proxied = await httpRequest("127.0.0.1", vitePort, "/api/sessions", {
-      host: `127.0.0.1:${vitePort}`,
-      method: "POST",
+    const shell = await httpRequest("::1", appPort, "/?mode=evidence", {
+      host: `localhost:${appPort}`,
     });
-    assert.equal(proxied.status, 201);
-    assert.match(proxied.body.sessionId, /^session_[0-9a-f-]{36}$/u);
+    assert.equal(shell.status, 200);
+    assert.match(shell.text, /id="root"/u);
+    assert.match(String(shell.headers["content-security-policy"]), /frame-ancestors 'none'/u);
+    assert.equal(shell.headers["cache-control"], "no-store");
+
+    const boundary = {
+      host: `localhost:${appPort}`,
+      origin: `http://localhost:${appPort}`,
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
+    };
+    const bootstrap = await httpRequest("::1", appPort, "/api/browser-session/bootstrap", {
+      ...boundary,
+      method: "POST",
+      body: "{}",
+      "content-type": "application/json",
+    });
+    assert.equal(bootstrap.status, 201);
+    assert.equal(bootstrap.body.platformOrigin, `http://localhost:${appPort}`);
+    const cookie = String(bootstrap.headers["set-cookie"]).split(";", 1)[0];
+    const recovery = await httpRequest("::1", appPort, "/api/recovery-status", {
+      ...boundary,
+      cookie,
+    });
+    assert.equal(recovery.status, 200);
+    assert.equal(recovery.body.state, "ready");
+
+    const home = await httpRequest("::1", appPort, "/api/home", {
+      ...boundary,
+      cookie,
+    });
+    assert.equal(home.status, 200);
+    assert.equal(home.body.schemaVersion, 1);
+    assert.ok(Array.isArray(home.body.models));
+    assert.ok(Array.isArray(home.body.projects));
+
+    const retired = await httpRequest("::1", appPort, "/api/sessions", {
+      ...boundary,
+      cookie,
+      method: "POST",
+      body: "{}",
+      "content-type": "application/json",
+      "x-riff-csrf": bootstrap.body.csrfToken,
+    });
+    assert.equal(retired.status, 404);
+    assert.equal(retired.body.error.code, "not_found");
   } finally {
     await Promise.allSettled(children.reverse().map(stopChild));
     await rm(root, { recursive: true, force: true });
@@ -160,11 +180,16 @@ const waitForOutput = async (child, expected) => await new Promise((resolveWait,
 });
 
 const httpRequest = async (hostname, port, path, options) => await new Promise((resolveRequest, reject) => {
+  const { method = "GET", body = "", host, ...headers } = options;
   const outgoing = request({
     family: hostname === "::1" ? 6 : 4,
-    headers: { host: options.host },
+    headers: {
+      host,
+      ...(body ? { "content-length": Buffer.byteLength(body) } : {}),
+      ...headers,
+    },
     hostname,
-    method: options.method ?? "GET",
+    method,
     path,
     port,
   }, (response) => {
@@ -172,14 +197,22 @@ const httpRequest = async (hostname, port, path, options) => await new Promise((
     response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     response.on("end", () => {
       const text = Buffer.concat(chunks).toString("utf8");
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = {};
+      }
       resolveRequest({
         status: response.statusCode ?? 0,
-        body: text ? JSON.parse(text) : {},
+        body,
+        headers: response.headers,
+        text,
       });
     });
   });
   outgoing.once("error", reject);
-  outgoing.end();
+  outgoing.end(body);
 });
 
 const stopChild = async (child) => {

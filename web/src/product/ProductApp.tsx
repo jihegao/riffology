@@ -7,7 +7,11 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { defaultProductClient, type ProductClient } from "./api";
+import {
+  defaultProductClient,
+  type ProductClient,
+  type ProductRecoveryStatus,
+} from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { WorkspacePane } from "./WorkspacePane";
 import { navigateProduct, readProductRoute, workspaceHref } from "./router";
@@ -27,6 +31,21 @@ export function ProductApp({
   client = defaultProductClient,
 }: Readonly<{ client?: ProductClient }>) {
   const [route, setRoute] = useState<ProductRoute>(() => readProductRoute());
+  const [recovery, setRecovery] = useState<ProductRecoveryStatus | "checking">("checking");
+
+  const checkRecovery = useCallback(async () => {
+    setRecovery("checking");
+    try {
+      setRecovery(await client.recoveryStatus());
+    } catch {
+      setRecovery({
+        state: "recovery_required",
+        code: "recovery_status_unavailable",
+        observedAt: new Date().toISOString(),
+        retryable: true,
+      });
+    }
+  }, [client]);
 
   useEffect(() => {
     const update = () => setRoute(readProductRoute());
@@ -37,6 +56,10 @@ export function ProductApp({
       window.removeEventListener("riff:product-navigation", update);
     };
   }, []);
+
+  useEffect(() => {
+    void checkRecovery();
+  }, [checkRecovery]);
 
   return (
     <div className="product-app">
@@ -68,15 +91,27 @@ export function ProductApp({
           </a>
         </nav>
       </header>
-      {route.page === "home" && <HomePage client={client} />}
-      {route.page === "workspace" && (
+      {recovery === "checking" && (
+        <main id="product-main" className="product-state-page" tabIndex={-1}>
+          <p className="product-eyebrow">STARTING</p>
+          <h1>Checking workspace recovery.</h1>
+        </main>
+      )}
+      {recovery !== "checking" && recovery.state === "recovery_required" && (
+        <RecoveryRequiredPage recovery={recovery} retry={checkRecovery} />
+      )}
+      {recovery !== "checking" && recovery.state === "ready"
+        && route.page === "home" && <HomePage client={client} />}
+      {recovery !== "checking" && recovery.state === "ready"
+        && route.page === "workspace" && (
         <SharedShell
           key={`${route.kind}:${route.id}`}
           client={client}
           route={route}
         />
       )}
-      {route.page === "not_found" && (
+      {recovery !== "checking" && recovery.state === "ready"
+        && route.page === "not_found" && (
         <main id="product-main" className="product-state-page" tabIndex={-1}>
           <p className="product-eyebrow">NOT FOUND</p>
           <h1>That workspace route is not available.</h1>
@@ -87,6 +122,32 @@ export function ProductApp({
         </main>
       )}
     </div>
+  );
+}
+
+function RecoveryRequiredPage({
+  recovery,
+  retry,
+}: Readonly<{
+  recovery: Extract<ProductRecoveryStatus, { state: "recovery_required" }>;
+  retry: () => Promise<void>;
+}>) {
+  return (
+    <main id="product-main" className="product-state-page" tabIndex={-1}>
+      <p className="product-eyebrow">RECOVERY REQUIRED</p>
+      <h1>Riffology is not accepting workspace changes yet.</h1>
+      <p role="alert">
+        Startup recovery could not establish a safe writable state. Models, Projects,
+        Conversations, Runs, and visual access remain unavailable.
+      </p>
+      <p>
+        Observed at <time dateTime={recovery.observedAt}>{recovery.observedAt}</time>.
+        {" "}{recovery.retryable
+          ? "You can retry after the recovery condition is resolved."
+          : "An operator must resolve the recovery condition before retrying."}
+      </p>
+      <button type="button" onClick={() => void retry()}>Check recovery again</button>
+    </main>
   );
 }
 

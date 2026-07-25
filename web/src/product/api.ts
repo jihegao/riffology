@@ -32,7 +32,21 @@ type BrowserSession = Readonly<{
   expiresAt: string;
 }>;
 
+export type ProductRecoveryStatus = Readonly<
+  | {
+    state: "ready";
+    observedAt: string;
+  }
+  | {
+    state: "recovery_required";
+    code: string;
+    observedAt: string;
+    retryable: boolean;
+  }
+>;
+
 export interface ProductClient {
+  recoveryStatus(): Promise<ProductRecoveryStatus>;
   home(): Promise<HomeDto>;
   providers(): Promise<ProviderDiscovery>;
   createModel(input: Readonly<{
@@ -175,6 +189,10 @@ export class ProductApiError extends Error {
 
 export class HttpProductClient implements ProductClient {
   #session?: Promise<BrowserSession>;
+
+  recoveryStatus(): Promise<ProductRecoveryStatus> {
+    return this.#request<ProductRecoveryStatus>("/api/recovery-status");
+  }
 
   home(): Promise<HomeDto> {
     return this.#request<HomeDto>("/api/home");
