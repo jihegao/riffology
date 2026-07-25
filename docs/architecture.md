@@ -134,8 +134,8 @@ A3-2d generic result access
   -> Agent-independent cancel/download/trash/restore controls
 ```
 
-A3-2c1 is implemented only on the current unpublished working branch. It adds
-the backend-private conversation/turn/current-healthy-attempt authority,
+A3-2c1 was merged through PR #38. It adds the backend-private
+conversation/turn/current-healthy-attempt authority,
 single-consume capability lifecycle, digest-only append-only audit facts,
 run/turn/shutdown/restart revocation, and legacy-CDP isolation. It adds no
 Playwright runner and exposes neither observation nor interaction to OpenCode;

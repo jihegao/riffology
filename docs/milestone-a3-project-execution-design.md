@@ -83,10 +83,9 @@ regression combination passes 32/32; the serial official backend gate reports
 104/104, the network-entry integration passes 1/1, and the production build
 succeeds. A3-2b4 was merged and published through PR #37; its dedicated
 real-browser matrix passes 5/5. A3-2c1's authority/audit and legacy-CDP-
-isolation foundation is implemented on the current working branch but is not
-published or merged and exposes no observation/interaction tool. A3-2c2
-through A3-2c4 and A3-2d remain pending.
-Its branch-only gate reports 500 backend tests with 499 passed, zero failed,
+isolation foundation was merged through PR #38 and exposes no observation/
+interaction tool. A3-2c2 through A3-2c4 and A3-2d remain pending.
+Its published gate reports 500 backend tests with 499 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; web passes 104/104, network
 entry 1/1, the production build succeeds, and independent security review has
 no P0/P1/P2 finding.
@@ -1321,7 +1320,7 @@ projection and is not reusable as A3-2c authority: it can discover an ambient
 localhost page and is not bound to the durable conversation, originating turn,
 current Project, current run, or current healthy attempt.
 
-The current unpublished A3-2c1 implementation stops at authority and audit. It
+A3-2c1, merged through PR #38, stops at authority and audit. It
 derives the durable conversation/turn/current-Project scope, requires exactly
 one current healthy visual attempt, binds one process-local capability to the
 full scope/target/operation tuple and process epoch, returns only an opaque
@@ -1654,11 +1653,11 @@ Output indexes never resolve outside the owning Project/run object root.
    reports 466 total with 465 passed, zero failed, and one optional
    installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
    and the production build succeeds. This is a Chromium-only claim.
-13. **A3-2c Playwright authority — in progress, unpublished:** c1 implements
-   backend-private scope/capability/audit/revocation and legacy-CDP isolation
-   on the current working branch only. It exposes no observation or interaction
-   tool. c2 read-only observation, c3 one-use typed interaction, and c4 real
-   Chromium/security/docs closeout remain pending.
+13. **A3-2c Playwright authority — in progress:** c1's backend-private
+   scope/capability/audit/revocation and legacy-CDP isolation was merged through
+   PR #38. It exposes no observation or interaction tool. c2 read-only
+   observation, c3 one-use typed interaction, and c4 real Chromium/security/
+   docs closeout remain pending.
 14. **A3-2d generic outputs/events/direct controls — pending:** exact same-run
    output list/download with byte/digest revalidation, bounded declared
    diagnostic-event ingestion with opaque run/filter-bound cursors, and

@@ -52,8 +52,8 @@
 > acceptance begins only after A3-2d. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
-> A3-2c1 is currently a local, unpublished authority/audit and legacy-CDP-
-> isolation foundation. It exposes no observation or interaction tool.
+> A3-2c1 is a merged authority/audit and legacy-CDP-isolation foundation
+> (PR #38). It exposes no observation or interaction tool.
 > A3-2c2 through A3-2c4 remain pending.
 
 > The current process claim is deliberately narrow: macOS, local user,

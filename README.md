@@ -71,11 +71,11 @@ A3-2c scoped Playwright access, A3-2d generic outputs/events/direct controls,
 and A3-3 ordinary wind import remain pending #14 slices. Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
-A3-2c1's authority/audit and legacy-CDP-isolation foundation is implemented on
-the current working branch but is not yet published or merged; it exposes no
-observation or interaction tool. A3-2c2 through A3-2c4 remain pending.
-Branch-only A3-2c1 verification reports 500 backend tests with 499 passed, zero
-failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
+A3-2c1's authority/audit and legacy-CDP-isolation foundation was merged through
+PR #38; it exposes no observation or interaction tool. A3-2c2 through A3-2c4
+remain pending. Published A3-2c1 verification reports 500 backend tests with
+499 passed, zero failed, and one optional installed-OpenCode smoke skipped; web
+passes 104/104,
 the network-entry integration passes 1/1, the production build succeeds, and
 the independent security review reports no P0/P1/P2 finding.
 A3-3 diagnostic-event acceptance depends on A3-2d; legacy wind/Gate event
