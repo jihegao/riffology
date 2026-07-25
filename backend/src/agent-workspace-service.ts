@@ -30,6 +30,7 @@ import type {
 } from "./product-domain.ts";
 import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
 import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
+import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentOperation } from "./agent-visual-authority.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -518,7 +519,7 @@ export class AgentWorkspaceService {
     catch (error) { throw storeApiError(error); }
   }
 
-  runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[] }): Promise<AgentTurnResult> {
+  runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
     const key = `${input.conversationId}\u0000${input.requestKey}`;
     const pending = this.#pendingTurns.get(key);
     if (pending) return pending;
@@ -540,11 +541,25 @@ export class AgentWorkspaceService {
     if (this.#conversationTurnTails.get(conversationId) === tail) this.#conversationTurnTails.delete(conversationId);
   }
 
-  async #runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[] }): Promise<AgentTurnResult> {
+  async #runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
     const conversationId = boundedId(input.conversationId);
     const requestKey = boundedKey(input.requestKey, "requestKey");
     const text = boundedText(input.text);
     const attachmentIds = input.attachmentIds ?? [];
+    let confirmedOperation: VisualAgentOperation | undefined;
+    let visualInteractionMarker: import("./agent-domain.ts").VisualInteractionMarker | undefined;
+    if (input.visualInteractionConfirmation !== undefined) {
+      if (this.store.getConversation(conversationId).owner.kind !== "project") {
+        throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid.");
+      }
+      try {
+        confirmedOperation = normalizeVisualAgentOperation(input.visualInteractionConfirmation);
+        if (!("locator" in confirmedOperation)) throw new Error("not interaction");
+        const commitment = visualAgentOperationCommitment(confirmedOperation);
+        visualInteractionMarker = Object.freeze({ schemaVersion: 1, actionKind: confirmedOperation.kind, locatorKind: confirmedOperation.locator.kind,
+          actionCommitmentDigest: commitment.digest, valueDigest: commitment.valueDigest });
+      } catch { throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid."); }
+    }
     if (!Array.isArray(attachmentIds) || attachmentIds.length > 16 || attachmentIds.some((id) => typeof id !== "string")) {
       throw new ApiError(422, "invalid_turn", "attachmentIds must be a bounded array of IDs.");
     }
@@ -558,6 +573,7 @@ export class AgentWorkspaceService {
         requestKey,
         text,
         attachmentIds: attachmentIds.map(boundedId),
+        ...(visualInteractionMarker ? { visualInteractionMarker } : {}),
         createdAt: this.#now(),
       });
     } catch (error) { throw storeApiError(error); }
@@ -570,7 +586,7 @@ export class AgentWorkspaceService {
     let scopedRelease: (() => void) | undefined;
     let mcpBound = false;
     try {
-      prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId) });
+      prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
       if (prepared?.requiresMcp) {
         if (!this.#scopedMcpUrl || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
           throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind a scoped MCP server for this Agent turn.");
@@ -880,6 +896,7 @@ const storeApiError = (error: unknown): ApiError => {
   if (/^stale_configuration:/u.test(error.message)) return new ApiError(409, "stale_configuration", "The experiment configuration changed after it was observed.");
   if (/^stale_record:/u.test(error.message)) return new ApiError(409, "stale_record", "The experiment record changed after it was observed.");
   if (/command already exists with a different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with different experiment intent.");
+  if (/Agent turn request key was reused with different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That requestKey was already used with different turn intent.");
   if (/reused|already|different|changed|locked|unexpected number|not active and technically executable/u.test(error.message)) return new ApiError(409, "state_conflict", "The request conflicts with current durable state.");
   if (/invalid|required|must|cannot|outside/u.test(error.message)) return new ApiError(422, "invalid_request", "The request violates the Agent workspace contract.");
   return new ApiError(500, "storage_error", "The Agent workspace store rejected the request.");

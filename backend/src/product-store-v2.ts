@@ -42,6 +42,7 @@ import type {
   ContextSnapshot,
   ConversationDto,
   ConversationMessageDto,
+  VisualInteractionMarker,
   DurableAgentSessionState,
   ModelFileMutation,
   SkillUseDto,
@@ -83,10 +84,12 @@ import {
 } from "./product-schema.ts";
 import { createModelWorkspaceCapability } from "./restricted-process.ts";
 import type {
+  VisualAgentOperation,
   VisualAgentAuditFactInput,
   VisualAgentTarget,
   VisualAgentTurnScope,
 } from "./agent-visual-authority.ts";
+import { normalizeVisualAgentOperation, visualAgentOperationCommitment } from "./agent-visual-authority.ts";
 
 const DATABASE_NAME = "product.sqlite3";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
@@ -850,7 +853,9 @@ export class ProductStoreV2 {
     if (!input.requestKey.trim() || input.requestKey.length > 300 || !input.text.trim()) throw new ProductStoreV2Error("Agent turn intent is invalid.");
     const attachmentIds = [...new Set(input.attachmentIds ?? [])];
     if (attachmentIds.length !== (input.attachmentIds ?? []).length) throw new ProductStoreV2Error("Agent turn attachment IDs must be unique.");
-    const intentDigest = canonicalDigest({ text: input.text, attachmentIds });
+    const marker = input.visualInteractionMarker ?? null;
+    assertVisualInteractionMarker(marker);
+    const intentDigest = canonicalDigest({ text: input.text, attachmentIds, visualInteractionMarker: marker });
     const existing = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?")
       .get(input.conversationId, input.requestKey) as any;
     if (existing) {
@@ -867,8 +872,8 @@ export class ProductStoreV2 {
       { sql: `UPDATE conversations SET provider_locked_at = coalesce(provider_locked_at, ?), updated_at = ?
         WHERE id = ? AND lifecycle_state = 'active'`, params: [input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
       { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
-        SELECT ?, ?, count(*), 'user', 'complete', ?, '{}', ?, ? FROM messages WHERE conversation_id = ?`,
-        params: [input.userMessageId, input.conversationId, input.text, input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
+        SELECT ?, ?, count(*), 'user', 'complete', ?, ?, ?, ? FROM messages WHERE conversation_id = ?`,
+        params: [input.userMessageId, input.conversationId, input.text, json(marker ? { visualInteractionConfirmation: marker } : {}), input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
       ...attachmentIds.map((attachmentId) => ({ sql: `INSERT INTO message_attachments (message_id, attachment_id)
         SELECT ?, id FROM attachments WHERE id = ? AND conversation_id = ?`, params: [input.userMessageId, attachmentId, input.conversationId], expectedChanges: 1 } satisfies DatabaseMutationStatement)),
       { sql: `INSERT INTO agent_turns (id, conversation_id, request_key, intent_sha256, input_message_id, state, created_at, updated_at)
@@ -3496,6 +3501,30 @@ export class ProductStoreV2 {
       externalSessionGeneration: row.session_generation,
       projectId: row.project_id,
     });
+  }
+
+  assertConfirmedVisualInteraction(input: {
+    conversationId: string;
+    turnId: string;
+    operation: VisualAgentOperation;
+  }): void {
+    this.#assertOpen();
+    let operation: VisualAgentOperation;
+    try { operation = normalizeVisualAgentOperation(input.operation); } catch { throw new ProductStoreV2Error("visual_interaction_unavailable"); }
+    if (!("locator" in operation)) throw new ProductStoreV2Error("visual_interaction_unavailable");
+    const row = this.#database.prepare(`SELECT m.role, m.status, m.content_json
+      FROM agent_turns t JOIN messages m ON m.id = t.input_message_id
+      WHERE t.id = ? AND t.conversation_id = ? AND t.state = 'running'`).get(input.turnId, input.conversationId) as any;
+    try {
+      const marker = JSON.parse(row?.content_json ?? "null")?.visualInteractionConfirmation as VisualInteractionMarker | undefined;
+      assertVisualInteractionMarker(marker ?? null);
+      const commitment = visualAgentOperationCommitment(operation);
+      if (row?.role !== "user" || row?.status !== "complete" || !marker
+        || marker.actionKind !== operation.kind
+        || marker.locatorKind !== operation.locator.kind
+        || marker.actionCommitmentDigest !== commitment.digest
+        || marker.valueDigest !== commitment.valueDigest) throw new Error("mismatch");
+    } catch { throw new ProductStoreV2Error("visual_interaction_unavailable"); }
   }
 
   /**
@@ -6148,6 +6177,20 @@ const messageDto = (row: any): ConversationMessageDto => ({
   messageKind: row.message_kind ?? "conversation", text: row.text,
   content: JSON.parse(row.content_json), createdAt: row.created_at, updatedAt: row.updated_at,
 });
+
+const assertVisualInteractionMarker = (marker: VisualInteractionMarker | null): void => {
+  if (marker === null) return;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)
+    || Object.keys(marker).length !== 5
+    || marker.schemaVersion !== 1
+    || !new Set(["click", "type", "select"]).has(marker.actionKind)
+    || !new Set(["role_name", "label"]).has(marker.locatorKind)
+    || !/^[0-9a-f]{64}$/u.test(marker.actionCommitmentDigest)
+    || (marker.valueDigest !== null && !/^[0-9a-f]{64}$/u.test(marker.valueDigest))
+    || ((marker.actionKind === "click") !== (marker.valueDigest === null))) {
+    throw new ProductStoreV2Error("Visual interaction confirmation is invalid.");
+  }
+};
 
 const modelRecord = (row: any): ModelRecord => ({
   id: row.id, name: row.name, lifecycleState: row.lifecycle_state, technicalStatus: row.technical_status, runMode: row.run_mode,

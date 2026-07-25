@@ -32,6 +32,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
   readonly mcp: AgentMcpServer;
   readonly visualAuthority?: VisualAgentAuthority;
   readonly #now: () => string;
+  readonly #consumedVisualInteractionGrants = new WeakSet<AgentToolGrant>();
 
   constructor(store: ProductStoreV2, skills: SimulationSkillCatalog, options: {
     now?: () => string;
@@ -45,7 +46,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     this.visualAuthority = options.visualAuthority;
   }
 
-  async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[] }): Promise<PreparedAgentTurnRuntime> {
+  async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[]; confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation }): Promise<PreparedAgentTurnRuntime> {
     const conversation = this.store.getConversation(input.conversationId);
     const runtime = await this.store.getConversationRuntime(input.conversationId);
     if (!runtime) throw new ApiError(409, "conversation_not_ready", "The conversation is not ready for an Agent turn.");
@@ -68,6 +69,16 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     if (!this.visualAuthority?.observationAvailable) {
       allowedTools.delete("riff_observe_current_visual");
     }
+    if (!input.confirmedVisualInteraction
+      || conversation.owner.kind !== "project"
+      || !this.visualAuthority?.interactionAvailable) {
+      allowedTools.delete("riff_interact_current_visual");
+    } else {
+      try {
+        this.store.assertConfirmedVisualInteraction({ conversationId: input.conversationId, turnId: input.turnId, operation: input.confirmedVisualInteraction });
+        allowedTools.add("riff_interact_current_visual");
+      } catch { allowedTools.delete("riff_interact_current_visual"); }
+    }
     if (intentAuthority !== "explicit") {
       allowedTools.delete("riff_apply_model_changes");
       allowedTools.delete("riff_transition_temporary_document");
@@ -81,12 +92,14 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       allowedTools,
       intentAuthority,
       attachmentIds: new Set(input.attachmentIds),
+      ...(allowedTools.has("riff_interact_current_visual") ? { confirmedVisualInteraction: input.confirmedVisualInteraction } : {}),
     });
     return Object.freeze({
       capability,
       turnId: input.turnId,
       intentAuthority,
-      requiresMcp: intentAuthority === "explicit" || input.attachmentIds.length > 0 || Boolean(loadedSkill)
+      requiresMcp: intentAuthority === "explicit" || Boolean(input.confirmedVisualInteraction)
+        || input.attachmentIds.length > 0 || Boolean(loadedSkill)
         || /\b(?:model|workspace|file|document|attachment|schema|dependency|visual|observe|screenshot)\b|(?:模型|工作区|文件|文档|附件|模式|依赖|可视化|观察|截图)/iu.test(intentText),
       context: {
         attachments: attachments.map(({ metadata, preview }) => ({ id: metadata.id, conversationId: input.conversationId, mediaType: metadata.mediaType, preview, relevant: true })),
@@ -161,6 +174,26 @@ export class AgentTurnRuntime implements AgentToolExecutor {
           externalSessionGeneration: grant.externalSessionGeneration,
           operation: Object.freeze({ kind: operationKind }),
           intentAuthority: grant.intentAuthority,
+        });
+      }
+      case "riff_interact_current_visual": {
+        if (grant.owner.kind !== "project" || !this.visualAuthority || !grant.confirmedVisualInteraction) {
+          throw new AgentRuntimeError("visual_interaction_unavailable", "The scoped visual interaction is unavailable.");
+        }
+        if (this.#consumedVisualInteractionGrants.has(grant)) {
+          throw new AgentRuntimeError("visual_interaction_consumed", "The scoped visual interaction is unavailable.");
+        }
+        // Synchronous consume-before-validation closes sequential and concurrent
+        // replay within this process. The durable audit mint uniqueness closes
+        // replay after backend restart.
+        this.#consumedVisualInteractionGrants.add(grant);
+        this.store.assertConfirmedVisualInteraction({ conversationId: grant.conversationId, turnId: grant.turnId, operation: grant.confirmedVisualInteraction });
+        return await this.visualAuthority.interact({
+          conversationId: grant.conversationId,
+          turnId: grant.turnId,
+          externalSessionGeneration: grant.externalSessionGeneration,
+          operation: grant.confirmedVisualInteraction as Extract<import("./agent-visual-authority.ts").VisualAgentOperation, { kind: "click" | "type" | "select" }>,
+          intentAuthority: "visual_interaction_confirmed",
         });
       }
     }

@@ -126,7 +126,8 @@ A3-2b isolated broker / frame / WebSocket
 
 A3-2c scoped Playwright
   -> current Project + current healthy attempt -> bounded observation
-  -> explicit one-turn, one-use typed interaction
+  -> accepted structured visual-interaction confirmation -> one-use typed interaction
+  -> fresh backend profile + private exact-peer GET/HEAD bridge (not broker/frame)
 
 A3-2d generic result access
   -> exact same-run output list/download with byte/digest revalidation
@@ -150,6 +151,19 @@ header/body/deadline limits. DOM, accessibility, and screenshot reads render a
 fresh, script-disabled snapshot with all later HTTP and WebSocket traffic
 blocked. Conversation/session/run/turn drift aborts in-flight work. Interaction
 and the live-CDP/complete Chromium negative matrix remain A3-2c3/A3-2c4.
+
+The two browser arms are deliberately disjoint. A human browser reaches a
+visual page only through the A3-2b app/broker/frame/WebSocket capability. The
+c3 candidate Agent arm starts from a durable structured
+`visualInteractionConfirmation`, creates a fresh backend-only browser profile,
+and reaches the child only through a private exact-listener/connected-peer
+GET/HEAD bridge. It never receives or reuses the frame URL, app/broker cookie,
+nonce, WebSocket route, or legacy CDP session. Browser page/DOM content is
+untrusted Agent input even where the human-frame deployment treats its active
+code as operator-provided. c3's one local typed interaction returns only a
+bounded untrusted dispatched receipt, not child-write or domain-success proof.
+The append-only schema-v11 audit admits only one interaction mint for the
+immutable turn/action commitment, closing concurrent and restart replay.
 
 Port selection closes a local probe socket before child bind and therefore has
 a bounded TOCTOU window; it is not a strong reservation claim. Health cannot

@@ -73,8 +73,17 @@ export type StartAgentTurnIntent = {
   requestKey: string;
   text: string;
   attachmentIds?: ProductId[];
+  visualInteractionMarker?: VisualInteractionMarker | null;
   createdAt: IsoTimestamp;
 };
+
+export type VisualInteractionMarker = Readonly<{
+  schemaVersion: 1;
+  actionKind: "click" | "type" | "select";
+  locatorKind: "role_name" | "label";
+  actionCommitmentDigest: Sha256Digest;
+  valueDigest: Sha256Digest | null;
+}>;
 
 export type ModelFileMutation = {
   objectFileId: ProductId;

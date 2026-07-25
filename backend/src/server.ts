@@ -21,6 +21,7 @@ import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 import { VisualAgentObserver } from "./visual-agent-observer.ts";
+import { VisualAgentInteractor } from "./visual-agent-interactor.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
 import {
   GenericVisualSupervisor,
@@ -99,6 +100,7 @@ export type BackendOptions = {
   a3VisualOutputConsumer?: (candidate: VisualOutputCandidate) => Buffer;
   a3VisualAuthority?: VisualAgentAuthority;
   a3VisualObserver?: VisualAgentObserver;
+  a3VisualInteractor?: VisualAgentInteractor;
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
@@ -325,6 +327,7 @@ export class BackendApp {
       const visualAuthority = options.a3VisualAuthority
         ?? new VisualAgentAuthority(this.productStore, {
           observer: options.a3VisualObserver ?? new VisualAgentObserver(),
+          interactor: options.a3VisualInteractor ?? new VisualAgentInteractor(),
         });
       this.productRunDispatcher = new ProductRunDispatcher({
         store: this.productStore,

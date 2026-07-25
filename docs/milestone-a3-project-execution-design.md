@@ -85,11 +85,12 @@ succeeds. A3-2b4 was merged and published through PR #37; its dedicated
 real-browser matrix passes 5/5. A3-2c1's authority/audit and legacy-CDP-
 isolation foundation was merged through PR #38. A3-2c2 adds bounded,
 Project-only read observation while exposing no interaction or caller-selected
-browser target. A3-2c3, A3-2c4, and A3-2d remain pending. The current c2 gate
-reports 511 backend tests with 510 passed, zero failed, and one optional
-installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, the
-production build succeeds, and independent security review has no P0/P1 merge
-blocker.
+browser target. A3-2c3's one-use typed interaction is a candidate on its review
+branch and remains pending review and merge; A3-2c4 and A3-2d remain pending.
+The current c3 candidate gate reports 525 backend tests with 524 passed, zero
+failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
+network entry 1/1, the production build succeeds, and three independent reviews
+have no P0/P1 merge blocker.
 The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
@@ -1332,8 +1333,9 @@ SHA-256 commitments only. It does not retain capability/browser secrets,
 locator role/name-or-label, typed value, observation summary/content, DOM, or
 screenshot bytes. There is no Playwright runner/transport and no OpenCode
 observe/interact tool in A3-2c1 alone. A3-2c2 adds the read-only runner and
-`riff_observe_current_visual`; interaction remains A3-2c3 and live-CDP
-isolation evidence remains an A3-2c4 browser gate.
+`riff_observe_current_visual`; A3-2c3's one-use typed interaction is a candidate
+on its review branch and remains pending review and merge. Live-CDP isolation
+evidence remains an A3-2c4 browser gate.
 
 The c2 runner resolves the sole healthy target internally and carries the full
 process identity only across private backend boundaries. Before each exact root
@@ -1384,8 +1386,12 @@ byte/dimension limits, digest, deletion, and restart behavior.
 Page content is untrusted observation data and never becomes an instruction;
 only the persisted human turn can authorize interaction.
 
-Click, type, or selection requires an explicit current-turn instruction and a
-one-turn, one-use capability. Interaction locators use only typed
+Click, type, or selection requires the optional structured
+`visualInteractionConfirmation` accepted on the immutable current human turn,
+not a generic `explicitImperative`, Agent text, DOM text, or browser capability.
+The immutable message retains only a digest marker; the c3 candidate MCP tool is
+`riff_interact_current_visual({})`, so no action, locator, value, target, or
+transport is caller supplied. It has a one-turn, one-use capability. Interaction locators use only typed
 accessibility role plus bounded accessible name, or a bounded label; CSS,
 XPath, text-as-selector, arbitrary JavaScript, and model-supplied URLs are not
 accepted. Navigation outside the exact proxy, popup, upload, clipboard,
@@ -1398,12 +1404,24 @@ a platform-internal fixed mirror intent after the matching domain commit.
 Capability consumption is an atomic consume-before-side-effect transition.
 Success, locator mismatch, policy denial, browser error, timeout, and bounded
 failure all consume it; concurrent/retried use admits at most one attempt.
+The append-only schema-v11 audit permits only one interaction mint for the
+immutable turn and complete action commitment, so process concurrency and
+backend restart cannot mint another capability from the same confirmation.
 Locator strings are valid UTF-8, NFC-normalized, case-sensitive exact matches
 with fixed byte limits; regex, glob, substring matching, and index/`nth`
 fallback are forbidden. Click roles are allowlisted to non-navigation controls;
 type/select roles and input values have separate role, type, and byte limits.
 The locator is re-resolved at action time and must match exactly one visible,
-enabled element; zero or multiple matches fail closed.
+enabled element; zero or multiple matches fail closed. c3 creates a fresh
+backend-only profile and can reach the child solely through a private
+exact-listener/connected-peer GET/HEAD bridge. It never reuses the A3-2b frame
+URL, app/broker cookies, nonce, WebSocket route, or legacy CDP. Its one local
+typed interaction returns only a bounded untrusted dispatched receipt; it
+neither proxies child HTTP writes nor proves a domain outcome. Navigation,
+popup, upload/download, clipboard, permission/credential prompt, Service
+Worker, WebSocket, and unlisted network traffic are denied. A3-2c4 retains the
+real-Chromium/live-CDP negative matrix, secret scans, independent review, and
+final documentation/security closure.
 
 ## Project Agent permission matrix
 
@@ -1416,7 +1434,7 @@ Agent-provided Project or Model ID.
 | Create/edit/copy experiment | Explicit imperative plus expected digest | Allow |
 | Start/cancel run | Explicit imperative and declared capability | Allow |
 | Observe healthy visual attempt | Bounded current run | Embedded frame |
-| Interact with healthy visual attempt | Explicit current-turn one-use capability | User interacts in frame |
+| Interact with healthy visual attempt | Immutable human-turn structured `visualInteractionConfirmation`; one-use capability and empty-input `riff_interact_current_visual` | Human uses the b2 frame; Agent uses a separate private bridge/fresh profile |
 | Create/adopt an analysis document | Stage 2 document/action rules | Existing controls when exposed |
 | Trash run and its owned output set | Deny; may suggest only | Explicit recoverable action |
 | Modify copied Model/schema/dependencies/execution description/snapshot | Deny | Deny |
@@ -1670,8 +1688,9 @@ Output indexes never resolve outside the owning Project/run object root.
 13. **A3-2c Playwright authority — in progress:** c1's backend-private
    scope/capability/audit/revocation and legacy-CDP isolation was merged through
    PR #38. c2 adds the bounded Project-only read-observation tool and keeps
-   process/browser authority private. c3 one-use typed interaction and c4
-   live-CDP/complete Chromium security and docs closeout remain pending.
+   process/browser authority private. c3's one-use typed interaction is a
+   candidate on its review branch and remains pending review and merge; c4
+   live-CDP/complete Chromium security and docs closeout remains pending.
 14. **A3-2d generic outputs/events/direct controls — pending:** exact same-run
    output list/download with byte/digest revalidation, bounded declared
    diagnostic-event ingestion with opaque run/filter-bound cursors, and

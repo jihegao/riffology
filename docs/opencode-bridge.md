@@ -132,7 +132,7 @@ Agent changes are proposals or domain actions, not prose side effects:
 | `get_run_status` | Read bounded backend status/log facts. |
 | `read_run_evidence` | Read declared summaries, events, metrics, and view manifests. |
 | `riff_observe_current_visual` | A3-2c2 Project-only read tool: derive the current Project/current healthy attempt and return one bounded, schema-versioned, untrusted structured/accessibility/DOM-text/screenshot observation. |
-| `interact_current_visual` | Future A3-2c3 target, not exposed by A3-2c1: consume one explicit current-turn capability for one typed role/name or label interaction, then return bounded audited evidence. |
+| `riff_interact_current_visual` | A3-2c3 candidate Project-only tool, pending review and merge, with exactly `{}` input: consume one accepted structured visual-interaction confirmation from the immutable current human turn for one typed role/name or label interaction, then return an untrusted bounded dispatched receipt. |
 
 The Agent cannot record a human endorsement, alter actor type/role, set
 `policySatisfied`, set trust, close an issue without a recorded resolution, or
@@ -169,11 +169,14 @@ Audit facts retain only bound IDs, finite lifecycle/operation/action/locator
 kinds, and SHA-256 commitments; locator role/name-or-label, typed value,
 observation content/summary, DOM, and screenshot bytes are not retained.
 
-The future A3-2c target tools derive scope from the durable conversation and originating turn;
+The A3-2c tools derive scope from the durable conversation and originating turn;
 they never accept a Project, run, URL, port, cookie, nonce, filesystem path, or
 generic selector from OpenCode. Observation uses a separately minted internal
-capability. Interaction additionally requires one explicit current-turn
-instruction, consumes the capability once, and accepts only accessibility role
+capability. Interaction additionally requires the optional structured
+`visualInteractionConfirmation` accepted on that immutable human turn; its
+message retains only a digest marker. A generic `explicitImperative` is not
+visual-interaction authority. The tool input is exactly `{}`; it consumes the
+capability once and accepts only accessibility role
 plus bounded accessible name, or a bounded label. The immutable audit metadata
 records conversation, turn, Project, run, attempt, finite kinds, timestamps,
 and commitments without making the observation authoritative Project state.
@@ -183,7 +186,11 @@ commitment covers action kind, role/name-or-label locator, and a digest of any
 input or selection value; every field is compared at use. The server requires exactly one
 healthy candidate, revalidates the complete tuple immediately before use, and
 atomically consumes before side effect; failure and timeout consume it too.
-The new runner is structurally unable to attach the legacy CDP profile.
+The new runner is structurally unable to attach the legacy CDP profile. It uses
+a fresh backend-only profile and a private exact-listener/connected-peer
+GET/HEAD bridge, never the A3-2b frame URL, app/broker cookie, nonce, or
+WebSocket route. It performs one isolated local typed interaction only; it
+does not proxy child HTTP writes or establish a domain outcome.
 Locator matching is NFC-normalized, case-sensitive, bounded, exact, unique,
 visible, and enabled, with no regex/glob/substring/index fallback. Page content
 is untrusted data and never authorizes a tool action.

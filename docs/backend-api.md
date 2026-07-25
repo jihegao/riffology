@@ -32,7 +32,7 @@ The implemented Stage 2 and Stage 3 routes are:
 | `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. Each message has `messageKind: "conversation" | "platform_card"`; a platform card is a system-owned terminal run record, not an Agent turn. |
 | `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
 | `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
-| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. |
+| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. Its optional structured `visualInteractionConfirmation` is the only request-level candidate for A3-2c3 visual interaction authority; ordinary `explicitImperative` is insufficient. |
 | `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
 | `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
@@ -613,6 +613,35 @@ and PNG DTOs are schema-versioned and explicitly untrusted; screenshot bytes
 are emitted as bounded MCP image content. Root HTML is rendered with scripts
 disabled and all subsequent HTTP/WebSocket traffic denied. No observation
 content or bytes enter the append-only audit.
+
+### A3-2c3 typed-interaction candidate (pending review and merge)
+
+This branch implements an internal MCP candidate, not a browser or public HTTP
+route.
+Only a durable human turn with an accepted optional structured
+`visualInteractionConfirmation` may expose
+`riff_interact_current_visual({})`; its input is exactly the empty object.
+The immutable user message retains only a digest marker for that confirmation,
+not a reusable confirmation value. A generic `explicitImperative`, Agent text,
+DOM text, or observation cannot authorize this tool. The server matches the
+process-local normalized operation to that immutable user-message digest
+marker, then binds it into the private capability; it never derives the action
+from tool input. The schema-v11 audit uniqueness gate admits only one
+interaction mint for that turn and action commitment, so restart or concurrent
+replay cannot reuse the human confirmation.
+
+The c3 candidate runner uses a fresh backend-only browser profile and a private
+GET/HEAD bridge that verifies the exact listener and connected peer for every
+child connection. It does not reuse the A3-2b frame URL, broker/app cookie,
+nonce, WebSocket route, or the legacy `RIFF_CDP_URL` projector. It admits one
+local typed click/type/select interaction only, atomically consumes its
+one-use capability before the side effect, and returns a bounded, explicitly
+untrusted dispatched receipt. It does not proxy child HTTP writes or establish
+domain success. Navigation, popups, uploads/downloads, clipboard, permission
+or credential prompts, Service Workers, WebSockets, and unlisted network
+traffic fail closed. A3-2c4, not c3, owns real-Chromium/live-CDP negatives,
+the complete browser matrix, secret scans, independent review, and final
+security documentation closure.
 
 A3-2d follows the existing committed output index but adds the missing generic
 public surface: same-run list/download with path/size/digest revalidation,
