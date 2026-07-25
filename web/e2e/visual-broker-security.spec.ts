@@ -11,6 +11,14 @@ import type {
   BrowserFrameTarget,
   BrowserFrameTargetResolver,
 } from "../../backend/src/browser-frame-capability.ts";
+import {
+  VisualAgentAuthority,
+  VisualAgentAuthorityError,
+  type VisualAgentAuditFactInput,
+  type VisualAgentAuthorityStore,
+  type VisualAgentTarget,
+  type VisualAgentTurnScope,
+} from "../../backend/src/agent-visual-authority.ts";
 import type { MesaAdapter, MesaRunRequest } from "../../backend/src/mesa-adapter.ts";
 import type {
   OpenCodeAdapter,
@@ -182,6 +190,193 @@ test("Chromium observes generation revocation before state reuse and cannot reco
   }
 });
 
+test("run trash revokes nonce, frame, WebSocket, and Visual-Agent authority without restore revival", async ({ context, page }) => {
+  const visualStore = new BrowserVisualAuthorityStore();
+  const visualAuthority = new VisualAgentAuthority(visualStore, {
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+  });
+  const stack = await startStack({ visualAuthority });
+  try {
+    let lifecycle: "succeeded" | "trashed" = "succeeded";
+    Object.assign(stack.app.a2!.service, {
+      trashRun(input: { beforeCommit?: () => void }) {
+        input.beforeCommit?.();
+        lifecycle = "trashed";
+        return {
+          schemaVersion: 1,
+          commandId: "command_browser_trash",
+          action: "trash",
+          projectId: PROJECT_ID,
+          runId: RUN_ID,
+          lifecycleDigest: "a".repeat(64),
+          applied: true,
+        };
+      },
+      restoreRun() {
+        lifecycle = "succeeded";
+        return {
+          schemaVersion: 1,
+          commandId: "command_browser_restore",
+          action: "restore",
+          projectId: PROJECT_ID,
+          runId: RUN_ID,
+          lifecycleDigest: "a".repeat(64),
+          applied: true,
+        };
+      },
+      getRun() {
+        return { status: lifecycle };
+      },
+    });
+    await page.addInitScript(() => {
+      const originalFetch = globalThis.fetch.bind(globalThis);
+      globalThis.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        const url = new URL(
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+          location.href,
+        );
+        if (url.pathname === "/api/browser-session/bootstrap" && response.ok) {
+          const body = await response.clone().json();
+          (globalThis as typeof globalThis & { __riffCsrf?: string }).__riffCsrf =
+            typeof body.csrfToken === "string" ? body.csrfToken : undefined;
+        }
+        return response;
+      };
+    });
+    const events = await collectFrameEvents(page, stack.network!.broker.origin);
+    await openHost(page, stack);
+    await expect(page.locator("#visual-host")).toHaveAttribute("data-status", "loaded");
+    await expect.poll(() => events.some((event) => event.type === "ws-open")).toBe(true);
+    const redeemedFrameUrl = page.frames()
+      .find((candidate) => candidate !== page.mainFrame())?.url();
+    expect(redeemedFrameUrl).toMatch(/\/frame\/c\//u);
+    const unredeemedFrameUrl = await page.evaluate(async ({ projectId, runId }) => {
+      const csrf = (globalThis as typeof globalThis & { __riffCsrf?: string }).__riffCsrf;
+      if (!csrf) throw new Error("browser csrf was not captured");
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/visual-frame-session`,
+        {
+          method: "POST",
+          headers: { "x-riff-csrf": csrf },
+        },
+      );
+      if (!response.ok) throw new Error(`frame issue failed: ${response.status}`);
+      return (await response.json()).frameUrl as string;
+    }, { projectId: PROJECT_ID, runId: RUN_ID });
+    expect(unredeemedFrameUrl).toContain("/frame/redeem/");
+    const operation = { kind: "observe_accessibility" } as const;
+    const agentCapability = visualAuthority.mint({
+      conversationId: visualStore.scope.conversationId,
+      turnId: visualStore.scope.turnId,
+      externalSessionGeneration: visualStore.scope.externalSessionGeneration,
+      operation,
+      intentAuthority: "proposal_only",
+    });
+
+    const trashStatus = await page.evaluate(async ({ projectId, runId }) => {
+      const csrf = (globalThis as typeof globalThis & { __riffCsrf?: string }).__riffCsrf;
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/trash`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-riff-csrf": csrf ?? "",
+          },
+          body: JSON.stringify({
+            commandId: "command_browser_trash",
+            expectedLifecycleDigest: "a".repeat(64),
+            confirmation: {
+              action: "trash_run",
+              projectId,
+              runId,
+              terminalStatus: "succeeded",
+              terminalClosureDigest: "a".repeat(64),
+            },
+          }),
+        },
+      );
+      return response.status;
+    }, { projectId: PROJECT_ID, runId: RUN_ID });
+    expect(trashStatus).toBe(200);
+    expect(lifecycle).toBe("trashed");
+    await expect.poll(() => events.some((event) =>
+      event.type === "ws-close" && event.code === 1008)).toBe(true);
+    await expect.poll(() => events.some((event) =>
+      event.type === "ws-reconnect-denied")).toBe(true);
+    expect(() => visualAuthority.consume(agentCapability, operation))
+      .toThrow(VisualAgentAuthorityError);
+    expect(visualStore.facts.at(-1)?.outcomeCode).toBe("run_revoked");
+
+    const nonceReplay = await context.newPage();
+    await nonceReplay.goto(unredeemedFrameUrl);
+    await expect(nonceReplay.locator("body")).toContainText("visual_frame_nonce_invalid");
+    await page.locator("#visual-frame").evaluate(
+      (element: HTMLIFrameElement, url) => {
+        element.src = url;
+      },
+      redeemedFrameUrl!,
+    );
+    await expect(page.frameLocator("#visual-frame").locator("body"))
+      .toContainText("visual_frame_session_denied");
+
+    const restoreStatus = await page.evaluate(async ({ projectId, runId }) => {
+      const csrf = (globalThis as typeof globalThis & { __riffCsrf?: string }).__riffCsrf;
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/restore`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-riff-csrf": csrf ?? "",
+          },
+          body: JSON.stringify({
+            commandId: "command_browser_restore",
+            expectedLifecycleDigest: "a".repeat(64),
+          }),
+        },
+      );
+      return response.status;
+    }, { projectId: PROJECT_ID, runId: RUN_ID });
+    expect(restoreStatus).toBe(200);
+    expect(lifecycle).toBe("succeeded");
+    await nonceReplay.goto(unredeemedFrameUrl);
+    await expect(nonceReplay.locator("body")).toContainText("visual_frame_nonce_invalid");
+    await page.locator("#visual-frame").evaluate(
+      (element: HTMLIFrameElement, url) => {
+        element.src = url;
+      },
+      redeemedFrameUrl!,
+    );
+    await expect(page.frameLocator("#visual-frame").locator("body"))
+      .toContainText("visual_frame_session_denied");
+    const childConnections = stack.wsConnections;
+    const oldSocketResult = await page.frameLocator("#visual-frame").locator("body")
+      .evaluate(async () => {
+        const result = await new Promise<"opened" | "denied">((resolve) => {
+          const socket = new WebSocket(new URL("socket", location.href), ["riff.echo"]);
+          socket.onopen = () => {
+            socket.close();
+            resolve("opened");
+          };
+          socket.onerror = () => resolve("denied");
+          socket.onclose = () => resolve("denied");
+        });
+        return result;
+      });
+    expect(oldSocketResult).toBe("denied");
+    expect(stack.wsConnections).toBe(childConnections);
+    expect(events.some((event) => event.type === "ws-reconnect-open")).toBe(false);
+    expect(() => visualAuthority.consume(agentCapability, operation))
+      .toThrow(VisualAgentAuthorityError);
+    await nonceReplay.close();
+  } finally {
+    await stack.close();
+  }
+});
+
 test("Chromium rejects an unredeemed nonce after the attempt expiry", async ({ page }) => {
   const stack = await startStack({ expiresInMs: 1_500 });
   try {
@@ -278,7 +473,10 @@ type TestStack = {
   close(): Promise<void>;
 };
 
-const startStack = async (options: { expiresInMs?: number } = {}): Promise<TestStack> => {
+const startStack = async (options: {
+  expiresInMs?: number;
+  visualAuthority?: VisualAgentAuthority;
+} = {}): Promise<TestStack> => {
   const httpRequests: TestStack["httpRequests"] = [];
   const wsRequests: TestStack["wsRequests"] = [];
   const childServer = createServer((request, response) => {
@@ -353,6 +551,12 @@ const startStack = async (options: { expiresInMs?: number } = {}): Promise<TestS
     openCode: new BrowserFakeOpenCode(),
     workspaceRoot: workspace,
     browserFrameTargetResolver: resolver,
+    ...(options.visualAuthority
+      ? {
+          a2ProductRoot: join(workspace, "product"),
+          a3VisualAuthority: options.visualAuthority,
+        }
+      : {}),
   });
   const stack: TestStack = {
     app,
@@ -504,7 +708,61 @@ class BrowserFakeMesa implements MesaAdapter {
 
 class BrowserFakeOpenCode implements OpenCodeAdapter {
   async initialize(): Promise<OpenCodeReadiness> { return { status: "unconfigured", modelId: null }; }
+  async discoverProviderModels(): Promise<[]> { return []; }
+  async getSession(): Promise<boolean> { return false; }
   async createSession(): Promise<string> { throw new Error("unused"); }
+  async injectContext(): Promise<void> {}
+  async promptWithModel(): Promise<never> { throw new Error("unused"); }
   async prompt(_sessionId: string, _prompt: OpenCodePrompt): Promise<void> { throw new Error("unused"); }
   async abort(): Promise<void> {}
+}
+
+class BrowserVisualAuthorityStore implements VisualAgentAuthorityStore {
+  readonly scope: VisualAgentTurnScope = Object.freeze({
+    conversationId: "conversation_browser_revocation",
+    turnId: "turn_browser_revocation",
+    immutableUserMessageId: "message_browser_revocation",
+    externalSessionGeneration: 1,
+    projectId: PROJECT_ID,
+  });
+  readonly target: VisualAgentTarget = Object.freeze({
+    projectId: PROJECT_ID,
+    runId: RUN_ID,
+    attemptId: "attempt_browser_revocation",
+    attemptGeneration: 1,
+    dispatcherGeneration: "b".repeat(64),
+    attemptExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+    processAttemptId: "process_browser_revocation",
+    pid: 9_001,
+    processStartToken: "browser-revocation-process-token",
+    processGroupId: 9_001,
+    loopbackHost: "127.0.0.1",
+    loopbackPort: 45_678,
+    entryPath: "/",
+    healthPath: "/health",
+    healthyAt: new Date(Date.now() - 1_000).toISOString(),
+  });
+  readonly facts: VisualAgentAuditFactInput[] = [];
+
+  resolveVisualAgentTurnScope(input: {
+    conversationId: string;
+    turnId: string;
+    externalSessionGeneration: number;
+  }): VisualAgentTurnScope {
+    if (input.conversationId !== this.scope.conversationId
+      || input.turnId !== this.scope.turnId
+      || input.externalSessionGeneration !== this.scope.externalSessionGeneration) {
+      throw new Error("scope unavailable");
+    }
+    return this.scope;
+  }
+
+  currentHealthyVisualAgentTarget(projectId: string): VisualAgentTarget {
+    if (projectId !== PROJECT_ID) throw new Error("target unavailable");
+    return this.target;
+  }
+
+  recordVisualAgentAuditFact(input: VisualAgentAuditFactInput): void {
+    this.facts.push(input);
+  }
 }

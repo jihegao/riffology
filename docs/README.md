@@ -70,7 +70,7 @@ implementation authority.
 | --- | --- |
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
-| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, scoped Playwright, isolated browser broker/frame/WebSocket, generic output access, and diagnostic events are merged. Direct controls and ordinary wind import remain. |
+| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, and direct controls are merged. A3-2d4 cross-authority revocation is under review in Draft PR #46; ordinary wind import remains. |
 | **4 — shared product shell** | Pending Stage 3. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
@@ -84,9 +84,18 @@ boundary merged through PR #45 and Stage 3 remains in progress. The d3 merge gat
 552 backend total/551 passed/zero failed/one optional smoke skipped, web
 104/104, network entry 1/1, successful production build and docs check, with
 no P0/P1 finding in final independent security review.
+The A3-2d4 review candidate in Draft PR #46 adds one fault-injected production
+API/revocation-wiring backend matrix and one real Chromium flow. They prove
+that run trash revokes an unredeemed nonce, a redeemed frame, an open
+WebSocket, and Visual-Agent authority, while restore does not revive any old
+capability. Its focused gates pass 65/65 and 6/6.
+The full candidate gate is 553 backend total/552 passed/zero failed/one
+optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
+15/15, successful production build, and a 24-file docs check. Independent
+security review reports P0/P1=0.
 
 A3-3 diagnostic-event acceptance is unblocked by the published A3-2d2 generic
-event-ingestion boundary, but remains sequenced after d3/d4; legacy wind/Gate
+event-ingestion boundary, but remains sequenced after d4; legacy wind/Gate
 event routes are not substitute evidence.
 
 ## Active product and stage documents

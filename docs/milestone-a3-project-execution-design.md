@@ -94,6 +94,18 @@ The d3 merge gate reports 552 backend total with 551 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build and docs check succeed, and final
 independent security review reports no P0/P1 merge blocker.
+The A3-2d4 review candidate in Draft PR #46 adds no new runtime contract. Its
+fault-injected production API/revocation-wiring matrix proves that the pre-commit callback
+invalidates an unredeemed frame nonce, a redeemed frame route, an open
+WebSocket, and a minted Visual-Agent capability, and that restore cannot revive
+old authority. Durable Store mutation/receipt evidence remains the published
+A3-2d3 boundary. The focused backend combination passes 65/65 and the complete
+dedicated broker Chromium matrix passes 6/6. The full candidate gate is
+553 backend total/552 passed/zero failed/one optional OpenCode smoke skipped,
+web 104/104, network entry 1/1, full Chromium 15/15, successful production
+build, and a 24-file docs check. Independent security review reports P0/P1=0;
+cross-run over-revocation and joint issuance/trash race coverage remain
+non-blocking P2 follow-ups.
 The c3 merge gate reports 525 backend tests with 524 passed, zero
 failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build succeeds, and three independent reviews
@@ -102,9 +114,8 @@ The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
 succeeds.
-Ordinary wind import remains A3-3. None of the remaining target slices is
-current implementation evidence, so this document does not claim that Stage 3
-is complete.
+Ordinary wind import remains A3-3. The A3-2d4 candidate and the remaining
+target slices are not Stage 3 completion evidence.
 
 This document is subordinate to the
 [Riff MVP PRD](product-requirements.md), builds on the
@@ -1752,18 +1763,23 @@ Output indexes never resolve outside the owning Project/run object root.
    process/browser authority private. c3's one-use typed interaction was merged
    through PR #41. c4 live-CDP/real-Chromium security and docs closeout was
    merged through PR #42.
-14. **A3-2d generic outputs/events/direct controls — in progress:** d1's exact
+14. **A3-2d generic outputs/events/direct controls — merged through d3:**
+   d1's exact
    same-run output list/download with byte/digest revalidation was merged
    through PR #43. D2's bounded declared diagnostic-event ingestion,
    schema-v12 atomic publication, and opaque run/filter-bound cursors were
    merged through PR #44. Agent-independent cancel/download/trash/restore
    acceptance was merged through PR #45. Cancel is
-   already current and download was merged in d1; the later controls slice adds
-   trash/restore routes and proves the complete direct-control set without OpenCode. A3-3
-   cannot declare wind diagnostic events until this slice is published.
-15. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
+   already current and download was merged in d1; d3 adds trash/restore routes
+   and proves the complete direct-control set without OpenCode.
+15. **A3-2d4 cross-authority revocation — Draft PR #46 review candidate:** one
+   fault-injected production API/revocation-wiring flow revokes an unredeemed
+   nonce, redeemed frame, open WebSocket, and Visual-Agent capability; restore
+   cannot revive them. Focused backend passes 65/65 and dedicated broker
+   Chromium passes 6/6.
+16. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-16. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
+17. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
    verification and narrow browser evidence, then PR merge, Issue #14 closure,
    and local `main` synchronization.
 
@@ -1808,9 +1824,9 @@ backend gate reports 385 tests with 384 passed, zero failed, and one
 optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; web is 104/104 and the production build succeeds. Visual
 completion remains HTTP `422`
-`visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser is
-published, while A3-2c Playwright, A3-2d generic result access/direct controls,
-and A3-3 wind import remain pending.
+`visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser,
+A3-2c Playwright, and A3-2d1 through A3-2d3 are published. A3-2d4 is under
+review, while A3-3 wind import remains pending.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:

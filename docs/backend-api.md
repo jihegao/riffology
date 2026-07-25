@@ -216,7 +216,7 @@ and exact `application/json` request framing. Browser-side bearer
 direct controls. This is a browser-app admission boundary, not a multi-user
 principal claim.
 
-The two new candidate request shapes are exact:
+The two request shapes are exact:
 
 ```ts
 type TrashProjectRunRequest = {
@@ -252,6 +252,16 @@ Visual-Agent/Playwright authority for the run. Restore restores durable
 visibility only: it never revives an old frame/WebSocket capability, cursor,
 confirmation, or download authority. These direct controls do not call or
 depend on OpenCode.
+
+The A3-2d4 review candidate adds no route or runtime behavior. Its
+fault-injected route-level matrix uses the production `.../trash` and
+`.../restore` API/revocation wiring to prove that the pre-commit callback
+invalidates both an unredeemed frame nonce and an already redeemed frame route,
+closes an open broker WebSocket with policy code `1008`, and terminally revokes
+a minted Visual-Agent capability. Restore makes the stubbed lifecycle visible
+again but none of those old capabilities becomes usable. The durable
+`AgentWorkspaceService -> ProductStoreV2` transaction and receipt chain remains
+the separately published A3-2d3 evidence; A3-2d4 does not claim to re-prove it.
 
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
@@ -328,10 +338,11 @@ missing/trashed bindings record permanent `conversation_unavailable`. The card
 contains only `runId`, terminal `status`, `sampleCount`, `outputCount`, and
 `outputIds`. Startup reconciles older terminal `pending` rows and fails closed
 if a final disposition, receipt, message, or card digest disagrees.
-Visual dispatch/admission now uses the existing Project-run resource. Output
-downloads, events, browser broker/frame routes, wind migration, and final shell
-routes remain later #14/#15 work. The legacy Gate API below still coexists until
-separately reviewed retirement.
+Visual dispatch/admission now uses the existing Project-run resource. Generic
+output downloads, diagnostic events, browser broker/frame routes, and direct
+controls are published; ordinary wind migration and the final shell remain
+later #14/#15 work. The legacy Gate API below still coexists until separately
+reviewed retirement.
 
 ### A3-2 visual API/runtime gates
 

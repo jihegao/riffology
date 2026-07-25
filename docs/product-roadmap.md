@@ -34,9 +34,9 @@
 > batch completion cards with startup reconciliation. A3-2a1 first froze
 > schema-v8 Store/recovery evidence while public visual starts still rejected;
 > A3-2a2 real visual lifecycle and the A3-2b isolated broker/frame/WebSocket
-> boundary are now published. A3-2c scoped Playwright is in progress: c1
-> authority/audit, c2 bounded read observation, c3 typed interaction, and c4
-> security closeout are merged.
+> boundary are now published. A3-2c scoped Playwright and A3-2d1 through
+> A3-2d3 generic output/event/direct-control work are merged; A3-2d4
+> cross-authority revocation is the current review candidate.
 > A3-2a1 remains schema/Store/recovery plus
 > negative admission only, hardening the existing v4 port/health shape and
 > rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
@@ -48,10 +48,9 @@
 > same-site and SOP isolates DOM origins, while the untrusted child remains on
 > IPv4 `127.0.0.1` and receives no platform cookie. One-use capability,
 > ≤60-second nonce, generation, Origin, Host, registry, and exact-app
-> `frame-ancestors` checks remain authority. A3-2d still owns generic output
-> download, bounded domain-event ingestion, and Agent-independent direct
-> controls; A3-3 remains the ordinary wind import and its diagnostic-event
-> acceptance begins only after A3-2d. This is not completion evidence
+> `frame-ancestors` checks remain authority. A3-2d4 now supplies the combined
+> trash-route nonce/frame/WebSocket/Visual-Agent revocation evidence; A3-3
+> remains the ordinary wind import. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation

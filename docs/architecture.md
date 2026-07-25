@@ -101,9 +101,12 @@ agreement and fails closed on drift. Agent turns cannot own platform cards;
 bounded Agent context serializes only their five allowlisted fields.
 A3-2a2 visual supervision and A3-2b scoped browser access are published.
 A3-2c and A3-2d1 through A3-2d3 are published; A3-2d3 direct controls were
-merged through PR #45. A3-2d4 and A3-3 ordinary wind import remain later
-Stage 3 slices. Wind diagnostic-event acceptance is now unblocked by the
-published A3-2d2 boundary.
+merged through PR #45. The A3-2d4 review candidate fault-injects the lifecycle
+service while exercising the production trash-route revocation wiring across
+pending frame nonces, redeemed frame routes, open WebSockets, and Visual-Agent
+capabilities; restore does not revive old authority. A3-3 ordinary wind import
+remains the later Stage 3 implementation slice. Wind diagnostic-event
+acceptance is now unblocked by the published A3-2d2 boundary.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

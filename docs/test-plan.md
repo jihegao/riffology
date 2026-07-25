@@ -616,9 +616,21 @@ The remaining claims begin only in the later gates:
   PR #45 merge gate is 552 backend total/551 passed/zero failed/one optional
   OpenCode smoke skipped, web 104/104, network entry 1/1, successful build,
   and 24-file docs check. Final independent security review reports no P0/P1.
-  A combined route-level frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent
-  revocation matrix remains a d4 evidence task rather than a d3 implementation
-  claim.
+  The A3-2d4 review candidate in Draft PR #46 now covers the combined route-level
+  frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent revocation matrix.
+  A focused Node route test and a real Chromium flow fault-inject the lifecycle
+  service while calling the production trash/restore API and revocation wiring.
+  They prove trash invalidates a still-unredeemed nonce, denies the redeemed
+  route, closes the open socket with code `1008`, records `run_revoked` for the
+  Visual-Agent capability, and that restore revives none of the old authority.
+  Durable Store mutation/receipt evidence remains owned by the published d3
+  tests. The focused backend combination passes 65/65 and the complete
+  dedicated broker Chromium matrix passes 6/6. The full candidate gate is
+  553 backend total/552 passed/zero failed/one optional OpenCode smoke skipped,
+  web 104/104, network entry 1/1, full Chromium 15/15, successful production
+  build, and a 24-file docs check. Independent security review reports
+  P0/P1=0; cross-run over-revocation and joint issuance/trash race coverage
+  remain non-blocking P2 follow-ups.
   The legacy `/events` route remains separate from generic
   `/diagnostic-events` and is excluded from this evidence.
 
