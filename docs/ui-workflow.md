@@ -40,6 +40,34 @@ downloads output, and verifies recovery after backend restart. The
 Models/Projects home, shared two-pane shell, responsive layout,
 multi-conversation story, and polished dynamic right pane remain #15.
 
+## A4-0 target shared shell (design only)
+
+The target UI contract is defined by
+[`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
+A4-0 changes no rendered page. A4-2 will replace the Legacy/Evidence product
+entry with one router: Home at `/`, and the same two-pane shell at
+`/models/:modelId` or `/projects/:projectId`. A subordinate
+`?conversation=` selection changes the persistent left pane without remounting
+or discarding the right-pane owner workspace.
+
+Home has separate Models and Projects collections plus New Model and New
+Project. The right pane selects only server-declared, bounded Markdown, code,
+table, JSON, chart/diagram, or restricted Model-page renderers. At narrow width
+and 200% zoom, a labelled pane selector retains the same owner state. Desktop,
+narrow, keyboard, focus, landmark, status-announcement, and accessible fallback
+evidence remains pending until its owning A4 slices merge.
+
+Untrusted content is rendered from data ASTs into fixed elements with raw HTML
+disabled. Active/remote URLs and inline HTML/SVG are rejected, active
+attachments are download-only, external HTTPS links are visibly marked with
+`noopener noreferrer`, and the app uses the exact CSP and no-store policy in
+the A4 design. Stored-XSS, unsafe-URL, remote-load, CSP, cache-rotation, and
+back/forward-cache negatives are required A4-4/A4-6 browser evidence.
+Renderer limits are fixed by the A4 design for total bytes, Markdown AST,
+code lines, table cells, JSON nodes/depth, and chart/diagram complexity.
+Oversized content yields a stable bounded fallback or safe source download,
+never silent truncation or an unresponsive DOM.
+
 ---
 
 # Legacy wind-turbine alignment workbench target

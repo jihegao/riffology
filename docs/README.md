@@ -57,7 +57,7 @@ implementation claim.
 | What was accepted in Stage 3? | [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md) | Issue #14 and merged Stage 3 PRs |
 | What HTTP/API behavior is exposed? | Merged server/Store code and [`backend-api.md`](backend-api.md) | API and Store tests |
 | How do Agent/OpenCode sessions work? | [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md) and [`opencode-bridge.md`](opencode-bridge.md) | Agent/API tests |
-| What runtime/security boundary is intended? | PRD plus merged implementation and active Stage 3 design | [`architecture.md`](architecture.md) and [`adr/`](adr/README.md) |
+| What runtime/security boundary is intended? | PRD plus merged implementation, implemented Stage 3 design, and the A4-0 target design | [`architecture.md`](architecture.md) and [`adr/`](adr/README.md) |
 | What evidence passed? | [`test-plan.md`](test-plan.md) for its named revision | Test output and PR checks |
 | How should Gate/legacy documents be read? | Their historical labels | PRD for every current product decision |
 
@@ -71,7 +71,7 @@ implementation authority.
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
 | **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
-| **4 — shared product shell** | Ready after Issue #14 merge/closure synchronization. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
+| **4 — shared product shell** | A4-0 documentation-only design gate established; A4-1 through A4-6 remain pending. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -111,6 +111,13 @@ an indexed output, restarts the backend on the same ports, bootstraps fresh
 process-local browser authority, and verifies durable Project/Run/event/output
 reads with zero console errors. It is not the Stage 4 shared shell.
 
+A4-0 is the documentation-only design gate. The design in
+[`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md)
+defines the Stage 4 traceability, target Home/API/shell/renderer contracts,
+resource deletion safety, browser admission, recovery, and precise retirement
+boundary. A4-1 through A4-6 are not implemented, and no Issue #15 acceptance
+item is complete.
+
 ## Active product and stage documents
 
 - [`product-requirements.md`](product-requirements.md): the Chinese single MVP
@@ -123,7 +130,10 @@ reads with zero console errors. It is not the Stage 4 shared shell.
   implemented Stage 2 Conversations, OpenCode, scoped tools/skills, documents,
   generic Model workspace, and technical-check design.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
-  active Stage 3 execution design and implementation ledger.
+  implemented Stage 3 execution design and implementation ledger.
+- [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md):
+  A4-0 documentation-only design gate for the final shared product shell;
+  target contracts and traceability, not runtime implementation.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.

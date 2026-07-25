@@ -65,6 +65,22 @@ uses the ordinary Product API/session contracts and deliberately does not
 contact or mock an Agent. That integration is not evidence for the full
 OpenCode/shared-shell story, which belongs to #15.
 
+## A4-0 Conversation projection target (design only)
+
+The
+[`Stage 4 shared-shell design`](milestone-a4-shared-product-shell-design.md)
+keeps this server-side Conversation/OpenCode authority unchanged while defining
+its complete browser projection. A4-3 will expose named Conversation lifecycle,
+messages, attachments, temporary document cards, and action records; a selected
+provider/model locks after the first accepted user message. The UI maps actual
+session state to `live`, `connecting`, `lost`, or `read_only` and never receives
+credentials, OpenCode session IDs, absolute paths, or raw tool payloads.
+
+When OpenCode is unavailable, saved resources and direct lifecycle/Run controls
+remain usable but no assistant reply is fabricated. This is an A4-0 target, not
+current shared-shell behavior; A4-3 implementation and real-provider browser
+acceptance remain pending.
+
 ---
 
 # Legacy OpenCode bridge target contract
