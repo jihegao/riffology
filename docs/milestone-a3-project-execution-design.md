@@ -85,9 +85,10 @@ succeeds. A3-2b4 was merged and published through PR #37; its dedicated
 real-browser matrix passes 5/5. A3-2c1's authority/audit and legacy-CDP-
 isolation foundation was merged through PR #38. A3-2c2 adds bounded,
 Project-only read observation while exposing no interaction or caller-selected
-browser target. A3-2c3's one-use typed interaction is published in PR #41 and
-remains pending merge; A3-2c4 and A3-2d remain pending.
-The current c3 candidate gate reports 525 backend tests with 524 passed, zero
+browser target. A3-2c3's one-use typed interaction was merged through PR #41.
+A3-2c4's live-CDP/real-Chromium security closeout is a candidate on its review
+branch and remains pending review and merge; A3-2d remains pending.
+The c3 merge gate reports 525 backend tests with 524 passed, zero
 failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build succeeds, and three independent reviews
 have no P0/P1 merge blocker.
@@ -1333,9 +1334,9 @@ SHA-256 commitments only. It does not retain capability/browser secrets,
 locator role/name-or-label, typed value, observation summary/content, DOM, or
 screenshot bytes. There is no Playwright runner/transport and no OpenCode
 observe/interact tool in A3-2c1 alone. A3-2c2 adds the read-only runner and
-`riff_observe_current_visual`; A3-2c3's one-use typed interaction is published
-in PR #41 and remains pending merge. Live-CDP isolation evidence remains an
-A3-2c4 browser gate.
+`riff_observe_current_visual`; A3-2c3's one-use typed interaction was merged
+through PR #41. A3-2c4's review-branch matrix now supplies candidate live-CDP
+isolation evidence; final status still requires independent review and merge.
 
 The c2 runner resolves the sole healthy target internally and carries the full
 process identity only across private backend boundaries. Before each exact root
@@ -1421,7 +1422,9 @@ neither proxies child HTTP writes nor proves a domain outcome. Navigation,
 popup, upload/download, clipboard, permission/credential prompt, Service
 Worker, WebSocket, and unlisted network traffic are denied. A3-2c4 retains the
 real-Chromium/live-CDP negative matrix, secret scans, independent review, and
-final documentation/security closure.
+final documentation/security closure. Its current review-branch matrix passes
+6/6 through the published BackendApp turn chain and scans public/MCP/audit/
+persistence/error/child evidence; it remains a candidate until review and merge.
 
 ## Project Agent permission matrix
 
@@ -1688,9 +1691,9 @@ Output indexes never resolve outside the owning Project/run object root.
 13. **A3-2c Playwright authority — in progress:** c1's backend-private
    scope/capability/audit/revocation and legacy-CDP isolation was merged through
    PR #38. c2 adds the bounded Project-only read-observation tool and keeps
-   process/browser authority private. c3's one-use typed interaction is
-   published in PR #41 and remains pending merge; c4 live-CDP/complete Chromium
-   security and docs closeout remains pending.
+   process/browser authority private. c3's one-use typed interaction was merged
+   through PR #41. c4 live-CDP/real-Chromium security and docs closeout is a
+   review-branch candidate and remains pending review and merge.
 14. **A3-2d generic outputs/events/direct controls — pending:** exact same-run
    output list/download with byte/digest revalidation, bounded declared
    diagnostic-event ingestion with opaque run/filter-bound cursors, and

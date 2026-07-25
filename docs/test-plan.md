@@ -527,8 +527,9 @@ The remaining claims begin only in the later gates:
   selection change, attempt replacement/terminalization, action-kind/locator/
   input-or-selection-value substitution, atomic consume-before-side-effect,
   failure consumption, concurrent double-use, retry, timeout, browser crash,
-  and structural inability to attach the legacy CDP profile. A3-2c4 must prove
-  the live-CDP negative. c3 uses a fresh profile and private exact-peer
+  and structural inability to attach the legacy CDP profile. A3-2c4's
+  review-branch matrix now proves the live-CDP negative through the published
+  BackendApp turn chain. c3 uses a fresh profile and private exact-peer
   GET/HEAD bridge, which must reject peer replacement and must not carry b2
   frame/cookie/nonce/WebSocket state. Its receipt proves only a bounded
   untrusted local action dispatch, never child HTTP write or domain success.
@@ -554,14 +555,18 @@ The remaining claims begin only in the later gates:
   header/body/deadline limits, global/per-conversation concurrency, in-flight
   lifecycle abort, untrusted non-instruction context, no-network
   script-disabled snapshots, and Project-only MCP schema. Typed interaction
-  is the A3-2c3 candidate published in PR #41, including schema-v11 durable
+  is the A3-2c3 implementation merged through PR #41, including schema-v11 durable
   one-confirmation/one-mint enforcement and a single absolute bridge deadline.
-  The current c3 candidate gate reports 525 backend tests with 524 passed,
+  The c3 merge gate reports 525 backend tests with 524 passed,
   zero failed, and one optional installed-OpenCode smoke skipped; web passes
   104/104, network entry 1/1, and the production build succeeds. Three
-  independent c3 reviews report no P0/P1 merge blocker;
-  the live-CDP/complete real-Chromium negative matrix and final
-  security closeout remain A3-2c4.
+  independent c3 reviews report no P0/P1 merge blocker.
+  The c4 candidate matrix passes 6/6 in real Chromium. It covers the actual
+  BackendApp/MCP/runtime/authority/interactor chain with a live-CDP endpoint,
+  fresh-profile and ambient frame-secret canaries, side-effect denials, exact
+  empty-input dispatch, real persistence-byte and bounded audit/MCP/error/child
+  scans, and legacy-tool zero-dispatch. The c4 security closeout remains
+  pending independent review and merge.
   The merged c1 gate reports backend 500 total/499 passed/zero
   failed/one optional installed-OpenCode smoke skipped, web 104/104, network
   entry 1/1, a successful production build, and independent security review

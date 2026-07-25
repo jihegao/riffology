@@ -614,7 +614,7 @@ are emitted as bounded MCP image content. Root HTML is rendered with scripts
 disabled and all subsequent HTTP/WebSocket traffic denied. No observation
 content or bytes enter the append-only audit.
 
-### A3-2c3 typed-interaction candidate (PR #41, pending merge)
+### A3-2c3 typed interaction (merged through PR #41)
 
 This branch implements an internal MCP candidate, not a browser or public HTTP
 route.
@@ -639,9 +639,25 @@ one-use capability before the side effect, and returns a bounded, explicitly
 untrusted dispatched receipt. It does not proxy child HTTP writes or establish
 domain success. Navigation, popups, uploads/downloads, clipboard, permission
 or credential prompts, Service Workers, WebSockets, and unlisted network
-traffic fail closed. A3-2c4, not c3, owns real-Chromium/live-CDP negatives,
-the complete browser matrix, secret scans, independent review, and final
-security documentation closure.
+traffic fail closed.
+
+### A3-2c4 browser/security closeout candidate (pending review and merge)
+
+The c4 review branch starts a real live-CDP Chromium alongside the published
+`BackendApp -> AgentTurnRuntime -> VisualAgentAuthority -> VisualAgentInteractor`
+turn chain. The scoped interaction reaches only its fresh browser and private
+child bridge: the configured CDP proxy receives zero post-reset connections,
+the legacy page and its cookie/storage/frame canaries remain unchanged, and
+`drive_workbench_ui` stays absent and undispatchable. Separate real-Chromium
+cases cover POST, popup, navigation, dialog, WebSocket, Service Worker, form,
+upload, download, clipboard, permission, credential challenge, response
+`Set-Cookie`, and non-empty MCP input. The current candidate matrix passes 6/6.
+
+Its canary scan covers the public turn DTO, real MCP list/results/errors,
+authority audit-fact boundary, real SQLite/WAL/SHM bytes, child requests, and
+explicit Error fields. It excludes model-authored child response bytes from
+the persistence claim: those bytes are untrusted input, not a secret boundary.
+Final c4 status still requires independent review and PR merge.
 
 A3-2d follows the existing committed output index but adds the missing generic
 public surface: same-run list/download with path/size/digest revalidation,

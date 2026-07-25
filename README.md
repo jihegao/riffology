@@ -77,8 +77,9 @@ bounded structured, accessibility, DOM-text, or screenshot observation. The
 runner uses a fresh backend-owned Chromium profile, exact process/listener/peer
 identity, streaming exact-path reads, a script-disabled no-network snapshot,
 and in-flight lifecycle revocation. It exposes no interaction, URL, selector,
-script, cookie, nonce, port, capability, or legacy-CDP control. A3-2c3 and
-A3-2c4 remain pending. The current A3-2c2 gate reports 511 backend tests with
+script, cookie, nonce, port, capability, or legacy-CDP control. A3-2c3 was
+merged through PR #41. A3-2c4's live-CDP/real-Chromium security closeout is a
+candidate on its review branch; A3-2d remains pending. The A3-2c2 gate reported 511 backend tests with
 510 passed, zero failed, and one optional installed-OpenCode smoke skipped; web
 passes 104/104,
 the network-entry integration passes 1/1, the production build succeeds, and
@@ -259,7 +260,7 @@ through PR #37: the dedicated Chromium browser security
 matrix passes 5/5 and the complete Chromium suite passes 8/8. The current
 backend gate reports 466 total with 465 passed, zero failed, and one optional
 installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
-the production build succeeds. A3-2c3/c4, A3-2d, and A3-3 remain pending.
+the production build succeeds. A3-2c4, A3-2d, and A3-3 remain pending.
 
 Focused Milestone A2 verification:
 

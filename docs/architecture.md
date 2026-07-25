@@ -149,12 +149,13 @@ declared structured-path GET is preceded by listener inspection, connected-peer
 inspection reuses that same socket, and the response is streamed under fixed
 header/body/deadline limits. DOM, accessibility, and screenshot reads render a
 fresh, script-disabled snapshot with all later HTTP and WebSocket traffic
-blocked. Conversation/session/run/turn drift aborts in-flight work. Interaction
-and the live-CDP/complete Chromium negative matrix remain A3-2c3/A3-2c4.
+blocked. Conversation/session/run/turn drift aborts in-flight work. A3-2c3
+interaction was merged through PR #41. A3-2c4's real live-CDP/Chromium negative
+matrix is a review-branch candidate and remains pending review and merge.
 
 The two browser arms are deliberately disjoint. A human browser reaches a
 visual page only through the A3-2b app/broker/frame/WebSocket capability. The
-c3 candidate Agent arm starts from a durable structured
+c3 Agent arm starts from a durable structured
 `visualInteractionConfirmation`, creates a fresh backend-only browser profile,
 and reaches the child only through a private exact-listener/connected-peer
 GET/HEAD bridge. It never receives or reuses the frame URL, app/broker cookie,
