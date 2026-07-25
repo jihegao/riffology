@@ -15,7 +15,7 @@
 > technical checker, and the narrow provider/Model/conversation/turn/check API
 > are implemented. Final acceptance completed the real-provider same-session
 > two-turn browser rerun with OpenCode `1.18.4`. Legacy Gate and queue code still
-> coexist. Stage 3 / #14 is in progress through
+> coexist. Stage 3 / #14 is implemented and accepted through
 > [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md).
 > The first foundation slice landed the fixed-copy Project/workspace. A3-1a
 > adds execution contract v4, canonical deterministic sample planning, experiment
@@ -49,11 +49,14 @@
 > IPv4 `127.0.0.1` and receives no platform cookie. One-use capability,
 > ≤60-second nonce, generation, Origin, Host, registry, and exact-app
 > `frame-ancestors` checks remain authority. A3-2d4 supplies the combined
-> trash-route nonce/frame/WebSocket/Visual-Agent revocation evidence. A3-3 is
-> implemented on the current review branch as an immutable 14-file manifest,
+> trash-route nonce/frame/WebSocket/Visual-Agent revocation evidence. A3-3,
+> merged through PR #47, is an immutable 14-file manifest,
 > ordinary Model technical check, fixed-copy Project, and baseline Experiment,
-> with no wind-specific route or DTO. This is not completion evidence
-> for Stage 3. #15 owns the final shared shell and browser acceptance.
+> with no wind-specific route or DTO. Final Integration uses real Chromium and
+> the existing Product/browser-session contracts to create a Project, edit an
+> Experiment, complete a batch, page events, download output, and verify
+> restart recovery. #15 still owns the final shared shell and complete MVP
+> browser acceptance.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

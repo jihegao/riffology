@@ -104,8 +104,8 @@ A3-2c and A3-2d1 through A3-2d3 are published; A3-2d3 direct controls were
 merged through PR #45. A3-2d4 was merged through PR #46 and fault-injects the lifecycle
 service while exercising the production trash-route revocation wiring across
 pending frame nonces, redeemed frame routes, open WebSockets, and Visual-Agent
-capabilities; restore does not revive old authority. A3-3 ordinary wind import
-is implemented on the current review branch without a wind-specific route,
+capabilities; restore does not revive old authority. A3-3 ordinary wind import,
+merged through PR #47, uses no wind-specific route,
 DTO, or runtime branch. Startup verifies a versioned 14-file manifest, creates
 one ordinary Model, runs the ordinary technical checker, then creates one
 fixed-copy Project and one single-seed Experiment before dispatcher activation.
@@ -113,7 +113,11 @@ Schema v13 makes the manifest installation durable and immutable and raises the
 generic diagnostic ceiling to 50,000 events / 64,000,000 bytes (64 MB). The fixed seed-2 baseline
 publishes 1,096 daily KPI rows and 38,730 events through the generic A3-2d
 output/event contracts and survives backend restart. This is implementation
-evidence for A3-3, not final Stage 3 browser acceptance.
+evidence for A3-3. Final Integration exercises the same ordinary contracts from
+one isolated Chromium context: create fixed-copy Project, create/edit
+Experiment, complete batch, page events, download output, same-port backend
+restart, fresh browser authority, and durable reads. It adds no Product DOM
+renderer and does not implement the Stage 4 shared shell.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

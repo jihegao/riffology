@@ -5,8 +5,12 @@
 Gate 1 implements this contract through the direct, backend-only Mesa `/v1`
 surface. The reviewed wind bundle, deterministic model, worker, event paging,
 artifact verification, and baseline runner exist in `mesa_service`. The current
-backend and browser are not yet wind-integrated; their singular legacy queue
-path remains reachable until Gate 4 removes it after the later cutover.
+Product backend installs the reviewed mechanism as an ordinary Model,
+fixed-copy Project, and Experiment and runs it through the generic batch,
+output, and diagnostic-event contracts. Final Stage 3 Integration drives that
+ordinary path from real Chromium and verifies indexed download and restart
+recovery. This is not the Stage 4 shared shell; the singular legacy queue path
+remains reachable until the later audited cutover.
 
 The internal FastAPI service is called only by the Riff backend. It owns the
 reviewed `wind-turbine-maintenance` model bundle and immutable run directories.

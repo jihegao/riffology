@@ -340,9 +340,16 @@ contains only `runId`, terminal `status`, `sampleCount`, `outputCount`, and
 if a final disposition, receipt, message, or card digest disagrees.
 Visual dispatch/admission now uses the existing Project-run resource. Generic
 output downloads, diagnostic events, browser broker/frame routes, and direct
-controls are published; ordinary wind migration and the final shell remain
-later #14/#15 work. The legacy Gate API below still coexists until separately
-reviewed retirement.
+controls are published; A3-3 ordinary wind installation is merged through
+PR #47. Final Stage 3 Integration adds no route: an isolated real Chromium
+context drives the existing Product create/config/run contracts and, separately,
+the browser-session-guarded output/download/event-cursor reads across a
+same-port backend restart. The final shared
+shell remains #15 work. This is not evidence that every Product mutation
+already enforces browser admission: current output/event/download reads and
+direct run controls are session guarded, while uniform Host/Origin/Fetch/CSRF
+admission for all Stage 4 browser APIs remains A4-1. The legacy Gate API below still coexists until
+separately reviewed retirement.
 
 ### A3-2 visual API/runtime gates
 

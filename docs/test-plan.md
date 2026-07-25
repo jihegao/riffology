@@ -642,7 +642,7 @@ seed-2 baseline is byte-identical across two runs, produces 1,096 daily KPI
 rows and 38,730 bounded diagnostic events, and remains readable after backend
 restart. Schema-v13 tests cover migration, rollback, and immutable installation
 authority. Same-ID/different-manifest conflicts fail closed. These are A3-3
-backend acceptance facts, not final browser evidence or a scientific
+backend acceptance facts, not by themselves final browser evidence or a scientific
 calibration/equivalence claim.
 The final A3-3 gate is backend 570 total/569 passed/zero failed/one optional
 OpenCode smoke skipped, web 104/104, network entry 1/1, Chromium 15/15,
@@ -650,9 +650,22 @@ reviewed wind 38/38, a successful production build, and a 25-file docs check.
 Independent review reports P0/P1=0.
 
 Mocks cover fault branches only. A3-1b batch acceptance uses a real generic
-subprocess. Visual acceptance still requires a real local visual process, and
-final Stage 3 acceptance still requires the narrow browser Project/run flow.
-The current green backend evidence does not complete Stage 3.
+subprocess and visual acceptance uses a real local visual process. Final
+Stage 3 Integration adds `web/e2e/a3-product-integration.spec.ts` behind the
+isolated `playwright.a3-product.config.ts`; `cd web && npm run test:e2e:a3`
+passes 1/1 in real Chromium.
+In one browser context it creates a fixed-copy Project, creates an Experiment,
+edits its actual parameters to 3 turbines, 1 crew, a four-day horizon and no
+warm-up, then completes that exact ordinary wind batch and verifies two path-free indexed
+outputs, reads two opaque-cursor event pages, verifies attachment headers and
+digest through the guarded same-origin fetch, saves those bytes through a
+browser download, then restarts the backend on the same app/broker ports. It bootstraps new
+process-local browser authority after restart and proves durable Project,
+Experiment, Run, event, and output reads with zero console errors. This closes
+the narrow Stage 3 browser gate, not the Stage 4 shared-shell or full MVP E2E.
+It does not claim uniform browser admission for create/edit/start; A4-1 owns
+that Host/Origin/Fetch/CSRF contract. Existing focused browser-capability tests
+remain the negative evidence for the guarded reads and direct controls.
 
 ---
 

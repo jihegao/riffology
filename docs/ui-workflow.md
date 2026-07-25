@@ -33,9 +33,12 @@ The legacy queue/wind UI still coexists and remains runnable history. Stage 2
 does not delete it or treat its fixed tabs as the generic workspace. A3-3
 installs wind as an ordinary Model, fixed-copy Project, and Experiment and
 exercises the generic backend run/output/event contracts; it adds no wind tab,
-route, or browser DTO. The final narrow Stage 3 browser integration remains
-#14. The Models/Projects home, shared two-pane shell, responsive layout, and
-polished dynamic right pane are #15.
+route, or browser DTO. Final Stage 3 Integration is an isolated API/session
+acceptance flow rather than a Product DOM: real Chromium creates a fixed-copy
+Project, creates and edits an Experiment, completes a batch, pages events,
+downloads output, and verifies recovery after backend restart. The
+Models/Projects home, shared two-pane shell, responsive layout,
+multi-conversation story, and polished dynamic right pane remain #15.
 
 ---
 

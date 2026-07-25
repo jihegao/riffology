@@ -54,7 +54,7 @@ implementation claim.
 | --- | --- | --- |
 | What is the approved MVP? | [`product-requirements.md`](product-requirements.md) | Repository [`README`](../README.md) |
 | What is actually implemented? | Merged code and tests | Repository README and revision-scoped PR evidence |
-| What remains in Stage 3? | [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md) | Issue #14 and merged Stage 3 PRs |
+| What was accepted in Stage 3? | [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md) | Issue #14 and merged Stage 3 PRs |
 | What HTTP/API behavior is exposed? | Merged server/Store code and [`backend-api.md`](backend-api.md) | API and Store tests |
 | How do Agent/OpenCode sessions work? | [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md) and [`opencode-bridge.md`](opencode-bridge.md) | Agent/API tests |
 | What runtime/security boundary is intended? | PRD plus merged implementation and active Stage 3 design | [`architecture.md`](architecture.md) and [`adr/`](adr/README.md) |
@@ -70,8 +70,8 @@ implementation authority.
 | --- | --- |
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
-| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, and A3-2d4 revocation are merged. A3-3 ordinary wind import is implemented on the current review branch; final Stage 3 integration remains. |
-| **4 — shared product shell** | Pending Stage 3. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
+| **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
+| **4 — shared product shell** | Ready after Issue #14 merge/closure synchronization. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -80,7 +80,7 @@ one-use typed interaction was merged through PR #41 and A3-2c4's live-CDP and
 real-Chromium security closeout through PR #42. A3-2d1 output list/download was
 merged through PR #43. A3-2d2 diagnostic event ingestion and opaque cursor
 reads were merged through PR #44; A3-2d3 direct controls are the active
-boundary merged through PR #45 and Stage 3 remains in progress. The d3 merge gate is
+boundary merged through PR #45. The d3 merge gate is
 552 backend total/551 passed/zero failed/one optional smoke skipped, web
 104/104, network entry 1/1, successful production build and docs check, with
 no P0/P1 finding in final independent security review.
@@ -94,7 +94,7 @@ optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
 15/15, successful production build, and a 24-file docs check. Independent
 security review reports P0/P1=0.
 
-A3-3 uses the published generic A3-2d2 event boundary. Schema v13 records the
+A3-3, merged through PR #47, uses the published generic A3-2d2 event boundary. Schema v13 records the
 immutable manifest installation; the reviewed source bytes enter ProductStoreV2
 as an ordinary executable Model, fixed-copy Project, and named synthetic
 single-seed Experiment. A real generic run produces 1,096 daily rows, 38,730
@@ -104,6 +104,12 @@ The final A3-3 review gate is backend 570 total/569 passed/zero failed/one
 optional OpenCode smoke skipped, web 104/104, network entry 1/1, Chromium
 15/15, reviewed wind 38/38, a successful production build, and a 25-file docs
 check. Independent review reports P0/P1=0.
+Final Stage 3 Integration adds one isolated real-Chromium Product flow. It
+creates a fixed-copy Project from the ordinary wind Model, creates and edits an
+Experiment, completes a real batch, pages generic diagnostic events, downloads
+an indexed output, restarts the backend on the same ports, bootstraps fresh
+process-local browser authority, and verifies durable Project/Run/event/output
+reads with zero console errors. It is not the Stage 4 shared shell.
 
 ## Active product and stage documents
 

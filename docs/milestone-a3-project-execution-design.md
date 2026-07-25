@@ -114,7 +114,7 @@ The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
 succeeds.
-A3-3 ordinary wind import is implemented on the current review branch. It uses
+A3-3 ordinary wind import was merged through PR #47. It uses
 one immutable schema-v13 installation manifest, an ordinary technical check,
 one fixed-copy Project, and one single-seed baseline Experiment; it adds no
 wind-specific route, DTO, or dispatcher branch. The 14-file manifest pins
@@ -1798,18 +1798,27 @@ Output indexes never resolve outside the owning Project/run object root.
    nonce, redeemed frame, open WebSocket, and Visual-Agent capability; restore
    cannot revive them. Focused backend passes 65/65 and dedicated broker
    Chromium passes 6/6.
-16. **A3-3 wind import — implemented on the current review branch:** schema-v13
+16. **A3-3 wind import — merged through PR #47:** schema-v13
    immutable versioned manifest, ordinary technical check, fixed-copy example
    Project and single-seed Experiment, exact deterministic baseline evidence,
    and explicit non-claim labels. The installation uses ordinary platform
    contracts and has no wind-specific route, DTO, or dispatcher branch.
-17. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
-   verification and narrow browser evidence, then PR merge, Issue #14 closure,
-   and local `main` synchronization.
+17. **Integration — implemented and accepted:** one isolated real-Chromium
+   Product flow creates a fixed-copy Project from the ordinary preinstalled
+   Model, creates and edits a single-sample Experiment to an exact four-day
+   3-turbine/1-crew configuration, completes the real
+   generic batch, pages diagnostic events with an opaque cursor, downloads an
+   indexed output, restarts the backend on the same ports, establishes fresh
+   process-local browser authority, and proves durable Project, Experiment,
+   Run, event, and output reads with zero console errors. It adds no Product
+   DOM renderer or collection route and is not the Stage 4 shared shell.
+   The scenario does not claim uniform browser admission for create/edit/start;
+   A4-1 owns that all-browser-API Host/Origin/Fetch/CSRF gate.
 
-No slice may use a healthy port, fixture-only run, mock Agent, file presence, or
+No slice used a healthy port, fixture-only run, mock Agent, file presence, or
 the historical wind-specific UI as proof of the full contract. Stage 4 / #15
-does not begin until Stage 3 is merged and accepted.
+begins only after the Integration PR is merged, Issue #14 is closed, and local
+`main...origin/main` is synchronized.
 
 ## Verification and acceptance matrix
 
@@ -1850,11 +1859,11 @@ review regressions; web is 104/104 and the production build succeeds. Visual
 completion remains HTTP `422`
 `visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser,
 A3-2c Playwright and A3-2d1 through A3-2d4 are published. A3-3 wind import is
-implemented on the current review branch; final Stage 3 integration remains
-pending.
+merged through PR #47; final Integration is implemented and accepted through
+the isolated Product Chromium restart flow described below.
 
-The matrix below remains the complete Stage 3 exit target; a row is not marked
-implemented merely because part of it is exercised by A3-1b:
+The matrix below is the complete Stage 3 exit record; no row was accepted
+merely because part of it was exercised by an earlier slice:
 
 | Contract | Required evidence |
 | --- | --- |
