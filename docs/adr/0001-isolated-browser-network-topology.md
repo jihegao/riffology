@@ -48,6 +48,10 @@ the iframe.
   child on `127.0.0.1`: platform cookies are never sent to the child.
 - The child port and health evidence remain backend-only and cannot restore
   browser access after restart.
+- Exact visual recovery continues to persist the child port only in its
+  allowlisted private process-attempt, launch, and health evidence. That
+  internal evidence is not a browser capability and cannot be projected into a
+  URL or used to recreate one after restart.
 
 ## Acceptance
 
@@ -58,4 +62,8 @@ the iframe.
 - Browser evidence proves the app and broker are different origins, the broker
   cookie is delivered in the iframe, cross-origin parent DOM access fails, and
   platform cookies never reach the child.
-- DTO, SQLite, header, and log scans prove that no child-port secret is exposed.
+- Public DTO, browser/Agent/context, header, error, and ordinary-log scans prove
+  that no child-port secret is exposed. SQLite scans allow only the
+  schema-defined private process-attempt, launch, and health evidence required
+  by exact recovery, and prove that no nonce, cookie, frame URL, or browser
+  capability is persisted.

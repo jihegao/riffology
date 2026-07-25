@@ -54,7 +54,10 @@ credentials, and stale capabilities must not survive lifecycle changes.
   revoked audit facts without secrets may be retained.
 - App, broker, and child request/response headers and logs are scanned for every
   cookie, nonce (including expired nonce values), capability, URL, and
-  child-port secret; the same values are absent from DTOs and SQLite.
+  child-port secret. Public DTOs contain none of those values. SQLite contains
+  no nonce, cookie, frame URL, or browser capability; child ports are allowed
+  only in the schema-defined private process-attempt, launch, and health
+  evidence already required for exact recovery.
 
 ## Consequences
 
@@ -80,6 +83,7 @@ credentials, and stale capabilities must not survive lifecycle changes.
 - Stop, unhealthy state, terminal reconciliation, restart, expiry, replay, and
   generation rotation each close live sockets before removing capability
   state.
-- Three-party secret scans prove that headers, logs, DTOs, and SQLite contain no
-  cookie, nonce (including expired values), capability, `frameUrl`, or child-
-  port secret.
+- Three-party secret scans prove that headers, logs, and DTOs contain no cookie,
+  nonce (including expired values), capability, `frameUrl`, or child-port
+  secret. SQLite contains none of the browser secrets and contains child ports
+  only in the allowlisted private recovery evidence.

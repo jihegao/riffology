@@ -1,0 +1,253 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+
+export const BROWSER_LOOPBACK_HOST = "::1" as const;
+
+export type BrowserNetworkRole = "platform" | "broker";
+
+export type BrowserNetworkAddress = {
+  host: typeof BROWSER_LOOPBACK_HOST;
+  port: number;
+  authority: string;
+  origin: string;
+};
+
+export type BrowserNetworkHandler = (
+  request: IncomingMessage,
+  response: ServerResponse,
+  address: BrowserNetworkAddress,
+) => void | Promise<void>;
+
+export type BrowserNetworkTopologyOptions = {
+  appPort?: number;
+  brokerPort?: number;
+  closeDrainTimeoutMs?: number;
+  appHandler: BrowserNetworkHandler;
+  brokerHandler: BrowserNetworkHandler;
+};
+
+export class BrowserNetworkTopologyError extends Error {
+  readonly code:
+    | "platform_listener_invalid"
+    | "platform_listener_unavailable"
+    | "broker_listener_unavailable";
+
+  constructor(
+    code:
+      | "platform_listener_invalid"
+      | "platform_listener_unavailable"
+      | "broker_listener_unavailable",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "BrowserNetworkTopologyError";
+    this.code = code;
+  }
+}
+
+export class BrowserNetworkTopology {
+  readonly app: BrowserNetworkAddress;
+  readonly broker: BrowserNetworkAddress;
+  readonly #appServer: Server;
+  readonly #brokerServer: Server;
+  readonly #gate: RequestGate;
+  readonly #closeDrainTimeoutMs: number;
+  #closed = false;
+
+  private constructor(
+    appServer: Server,
+    brokerServer: Server,
+    app: BrowserNetworkAddress,
+    broker: BrowserNetworkAddress,
+    gate: RequestGate,
+    closeDrainTimeoutMs: number,
+  ) {
+    this.#appServer = appServer;
+    this.#brokerServer = brokerServer;
+    this.app = app;
+    this.broker = broker;
+    this.#gate = gate;
+    this.#closeDrainTimeoutMs = closeDrainTimeoutMs;
+  }
+
+  static async start(options: BrowserNetworkTopologyOptions): Promise<BrowserNetworkTopology> {
+    const appPort = exactPort(options.appPort ?? 0);
+    const brokerPort = exactPort(options.brokerPort ?? 0);
+    const closeDrainTimeoutMs = exactDrainTimeout(options.closeDrainTimeoutMs ?? 5_000);
+    if (appPort !== 0 && appPort === brokerPort) {
+      throw new BrowserNetworkTopologyError(
+        "platform_listener_invalid",
+        "The platform app and visual broker must use different server-owned ports.",
+      );
+    }
+
+    let appAddress: BrowserNetworkAddress | undefined;
+    let brokerAddress: BrowserNetworkAddress | undefined;
+    const gate: RequestGate = { ready: false, closing: false, inFlight: new Set() };
+    const appServer = createExactServer("platform", () => appAddress, options.appHandler, gate);
+    const brokerServer = createExactServer("broker", () => brokerAddress, options.brokerHandler, gate);
+    try {
+      appAddress = await listenExact(appServer, appPort, "platform_listener_unavailable");
+      brokerAddress = await listenExact(brokerServer, brokerPort, "broker_listener_unavailable");
+      if (appAddress.port === brokerAddress.port) {
+        throw new BrowserNetworkTopologyError(
+          "platform_listener_invalid",
+          "The platform app and visual broker resolved to the same port.",
+        );
+      }
+      gate.ready = true;
+      return new BrowserNetworkTopology(
+        appServer,
+        brokerServer,
+        appAddress,
+        brokerAddress,
+        gate,
+        closeDrainTimeoutMs,
+      );
+    } catch (error) {
+      gate.closing = true;
+      await Promise.allSettled([closeServer(appServer), closeServer(brokerServer)]);
+      throw error;
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#gate.closing = true;
+    this.#gate.ready = false;
+    this.#appServer.closeIdleConnections?.();
+    this.#brokerServer.closeIdleConnections?.();
+    const closing = [
+      closeServer(this.#brokerServer),
+      closeServer(this.#appServer),
+    ];
+    await boundedDrain([...this.#gate.inFlight], this.#closeDrainTimeoutMs);
+    this.#appServer.closeIdleConnections?.();
+    this.#brokerServer.closeIdleConnections?.();
+    this.#appServer.closeAllConnections?.();
+    this.#brokerServer.closeAllConnections?.();
+    const results = await Promise.allSettled(closing);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (rejected) throw rejected.reason;
+  }
+}
+
+type RequestGate = {
+  ready: boolean;
+  closing: boolean;
+  inFlight: Set<Promise<void>>;
+};
+
+const createExactServer = (
+  role: BrowserNetworkRole,
+  address: () => BrowserNetworkAddress | undefined,
+  handler: BrowserNetworkHandler,
+  gate: RequestGate,
+): Server => createServer((request, response) => {
+  const current = address();
+  if (!current || !gate.ready || gate.closing) return networkError(response, 503, `${role}_listener_unavailable`);
+  if (request.headers.host !== current.authority) {
+    return networkError(response, 421, role === "platform" ? "platform_host_denied" : "broker_host_denied");
+  }
+  const operation = Promise.resolve().then(() => handler(request, response, current)).then(() => undefined).catch(() => {
+    if (!response.headersSent) networkError(response, 500, `${role}_request_failed`);
+    else response.end();
+  });
+  gate.inFlight.add(operation);
+  void operation.then(() => gate.inFlight.delete(operation));
+});
+
+const listenExact = async (
+  server: Server,
+  port: number,
+  failureCode: "platform_listener_unavailable" | "broker_listener_unavailable",
+): Promise<BrowserNetworkAddress> => {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(new BrowserNetworkTopologyError(failureCode, "The exact IPv6 loopback listener is unavailable.", { cause: error }));
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({ host: BROWSER_LOOPBACK_HOST, port, ipv6Only: true });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new BrowserNetworkTopologyError(failureCode, "The listener did not expose a TCP address.");
+  }
+  if ((address as AddressInfo).address !== BROWSER_LOOPBACK_HOST || (address as AddressInfo).family !== "IPv6") {
+    throw new BrowserNetworkTopologyError(failureCode, "The listener did not exact-bind IPv6 loopback.");
+  }
+  const boundPort = (address as AddressInfo).port;
+  return Object.freeze({
+    host: BROWSER_LOOPBACK_HOST,
+    port: boundPort,
+    authority: `[${BROWSER_LOOPBACK_HOST}]:${boundPort}`,
+    origin: `http://[${BROWSER_LOOPBACK_HOST}]:${boundPort}`,
+  });
+};
+
+const exactPort = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+    throw new BrowserNetworkTopologyError(
+      "platform_listener_invalid",
+      "Browser listener ports must be integers from 0 through 65535.",
+    );
+  }
+  return value;
+};
+
+const exactDrainTimeout = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 30_000) {
+    throw new BrowserNetworkTopologyError(
+      "platform_listener_invalid",
+      "The browser listener close-drain timeout must be an integer from 1 through 30000 milliseconds.",
+    );
+  }
+  return value;
+};
+
+const boundedDrain = async (operations: Promise<void>[], timeoutMs: number): Promise<void> => {
+  if (operations.length === 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(operations).then(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const closeServer = async (server: Server): Promise<void> => {
+  if (!server.listening) return;
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+};
+
+export const networkJson = (
+  response: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+): void => {
+  const bytes = Buffer.from(JSON.stringify(body));
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength,
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(bytes);
+};
+
+const networkError = (response: ServerResponse, status: number, code: string): void =>
+  networkJson(response, status, { accepted: false, error: { code, message: "The browser network request was denied." } });

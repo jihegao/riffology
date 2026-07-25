@@ -331,10 +331,22 @@ target contracts, not current routes or acceptance evidence:
    `/api/projects/{projectId}/runs` resource accepts eligible visual
    experiments and returns the existing allowlisted run DTO; no parallel
    visual-run API is introduced.
-5. **A3-2b broker/frame/WebSocket — pending:** add browser bootstrap, visual frame
-   session, isolated broker HTTP, and exact WebSocket forwarding. Platform app
-   and broker exact-bind `::1` on different server-owned ports.
-6. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
+5. **A3-2b1 browser network topology — implementation under review:** the isolated
+   `BackendApp` entrypoint exact-binds platform app and empty broker servers to
+   distinct server-owned `::1` ports, derives canonical bracketed origins, and
+   rejects non-canonical Host counterexamples before invoking either handler.
+   Startup and close are serialized and partial listener pairs do not admit
+   requests. Route-specific Origin/Fetch-Site checks remain A3-2b2.
+6. **A3-2b2 frame bootstrap and HTTP proxy — pending:** add browser bootstrap,
+   CSRF, cookies, one-time nonce redemption, visual frame sessions, isolated
+   broker HTTP forwarding, and exact CSP on the A3-2b1 topology.
+7. **A3-2b3 WebSocket, revocation, and secrecy — pending:** add exact path and
+   subprotocol forwarding, resource limits, generation/lifecycle revocation,
+   and three-party secret scans.
+8. **A3-2b4 browser and security closeout — pending:** run the real-browser
+   negative matrix, complete focused/full suites, obtain an independent
+   security review, and synchronize implementation records.
+9. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
    observation and explicit one-turn interaction authority.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
@@ -458,7 +470,10 @@ read it, and cross-origin DOM access fails. Every broker document sends CSP
 send `X-Frame-Options: SAMEORIGIN`. Only the exact app may embed it. App,
 broker, and child headers/logs are scanned for all cookie, nonce, including
 expired nonce values, capability, URL, and child-port secrets; those values are
-also absent from DTOs and SQLite.
+also absent from public DTOs. SQLite contains no browser nonce, cookie, frame
+URL, or capability. It retains child ports only in the schema-defined private
+process-attempt, launch, and health evidence required for exact recovery; that
+evidence cannot restore browser access after restart.
 A3-2c is subsequent and never reuses a user frame URL or cookie.
 
 ---

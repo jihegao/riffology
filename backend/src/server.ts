@@ -33,6 +33,11 @@ import type { WorkbenchProjector } from "./playwright-projection.ts";
 import { ProjectStore, type StoredAttachment } from "./project-store.ts";
 import { SimulationActions } from "./simulation-actions.ts";
 import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
+import {
+  BrowserNetworkTopology,
+  networkJson,
+  type BrowserNetworkAddress,
+} from "./browser-network-topology.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -73,6 +78,7 @@ export type BackendOptions = {
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
+  legacyCloseDrainTimeoutMs?: number;
 };
 
 export class BackendApp {
@@ -90,9 +96,14 @@ export class BackendApp {
   #unsubscribeOpenCode?: () => void;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #server?: Server;
+  #browserNetwork?: BrowserNetworkTopology;
+  #listenerQueue: Promise<void> = Promise.resolve();
+  #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
+  readonly #legacyCloseDrainTimeoutMs: number;
 
   constructor(options: BackendOptions) {
     this.options = options;
+    this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
     this.store = options.store ?? new ProjectStore();
     this.gate2 = new Gate2Runtime(options.workspaceRoot, options.mesa, options.durableStore);
     this.gate3 = new Gate3Runtime(this.gate2, options.mesa, options.workspaceRoot, options.gate3FaultInjector);
@@ -174,33 +185,97 @@ export class BackendApp {
   }
 
   async listen(port = 0, host = "127.0.0.1"): Promise<{ port: number; host: string }> {
-    if (!this.#server) this.#server = createServer((request, response) => void this.#handle(request, response));
-    await new Promise<void>((resolve, reject) => {
-      this.#server!.once("error", reject);
-      this.#server!.listen(port, host, () => {
-        this.#server!.off("error", reject);
-        resolve();
-      });
+    return this.#withListenerLock(async () => {
+      if (this.#listenerMode !== "idle") throw new Error("A backend listener is already active or closed.");
+      const server = createServer((request, response) => void this.#handle(request, response));
+      this.#server = server;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (error: Error): void => {
+            server.off("listening", onListening);
+            reject(error);
+          };
+          const onListening = (): void => {
+            server.off("error", onError);
+            resolve();
+          };
+          server.once("error", onError);
+          server.once("listening", onListening);
+          server.listen(port, host);
+        });
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Backend did not expose a TCP address.");
+        this.#listenerMode = "legacy";
+        return { port: address.port, host };
+      } catch (error) {
+        this.#server = undefined;
+        if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+        throw error;
+      }
     });
-    const address = this.#server.address();
-    if (!address || typeof address === "string") throw new Error("Backend did not expose a TCP address.");
-    return { port: address.port, host };
+  }
+
+  async listenBrowserNetwork(
+    appPort = 0,
+    brokerPort = 0,
+  ): Promise<{ app: BrowserNetworkAddress; broker: BrowserNetworkAddress }> {
+    return this.#withListenerLock(async () => {
+      if (this.#listenerMode === "browser" && this.#browserNetwork) {
+        return { app: this.#browserNetwork.app, broker: this.#browserNetwork.broker };
+      }
+      if (this.#listenerMode !== "idle") throw new Error("A backend listener is already active or closed.");
+      const network = await BrowserNetworkTopology.start({
+        appPort,
+        brokerPort,
+        appHandler: (request, response) => this.#handle(request, response),
+        brokerHandler: (_request, response) => networkJson(response, 404, {
+          accepted: false,
+          error: {
+            code: "broker_route_denied",
+            message: "No live visual frame route matches this request.",
+          },
+        }),
+      });
+      this.#browserNetwork = network;
+      this.#listenerMode = "browser";
+      return { app: network.app, broker: network.broker };
+    });
   }
 
   async close(): Promise<void> {
+    await this.#withListenerLock(async () => {
+      if (this.#listenerMode === "closed") return;
+      this.#listenerMode = "closed";
+      if (this.#server) {
+        await closeServerWithDrain(this.#server, this.#legacyCloseDrainTimeoutMs);
+        this.#server = undefined;
+      }
+      if (this.#browserNetwork) {
+        await this.#browserNetwork.close();
+        this.#browserNetwork = undefined;
+      }
+    });
     this.#unsubscribeOpenCode?.();
     this.#unsubscribeOpenCode = undefined;
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
     this.mcp.revokeAll();
     await this.gate2.close();
-    if (this.#server) {
-      this.#server.closeIdleConnections?.();
-      this.#server.closeAllConnections?.();
-      await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
-      this.#server = undefined;
-    }
     await this.productRunDispatcher?.stop();
     this.productStore?.close();
+  }
+
+  async #withListenerLock<T>(action: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const prior = this.#listenerQueue;
+    this.#listenerQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -232,10 +307,14 @@ export class BackendApp {
   }
 
   #a2McpUrl(capability: string): string {
-    const address = this.#server?.address();
-    if (!address || typeof address === "string") throw new ApiError(503, "a2_mcp_unavailable", "The local A2 MCP endpoint is not listening.");
-    const url = new URL(`http://127.0.0.1:${address.port}/a2/mcp`);
+    const browserAddress = this.#browserNetwork?.app;
+    const legacyAddress = this.#server?.address();
+    if (!browserAddress && (!legacyAddress || typeof legacyAddress === "string")) {
+      throw new ApiError(503, "a2_mcp_unavailable", "The local A2 MCP endpoint is not listening.");
+    }
+    const url = new URL(browserAddress?.origin ?? `http://127.0.0.1:${(legacyAddress as import("node:net").AddressInfo).port}`);
     url.searchParams.set("cap", capability);
+    url.pathname = "/a2/mcp";
     return url.toString();
   }
 
@@ -634,6 +713,36 @@ const bodyText = async (request: IncomingMessage, limit = 1_100_000): Promise<st
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
+};
+
+const exactLegacyCloseDrainTimeout = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 30_000) {
+    throw new Error("The legacy listener close-drain timeout must be an integer from 1 through 30000 milliseconds.");
+  }
+  return value;
+};
+
+const closeServerWithDrain = async (server: Server, timeoutMs: number): Promise<void> => {
+  server.closeIdleConnections?.();
+  if (!server.listening) return;
+  const closing = new Promise<void>((resolve, reject) =>
+    server.close((error) => error ? reject(error) : resolve()));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const drained = await Promise.race([
+      closing.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    if (!drained) {
+      server.closeAllConnections?.();
+      await closing;
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 };
 
 type MultipartFile = { filename: string; contentType: string; data: Buffer };
