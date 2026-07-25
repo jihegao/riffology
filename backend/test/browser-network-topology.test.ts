@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +10,7 @@ import {
   BrowserNetworkTopology,
   BrowserNetworkTopologyError,
   networkJson,
+  rejectUpgrade,
   type BrowserNetworkAddress,
 } from "../src/browser-network-topology.ts";
 import { BackendApp } from "../src/server.ts";
@@ -16,7 +18,7 @@ import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodePrompt, OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
-test("platform app and broker exact-bind distinct IPv6 loopback origins", async (t) => {
+test("platform app and broker exact-bind distinct IPv6 loopback sockets with localhost authorities", async (t) => {
   const topology = await BrowserNetworkTopology.start({
     appHandler: (_request, response, address) => networkJson(response, 200, {
       role: "platform",
@@ -32,17 +34,30 @@ test("platform app and broker exact-bind distinct IPv6 loopback origins", async 
   assert.equal(topology.app.host, BROWSER_LOOPBACK_HOST);
   assert.equal(topology.broker.host, BROWSER_LOOPBACK_HOST);
   assert.notEqual(topology.app.port, topology.broker.port);
-  assert.equal(topology.app.origin, `http://[::1]:${topology.app.port}`);
-  assert.equal(topology.broker.origin, `http://[::1]:${topology.broker.port}`);
+  assert.equal(topology.app.origin, `http://localhost:${topology.app.port}`);
+  assert.equal(topology.broker.origin, `http://localhost:${topology.broker.port}`);
   assert.equal(Object.isFrozen(topology.app), true);
   assert.equal(Object.isFrozen(topology.broker), true);
+  const ipv4App = await rawAt("127.0.0.1", 4, topology.app, {
+    method: "GET",
+    path: "/health",
+  });
+  assert.equal(ipv4App.status, 421);
+  assert.equal(ipv4App.body.error.code, "ipv4_authority_denied");
+  const ipv4Broker = await rawAt("127.0.0.1", 4, topology.broker, {
+    method: "GET",
+    path: "/",
+  });
+  assert.equal(ipv4Broker.status, 421);
+  assert.equal(ipv4Broker.body.error.code, "ipv4_authority_denied");
+
+  const takeover = createServer();
   await assert.rejects(
-    rawAt("127.0.0.1", 4, topology.app, { method: "GET", path: "/health" }),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === "ECONNREFUSED",
-  );
-  await assert.rejects(
-    rawAt("127.0.0.1", 4, topology.broker, { method: "GET", path: "/" }),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === "ECONNREFUSED",
+    new Promise<void>((resolve, reject) => {
+      takeover.once("error", reject);
+      takeover.listen({ host: "127.0.0.1", port: topology.broker.port }, resolve);
+    }),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "EADDRINUSE",
   );
 
   const app = await raw(topology.app, { method: "GET", path: "/health" });
@@ -69,10 +84,11 @@ test("Host guards fail before either application handler", async (t) => {
   t.after(() => topology.close());
 
   for (const host of [
-    `localhost:${topology.app.port}`,
+    `[::1]:${topology.app.port}`,
     `127.0.0.1:${topology.app.port}`,
     `[::1]`,
-    `[::1]:${topology.broker.port}`,
+    "localhost",
+    `localhost:${topology.broker.port}`,
     `[0:0:0:0:0:0:0:1]:${topology.app.port}`,
   ]) {
     const denied = await raw(topology.app, { method: "GET", path: "/", host });
@@ -90,7 +106,7 @@ test("Host guards fail before either application handler", async (t) => {
   const brokerHost = await raw(topology.broker, {
     method: "GET",
     path: "/frame",
-    host: `[::1]:${topology.app.port}`,
+    host: `localhost:${topology.app.port}`,
   });
   assert.equal(brokerHost.status, 421);
   assert.equal(brokerHost.body.error.code, "broker_host_denied");
@@ -121,6 +137,69 @@ test("invalid or colliding configured ports fail closed", async () => {
     }),
     (error: unknown) => error instanceof BrowserNetworkTopologyError
       && error.code === "platform_listener_invalid",
+  );
+});
+
+test("beforeReady completes before either listener admits requests and rolls back on failure", async () => {
+  let hookEntered!: () => void;
+  let releaseHook!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    hookEntered = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseHook = resolve;
+  });
+  let appAddress: BrowserNetworkAddress | undefined;
+  const starting = BrowserNetworkTopology.start({
+    beforeReady: async ({ app }) => {
+      appAddress = app;
+      hookEntered();
+      await blocked;
+    },
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+  });
+  await entered;
+  assert.ok(appAddress);
+  const denied = await raw(appAddress, { method: "GET", path: "/" });
+  assert.equal(denied.status, 503);
+  releaseHook();
+  const topology = await starting;
+  assert.equal((await raw(topology.app, { method: "GET", path: "/" })).status, 204);
+  await topology.close();
+
+  let rejectedAddress: BrowserNetworkAddress | undefined;
+  let rejectedGuardClosed: Promise<void> | undefined;
+  await assert.rejects(
+    BrowserNetworkTopology.start({
+      beforeReady: async ({ app }) => {
+        rejectedAddress = app;
+        const guardSocket = connect({ host: "127.0.0.1", port: app.port });
+        await new Promise<void>((resolve, reject) => {
+          guardSocket.once("connect", resolve);
+          guardSocket.once("error", reject);
+        });
+        rejectedGuardClosed = new Promise<void>((resolve) => {
+          guardSocket.once("close", resolve);
+        });
+        guardSocket.write("GET / HTTP/1.1\r\n");
+        throw new Error("configuration rejected");
+      },
+      appHandler: (_request, response) => networkJson(response, 204, {}),
+      brokerHandler: (_request, response) => networkJson(response, 204, {}),
+    }),
+    /configuration rejected/u,
+  );
+  assert.ok(rejectedAddress);
+  assert.ok(rejectedGuardClosed);
+  await rejectedGuardClosed;
+  await assert.rejects(
+    rawAt(BROWSER_LOOPBACK_HOST, 6, rejectedAddress, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+  await assert.rejects(
+    rawAt("127.0.0.1", 4, rejectedAddress, { method: "GET", path: "/" }),
+    closedConnection,
   );
 });
 
@@ -191,6 +270,99 @@ test("sync and async handler failures return bounded generic errors", async (t) 
   assert.doesNotMatch(JSON.stringify(broker.body), /sensitive/u);
 });
 
+test("broker header overflow returns the frozen bounded limit error", async (t) => {
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+  });
+  t.after(() => topology.close());
+  const response = await new Promise<string>((resolve, reject) => {
+    const socket = connect({
+      family: 6,
+      host: topology.broker.host,
+      port: topology.broker.port,
+    });
+    const chunks: Buffer[] = [];
+    socket.once("connect", () => {
+      socket.write([
+        "GET /frame/c/not-real/ HTTP/1.1",
+        `Host: ${topology.broker.authority}`,
+        `X-Oversized: ${"x".repeat(33 * 1_024)}`,
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    socket.once("error", reject);
+  });
+  assert.match(response, /^HTTP\/1\.1 502 Bad Gateway\r\n/u);
+  assert.match(response, /"code":"visual_frame_proxy_limit_exceeded"/u);
+  assert.doesNotMatch(response, /x{128}/u);
+});
+
+test("upgrade routing rejects the app, exact-gates broker Host, and close destroys tracked sockets", async () => {
+  let brokerUpgrades = 0;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerUpgradeHandler: (_request, _socket) => {
+      brokerUpgrades += 1;
+      entered();
+    },
+  });
+  const appDenied = await rawUpgrade(topology.app, topology.app.authority);
+  assert.match(appDenied, /^HTTP\/1\.1 404 Not Found\r\n/u);
+  assert.match(appDenied, /"code":"platform_upgrade_denied"/u);
+  const brokerDenied = await rawUpgrade(topology.broker, topology.app.authority);
+  assert.match(brokerDenied, /^HTTP\/1\.1 421 Misdirected Request\r\n/u);
+  assert.equal(brokerUpgrades, 0);
+
+  const client = connect({
+    family: 6,
+    host: topology.broker.host,
+    port: topology.broker.port,
+  });
+  const clientClosed = new Promise<void>((resolve, reject) => {
+    client.once("close", resolve);
+    client.once("error", reject);
+  });
+  await new Promise<void>((resolve, reject) => {
+    client.once("connect", resolve);
+    client.once("error", reject);
+  });
+  client.write([
+    "GET /frame/c/opaque/ws HTTP/1.1",
+    `Host: ${topology.broker.authority}`,
+    "Connection: Upgrade",
+    "Upgrade: websocket",
+    "",
+    "",
+  ].join("\r\n"));
+  await enteredPromise;
+  assert.equal(brokerUpgrades, 1);
+  await topology.close();
+  await clientClosed;
+});
+
+test("upgrade rejection preserves the 504 Gateway Timeout contract", async (t) => {
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 404, {}),
+    brokerHandler: (_request, response) => networkJson(response, 404, {}),
+    brokerUpgradeHandler: (_request, socket) =>
+      rejectUpgrade(socket, 504, "visual_websocket_timeout"),
+  });
+  t.after(() => topology.close());
+
+  const response = await rawUpgrade(topology.broker, topology.broker.authority);
+  assert.match(response, /^HTTP\/1\.1 504 Gateway Timeout\r\n/u);
+  assert.match(response, /"code":"visual_websocket_timeout"/u);
+});
+
 test("close stops admission, drains an in-flight handler, and releases both ports", async () => {
   let release!: () => void;
   let entered!: () => void;
@@ -225,6 +397,37 @@ test("close stops admission, drains an in-flight handler, and releases both port
   );
   await assert.rejects(
     rawAt(BROWSER_LOOPBACK_HOST, 6, topology.broker, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+});
+
+test("close bounds incomplete IPv4 denial-guard requests and releases both authorities", async () => {
+  const topology = await BrowserNetworkTopology.start({
+    closeDrainTimeoutMs: 10,
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 404, {}),
+  });
+  const guardSocket = connect({
+    host: "127.0.0.1",
+    port: topology.app.port,
+  });
+  await new Promise<void>((resolve, reject) => {
+    guardSocket.once("connect", resolve);
+    guardSocket.once("error", reject);
+  });
+  guardSocket.write("GET / HTTP/1.1\r\n");
+  const guardClosed = new Promise<void>((resolve) => {
+    guardSocket.once("close", resolve);
+  });
+
+  await topology.close();
+  await guardClosed;
+  await assert.rejects(
+    rawAt(BROWSER_LOOPBACK_HOST, 6, topology.app, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+  await assert.rejects(
+    rawAt("127.0.0.1", 4, topology.app, { method: "GET", path: "/" }),
     closedConnection,
   );
 });
@@ -501,6 +704,27 @@ const rawAt = async (
     outgoing.once("error", reject);
     outgoing.end();
   });
+
+const rawUpgrade = async (
+  address: BrowserNetworkAddress,
+  host: string,
+): Promise<string> => new Promise((resolve, reject) => {
+  const socket = connect({ family: 6, host: address.host, port: address.port });
+  const chunks: Buffer[] = [];
+  socket.once("connect", () => {
+    socket.write([
+      "GET /frame/c/opaque/ws HTTP/1.1",
+      `Host: ${host}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      "",
+      "",
+    ].join("\r\n"));
+  });
+  socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+  socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  socket.once("error", reject);
+});
 
 class NetworkFakeMesa implements MesaAdapter {
   async loadModel(): Promise<MesaModel> {

@@ -12,7 +12,7 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(webRoot, "..");
 const backendRoot = join(repoRoot, "backend");
 
-test("production entry honors app/broker ports and Vite proxies with the exact IPv6 Host", {
+test("production entry exact-binds IPv6 while using CSP-compatible localhost authorities", {
   timeout: 30_000,
 }, async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "riff-network-entry-")));
@@ -39,21 +39,21 @@ test("production entry honors app/broker ports and Vite proxies with the exact I
     children.push(backend);
     await waitForOutput(
       backend,
-      `Riff visual broker listening at http://[::1]:${brokerPort}`,
+      `Riff visual broker listening at http://localhost:${brokerPort}`,
     );
 
     const health = await httpRequest("::1", appPort, "/health", {
-      host: `[::1]:${appPort}`,
+      host: `localhost:${appPort}`,
     });
     assert.equal(health.status, 200);
     assert.equal(health.body.healthy, true);
     const wrongHost = await httpRequest("::1", appPort, "/health", {
-      host: `localhost:${appPort}`,
+      host: `[::1]:${appPort}`,
     });
     assert.equal(wrongHost.status, 421);
     assert.equal(wrongHost.body.error.code, "platform_host_denied");
     const broker = await httpRequest("::1", brokerPort, "/not-minted", {
-      host: `[::1]:${brokerPort}`,
+      host: `localhost:${brokerPort}`,
     });
     assert.equal(broker.status, 404);
     assert.equal(broker.body.error.code, "broker_route_denied");

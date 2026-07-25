@@ -53,6 +53,13 @@ const EXECUTION = {
     entryPoint: "code/model.py",
     protocol: "riff-visual-v1",
     healthPath: "/healthz",
+    webSocket: {
+      path: "/events",
+      subprotocols: ["riff.visual.v1"],
+      maxFrameBytes: 65_536,
+      maxConnections: 2,
+      idleTimeoutMs: 30_000,
+    },
   },
   cancellation: { signal: "SIGTERM", graceMs: 1_000 },
 };
@@ -239,6 +246,37 @@ const launchReceipt = (
   return Object.freeze({ ...unsigned, receiptDigest: canonicalDigest(unsigned) });
 };
 
+const makeHealthy = (fixture: Fixture): void => {
+  const binding = fixture.store.prepareVisualProcessLaunch({
+    ...fixture.launch,
+    createdAt: NOW,
+  });
+  fixture.store.registerVisualScratchDirectory({
+    ...fixture.launch,
+    ownerUid: 501,
+    device: 42,
+    inode: 99,
+    registeredAt: STARTED_AT,
+  });
+  fixture.store.registerVisualProcessAttempt({
+    ...fixture.process,
+    launchReceipt: launchReceipt(fixture, binding),
+    launchedAt: STARTED_AT,
+  });
+  fixture.store.markVisualProcessGateReleased({
+    ...fixture.process,
+    startedAt: STARTED_AT,
+  });
+  fixture.store.markVisualProcessStarted({
+    ...fixture.process,
+    startedAt: STARTED_AT,
+  });
+  fixture.store.recordVisualProcessHealth({
+    ...fixture.process,
+    healthyAt: HEALTHY_AT,
+  });
+};
+
 const closeFixture = (fixture: Fixture): void => {
   fixture.store.close();
   rmSync(fixture.parent, { recursive: true, force: true });
@@ -284,6 +322,341 @@ const wrongProcessIdentities = (
   { label: "scratch ID", override: { scratchId: `${fixture.process.scratchId}_wrong` } },
   { label: "dispatcher generation", override: { dispatcherGeneration: "d".repeat(64) } },
 ] as const;
+
+test("currentHealthyVisualFrameTarget returns only the exact healthy current visual identity", () => {
+  const fixture = createFixture("frame_target");
+  try {
+    makeHealthy(fixture);
+    assert.deepEqual(
+      fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ),
+      {
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        attemptId: fixture.attempt.attemptId,
+        attemptGeneration: fixture.attempt.attemptGeneration,
+        dispatcherGeneration: fixture.attempt.dispatcherGeneration,
+        attemptExpiresAt: "2026-07-25T12:01:00.000Z",
+        processAttemptId: fixture.process.processAttemptId,
+        pid: fixture.process.pid,
+        processStartToken: fixture.process.processStartToken,
+        processGroupId: fixture.process.processGroupId,
+        loopbackHost: "127.0.0.1",
+        loopbackPort: fixture.process.loopbackPort,
+        healthPath: fixture.launch.healthPath,
+        healthyAt: HEALTHY_AT,
+        webSocket: EXECUTION.visual.webSocket,
+      },
+    );
+  } finally {
+    closeFixture(fixture);
+  }
+});
+
+test("currentHealthyVisualFrameTarget revalidates the frozen run execution digest before exposing WebSocket policy", () => {
+  const fixture = createFixture("frame_execution_digest");
+  try {
+    makeHealthy(fixture);
+    fixture.store.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      database.exec("DROP TRIGGER run_frozen_contract_immutable_v4");
+      database.prepare(
+        "UPDATE runs SET execution_description_sha256 = ? WHERE id = ?",
+      ).run(DIGEST_A, fixture.runId);
+    } finally {
+      database.close();
+    }
+    const reopened = ProductStoreV2.open(fixture.root);
+    try {
+      assert.throws(
+        () => reopened.currentHealthyVisualFrameTarget(
+          fixture.projectId,
+          fixture.runId,
+          { now: HEALTHY_AT },
+        ),
+        /visual_frame_unavailable/u,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(fixture.parent, { recursive: true, force: true });
+  }
+});
+
+test("currentHealthyVisualFrameTarget fails closed for every non-current or incomplete state", async (context) => {
+  await context.test("project ownership mismatch", () => {
+    const fixture = createFixture("frame_wrong_project");
+    try {
+      makeHealthy(fixture);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        "project_visual_wrong_owner",
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("process has not committed health evidence", () => {
+    const fixture = createFixture("frame_pre_health");
+    try {
+      const binding = fixture.store.prepareVisualProcessLaunch({
+        ...fixture.launch,
+        createdAt: NOW,
+      });
+      fixture.store.registerVisualScratchDirectory({
+        ...fixture.launch,
+        ownerUid: 501,
+        device: 42,
+        inode: 99,
+        registeredAt: STARTED_AT,
+      });
+      fixture.store.registerVisualProcessAttempt({
+        ...fixture.process,
+        launchReceipt: launchReceipt(fixture, binding),
+        launchedAt: STARTED_AT,
+      });
+      fixture.store.markVisualProcessGateReleased({
+        ...fixture.process,
+        startedAt: STARTED_AT,
+      });
+      fixture.store.markVisualProcessStarted({
+        ...fixture.process,
+        startedAt: STARTED_AT,
+      });
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("run cancellation has been requested", () => {
+    const fixture = createFixture("frame_cancelled");
+    try {
+      makeHealthy(fixture);
+      fixture.store.cancelRun({
+        commandId: "command_cancel_frame",
+        projectId: fixture.projectId,
+        runId: fixture.runId,
+        requestedAt: HEALTHY_AT,
+      });
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("dispatcher lease has expired", () => {
+    const fixture = createFixture("frame_expired_lease");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.prepare(
+        "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+      ).run(HEALTHY_AT, fixture.attempt.attemptId);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("process heartbeat is stale relative to its run attempt", () => {
+    const fixture = createFixture("frame_stale_process_heartbeat");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.prepare(
+        "UPDATE process_attempts SET heartbeat_at = ? WHERE id = ?",
+      ).run(HEALTHY_AT, fixture.process.processAttemptId);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("frozen wall-time deadline is reached", () => {
+    const fixture = createFixture("frame_expired");
+    try {
+      makeHealthy(fixture);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: "2026-07-25T12:01:00.000Z" },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("dispatcher generation has been revoked", () => {
+    const fixture = createFixture("frame_generation");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.prepare(
+        "UPDATE dispatcher_state SET generation = ?, activated_at = ? WHERE singleton = 1",
+      ).run("d".repeat(64), HEALTHY_AT);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("latest attempt is not running", () => {
+    const fixture = createFixture("frame_latest_attempt");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.prepare(
+        "UPDATE run_attempts SET state = 'interrupted', finished_at = ? WHERE id = ?",
+      ).run(HEALTHY_AT, fixture.attempt.attemptId);
+      database.prepare(`INSERT INTO run_attempts
+        (id, run_id, attempt_generation, dispatcher_generation, state, claimed_at, lease_expires_at)
+        VALUES (?, ?, 2, ?, 'claimed', ?, ?)`
+      ).run(
+        "attempt_visual_frame_latest_attempt_2",
+        fixture.runId,
+        GENERATION,
+        HEALTHY_AT,
+        "2026-07-25T12:02:00.000Z",
+      );
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("running process is terminal", () => {
+    const fixture = createFixture("frame_process_terminal");
+    try {
+      makeHealthy(fixture);
+      fixture.store.recordVisualProcessExit({
+        ...fixture.process,
+        expectedState: "running",
+        exitedAt: EXITED_AT,
+        exitCode: 0,
+        exitSignal: null,
+      });
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("current attempt has ambiguous process history", () => {
+    const fixture = createFixture("frame_process_ambiguity");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.exec(`
+        DROP INDEX one_visual_process_attempt_v4;
+        DROP TRIGGER process_attempt_shape_insert_v4;
+        DROP TRIGGER IF EXISTS process_requires_launch_receipt_v6;
+        DROP TRIGGER IF EXISTS process_requires_launch_receipt_v8;
+      `);
+      database.prepare(`INSERT INTO process_attempts
+        (id, run_attempt_id, process_kind, sample_index, sample_id,
+          pid, process_start_token, process_group_id, launch_gate_state, state,
+          loopback_port, launched_at, started_at, health_at, heartbeat_at,
+          exited_at, exit_code, exit_signal, cleanup_receipt_sha256)
+        SELECT ?, run_attempt_id, process_kind, sample_index, sample_id,
+          pid + 1, process_start_token || '-duplicate', process_group_id + 1,
+          launch_gate_state, state, loopback_port + 1, launched_at, started_at,
+          NULL, heartbeat_at, exited_at, exit_code, exit_signal, cleanup_receipt_sha256
+        FROM process_attempts WHERE id = ?`
+      ).run(
+        "process_visual_frame_process_ambiguity_2",
+        fixture.process.processAttemptId,
+      );
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("durable launch evidence is inconsistent", () => {
+    const fixture = createFixture("frame_bad_launch");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.exec("DROP TRIGGER launch_manifest_binding_immutable_v6");
+      database.prepare(
+        "UPDATE process_launch_manifests SET manifest_json = json_remove(manifest_json, '$.healthPath') WHERE process_attempt_id = ?",
+      ).run(fixture.process.processAttemptId);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+
+  await context.test("immutable health receipt is incomplete or corrupt", () => {
+    const fixture = createFixture("frame_bad_health");
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      makeHealthy(fixture);
+      database.exec("DROP TRIGGER visual_health_receipt_immutable_v8");
+      database.prepare(
+        "UPDATE visual_health_receipts SET receipt_json = json_remove(receipt_json, '$.healthPath') WHERE process_attempt_id = ?",
+      ).run(fixture.process.processAttemptId);
+      assert.throws(() => fixture.store.currentHealthyVisualFrameTarget(
+        fixture.projectId,
+        fixture.runId,
+        { now: HEALTHY_AT },
+      ), /visual_frame_unavailable/u);
+    } finally {
+      database.close();
+      closeFixture(fixture);
+    }
+  });
+});
 
 test("ProductStoreV2 visual primitives preserve every pre-health checkpoint and commit one exact health receipt", () => {
   const fixture = createFixture("lifecycle");

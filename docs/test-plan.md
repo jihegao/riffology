@@ -366,11 +366,12 @@ port, proxy, frame, WebSocket, Playwright authority, or real-browser acceptance
 row. The HTTP `422` `visual_completion_not_supported` negative gate remains.
 The remaining claims begin only in the later gates:
 
-- **A3-2b1 network topology — implementation under review:** focused Node tests start the
+- **A3-2b1 network topology — merged and published through PR #33:** focused Node tests start the
   real `BackendApp` app listener plus empty broker on separate server-owned
-  `::1` ports. They prove canonical bracketed origins, distinct ports, Host
-  rejection for localhost/IPv4/missing-port/expanded-IPv6/other-port values,
-  IPv4 connection refusal, collision/invalid-port failure, handler-error
+  `::1` ports. They prove CSP-compatible exact localhost authorities, distinct
+  ports, Host rejection for literal-IPv6/IPv4/missing-port/expanded-IPv6/
+  other-port values, IPv4 same-port denial reservation, collision/invalid-port
+  failure, handler-error
   redaction, serialized start/close, drain, and idempotent close. The existing
   visual-listener suite separately preserves the child's
   exact `127.0.0.1` boundary. This slice does not claim a frame route, proxy,
@@ -384,22 +385,29 @@ The remaining claims begin only in the later gates:
   `421` `platform_host_denied` for a wrong Host, HTTP `404`
   `broker_route_denied`, and a successful Vite `/api` proxy POST whose
   `changeOrigin` Host passes the exact app guard.
-- **A3-2b2 frame bootstrap and HTTP proxy — pending:** the same-origin local
+- **A3-2b2 frame bootstrap and HTTP proxy — merged and published through PR #35:** the same-origin local
   bootstrap, isolated-broker HttpOnly one-use frame session,
   Origin/CORS rules, and exact CSP/HTTP forwarding. Platform app
   and broker exact-bind `::1` on different server-owned ports and use
-  `http://[::1]:<port>` URLs; the untrusted child remains IPv4
+  `http://localhost:<port>` browser authorities; the sockets remain exact-bound
+  to IPv6 loopback `::1`, while the untrusted child remains IPv4
   `127.0.0.1:<assigned-port>`. Component and HTTP integration tests prove
   exact cookie attributes and that platform cookies are never forwarded to
   the child host.
 
-  Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, and wrong
-  Fetch-Site; its app cookie is host-only with `Path=/api/`. A new bootstrap
+  Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, the Vite
+  origin, and wrong Fetch-Site; its app cookie is host-only with `Path=/api/`,
+  and its server session, `Max-Age`, and `Expires` all use 15 minutes. Origin
+  and Fetch-Site are browser-CSRF defenses, not local-client identity. Bootstrap
+  and frame-session accept `POST` plus preflight `OPTIONS`, expose exact-app-only
+  credentialed CORS for `POST, OPTIONS` and
+  `Content-Type, X-Riff-CSRF`, and return HTTP `201`. A new bootstrap
   generation invalidates older frame capabilities. Frame-session requires exact
   cookie, CSRF, Origin, and Fetch-Site. First nonce navigation succeeds without
   Origin only at the exact broker Host/path, only once, and no later than 60
   seconds after issue. Tests redeem within 60 seconds, reject after expiry, and
   prove restart or a new browser generation invalidates the nonce immediately.
+  Redemption returns HTTP `303` with a relative nonce-free `Location`.
   Expired nonce values never appear in logs, headers, DTOs, or SQLite. SQLite
   contains no cookie, frame URL, or browser capability; child-port assertions
   allow only the schema-defined private process-attempt, launch, and health
@@ -408,26 +416,96 @@ The remaining claims begin only in the later gates:
   without Origin requires the broker cookie; HTTP with Origin requires exact
   broker Origin. Frame registry assertions cover browser-session generation,
   Project, run, attempt generation, and expiry. Tests do not treat port
-  separation or Cookie `Path` as Cookie authorization. The broker cookie expires at
-  `min(attempt expiry, 15 minutes)`. App and broker cookies may omit `Secure` on
-  current HTTP, but HTTPS fixtures require it.
+  separation or Cookie `Path` as Cookie authorization. The broker cookie expires
+  at `min(attempt claimedAt + frozen wallTimeMs, issue time + 15 minutes)`.
+  App and broker cookies may omit `Secure` on current HTTP, but HTTPS fixtures
+  require it.
+
+  Without changing execution-description v2, the minted capability base
+  forwards normalized suffixes for `GET` and `HEAD` only. Query is allowed
+  while normalized path plus query is at most 4,096 bytes; request bodies are
+  denied. A multi-resource HTTP integration proves relative HTML, CSS, script,
+  image, and JSON references stay beneath the minted base; root-absolute
+  application routes remain denied and are not rewritten. Tests prove the child receives only `Accept`, `Accept-Language`,
+  `If-None-Match`, `If-Modified-Since`, and `Range`, plus exact child `Host` and
+  forced `Accept-Encoding: identity`. Responses expose only `Content-Type`,
+  `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`,
+  and `Cache-Control`; tests prove `Set-Cookie`, `Location`, `Refresh`,
+  authentication, CORS, credentials, nonce/capability, and hop-by-hop headers
+  are absent.
+  Broker responses override child cache policy with `private, no-store`;
+  component and HTTP tests prove rotated/revoked routes are rejected rather
+  than reused; A3-2b4 adds the real-browser no-store and revocation proof.
+  Secret scans cover broker-generated DTOs, routes, transport headers, errors,
+  and logs. They do not claim arbitrary model-authored response bytes can hide
+  a listener already known by that child; literal payload scanning is not an
+  authorization boundary. A3-2b treats operator-provided active frame content
+  as trusted browser code under the local deployment threat model; it does not
+  claim a runtime code-review gate. Adversarial active-payload
+  isolation needs a trusted data-only wrapper or browser-inaccessible transport
+  and is not claimed by b2/b4 iframe sandbox tests.
+
+  Every child `3xx` is rejected without following. Tests cover 32,768-byte
+  request/response header ceilings, 8 MiB response body, 5,000 millisecond
+  deadline, and eight concurrent HTTP requests per capability. They also cover
+  expired dispatcher leases, stale process heartbeats, authority replacement
+  during an in-flight exchange, asynchronous serialized OS inspection, and
+  bounded inspection admission with a 5,000 millisecond overall deadline. Exact stable
+  errors are `browser_method_denied` (`405`),
+  `browser_session_denied` (`403`), `visual_frame_unavailable` (`409`),
+  `visual_frame_nonce_invalid` (`404`), `visual_frame_session_denied` (`403`),
+  `visual_frame_proxy_denied` (`404` or `405`),
+  `visual_frame_proxy_redirect_denied` (`502`),
+  `visual_frame_proxy_limit_exceeded` (`502`),
+  `visual_frame_proxy_timeout` (`504`), and
+  `visual_frame_proxy_failed` (`502`).
 
   Every broker document must emit exact CSP
-  `frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and must not
-  emit `X-Frame-Options: SAMEORIGIN`.
-- **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
-  path/subprotocol enforcement, frame-size, connection-count, and idle-time
-  limits; strict broker Origin rejection for missing, `null`, app, child, and
-  foreign values; socket-set binding and socket-first generation/lifecycle
-  revocation; and three-party app/broker/child header, log, DTO, and SQLite
-  secret scans.
-- **A3-2b4 browser and security closeout — pending:** run the complete real-
-  browser negative matrix for cookie delivery, HttpOnly denial, parent-DOM
-  isolation, nonce replay/expiry/restart, CSP embedding, and live WebSocket
-  revocation. The exact app must embed the frame while another `::1` port, a
-  different app, the IPv4 child, and a foreign top-level page cannot. Then run
-  focused/full suites, obtain an independent security review, and synchronize
-  all implementation records.
+  `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none';
+  form-action 'none'; frame-src 'none'; frame-ancestors
+  http://localhost:<exact-app-port>` with no wildcard and must not emit
+  `X-Frame-Options`. A3-2b4 provides the exact app-origin host page and
+  real-browser evidence.
+- **A3-2b3 WebSocket, revocation, and secrecy — merged and published through
+  PR #36 at `bb54b2a`:** exact path/subprotocol forwarding, fixed-child
+  peer reinspection, assembled-message and per-direction queue limits,
+  attempt-global pending/active connection limits across minted routes,
+  bounded child handshake, idle/absolute expiry, and socket-first
+  generation/lifecycle revocation are implemented. Server-level tests exercise
+  the complete bootstrap/issue/redeem path, real `::1` broker to
+  `127.0.0.1` child sockets, the negative pre-`101` matrix, exact
+  `maxConnections + 1` denial before a third child dial, child redirect and
+  non-`101` denial, and `1008` close on generation rotation and backend
+  shutdown. Sentinel and SHA-256 scans cover bounded broker errors, fixed-child
+  headers, the real ProductStore SQLite file, captured backend console output,
+  and unrelated public DTOs. These observable/persisted scans do not claim
+  arbitrary process heap bytes. Its publication
+  focused frame/network/WebSocket regression combination passed `32/32`; its
+  serial official backend publication gate reported 464 total with 463 passed, zero failed, and
+  one optional installed-OpenCode smoke skipped. Web remains 104/104, its
+  network-entry integration passes 1/1, and the production build succeeds.
+  Stable pre-upgrade distinctions include parser-level
+  `400/broker_request_failed`, parsed-but-malformed handshake
+  `400/visual_websocket_protocol_denied`, non-GET
+  `405/visual_websocket_protocol_denied`, broker authority
+  `403/visual_frame_session_denied`, and offered-subprotocol/policy
+  `403/visual_websocket_protocol_denied`.
+- **A3-2b4 browser and security closeout — merged and published through
+  PR #37:** `cd web && npm run test:e2e:a3-2b` passes 5/5
+  on Playwright-managed Chromium. It proves real cookie-jar HttpOnly/SameSite delivery,
+  one-use nonce redirect/replay denial, relative resources, child credential
+  stripping, no-store reload, `worker-src 'none'` Service Worker denial,
+  exact-app CSP embedding, hostile same-site/IPv4 embedding denial, SOP and
+  sandbox denial, native WebSocket Origin/cookie/subprotocol/text/binary
+  behavior, page-observed generation close `1008` followed by reconnect
+  denial, nonce expiry, and route invalidation after backend restart. Raw
+  fragmentation/backpressure/limit evidence remains owned by b3.
+  The complete Chromium suite passes 8/8. The focused broker/frame/WebSocket
+  regression passes 58/58. The current backend gate reports 466 total with 465
+  passed, zero failed, and one optional installed-OpenCode smoke skipped; web
+  passes 104/104, network entry 1/1, and the production build succeeds.
+  This does not claim Firefox/WebKit, remote deployment, or HTTPS acceptance.
 - **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
   explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
   script, upload, clipboard, and expired-capability rejection. Its internal

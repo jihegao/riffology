@@ -15,6 +15,10 @@ import {
   ProductRunRecovery,
   type ProductRunRecoverySupervisorPort,
 } from "../src/product-run-recovery.ts";
+import {
+  ProductRunDispatcher,
+  type BatchSupervisorPort,
+} from "../src/product-run-dispatcher.ts";
 import { openProductDatabase } from "../src/product-schema.ts";
 import {
   ProductStoreV2,
@@ -474,6 +478,48 @@ test("visual recovery converges every durable checkpoint with fake process super
       fixture.store.close();
       rmSync(fixture.parent, { recursive: true, force: true });
     }
+  }
+});
+
+test("dispatcher revokes visual access before cross-generation recovery commits terminal state", async () => {
+  const fixture = createFixture("dispatcher_revoke");
+  let dispatcher: ProductRunDispatcher | undefined;
+  try {
+    prepareCheckpoint(fixture, "running");
+    const recoveryCalls: string[] = [];
+    const recovery = recoverySupervisor(recoveryCalls);
+    const supervisor: BatchSupervisorPort = {
+      ...recovery,
+      async supervise() {
+        throw new Error("recovered visual work must not enter batch supervision");
+      },
+      cleanup() {
+        throw new Error("recovered visual work must not enter batch cleanup");
+      },
+    };
+    const revocations: string[] = [];
+    dispatcher = new ProductRunDispatcher({
+      store: fixture.store,
+      supervisor,
+      now: () => new Date(RECOVERED_AT),
+      revokeVisualAccess: (runId) => {
+        assert.equal(runId, fixture.runId);
+        assert.equal(fixture.store.getRun(fixture.projectId, runId).status, "running");
+        assert.deepEqual(recoveryCalls, []);
+        revocations.push(runId);
+      },
+    });
+
+    await dispatcher.start();
+
+    assert.deepEqual(revocations, [fixture.runId]);
+    assert.deepEqual(recoveryCalls, ["inspect", "terminate", "gone", "scratch"]);
+    assertPrivateVisualCompletion(fixture, "failed");
+    assert.equal(fixture.store.listRunAttempts(fixture.runId)[0]!.state, "interrupted");
+  } finally {
+    await dispatcher?.stop();
+    fixture.store.close();
+    rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 

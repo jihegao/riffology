@@ -70,7 +70,7 @@ implementation authority.
 | --- | --- |
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
-| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, and the isolated network-topology primitives are merged. Browser broker/frame/WebSocket completion, scoped Playwright, and ordinary wind import remain. |
+| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, and the isolated browser broker/frame/WebSocket path plus Chromium security closeout are merged. Scoped Playwright and ordinary wind import remain. |
 | **4 — shared product shell** | Pending Stage 3. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
 ## Active product and stage documents

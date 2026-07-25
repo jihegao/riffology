@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { accessSync, constants, mkdirSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import type { Duplex } from "node:stream";
 import { ApiError, asApiError } from "./errors.ts";
 import { canonicalJsonV2, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import { DurableProjectStore } from "./durable-project-store.ts";
@@ -17,7 +18,7 @@ import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
-import { ProductStoreV2 } from "./product-store-v2.ts";
+import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
 import {
   GenericVisualSupervisor,
@@ -36,8 +37,27 @@ import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
 import {
   BrowserNetworkTopology,
   networkJson,
+  rejectUpgrade,
   type BrowserNetworkAddress,
 } from "./browser-network-topology.ts";
+import {
+  BrowserFrameCapability,
+  BrowserFrameCapabilityError,
+  BrowserFrameInspectionTimeoutError,
+  type BrowserFrameConnectedPeer,
+  type BrowserFrameTarget,
+  type BrowserFrameTargetResolver,
+  type BrowserRequestAdmission,
+} from "./browser-frame-capability.ts";
+import {
+  BrowserWebSocketBridge,
+  BrowserWebSocketBridgeError,
+  type BrowserWebSocketPeerIdentity,
+} from "./browser-websocket-bridge.ts";
+import {
+  inspectVisualConnectedPeerAsync,
+  inspectVisualListenerAsync,
+} from "./visual-listener-inspector.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -79,7 +99,175 @@ export type BackendOptions = {
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
   legacyCloseDrainTimeoutMs?: number;
+  browserFrameTargetResolver?: BrowserFrameTargetResolver;
 };
+
+export type BrowserFrameListenerInspector = (
+  target: HealthyVisualFrameTarget,
+) => Promise<boolean>;
+
+export type BrowserFrameConnectedPeerInspector = (
+  target: HealthyVisualFrameTarget,
+  peer: BrowserFrameConnectedPeer,
+) => Promise<boolean>;
+
+export const createProductBrowserFrameTargetResolver = (
+  store: Pick<ProductStoreV2, "currentHealthyVisualFrameTarget">,
+  inspect: BrowserFrameListenerInspector = async (target) => {
+    try {
+      await inspectVisualListenerAsync({
+        runId: target.runId,
+        processAttemptId: target.processAttemptId,
+        pid: target.pid,
+        processStartToken: target.processStartToken,
+        processGroupId: target.processGroupId,
+        assignedPort: target.loopbackPort,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  inspectionDeadlineMs = 5_000,
+  inspectConnectedPeer: BrowserFrameConnectedPeerInspector = async (target, peer) => {
+    if (peer.localHost !== "127.0.0.1"
+      || peer.remoteHost !== "127.0.0.1"
+      || peer.remotePort !== target.loopbackPort) return false;
+    try {
+      await inspectVisualConnectedPeerAsync({
+        runId: target.runId,
+        processAttemptId: target.processAttemptId,
+        pid: target.pid,
+        processStartToken: target.processStartToken,
+        processGroupId: target.processGroupId,
+        assignedPort: target.loopbackPort,
+        brokerLocalPort: peer.localPort,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+): BrowserFrameTargetResolver => {
+  if (!Number.isSafeInteger(inspectionDeadlineMs)
+    || inspectionDeadlineMs < 1 || inspectionDeadlineMs > 5_000) {
+    throw new Error("Browser frame inspection deadline must be between 1 and 5000 milliseconds.");
+  }
+  const current = (projectId: string, runId: string): HealthyVisualFrameTarget | null => {
+    try {
+      return store.currentHealthyVisualFrameTarget(projectId, runId);
+    } catch {
+      return null;
+    }
+  };
+  let inspectionQueue: Promise<void> = Promise.resolve();
+  let pendingInspections = 0;
+  const scheduleInspection = async (
+    expected: BrowserFrameTarget,
+    operation: (target: HealthyVisualFrameTarget) => Promise<boolean>,
+  ): Promise<boolean> => {
+    if (pendingInspections >= 16) return false;
+    pendingInspections += 1;
+    const prior = inspectionQueue;
+    let cancelled = false;
+    const task = prior.then(async (): Promise<boolean> => {
+      if (cancelled) return false;
+      const target = current(expected.projectId, expected.runId);
+      if (!target || !matchesBrowserFrameTarget(target, expected)) return false;
+      if (!await operation(target) || cancelled) return false;
+      const after = current(expected.projectId, expected.runId);
+      return Boolean(after
+        && matchesBrowserFrameTarget(after, expected)
+        && sameHealthyVisualFrameTarget(after, target));
+    });
+    inspectionQueue = task.then(() => undefined, () => undefined);
+    void task.then(
+      () => { pendingInspections -= 1; },
+      () => { pendingInspections -= 1; },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        task.catch(() => false),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            cancelled = true;
+            reject(new BrowserFrameInspectionTimeoutError());
+          }, inspectionDeadlineMs);
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof BrowserFrameInspectionTimeoutError) throw error;
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  return Object.freeze({
+    resolve: async (projectId: string, runId: string): Promise<BrowserFrameTarget | null> => {
+      const target = current(projectId, runId);
+      if (!target) return null;
+      return Object.freeze({
+        projectId: target.projectId,
+        runId: target.runId,
+        attemptGeneration: target.attemptGeneration,
+        port: target.loopbackPort,
+        expiresAtMs: Date.parse(target.attemptExpiresAt),
+        ...(target.webSocket ? { webSocket: target.webSocket } : {}),
+      });
+    },
+    inspect: async (expected: BrowserFrameTarget): Promise<boolean> =>
+      scheduleInspection(expected, inspect),
+    inspectConnectedPeer: async (
+      expected: BrowserFrameTarget,
+      peer: BrowserFrameConnectedPeer,
+    ): Promise<boolean> => scheduleInspection(
+      expected,
+      (target) => inspectConnectedPeer(target, peer),
+    ),
+  });
+};
+
+const matchesBrowserFrameTarget = (
+  target: HealthyVisualFrameTarget,
+  expected: BrowserFrameTarget,
+): boolean => target.projectId === expected.projectId
+  && target.runId === expected.runId
+  && target.attemptGeneration === expected.attemptGeneration
+  && target.loopbackPort === expected.port
+  && Date.parse(target.attemptExpiresAt) === expected.expiresAtMs
+  && sameBrowserWebSocketPolicy(target.webSocket, expected.webSocket);
+
+const sameHealthyVisualFrameTarget = (
+  left: HealthyVisualFrameTarget,
+  right: HealthyVisualFrameTarget,
+): boolean => left.projectId === right.projectId
+  && left.runId === right.runId
+  && left.attemptId === right.attemptId
+  && left.attemptGeneration === right.attemptGeneration
+  && left.dispatcherGeneration === right.dispatcherGeneration
+  && left.attemptExpiresAt === right.attemptExpiresAt
+  && left.processAttemptId === right.processAttemptId
+  && left.pid === right.pid
+  && left.processStartToken === right.processStartToken
+  && left.processGroupId === right.processGroupId
+  && left.loopbackHost === right.loopbackHost
+  && left.loopbackPort === right.loopbackPort
+  && left.healthPath === right.healthPath
+  && left.healthyAt === right.healthyAt
+  && sameBrowserWebSocketPolicy(left.webSocket, right.webSocket);
+
+const sameBrowserWebSocketPolicy = (
+  left: HealthyVisualFrameTarget["webSocket"] | BrowserFrameTarget["webSocket"],
+  right: HealthyVisualFrameTarget["webSocket"] | BrowserFrameTarget["webSocket"],
+): boolean => left === undefined && right === undefined
+  || Boolean(left && right
+    && left.path === right.path
+    && left.maxFrameBytes === right.maxFrameBytes
+    && left.maxConnections === right.maxConnections
+    && left.idleTimeoutMs === right.idleTimeoutMs
+    && left.subprotocols.length === right.subprotocols.length
+    && left.subprotocols.every((value, index) => value === right.subprotocols[index]));
 
 export class BackendApp {
   readonly store: ProjectStore;
@@ -97,6 +285,9 @@ export class BackendApp {
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #server?: Server;
   #browserNetwork?: BrowserNetworkTopology;
+  #browserFrames?: BrowserFrameCapability;
+  #browserWebSockets?: BrowserWebSocketBridge;
+  #browserBrokerOrigin?: string;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
@@ -135,6 +326,7 @@ export class BackendApp {
         ...(options.a3VisualOutputConsumer
           ? { consumeVisualOutput: options.a3VisualOutputConsumer }
           : {}),
+        revokeVisualAccess: (runId) => this.#browserFrames?.revokeRun(runId),
       });
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
       const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
@@ -224,18 +416,36 @@ export class BackendApp {
         return { app: this.#browserNetwork.app, broker: this.#browserNetwork.broker };
       }
       if (this.#listenerMode !== "idle") throw new Error("A backend listener is already active or closed.");
-      const network = await BrowserNetworkTopology.start({
-        appPort,
-        brokerPort,
-        appHandler: (request, response) => this.#handle(request, response),
-        brokerHandler: (_request, response) => networkJson(response, 404, {
-          accepted: false,
-          error: {
-            code: "broker_route_denied",
-            message: "No live visual frame route matches this request.",
+      let network: BrowserNetworkTopology;
+      try {
+        network = await BrowserNetworkTopology.start({
+          appPort,
+          brokerPort,
+          beforeReady: ({ app, broker }) => {
+            this.#browserBrokerOrigin = broker.origin;
+            this.#browserFrames = new BrowserFrameCapability({
+              appOrigin: app.origin,
+              brokerOrigin: broker.origin,
+              targets: this.options.browserFrameTargetResolver ?? this.#productBrowserFrameTargets(),
+            });
+            this.#browserWebSockets = new BrowserWebSocketBridge();
           },
-        }),
-      });
+          appHandler: async (request, response, address) => {
+            if (await this.#handleBrowserFramePlatform(request, response, address)) return;
+            await this.#handle(request, response);
+          },
+          brokerHandler: (request, response, address) =>
+            this.#handleBrowserFrameBroker(request, response, address),
+          brokerUpgradeHandler: (request, socket, head, address) =>
+            this.#handleBrowserFrameWebSocket(request, socket, head, address),
+        });
+      } catch (error) {
+        this.#browserFrames?.clear();
+        this.#browserFrames = undefined;
+        this.#browserWebSockets = undefined;
+        this.#browserBrokerOrigin = undefined;
+        throw error;
+      }
       this.#browserNetwork = network;
       this.#listenerMode = "browser";
       return { app: network.app, broker: network.broker };
@@ -251,6 +461,10 @@ export class BackendApp {
         this.#server = undefined;
       }
       if (this.#browserNetwork) {
+        this.#browserFrames?.clear();
+        this.#browserFrames = undefined;
+        this.#browserWebSockets = undefined;
+        this.#browserBrokerOrigin = undefined;
         await this.#browserNetwork.close();
         this.#browserNetwork = undefined;
       }
@@ -276,6 +490,242 @@ export class BackendApp {
     } finally {
       release();
     }
+  }
+
+  #productBrowserFrameTargets(): BrowserFrameTargetResolver {
+    const store = this.productStore;
+    if (!store) {
+      return Object.freeze({
+        resolve: async () => null,
+        inspect: async () => false,
+      });
+    }
+    return createProductBrowserFrameTargetResolver(store);
+  }
+
+  async #handleBrowserFramePlatform(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): Promise<boolean> {
+    const url = new URL(request.url ?? "/", address.origin);
+    const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
+    const bootstrap = url.pathname === "/api/browser-session/bootstrap";
+    const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
+    if (!hostPage && !bootstrap && !match) return false;
+    try {
+      if (hostPage) {
+        if (url.search !== "") throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        decodeBrowserPathId(hostPage[1]!);
+        decodeBrowserPathId(hostPage[2]!);
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          throw new BrowserFrameCapabilityError(405, "browser_method_denied");
+        }
+        if (request.method === "GET") {
+          const fetchSite = rawBrowserHeader(request, "sec-fetch-site");
+          if ((fetchSite !== "none" && fetchSite !== "same-origin")
+            || rawBrowserHeader(request, "sec-fetch-mode") !== "navigate"
+            || rawBrowserHeader(request, "sec-fetch-dest") !== "document") {
+            throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+          }
+        }
+        const brokerOrigin = this.#browserBrokerOrigin;
+        if (!brokerOrigin) throw new BrowserFrameCapabilityError(503, "browser_session_denied");
+        browserVisualHostPage(response, request.method, brokerOrigin);
+        return true;
+      }
+      if (request.method === "OPTIONS") {
+        this.#browserFramePreflight(request, response, address);
+        return true;
+      }
+      exactEmptyBrowserBody(request, "browser_session_denied");
+      if (url.search !== "") throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+      const frames = this.#browserFrames;
+      if (!frames) throw new BrowserFrameCapabilityError(503, "browser_session_denied");
+      const admission = browserAdmission(request, address);
+      const cors = browserCorsHeaders(address.origin);
+      if (bootstrap) {
+        const result = frames.bootstrap(admission);
+        networkJsonWithHeaders(response, 201, {
+          schemaVersion: 1,
+          generation: result.generation,
+          csrfToken: result.csrfToken,
+          expiresAt: new Date(result.expiresAtMs).toISOString(),
+        }, { ...cors, "set-cookie": result.setCookie });
+        return true;
+      }
+      const result = await frames.issueFrameSession(admission, {
+        projectId: decodeBrowserPathId(match![1]!),
+        runId: decodeBrowserPathId(match![2]!),
+      });
+      networkJsonWithHeaders(response, 201, {
+        schemaVersion: 1,
+        frameUrl: result.frameUrl,
+        expiresAt: new Date(result.expiresAtMs).toISOString(),
+      }, cors);
+      return true;
+    } catch (error) {
+      const origin = rawBrowserHeader(request, "origin");
+      this.#browserFrameError(response, error, origin === address.origin ? address.origin : undefined);
+      return true;
+    }
+  }
+
+  async #handleBrowserFrameBroker(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): Promise<void> {
+    const url = new URL(request.url ?? "/", address.origin);
+    const frames = this.#browserFrames;
+    if (!frames) {
+      this.#browserFrameError(response, new BrowserFrameCapabilityError(503, "visual_frame_unavailable"));
+      return;
+    }
+    try {
+      if (url.pathname.startsWith("/frame/redeem/")) {
+        exactEmptyBrowserBody(request, "visual_frame_nonce_invalid");
+        if (url.search !== "") throw new BrowserFrameCapabilityError(404, "visual_frame_nonce_invalid");
+        const result = await frames.redeem({
+          ...browserAdmission(request, address),
+          path: url.pathname,
+        });
+        response.writeHead(303, {
+          "cache-control": "no-store",
+          "content-length": "0",
+          location: result.location,
+          "referrer-policy": "no-referrer",
+          "set-cookie": result.setCookie,
+          "x-content-type-options": "nosniff",
+        });
+        response.end();
+        return;
+      }
+      if (url.pathname.startsWith("/frame/c/")) {
+        exactEmptyBrowserBody(request, "visual_frame_proxy_limit_exceeded");
+        const result = await frames.proxy({
+          method: request.method ?? "",
+          host: address.authority,
+          origin: rawBrowserHeader(request, "origin"),
+          cookie: rawBrowserHeader(request, "cookie"),
+          path: `${url.pathname}${url.search}`,
+          headers: browserProxyHeaders(request),
+        });
+        response.writeHead(result.status, result.headers as Record<string, string>);
+        response.end(Buffer.from(result.body));
+        return;
+      }
+      networkJson(response, 404, {
+        accepted: false,
+        error: {
+          code: "broker_route_denied",
+          message: "No live visual frame route matches this request.",
+        },
+      });
+    } catch (error) {
+      this.#browserFrameError(response, error);
+    }
+  }
+
+  async #handleBrowserFrameWebSocket(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    address: BrowserNetworkAddress,
+  ): Promise<void> {
+    const frames = this.#browserFrames;
+    const bridge = this.#browserWebSockets;
+    if (!frames || !bridge) {
+      rejectUpgrade(socket, 503, "broker_listener_unavailable");
+      return;
+    }
+    const owner = bridge.createOwner(socket);
+    let admission: Awaited<ReturnType<BrowserFrameCapability["admitWebSocket"]>> | undefined;
+    try {
+      const host = rawBrowserHeader(request, "host");
+      admission = await frames.admitWebSocket({
+        method: request.method ?? "",
+        host: typeof host === "string" ? host : undefined,
+        origin: rawBrowserHeader(request, "origin"),
+        cookie: rawBrowserHeader(request, "cookie"),
+        authorization: rawBrowserHeader(request, "authorization"),
+        path: request.url ?? "/",
+        protocols: rawBrowserHeader(request, "sec-websocket-protocol"),
+        upgrade: rawBrowserHeader(request, "upgrade"),
+        connection: rawBrowserHeader(request, "connection"),
+        version: rawBrowserHeader(request, "sec-websocket-version"),
+        key: rawBrowserHeader(request, "sec-websocket-key"),
+        extensions: rawBrowserHeader(request, "sec-websocket-extensions"),
+      }, owner);
+      await bridge.upgrade(request, socket, head, owner, {
+        childPort: admission.target.port,
+        childPath: admission.childPath,
+        declaredProtocols: admission.target.webSocket?.subprotocols ?? [],
+        maxFrameBytes: admission.maxFrameBytes,
+        idleTimeoutMs: admission.idleTimeoutMs,
+        expiresAtMs: admission.expiresAtMs,
+        brokerOrigin: address.origin,
+        inspectConnectedPeer: async (peer: BrowserWebSocketPeerIdentity): Promise<boolean> => {
+          await admission!.recheckConnected(toFrameConnectedPeer(peer));
+          return true;
+        },
+        live: admission.live,
+        markOpen: admission.markOpen,
+        onClosed: admission.release,
+      });
+    } catch (error) {
+      admission?.release();
+      const denied = webSocketUpgradeError(error);
+      rejectUpgrade(socket, denied.status, denied.code);
+    }
+  }
+
+  #browserFramePreflight(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): void {
+    const origin = rawBrowserHeader(request, "origin");
+    const fetchSite = rawBrowserHeader(request, "sec-fetch-site");
+    const requestedMethod = rawBrowserHeader(request, "access-control-request-method");
+    const requestedHeaders = rawBrowserHeader(request, "access-control-request-headers");
+    const normalizedHeaders = typeof requestedHeaders === "string"
+      ? requestedHeaders.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)
+      : [];
+    if (origin !== address.origin
+      || fetchSite !== "same-origin"
+      || requestedMethod !== "POST"
+      || Array.isArray(requestedHeaders)
+      || normalizedHeaders.some((name) => name !== "content-type" && name !== "x-riff-csrf")
+      || rawBrowserHeader(request, "authorization") !== undefined) {
+      throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+    }
+    response.writeHead(204, {
+      ...browserCorsHeaders(address.origin),
+      "access-control-allow-headers": "Content-Type, X-Riff-CSRF",
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-max-age": "300",
+      "content-length": "0",
+    });
+    response.end();
+  }
+
+  #browserFrameError(response: ServerResponse, error: unknown, corsOrigin?: string): void {
+    const denied = error instanceof BrowserFrameCapabilityError
+      ? error
+      : new BrowserFrameCapabilityError(502, "visual_frame_proxy_failed");
+    const body = {
+      accepted: false,
+      error: {
+        code: denied.code,
+        message: "The browser frame request was denied.",
+      },
+    };
+    if (corsOrigin) {
+      networkJsonWithHeaders(response, denied.status, body, browserCorsHeaders(corsOrigin));
+      return;
+    }
+    networkJson(response, denied.status, body);
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -635,6 +1085,224 @@ const json = (response: ServerResponse, status: number, payload: unknown): void 
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
 };
+
+const browserVisualHostPage = (
+  response: ServerResponse,
+  method: string | undefined,
+  brokerOrigin: string,
+): void => {
+  const nonce = randomUUID().replaceAll("-", "");
+  const source = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riff visual run</title>
+</head>
+<body>
+<main id="visual-host" data-status="loading" data-stage="bootstrap">
+<p id="visual-status" role="status" aria-live="polite">Preparing the visual run.</p>
+<iframe id="visual-frame" title="Project visual run" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" hidden></iframe>
+</main>
+<script nonce="${nonce}">
+(() => {
+  "use strict";
+  const host = document.getElementById("visual-host");
+  const status = document.getElementById("visual-status");
+  const frame = document.getElementById("visual-frame");
+  const brokerOrigin = ${JSON.stringify(brokerOrigin)};
+  const route = /^\\/browser\\/projects\\/([^/]+)\\/runs\\/([^/]+)\\/visual$/.exec(location.pathname);
+  const fail = (code) => {
+    host.dataset.status = "error";
+    host.dataset.stage = "error";
+    host.dataset.errorCode = code;
+    status.textContent = "The visual run is unavailable.";
+  };
+  const responseCode = async (response, fallback) => {
+    try {
+      const body = await response.json();
+      return typeof body?.error?.code === "string" ? body.error.code : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  const start = async () => {
+    if (!route) throw new Error("visual_host_route_invalid");
+    const projectId = decodeURIComponent(route[1]);
+    const runId = decodeURIComponent(route[2]);
+    host.dataset.stage = "bootstrap";
+    const bootstrapResponse = await fetch("/api/browser-session/bootstrap", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { accept: "application/json" }
+    });
+    if (!bootstrapResponse.ok) {
+      throw new Error(await responseCode(bootstrapResponse, "browser_session_denied"));
+    }
+    const bootstrap = await bootstrapResponse.json();
+    if (typeof bootstrap.csrfToken !== "string" || !Number.isSafeInteger(bootstrap.generation)) {
+      throw new Error("browser_session_denied");
+    }
+    host.dataset.browserGeneration = String(bootstrap.generation);
+    host.dataset.stage = "frame-session";
+    const issueResponse = await fetch(
+      "/api/projects/" + encodeURIComponent(projectId) + "/runs/" + encodeURIComponent(runId) + "/visual-frame-session",
+      {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          accept: "application/json",
+          "x-riff-csrf": bootstrap.csrfToken
+        }
+      }
+    );
+    if (!issueResponse.ok) {
+      throw new Error(await responseCode(issueResponse, "visual_frame_unavailable"));
+    }
+    const issued = await issueResponse.json();
+    if (typeof issued.frameUrl !== "string" || new URL(issued.frameUrl).origin !== brokerOrigin) {
+      throw new Error("visual_frame_unavailable");
+    }
+    frame.addEventListener("load", () => {
+      host.dataset.status = "loaded";
+      host.dataset.stage = "navigation-complete";
+      status.textContent = "Visual frame navigation completed.";
+    }, { once: true });
+    frame.src = issued.frameUrl;
+    frame.hidden = false;
+    host.dataset.status = "frame-issued";
+    host.dataset.stage = "navigation";
+    status.textContent = "Loading the visual run.";
+  };
+  void start().catch((error) => fail(
+    error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
+      ? error.message
+      : "visual_frame_unavailable"
+  ));
+})();
+</script>
+</body>
+</html>`;
+  const bytes = Buffer.from(source);
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength,
+    "content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-src ${brokerOrigin}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
+    "content-type": "text/html; charset=utf-8",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(method === "HEAD" ? undefined : bytes);
+};
+
+const networkJsonWithHeaders = (
+  response: ServerResponse,
+  status: number,
+  payload: Record<string, unknown>,
+  headers: Record<string, string>,
+): void => {
+  const bytes = Buffer.from(JSON.stringify(payload));
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength,
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    ...headers,
+  });
+  response.end(bytes);
+};
+
+const browserCorsHeaders = (origin: string): Record<string, string> => ({
+  "access-control-allow-credentials": "true",
+  "access-control-allow-origin": origin,
+  vary: "Origin",
+});
+
+const rawBrowserHeader = (
+  request: IncomingMessage,
+  expectedName: string,
+): string | readonly string[] | undefined => {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === expectedName) {
+      values.push(request.rawHeaders[index + 1] ?? "");
+    }
+  }
+  return values.length === 0 ? undefined : values.length === 1 ? values[0] : Object.freeze(values);
+};
+
+const toFrameConnectedPeer = (
+  peer: BrowserWebSocketPeerIdentity,
+): BrowserFrameConnectedPeer => Object.freeze({
+  localHost: peer.localAddress,
+  localPort: peer.localPort,
+  remoteHost: peer.remoteAddress,
+  remotePort: peer.remotePort,
+});
+
+const webSocketUpgradeError = (
+  error: unknown,
+): Readonly<{ status: number; code: string }> => {
+  if (error instanceof BrowserFrameCapabilityError
+    || error instanceof BrowserWebSocketBridgeError) {
+    return Object.freeze({ status: error.status, code: error.code });
+  }
+  return Object.freeze({ status: 502, code: "visual_websocket_upstream_failed" });
+};
+
+const browserAdmission = (
+  request: IncomingMessage,
+  address: BrowserNetworkAddress,
+): BrowserRequestAdmission => {
+  const host = rawBrowserHeader(request, "host");
+  return {
+    method: request.method ?? "",
+    host: typeof host === "string" ? host : host === undefined ? address.authority : undefined,
+    origin: rawBrowserHeader(request, "origin"),
+    fetchSite: rawBrowserHeader(request, "sec-fetch-site"),
+    cookie: rawBrowserHeader(request, "cookie"),
+    csrf: rawBrowserHeader(request, "x-riff-csrf"),
+    authorization: rawBrowserHeader(request, "authorization"),
+  };
+};
+
+const exactEmptyBrowserBody = (
+  request: IncomingMessage,
+  code:
+    | "browser_session_denied"
+    | "visual_frame_nonce_invalid"
+    | "visual_frame_proxy_limit_exceeded",
+): void => {
+  const contentLength = rawBrowserHeader(request, "content-length");
+  if (rawBrowserHeader(request, "transfer-encoding") !== undefined
+    || Array.isArray(contentLength)
+    || contentLength !== undefined && contentLength !== "0") {
+    const status = code === "visual_frame_proxy_limit_exceeded" ? 502 : code === "visual_frame_nonce_invalid" ? 404 : 403;
+    throw new BrowserFrameCapabilityError(status, code);
+  }
+};
+
+const decodeBrowserPathId = (value: string): string => {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0")) throw new Error("invalid path id");
+    return decoded;
+  } catch {
+    throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+  }
+};
+
+const browserProxyHeaders = (
+  request: IncomingMessage,
+): Readonly<Record<string, string | readonly string[] | undefined>> => Object.freeze({
+  accept: rawBrowserHeader(request, "accept"),
+  "accept-language": rawBrowserHeader(request, "accept-language"),
+  "if-none-match": rawBrowserHeader(request, "if-none-match"),
+  "if-modified-since": rawBrowserHeader(request, "if-modified-since"),
+  range: rawBrowserHeader(request, "range"),
+});
 
 const canonicalJson = (response: ServerResponse, status: number, payload: unknown): void => {
   const bytes = canonicalJsonV2(payload);

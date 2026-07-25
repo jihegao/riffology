@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-const origin = "http://[::1]:8787";
+const origin = "http://localhost:8787";
 const request = async (path, init) => { const response = await fetch(`${origin}${path}`, init); const body = await response.json(); if (!response.ok || body.accepted === false) throw new Error(`${response.status} ${path}: ${JSON.stringify(body)}`); return body; };
 const post = (path, body) => request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const discovery = await request("/api/projects/default"); const projectId = discovery.project_id; const actorId = discovery.actors[0].actor_id; const base = `/api/projects/${projectId}`; const attached = await post(`${base}/sessions`, { actor_id: actorId }); let revision = 0;

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
   inspectVisualListener,
+  inspectVisualListenerAsync,
+  inspectVisualConnectedPeer,
+  inspectVisualConnectedPeerAsync,
   selectVisualLoopbackPort,
   VisualListenerInspectionError,
   type VisualListenerInspectionCode,
@@ -94,6 +97,53 @@ test("selectVisualLoopbackPort uses literal IPv4 loopback and releases the non-r
   assert.equal(address.address, "127.0.0.1");
   await new Promise<void>((resolveClose, rejectClose) =>
     server.close((error) => error ? rejectClose(error) : resolveClose()));
+});
+
+test("async inspector performs bounded OS reads without blocking the event loop", async () => {
+  const sync = dependencies({ lsof: lsof([100, `127.0.0.1:${ASSIGNED_PORT}`]) });
+  let ticked = false;
+  const pending = inspectVisualListenerAsync(BASE_INPUT, {
+    platform: "darwin",
+    runCommand: async (file, args) => {
+      await delay(1);
+      return sync.runCommand!(file, args);
+    },
+  });
+  setImmediate(() => {
+    ticked = true;
+  });
+  assert.deepEqual(await pending, { kind: "ready" });
+  assert.equal(ticked, true);
+});
+
+test("connected-peer inspector binds the exact established four-tuple to the process group", async () => {
+  const input = Object.freeze({ ...BASE_INPUT, brokerLocalPort: 52_345 });
+  const exact = dependencies({
+    lsof: lsof([100, `127.0.0.1:${ASSIGNED_PORT}->127.0.0.1:${input.brokerLocalPort}`]),
+  });
+  assert.deepEqual(inspectVisualConnectedPeer(input, exact), { kind: "ready" });
+  const asyncEvidence = dependencies({
+    lsof: lsof([100, `127.0.0.1:${ASSIGNED_PORT}->127.0.0.1:${input.brokerLocalPort}`]),
+  });
+  assert.deepEqual(await inspectVisualConnectedPeerAsync(input, {
+    platform: "darwin",
+    runCommand: async (file, args) => asyncEvidence.runCommand!(file, args),
+  }), { kind: "ready" });
+  assert.throws(
+    () => inspectVisualConnectedPeer(input, dependencies({
+      firstPs: `${PS}  200   200 ${START_TOKEN}\n`,
+      lsof: lsof([200, `127.0.0.1:${ASSIGNED_PORT}->127.0.0.1:${input.brokerLocalPort}`]),
+    })),
+    (error: unknown) => error instanceof VisualListenerInspectionError
+      && error.code === "visual_socket_foreign_owner",
+  );
+  assert.throws(
+    () => inspectVisualConnectedPeer(input, dependencies({
+      lsof: lsof([100, `127.0.0.1:${ASSIGNED_PORT}->127.0.0.1:${input.brokerLocalPort + 1}`]),
+    })),
+    (error: unknown) => error instanceof VisualListenerInspectionError
+      && error.code === "visual_socket_missing",
+  );
 });
 
 test("injected OS evidence classifies exact readiness and every fail-closed listener shape", async (t) => {
@@ -191,11 +241,13 @@ const net = require("node:net");
 const readline = require("node:readline");
 const servers = [];
 let connections = 0;
+const held = [];
 const bind = (spec) => new Promise((resolve, reject) => {
   const server = net.createServer((socket) => {
     connections += 1;
     process.stdout.write("connection\n");
-    socket.destroy();
+    if (spec.hold) held.push(socket);
+    else socket.destroy();
   });
   server.once("error", reject);
   server.listen({host: spec.host, port: spec.port, exclusive: true}, () => {
@@ -219,7 +271,7 @@ setInterval(() => {}, 1000);
 `;
 
 const startRealChild = async (
-  specs: readonly Readonly<{ host: string; port: number }>[],
+  specs: readonly Readonly<{ host: string; port: number; hold?: boolean }>[],
   assignedPort: number,
   suffix: string,
 ): Promise<RealChild> => {
@@ -320,6 +372,7 @@ test("Darwin inspector observes real exact, wildcard, extra, and foreign-replace
     );
     try {
       assert.deepEqual(inspectVisualListener(fixture.input), { kind: "ready" });
+      assert.deepEqual(await inspectVisualListenerAsync(fixture.input), { kind: "ready" });
       await delay(50);
       assert.equal(fixture.lines.includes("connection"), false);
     } finally {
@@ -387,6 +440,31 @@ test("Darwin inspector observes real exact, wildcard, extra, and foreign-replace
     } finally {
       await stopRealChild(foreign);
       await stopRealChild(target);
+    }
+  });
+
+  await t.test("established peer belongs to the exact child process group and four-tuple", async () => {
+    const assignedPort = await selectVisualLoopbackPort();
+    const fixture = await startRealChild(
+      [{ host: "127.0.0.1", port: assignedPort, hold: true }],
+      assignedPort,
+      "real_connected",
+    );
+    const socket = connect({ host: "127.0.0.1", port: assignedPort });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+      await fixture.waitForLine("connection");
+      assert.ok(socket.localPort);
+      assert.deepEqual(inspectVisualConnectedPeer({
+        ...fixture.input,
+        brokerLocalPort: socket.localPort,
+      }), { kind: "ready" });
+    } finally {
+      socket.destroy();
+      await stopRealChild(fixture);
     }
   });
 });

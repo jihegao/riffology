@@ -619,6 +619,24 @@ const assertNoCompletionEvidence = (fixture: Fixture, runId: string): void => {
   }
 };
 
+test("cancellation revokes visual access even before an active lane is registered", async () => {
+  const fixture = createFixture("cancel_race");
+  const runId = fixture.createVisualRun("visual", "2026-07-25T18:00:00.000Z");
+  const revocations: string[] = [];
+  const dispatcher = new ProductRunDispatcher({
+    store: fixture.store,
+    supervisor: batchHarness(new Map()).supervisor,
+    revokeVisualAccess: (candidate) => revocations.push(candidate),
+  });
+  try {
+    dispatcher.requestCancellation(runId);
+    assert.deepEqual(revocations, [runId]);
+  } finally {
+    await dispatcher.stop();
+    fixture.close();
+  }
+});
+
 test("one visual slot preserves batch progress and releases the next visual only after exact cleanup and terminal commit", {
   timeout: 15_000,
 }, async () => {
@@ -634,6 +652,7 @@ test("one visual slot preserves batch progress and releases the next visual only
     assert.equal(fixture.store.getRun(fixture.visualProjectId, firstVisual).status, "succeeded");
   });
   const batchControl = laneControl("none");
+  const revocations: string[] = [];
   const visual = visualHarness(new Map([
     [firstVisual, firstControl],
     [secondVisual, secondControl],
@@ -653,6 +672,10 @@ test("one visual slot preserves batch progress and releases the next visual only
       leaseMs: 1_000,
       consumeOutput: () => Buffer.from("{}"),
       consumeVisualOutput: () => Buffer.from("{}"),
+      revokeVisualAccess: (runId) => {
+        assert.equal(fixture.store.getRun(fixture.visualProjectId, runId).status, "running");
+        revocations.push(runId);
+      },
     });
     await dispatcher.start();
     await Promise.all([firstControl.entered.promise, batchControl.entered.promise]);
@@ -676,6 +699,7 @@ test("one visual slot preserves batch progress and releases the next visual only
 
     assert.deepEqual(visual.calls, [firstVisual, secondVisual]);
     assert.deepEqual(visual.cleanupCalls, [firstVisual, secondVisual]);
+    assert.deepEqual(revocations, [firstVisual, secondVisual]);
     assert.equal(fixture.store.listRunAttempts(firstVisual).length, 1);
     assert.equal(fixture.store.listRunAttempts(secondVisual).length, 1);
     assert.equal(fixture.store.listRunOutputs(firstVisual).length, 1);
@@ -705,6 +729,7 @@ test("active visual cancellation aborts only its exact lane and cancellation win
   const batchControl = laneControl("release-or-abort");
   const visual = visualHarness(new Map([[visualRun, visualControl]]));
   const batch = batchHarness(new Map([[batchRun, batchControl]]));
+  const revocations: string[] = [];
   try {
     dispatcher = new ProductRunDispatcher({
       store: fixture.store,
@@ -713,6 +738,12 @@ test("active visual cancellation aborts only its exact lane and cancellation win
       leaseMs: 1_000,
       consumeOutput: () => Buffer.from("{}"),
       consumeVisualOutput: () => Buffer.from("{}"),
+      revokeVisualAccess: (runId) => {
+        const run = fixture.store.getRun(fixture.visualProjectId, runId);
+        assert.equal(run.status, "running");
+        assert.ok(run.cancelRequestedAt);
+        revocations.push(runId);
+      },
     });
     await dispatcher.start();
     await Promise.all([visualControl.entered.promise, batchControl.entered.promise]);
@@ -744,6 +775,7 @@ test("active visual cancellation aborts only its exact lane and cancellation win
     assert.equal(fixture.store.listRunAttempts(visualRun)[0]!.state, "cancelled");
     assert.deepEqual(fixture.store.listRunOutputs(visualRun), []);
     assert.deepEqual(visual.calls, [visualRun]);
+    assert.deepEqual(revocations, [visualRun, visualRun]);
     assertNoCompletionEvidence(fixture, visualRun);
 
     batchControl.release.resolve();
@@ -769,6 +801,7 @@ test("dispatcher stop aborts and joins active batch and visual lanes before retu
   const batchControl = laneControl("abort-then-release");
   const visual = visualHarness(new Map([[visualRun, visualControl]]));
   const batch = batchHarness(new Map([[batchRun, batchControl]]));
+  const revocations: Array<{ runId: string; aborted: boolean }> = [];
   try {
     dispatcher = new ProductRunDispatcher({
       store: fixture.store,
@@ -777,6 +810,13 @@ test("dispatcher stop aborts and joins active batch and visual lanes before retu
       leaseMs: 1_000,
       consumeOutput: () => Buffer.from("{}"),
       consumeVisualOutput: () => Buffer.from("{}"),
+      revokeVisualAccess: (runId) => {
+        assert.equal(fixture.store.getRun(fixture.visualProjectId, runId).status, "running");
+        revocations.push({
+          runId,
+          aborted: visual.signals.get(runId)?.aborted ?? false,
+        });
+      },
     });
     await dispatcher.start();
     await Promise.all([visualControl.entered.promise, batchControl.entered.promise]);
@@ -815,6 +855,10 @@ test("dispatcher stop aborts and joins active batch and visual lanes before retu
     assert.deepEqual(batch.cleanupCalls, [batchRun]);
     assert.deepEqual(visual.calls, [visualRun]);
     assert.deepEqual(batch.calls, [batchRun]);
+    assert.deepEqual(revocations, [
+      { runId: visualRun, aborted: false },
+      { runId: visualRun, aborted: true },
+    ]);
     assert.equal(fixture.store.listRunAttempts(visualRun)[0]!.state, "failed");
     assert.equal(fixture.store.listRunAttempts(batchRun)[0]!.state, "failed");
     assert.deepEqual(fixture.store.listRunOutputs(visualRun), []);
@@ -823,6 +867,62 @@ test("dispatcher stop aborts and joins active batch and visual lanes before retu
   } finally {
     visualControl.release.resolve();
     batchControl.release.resolve();
+    await dispatcher?.stop();
+    fixture.close();
+  }
+});
+
+test("visual heartbeat loss revokes access before abort and terminal commit", {
+  timeout: 15_000,
+}, async () => {
+  const fixture = createFixture("heartbeat_revoke");
+  let dispatcher: ProductRunDispatcher | undefined;
+  const visualRun = fixture.createVisualRun("visual", "2026-07-25T18:03:30.000Z");
+  const control = laneControl("abort");
+  const visual = visualHarness(new Map([[visualRun, control]]));
+  const storePort = new Proxy(fixture.store, {
+    get(target, property, receiver) {
+      if (property === "heartbeatVisualProcess") {
+        return () => {
+          throw new Error("injected visual heartbeat loss");
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const revocations: Array<{ status: string; aborted: boolean }> = [];
+  try {
+    dispatcher = new ProductRunDispatcher({
+      store: storePort,
+      supervisor: batchHarness(new Map()).supervisor,
+      visualSupervisor: visual.supervisor,
+      leaseMs: 1_000,
+      consumeVisualOutput: () => Buffer.from("{}"),
+      revokeVisualAccess: (runId) => {
+        revocations.push({
+          status: fixture.store.getRun(fixture.visualProjectId, runId).status,
+          aborted: visual.signals.get(runId)?.aborted ?? false,
+        });
+      },
+    });
+    await dispatcher.start();
+    await control.entered.promise;
+    const terminal = await waitForRun(
+      fixture.store,
+      fixture.visualProjectId,
+      visualRun,
+      "failed",
+    );
+
+    assert.equal(terminal.terminalCode, "dispatcher_heartbeat_failed");
+    assert.deepEqual(revocations, [
+      { status: "running", aborted: false },
+      { status: "running", aborted: true },
+    ]);
+    assert.equal(dispatcher.lastError, null);
+  } finally {
+    control.release.resolve();
     await dispatcher?.stop();
     fixture.close();
   }
