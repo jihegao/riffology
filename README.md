@@ -180,12 +180,18 @@ frame, broker, and WebSocket authority stay `503 recovery_required`. The exact
 retirement boundary is recorded in
 [`docs/milestone-a4-5-retirement-manifest.md`](docs/milestone-a4-5-retirement-manifest.md).
 No `.riff-workspace*`, output, `.DS_Store`, ignored/untracked file, ordinary
-wind asset, or generic batch/visual/broker capability is cleaned. A4-6 still
-owns continuous real-browser acceptance, the complete-MVP claim, and Issue #15
-closure. Its branch gate is backend 596 total/595 passed/one optional skip, Web
-27/27 plus production-entry 1/1 and build, retained Chromium
-1+1+1+1+1+6+6, 28-document governance, and three independent
-P0=0/P1=0/P2=0 re-reviews.
+wind asset, or generic batch/visual/broker capability is cleaned. A4-6 已通过
+本地连续真实 Chromium 12 步门禁（最终聚合运行 31.2s；OpenCode 1.18.4）。默认 discovery 的
+`opencode-go/deepseek-v4-pro` 明确 weekly usage limit 后，经用户预授权重新 discovery
+显式选用 `deepseek/deepseek-v4-flash`，无静默回退。它覆盖两 Conversation/两文档/附件、
+CAS、两 batch、outputs/events/download、请求后分析、受限 visual、restart、provider-down
+只读、桌面/窄屏、scale 2 下真实 Tab/Shift+Tab/Enter/Space、无横向溢出与零
+console/page error。完整 branch gate 是 backend 598 total/597 passed/zero failed/one
+optional skip，focused backend 28/28，Web 28/28、production-entry 1/1 和 build，
+retained Chromium 18/18，最终 correctness/security、accessibility 与
+product/architecture 独立复审 P0/P1=0。脱敏证据见
+[`docs/a4-6-exit-evidence.md`](docs/a4-6-exit-evidence.md)。Issue #15 仍 OPEN，
+只有合并后从 `main` 复跑才能关闭。
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed

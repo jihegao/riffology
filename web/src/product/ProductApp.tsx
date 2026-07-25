@@ -580,6 +580,7 @@ function SharedShell({
             ownerKind={route.kind}
             ownerId={route.id}
             selectedConversationId={route.conversationId}
+            onOwnerChanged={loadWorkspace}
           />
         </aside>
         <section

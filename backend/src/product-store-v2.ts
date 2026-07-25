@@ -318,6 +318,7 @@ export type CreateExperimentV4Input = {
 
 export type UpdateExperimentV4Input = {
   commandId: string;
+  transactionId?: string;
   id: string;
   projectId: string;
   expectedConfigurationDigest: string;
@@ -330,7 +331,7 @@ export type UpdateExperimentV4Input = {
 
 export type ExperimentUpdateIntentV4 = Pick<
   UpdateExperimentV4Input,
-  "commandId" | "id" | "projectId" | "expectedConfigurationDigest" | "expectedRecordDigest" | "name" | "configuration"
+  "commandId" | "transactionId" | "id" | "projectId" | "expectedConfigurationDigest" | "expectedRecordDigest" | "name" | "configuration"
 >;
 
 export type RunLimitsV1 = Readonly<{
@@ -1500,6 +1501,28 @@ export class ProductStoreV2 {
 
   recordAction(input: RecordActionInput): ActionRecordDto {
     assertId(input.id);
+    const existing = (
+      this.#database.prepare(`SELECT conversation_id, turn_id,
+        action_kind, intent_json FROM action_records WHERE id = ?`).get(input.id)
+    ) as {
+        conversation_id: string;
+        turn_id: string;
+        action_kind: string;
+        intent_json: string;
+      } | undefined;
+    if (existing) {
+      if (existing.conversation_id !== input.conversationId
+        || existing.turn_id !== input.turnId
+        || existing.action_kind !== input.actionKind
+        || canonicalDigest(JSON.parse(existing.intent_json))
+          !== canonicalDigest(input.intent)) {
+        throw new ProductStoreV2Error(
+          "Action retry differs from the durable action.",
+        );
+      }
+      return this.#actions(input.turnId)
+        .find((row) => row.id === input.id)!;
+    }
     this.#databaseMutation([{ sql: `INSERT INTO action_records
       (id, conversation_id, turn_id, action_kind, intent_json, permission_decision, state, affected_resources_json, error_code, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, input.turnId, input.actionKind, json(input.intent),
@@ -1510,6 +1533,32 @@ export class ProductStoreV2 {
   transitionActionRecord(input: { id: string; expectedState: "proposed" | "authorized" | "staging"; state: "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed"; mutationTransactionId?: string | null; affectedResources?: unknown[]; errorCode?: string | null; at: IsoTimestamp }): ActionRecordDto {
     const allowed = new Set(["proposed:authorized", "proposed:denied", "authorized:staging", "staging:committed", "staging:rolled_back", "staging:failed", "authorized:failed"]);
     if (!allowed.has(`${input.expectedState}:${input.state}`)) throw new ProductStoreV2Error("Action transition is invalid.");
+    const current = this.#database.prepare(
+      "SELECT state, mutation_transaction_id FROM action_records WHERE id = ?",
+    ).get(input.id) as {
+      state: string;
+      mutation_transaction_id: string | null;
+    } | undefined;
+    const transactionId =
+      input.mutationTransactionId ?? current?.mutation_transaction_id ?? null;
+    const mutationCommitted = transactionId !== null && Boolean(
+      this.#database.prepare(
+        "SELECT 1 FROM committed_mutations WHERE transaction_id = ?",
+      ).get(transactionId),
+    );
+    if (input.expectedState === "staging" && input.state === "committed"
+      && !mutationCommitted) {
+      throw new ProductStoreV2Error(
+        "Action cannot commit without durable mutation evidence.",
+      );
+    }
+    if (input.expectedState === "staging"
+      && (input.state === "rolled_back" || input.state === "failed")
+      && mutationCommitted) {
+      throw new ProductStoreV2Error(
+        "A durably committed mutation cannot be recorded as unsuccessful.",
+      );
+    }
     this.#databaseMutation([{ sql: `UPDATE action_records SET state = ?, permission_decision = CASE
         WHEN ? = 'authorized' THEN 'allowed' WHEN ? = 'denied' THEN 'denied' ELSE permission_decision END,
         mutation_transaction_id = coalesce(?, mutation_transaction_id), affected_resources_json = ?, error_code = ?, updated_at = ?
@@ -1708,6 +1757,7 @@ export class ProductStoreV2 {
 
   updateExperimentV4(input: UpdateExperimentV4Input): ExperimentConfigurationRecordV4 {
     assertCommandId(input.commandId);
+    if (input.transactionId !== undefined) assertId(input.transactionId);
     assertId(input.id);
     assertId(input.projectId);
     assertDigest(input.expectedConfigurationDigest, "Expected experiment configuration digest");
@@ -1768,21 +1818,27 @@ export class ProductStoreV2 {
       ]);
       const response = this.#experimentConfiguration(input.projectId, input.id) as ExperimentConfigurationRecordV4;
       const responseJson = json(response);
-      this.#executeDatabaseStatements([{
-        sql: `INSERT INTO experiment_command_receipts
-          (command_id, command_kind, project_id, experiment_id, intent_sha256,
-            response_json, response_sha256, created_at)
-          VALUES (?, 'update', ?, ?, ?, ?, ?, ?)`,
-        params: [input.commandId, input.projectId, input.id, intentDigest,
-          responseJson, canonicalDigest(response), input.updatedAt],
-        expectedChanges: 1,
-      }]);
+      this.#executeDatabaseStatements([
+        {
+          sql: `INSERT INTO experiment_command_receipts
+            (command_id, command_kind, project_id, experiment_id, intent_sha256,
+              response_json, response_sha256, created_at)
+            VALUES (?, 'update', ?, ?, ?, ?, ?, ?)`,
+          params: [input.commandId, input.projectId, input.id, intentDigest,
+            responseJson, canonicalDigest(response), input.updatedAt],
+          expectedChanges: 1,
+        },
+        ...(input.transactionId === undefined
+          ? []
+          : [commandReceiptInsert(input.transactionId, intentDigest)]),
+      ]);
       return response;
     });
   }
 
   getExperimentUpdateReceipt(input: ExperimentUpdateIntentV4): ExperimentConfigurationRecordV4 | null {
     assertCommandId(input.commandId);
+    if (input.transactionId !== undefined) assertId(input.transactionId);
     assertId(input.id);
     assertId(input.projectId);
     assertDigest(input.expectedConfigurationDigest, "Expected experiment configuration digest");
@@ -9352,6 +9408,7 @@ const restoreRunIntentDigest = (intent: RestoreRunIntent): string => canonicalDi
 const experimentUpdateIntentDigest = (input: ExperimentUpdateIntentV4): string => canonicalDigest({
   schemaVersion: 1,
   commandKind: "experiment.update",
+  ...(input.transactionId === undefined ? {} : { transactionId: input.transactionId }),
   id: input.id,
   projectId: input.projectId,
   expectedConfigurationDigest: input.expectedConfigurationDigest,

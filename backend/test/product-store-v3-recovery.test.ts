@@ -114,6 +114,14 @@ test("restart reconciles in-flight turns, sessions, checks, and staged actions f
     const code = store.listObjectFiles({ kind: "model", id: created.id }).find((file) => file.kind === "model_code")!;
     store.mutateModelFiles({ modelId: created.id, transactionId: "mutation_reconcile_commit", updatedAt: LATER, files: [{ objectFileId: code.id,
       kind: "model_code", relativePath: "model.py", mediaType: code.mediaType, bytes: Buffer.from("recovered\n"), expectedPriorSha256: code.sha256 }] });
+    assert.throws(() => store.transitionActionRecord({
+      id: "action_reconcile_commit",
+      expectedState: "staging",
+      state: "rolled_back",
+      mutationTransactionId: "mutation_reconcile_commit",
+      errorCode: "late_failure",
+      at: LATER,
+    }), /durably committed mutation/u);
     await store.beginSessionGeneration({ conversationId: "conversation_reconcile", expectedGeneration: null });
     store.startTechnicalCheck({ id: "technical_check_interrupted", modelId: created.id, limits: { seconds: 1 }, startedAt: LATER });
     store.close();

@@ -71,8 +71,10 @@
 > global recovery-required UX, read-only legacy preflight, and
 > identity/version/digest-manifest retirement of the old Web product entries;
 > protected local state and ordinary wind/generic execution assets remain
-> untouched. A4-6 remains pending. Only A4-6 may claim the complete MVP or
-> close #15.
+> untouched. A4-6 has passed its local cumulative branch gate and continuous
+> twelve-step Chromium exit scenario; merge and the merged-revision rerun
+> remain before #15 may close. Only A4-6 may claim the complete MVP or close
+> #15.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

@@ -1,7 +1,6 @@
 # Milestone A4 shared product shell design
 
-- Status: active; A4-0 through A4-4 merged, A4-5 recovery/cutover/retirement
-  implemented as a narrow slice, A4-6 pending
+- Status: active; A4-0 through A4-5 implemented; A4-6 local continuous gate observed, merge/post-merge closeout pending
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -653,95 +652,95 @@ then owns the continuous exit verification.
 
 | PRD ID | Target API | Target UI | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| FR-HOME-01 | `GET /api/home`, `/api/models`, `/api/projects` | Separate collections, state, recent activity | Owner/order/empty DTO tests; desktop/narrow/a11y browser | pending |
-| FR-HOME-02 | Home/create routes | Models, Projects, New Model, New Project entries | Four-entry continuous browser start | pending |
-| FR-HOME-03 | `POST /api/models`, provider discovery | Name and provider/model only | Validation, provider failure, idempotency | pending |
-| FR-HOME-04 | `POST /api/projects`, executable Model options | Name and executable Model only | Inactive/non-executable/cross-owner rejection | pending |
-| FR-LIFE-01 | Rename/archive/restore/trash routes | Direct menus independent of Agent | Owner, idempotency, restart, Agent-down controls | pending |
-| FR-LIFE-02 | Preview then confirmed permanent delete | Explicit preview/confirm | Stale token/state, drift, replay, preview-no-delete | pending |
-| FR-LIFE-03 | Lifecycle/delete projections | Blockers and exclusions | Source delete cannot touch Project copy or local files | pending |
+| FR-HOME-01 | `GET /api/home`, `/api/models`, `/api/projects` | Separate collections, state, recent activity | Owner/order/empty DTO tests; desktop/narrow/a11y browser | verified |
+| FR-HOME-02 | Home/create routes | Models, Projects, New Model, New Project entries | Four-entry continuous browser start | verified |
+| FR-HOME-03 | `POST /api/models`, provider discovery | Name and provider/model only | Validation, provider failure, idempotency | verified |
+| FR-HOME-04 | `POST /api/projects`, executable Model options | Name and executable Model only | Inactive/non-executable/cross-owner rejection | verified |
+| FR-LIFE-01 | Rename/archive/restore/trash routes | Direct menus independent of Agent | Owner, idempotency, restart, Agent-down controls | verified |
+| FR-LIFE-02 | Preview then confirmed permanent delete | Explicit preview/confirm | Stale token/state, drift, replay, preview-no-delete | verified |
+| FR-LIFE-03 | Lifecycle/delete projections | Blockers and exclusions | Source delete cannot touch Project copy or local files | verified |
 
 ### 11.2 Shared shell and Conversation
 
 | PRD ID | Target API | Target UI | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| FR-SHELL-01 | Owner/workspace projections | One Model/Project two-pane shell | Desktop current-owner persistence | pending |
-| FR-SHELL-02 | Conversation list/read under owner route | Switch left thread, retain right object | Identity/no-remount/navigation/reload | pending |
-| FR-SHELL-03 | Declared document/output APIs | Markdown/code/table/JSON/chart/Model page | Escaping, untrusted input, a11y fallback | pending |
-| FR-SHELL-04 | No domain route or DTO | Dynamic workspace, no wind/Evidence tabs | Route/import/string scan and generic case | pending |
-| FR-SHELL-05 | Direct lifecycle and Run APIs | Controls available in `read_only` | Provider-down Chromium, no canned reply | pending |
-| FR-CONV-01 | Conversation create/read/lifecycle | Named create/switch/rename/archive/restore/trash | Owner, replay, restart, browser switch | pending |
-| FR-CONV-02 | Message/attachment/document/action projections | Durable cards and records | Persistence plus credential/session/raw-payload redaction | pending |
-| FR-CONV-03 | Conversation create/provider binding | Selector then locked display | Change before/after first message; replay | pending |
-| FR-CONV-04 | Turn/session lifecycle | live/connecting/lost/read_only | Loss, rebuild, restart, provider unavailable | pending |
-| FR-CONV-05 | Internal bounded context | Safe source/status summary only | Allowlist, secret and irrelevant-document negatives | pending |
-| FR-CONV-06 | Skill catalog and action records | Visible skill use | Lazy load, audit, denied scope | pending |
-| FR-CONV-07 | Provider/readiness state | Explicit read-only | No fabricated assistant response | pending |
-| FR-CONV-08 | Typed owner-scoped actions | Committed/denied status | Cross-owner, unauthorized, atomicity | pending |
-| FR-DOC-01 | Temporary document create/read/update | Optional linked message cards | No forced card; create/update lifecycle | pending |
-| FR-DOC-02 | Document lifecycle | draft/adopted/rejected/superseded | Render is not adoption; restart persistence | pending |
-| FR-ATT-01 | Attachment and adoption routes | Source/provenance display | Owner copy, purpose, size, digest | pending |
-| FR-ATT-02 | Conversation trash/delete | Adopted-copy disclosure | Owner copy survives Conversation deletion | pending |
+| FR-SHELL-01 | Owner/workspace projections | One Model/Project two-pane shell | Desktop current-owner persistence | verified |
+| FR-SHELL-02 | Conversation list/read under owner route | Switch left thread, retain right object | Identity/no-remount/navigation/reload | verified |
+| FR-SHELL-03 | Declared document/output APIs | Markdown/code/table/JSON/chart/Model page | Escaping, untrusted input, a11y fallback | verified |
+| FR-SHELL-04 | No domain route or DTO | Dynamic workspace, no wind/Evidence tabs | Route/import/string scan and generic case | verified |
+| FR-SHELL-05 | Direct lifecycle and Run APIs | Controls available in `read_only` | Provider-down Chromium, no canned reply | verified |
+| FR-CONV-01 | Conversation create/read/lifecycle | Named create/switch/rename/archive/restore/trash | Owner, replay, restart, browser switch | verified |
+| FR-CONV-02 | Message/attachment/document/action projections | Durable cards and records | Persistence plus credential/session/raw-payload redaction | verified |
+| FR-CONV-03 | Conversation create/provider binding | Selector then locked display | Change before/after first message; replay | verified |
+| FR-CONV-04 | Turn/session lifecycle | live/connecting/lost/read_only | Loss, rebuild, restart, provider unavailable | verified |
+| FR-CONV-05 | Internal bounded context | Safe source/status summary only | Allowlist, secret and irrelevant-document negatives | verified |
+| FR-CONV-06 | Skill catalog and action records | Visible skill use | Lazy load, audit, denied scope | verified |
+| FR-CONV-07 | Provider/readiness state | Explicit read-only | No fabricated assistant response | verified |
+| FR-CONV-08 | Typed owner-scoped actions | Committed/denied status | Cross-owner, unauthorized, atomicity | verified |
+| FR-DOC-01 | Temporary document create/read/update | Optional linked message cards | No forced card; create/update lifecycle | verified |
+| FR-DOC-02 | Document lifecycle | draft/adopted/rejected/superseded | Render is not adoption; restart persistence | verified |
+| FR-ATT-01 | Attachment and adoption routes | Source/provenance display | Owner copy, purpose, size, digest | verified |
+| FR-ATT-02 | Conversation trash/delete | Adopted-copy disclosure | Owner copy survives Conversation deletion | verified |
 
 ### 11.3 Model, Project, and Experiment
 
 | PRD ID | Target API | Target UI | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| FR-MODEL-01 | New Model/scaffold | Generic workspace | Continuous browser creation/open plus no placeholder or wind template | pending |
-| FR-MODEL-02 | Execution description/check reads | Inputs/entry/status/output declarations | Malformed, cancellation, output negatives | pending |
-| FR-MODEL-03 | Workspace file/document projection | Dynamic renderer sections | Arbitrary declared docs; no fixed schema | pending |
-| FR-MODEL-04 | Technical check/readiness | Executable selector badge | Syntax/interface/dependency/smoke/resource/cancel/output | pending |
-| FR-MODEL-05 | Honest technical DTO | Thin technical status copy | Forbidden validity/trust terminology scan | pending |
-| FR-MODEL-06 | Restricted checker/supervisor | Bounded status only | Path/env/network/resource/cancel regression | pending |
-| FR-MODEL-07 | Scoped Model tools | Safe action summary | Other-owner/source/home/credential denial | pending |
-| FR-PROJ-01 | `POST /api/projects` fixed copy | New Project confirmation | Source edit/delete isolation | pending |
-| FR-PROJ-02 | Project summary/workspace | No active Model/version UI | API and UI negative scan | pending |
-| FR-PROJ-03 | Project tool/config/document API | Project Conversation workspace | Code/schema/dependency mutation denial | pending |
-| FR-EXP-01 | Experiment create/read/update/lifecycle | Named editable form | Save/read/restart/idempotency | pending |
-| FR-EXP-02 | Plan preview | Seeds/sweep/sample count | Invalid plan, exact count, limit | pending |
-| FR-EXP-03 | Run start/frozen receipt | Accepted configuration preview | Edit-after-queue and restart freeze | pending |
-| FR-EXP-04 | Outputs and explicit analysis document | User-requested analysis only | No automatic metric/optimum/reinterpretation | pending |
+| FR-MODEL-01 | New Model/scaffold | Generic workspace | Continuous browser creation/open plus no placeholder or wind template | verified |
+| FR-MODEL-02 | Execution description/check reads | Inputs/entry/status/output declarations | Malformed, cancellation, output negatives | verified |
+| FR-MODEL-03 | Workspace file/document projection | Dynamic renderer sections | Arbitrary declared docs; no fixed schema | verified |
+| FR-MODEL-04 | Technical check/readiness | Executable selector badge | Syntax/interface/dependency/smoke/resource/cancel/output | verified |
+| FR-MODEL-05 | Honest technical DTO | Thin technical status copy | Forbidden validity/trust terminology scan | verified |
+| FR-MODEL-06 | Restricted checker/supervisor | Bounded status only | Path/env/network/resource/cancel regression | verified |
+| FR-MODEL-07 | Scoped Model tools | Safe action summary | Other-owner/source/home/credential denial | verified |
+| FR-PROJ-01 | `POST /api/projects` fixed copy | New Project confirmation | Source edit/delete isolation | verified |
+| FR-PROJ-02 | Project summary/workspace | No active Model/version UI | API and UI negative scan | verified |
+| FR-PROJ-03 | Project tool/config/document API | Project Conversation workspace | Code/schema/dependency mutation denial | verified |
+| FR-EXP-01 | Experiment create/read/update/lifecycle | Named editable form | Save/read/restart/idempotency | verified |
+| FR-EXP-02 | Plan preview | Seeds/sweep/sample count | Invalid plan, exact count, limit | verified |
+| FR-EXP-03 | Run start/frozen receipt | Accepted configuration preview | Edit-after-queue and restart freeze | verified |
+| FR-EXP-04 | Outputs and explicit analysis document | User-requested analysis only | No automatic metric/optimum/reinterpretation | verified |
 
 ### 11.4 Run and visual
 
 | PRD ID | Target API | Target UI | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| FR-RUN-01 | Run start/read by declared capability | Capability/error state | Unsupported capability rejection | pending |
-| FR-RUN-02 | Start/cancel/download/trash | Direct controls | Replay, lifecycle, Agent-down | pending |
-| FR-RUN-03 | Run overview DTO | Status/samples/horizon/seeds/metrics/duration/resources/files | Projection and real batch browser | pending |
-| FR-RUN-04 | Output list/download | Checked outputs | Path/media/size/digest/atomic/cross-run failures | pending |
-| FR-RUN-05 | Diagnostic-event cursor/list | Bounded filterable events | Cap, pagination, tamper, trash | pending |
-| FR-RUN-06 | Completion-card receipt | One platform card or skip | Exactly once; no visual card | pending |
-| FR-RUN-07 | Explicit analyze action/document | Requested analysis document | No request means no document | pending |
-| FR-RUN-08 | Frozen limits/status | Timeout/cancel/failure | Resource/log/event/output/process/cancel-first | pending |
-| FR-RUN-09 | Startup/recovery records | recovery-required state | Durable evidence, fail closed, restart | pending |
-| FR-VIS-01 | Visual start/status | Managed visual controls | Health/proxy/stop/timeout/output/resource | pending |
-| FR-VIS-02 | Frame bootstrap/redeem | Restricted right-pane frame | No child endpoint/credential/route leak | pending |
-| FR-VIS-03 | Browser/frame/WebSocket session | Current frame state | Host/Origin/Fetch/CSRF/owner/generation/expiry/revocation | pending |
-| FR-VIS-04 | Internal scoped Playwright capability | Action summary only | Immutable confirmation, single-use, audit, scope denial | pending |
-| FR-VIS-05 | Observation projection | Timestamped DOM/a11y/screenshot | Never promoted to Project state | pending |
-| FR-VIS-06 | Visual terminalization | No completion card/report | Database/API/browser absence | pending |
+| FR-RUN-01 | Run start/read by declared capability | Capability/error state | Unsupported capability rejection | verified |
+| FR-RUN-02 | Start/cancel/download/trash | Direct controls | Replay, lifecycle, Agent-down | verified |
+| FR-RUN-03 | Run overview DTO | Status/samples/horizon/seeds/metrics/duration/resources/files | Projection and real batch browser | verified |
+| FR-RUN-04 | Output list/download | Checked outputs | Path/media/size/digest/atomic/cross-run failures | verified |
+| FR-RUN-05 | Diagnostic-event cursor/list | Bounded filterable events | Cap, pagination, tamper, trash | verified |
+| FR-RUN-06 | Completion-card receipt | One platform card or skip | Exactly once; no visual card | verified |
+| FR-RUN-07 | Explicit analyze action/document | Requested analysis document | No request means no document | verified |
+| FR-RUN-08 | Frozen limits/status | Timeout/cancel/failure | Resource/log/event/output/process/cancel-first | verified |
+| FR-RUN-09 | Startup/recovery records | recovery-required state | Durable evidence, fail closed, restart | verified |
+| FR-VIS-01 | Visual start/status | Managed visual controls | Health/proxy/stop/timeout/output/resource | verified |
+| FR-VIS-02 | Frame bootstrap/redeem | Restricted right-pane frame | No child endpoint/credential/route leak | verified |
+| FR-VIS-03 | Browser/frame/WebSocket session | Current frame state | Host/Origin/Fetch/CSRF/owner/generation/expiry/revocation | verified |
+| FR-VIS-04 | Internal scoped Playwright capability | Action summary only | Immutable confirmation, single-use, audit, scope denial | verified |
+| FR-VIS-05 | Observation projection | Timestamped DOM/a11y/screenshot | Never promoted to Project state | verified |
+| FR-VIS-06 | Visual terminalization | No completion card/report | Database/API/browser absence | verified |
 
 ### 11.5 Data and non-functional requirements
 
 | PRD ID | Target API/boundary | Target UI | Required evidence | Status |
 | --- | --- | --- | --- | --- |
-| FR-DATA-01 | Store reads/lifecycle | Restored status | Ownership/lifecycle persistence | pending |
-| FR-DATA-02 | Object/output/attachment indexes | Declared files only | Path/size/digest/index checks | pending |
-| FR-DATA-03 | Mutation coordinator and receipts | Honest transient/recovery state | Database/filesystem fault recovery | pending |
-| FR-DATA-04 | Startup/read APIs | Restored supported resources | Continuous backend-restart browser test | pending |
-| FR-DATA-05 | Every browser DTO | No internal authority | DTO/log/error/canary scans | pending |
-| NFR-AUTH-01 | Every write admission | Disabled/forbidden state | Owner/object/operation/lifecycle matrix | pending |
-| NFR-ATOM-01 | Mutation/output/delete commit | Receipt/recovery display | Crash/fault atomicity | pending |
-| NFR-REC-01 | Startup coordinator | Pending/recovery state | Reconcile-before-write race | pending |
-| NFR-FAIL-01 | Stable errors | Explicit safe error | Missing/conflict/expiry/unsupported | pending |
-| NFR-SEC-01 | Every projection | Redacted UI | DTO/console/network/persistence secret scan | pending |
-| NFR-SEC-02 | Model/Run supervisors | Limits/status only | Sandbox/env/network/resource/cancel | pending |
-| NFR-SCOPE-01 | Every resource/tool/run/frame route | Current-owner state | Cross-owner/object/capability rejection | pending |
-| NFR-IDEM-01 | Create/start/cancel/delete receipts | Replay-safe UI | Duplicate/change-intent/restart | pending |
-| NFR-HONEST-01 | Status DTOs | Exact state vocabulary | Copy/status matrix | pending |
-| NFR-COMPAT-01 | Legacy preflight/manifest | Classified, not Product UI | No behavior authority or untracked deletion | pending |
-| NFR-TEST-01 | Slice gate record | Evidence links only | Contract, negative, restart, review, browser | pending |
+| FR-DATA-01 | Store reads/lifecycle | Restored status | Ownership/lifecycle persistence | verified |
+| FR-DATA-02 | Object/output/attachment indexes | Declared files only | Path/size/digest/index checks | verified |
+| FR-DATA-03 | Mutation coordinator and receipts | Honest transient/recovery state | Database/filesystem fault recovery | verified |
+| FR-DATA-04 | Startup/read APIs | Restored supported resources | Continuous backend-restart browser test | verified |
+| FR-DATA-05 | Every browser DTO | No internal authority | DTO/log/error/canary scans | verified |
+| NFR-AUTH-01 | Every write admission | Disabled/forbidden state | Owner/object/operation/lifecycle matrix | verified |
+| NFR-ATOM-01 | Mutation/output/delete commit | Receipt/recovery display | Crash/fault atomicity | verified |
+| NFR-REC-01 | Startup coordinator | Pending/recovery state | Reconcile-before-write race | verified |
+| NFR-FAIL-01 | Stable errors | Explicit safe error | Missing/conflict/expiry/unsupported | verified |
+| NFR-SEC-01 | Every projection | Redacted UI | DTO/console/network/persistence secret scan | verified |
+| NFR-SEC-02 | Model/Run supervisors | Limits/status only | Sandbox/env/network/resource/cancel | verified |
+| NFR-SCOPE-01 | Every resource/tool/run/frame route | Current-owner state | Cross-owner/object/capability rejection | verified |
+| NFR-IDEM-01 | Create/start/cancel/delete receipts | Replay-safe UI | Duplicate/change-intent/restart | verified |
+| NFR-HONEST-01 | Status DTOs | Exact state vocabulary | Copy/status matrix | verified |
+| NFR-COMPAT-01 | Legacy preflight/manifest | Classified, not Product UI | No behavior authority or untracked deletion | verified |
+| NFR-TEST-01 | Slice gate record | Evidence links only | Contract, negative, restart, review, browser | verified |
 
 ## 12. A4-6 continuous Chromium exit matrix
 
@@ -773,6 +772,25 @@ Visual-Agent, lifecycle/deletion, recovery, secrecy, and legacy-scan tests.
 Independent correctness, security, accessibility, product, and architecture
 reviews must report P0=0 and P1=0. After merge, the same critical browser flow
 is re-run before Issue #15 closes and `main...origin/main = 0 0` is reported.
+
+### A4-6 branch-gate evidence
+
+The cumulative Stage 4 and retained regression suites verify the section 11
+rows; the A4-6 continuous Chromium scenario is the integrated twelve-step exit
+path, not the sole proof for every negative, recovery, or security row. Its
+final aggregated run passed 1/1 in 31.2s with same-root recovery,
+provider-down honesty, actual CDP scale 2, keyboard-only pane operation while
+scaled, no horizontal document overflow, and zero console/page errors.
+
+The full branch gate records backend 598 total / 597 passed / zero failed / one
+optional installed-OpenCode smoke skipped; focused A4-6 backend 28/28; Web
+28/28; production-entry integration 1/1; production build; and retained
+Chromium 18/18, including broker/WebSocket 6/6 and Visual-Agent 6/6. Exact
+provider selection, documentation 29/29, and independent
+correctness/security, accessibility, and product/architecture P0/P1=0 evidence
+are recorded in
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). Merge, merged-revision rerun,
+and Issue closure remain ordered later steps.
 
 ## 13. Documentation and review gate
 
@@ -1051,5 +1069,7 @@ retained browser slices. Final independent Product/architecture,
 security/accessibility, and test/documentation re-reviews each report
 P0=0/P1=0/P2=0 for the current A4-5 diff.
 
-This is not A4-6 evidence. All 69 final traceability rows remain `pending`,
-Issue #15 remains OPEN, and no complete-MVP claim is made.
+This historical A4-5 record is not itself A4-6 evidence. The cumulative slice
+and A4-6 full gates verify the 69 trace rows; the continuous A4-6 scenario
+verifies the twelve integrated exit steps. Issue #15 remains OPEN and no
+complete-MVP claim is made before merge/post-merge closure.

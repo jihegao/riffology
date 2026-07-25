@@ -12,7 +12,9 @@ export const MODEL_AGENT_TOOLS = [
 
 export const PROJECT_AGENT_TOOLS = [
   "riff_read_owner_summary",
-  "riff_create_temporary_document",
+  "riff_list_experiment_configurations",
+  "riff_update_experiment_configuration",
+  "riff_create_analysis_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
   "riff_observe_current_visual",

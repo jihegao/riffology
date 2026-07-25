@@ -62,8 +62,10 @@ restricted Model-page renderer path. At narrow width
 and reflow-equivalent 200% layout, a labelled pane selector retains the same owner
 state. A dedicated real-Chromium A4-2 scenario covers desktop, narrow,
 keyboard pane switching, horizontal fit, real bootstrap/cookie/CSRF, and zero
-console errors. The continuous A4-6 matrix and every final trace row remain
-pending.
+console errors. A4-6 has passed its local continuous matrix, including
+Tab/Shift+Tab and Enter/Space pane operation while actual CDP page scale 2
+remains active, with no document horizontal overflow. Merge and merged-revision
+closeout remain pending.
 
 Deprecated `?mode=legacy` and `?mode=evidence` queries now resolve to Product
 Home (or the matching Product owner route) and cannot select another product

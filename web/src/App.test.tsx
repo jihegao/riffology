@@ -240,6 +240,39 @@ describe("Stage 4 Product entry", () => {
     expect(productClient.workspace).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes the right workspace after a committed Agent owner mutation without remounting it", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.sendTurn = vi.fn(async () => ({
+      mode: "live" as const,
+      turn: {
+        requestKey: "owner-mutation",
+        state: "complete" as const,
+        userMessageId: "message-user",
+        assistantMessageId: "message-assistant",
+        skillUses: [],
+        actions: [{
+          id: "action-mutate",
+          actionKind: "model_files_mutate",
+          permissionDecision: "allowed" as const,
+          state: "committed" as const,
+          errorCode: null,
+        }],
+        failure: null,
+      },
+      messages: [],
+    }));
+    render(<App client={productClient} />);
+
+    const ownerCard = await screen.findByTestId("workspace-owner-card");
+    await user.type(await screen.findByRole("textbox", { name: "Message" }), "Update it now.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(productClient.workspace).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByTestId("workspace-owner-card")).toBe(ownerCard);
+  });
+
   it("creates a Model from only its name and discovered provider/model", async () => {
     const user = userEvent.setup();
     const productClient = client();
@@ -286,7 +319,8 @@ describe("Stage 4 Product entry", () => {
     history.replaceState({}, "", "/models/model-one?mode=evidence");
     render(<App client={client()} />);
 
-    expect(await screen.findByTestId("shell-owner-heading")).toHaveTextContent("General maintenance");
+    await waitFor(() => expect(screen.getByTestId("shell-owner-heading"))
+      .toHaveTextContent("General maintenance"));
     expect(screen.queryByText("Wind-turbine maintenance")).not.toBeInTheDocument();
   });
 

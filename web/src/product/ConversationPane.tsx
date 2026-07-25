@@ -33,11 +33,13 @@ export function ConversationPane({
   ownerKind,
   ownerId,
   selectedConversationId,
+  onOwnerChanged,
 }: Readonly<{
   client: ProductClient;
   ownerKind: OwnerKind;
   ownerId: string;
   selectedConversationId?: string;
+  onOwnerChanged?: () => Promise<void> | void;
 }>) {
   const [collections, setCollections] =
     useState<ConversationCollections>(emptyCollections);
@@ -213,6 +215,11 @@ export function ConversationPane({
                   setReadOnlyReason(readOnlyMessage(result.reason));
                 }
                 await refreshConversation(conversationId);
+                if (result.turn.actions.some((action) =>
+                  action.state === "committed"
+                  && OWNER_MUTATION_ACTIONS.has(action.actionKind))) {
+                  await onOwnerChanged?.();
+                }
               } catch (cause) {
                 if (selectedIdRef.current === conversationId) {
                   setError(messageOf(cause, "The message could not be sent."));
@@ -238,6 +245,12 @@ export function ConversationPane({
     </div>
   );
 }
+
+const OWNER_MUTATION_ACTIONS = new Set([
+  "attachment_adopt",
+  "experiment_configuration_update",
+  "model_files_mutate",
+]);
 
 function ConversationList({
   conversations,

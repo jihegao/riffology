@@ -1,5 +1,15 @@
 # OpenCode bridge contracts
 
+## A4-6 passed local live acceptance
+
+OpenCode 1.18.4 first discovered `opencode-go/deepseek-v4-pro`; its weekly
+usage-limit error was explicit. After user authorization, discovery was repeated
+and `deepseek/deepseek-v4-flash` was selected. This was not a silent fallback.
+Evidence contains no credential, upstream session ID, absolute path, or raw tool
+payload. The redacted selection and gate record is
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). Issue #15 remains OPEN
+pending merge and the merged-revision rerun.
+
 ## Milestone A2 current authority
 
 Stage 2 gives each durable Model or Project conversation its own backend-only
