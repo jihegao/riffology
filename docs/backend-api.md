@@ -641,7 +641,7 @@ domain success. Navigation, popups, uploads/downloads, clipboard, permission
 or credential prompts, Service Workers, WebSockets, and unlisted network
 traffic fail closed.
 
-### A3-2c4 browser/security closeout candidate (pending review and merge)
+### A3-2c4 browser/security closeout (merged through PR #42)
 
 The c4 review branch starts a real live-CDP Chromium alongside the published
 `BackendApp -> AgentTurnRuntime -> VisualAgentAuthority -> VisualAgentInteractor`
@@ -651,26 +651,32 @@ the legacy page and its cookie/storage/frame canaries remain unchanged, and
 `drive_workbench_ui` stays absent and undispatchable. Separate real-Chromium
 cases cover POST, popup, navigation, dialog, WebSocket, Service Worker, form,
 upload, download, clipboard, permission, credential challenge, response
-`Set-Cookie`, and non-empty MCP input. The current candidate matrix passes 6/6.
+`Set-Cookie`, and non-empty MCP input. The merge matrix passes 6/6.
 
 Its canary scan covers the public turn DTO, real MCP list/results/errors,
 authority audit-fact boundary, real SQLite/WAL/SHM bytes, child requests, and
 explicit Error fields. It excludes model-authored child response bytes from
 the persistence claim: those bytes are untrusted input, not a secret boundary.
-Final c4 status still requires independent review and PR merge.
+Two independent final reviews reported no P0/P1 blocker before PR #42 merged.
 
-A3-2d follows the existing committed output index but adds the missing generic
-public surface: same-run list/download with path/size/digest revalidation,
-declared diagnostic NDJSON ingestion with structural/schema/count/byte limits
+A3-2d follows the existing committed output index. The A3-2d1 review branch
+implements the first narrow public surface: same-run list/download with
+path/size/digest revalidation. Later slices add declared diagnostic NDJSON
+ingestion with structural/schema/count/byte limits
 and opaque run/filter-bound cursors, plus Agent-independent cancel/download/
 trash/restore acceptance. Cancel already exists; A3-2d adds the missing generic
 download/trash/restore routes and proves the complete control set without
 OpenCode. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
 A3-3 diagnostic-event acceptance therefore begins only after A3-2d is
-published.
+published. The d1 candidate remains pending review and merge; event ingestion
+and direct trash/restore controls are not part of d1.
 
-A3-2d list/download/event reads require the exact app session/owner/Host and
-same-origin Fetch Metadata and emit private no-store responses; mutation routes
+A3-2d list/download/event reads require the exact current single-user app
+session and Host, same-origin Fetch Metadata, and the exact
+Project/run/output ownership tuple; they emit private no-store responses. This
+is local Product tuple authorization, not a multi-user principal claim. The d1
+browser client must use same-origin `fetch` (`cors`/`empty` Fetch Metadata);
+top-level or anchor navigation is not accepted by this route. Mutation routes
 additionally require exact Origin, CSRF, JSON non-simple content type, command
 idempotency, and expected run revision or terminal closure digest.
 Project/run/output IDs are not bearer credentials. Output download is

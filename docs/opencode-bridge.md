@@ -155,9 +155,9 @@ permits manual continuation.
 `drive_workbench_ui` and its ambient `RIFF_CDP_URL` projector remain
 platform-internal legacy projection behavior, not an OpenCode tool. Project
 and A3-2c turn schemas and server-side dispatch allowlists never grant or
-dispatch it. A3-2c4's review-branch matrix now exercises that denial with a
-real live-CDP endpoint and the published BackendApp turn chain; final status
-still requires independent review and merge. A3-2c1 does not claim that evidence.
+dispatch it. A3-2c4 exercised that denial with a real live-CDP endpoint and
+the published BackendApp turn chain before merging through PR #42. A3-2c1
+alone does not claim that evidence.
 Only the platform may invoke a fixed legacy mirror intent after the matching
 domain commit.
 

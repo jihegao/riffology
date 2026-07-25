@@ -2,12 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
+  createReadStream,
   existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -16,12 +18,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { Readable } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve, sep } from "node:path";
 import type { ResourceOwner, Sha256Digest } from "./product-domain.ts";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
 const SAFE_TRANSACTION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/u;
+const VERIFIED_READ_HASH_TIMEOUT_MS = 5_000;
 
 export type OwnerPath = {
   owner: ResourceOwner;
@@ -33,6 +37,17 @@ export type OwnerPath = {
 export type FileInspection = { sizeBytes: number; sha256: Sha256Digest };
 export type InspectedFile = FileInspection & { bytes: Buffer };
 export type WriterLock = { instanceId: string; path: string };
+
+/**
+ * A backend-only handle for a run artifact that has been completely verified
+ * on the same no-follow descriptor used to serve a bounded byte range.
+ */
+export type VerifiedObjectRead = Readonly<{
+  sizeBytes: number;
+  sha256: Sha256Digest;
+  stream(range?: Readonly<{ start: number; end: number }>): Readable;
+  close(): void;
+}>;
 
 export class UnsafeObjectPathError extends Error {
   constructor(message: string) {
@@ -119,6 +134,78 @@ export class ProductObjectStore {
     if (!existsSync(path)) return null;
     const bytes = this.readManagedFile(path);
     return { bytes, sizeBytes: bytes.byteLength, sha256: sha256(bytes) };
+  }
+
+  /**
+   * Opens one managed regular file without following its final path component,
+   * verifies its complete digest, then exposes only bounded reads from that
+   * exact descriptor. Callers never receive the local path.
+   */
+  openVerifiedRead(input: OwnerPath, expected: Readonly<{
+    sizeBytes: number;
+    sha256: Sha256Digest;
+  }>): VerifiedObjectRead {
+    if (!Number.isSafeInteger(expected.sizeBytes) || expected.sizeBytes < 0
+      || !/^[0-9a-f]{64}$/u.test(expected.sha256)) {
+      throw new UnsafeObjectPathError("Expected object metadata is invalid.");
+    }
+    const target = this.resolveOwnerPath(input);
+    let fd: number | undefined;
+    try {
+      fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const before = fstatSync(fd);
+      this.assertOwnedManagedFile(before, "Managed file");
+      if (before.size !== expected.sizeBytes) throw new UnsafeObjectPathError("Managed file size drifted.");
+      const hash = createHash("sha256");
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, expected.sizeBytes)));
+      const verifyDeadline = Date.now() + VERIFIED_READ_HASH_TIMEOUT_MS;
+      let position = 0;
+      while (position < expected.sizeBytes) {
+        if (Date.now() > verifyDeadline) {
+          throw new UnsafeObjectPathError("Managed file verification timed out.");
+        }
+        const count = readSync(fd, buffer, 0, Math.min(buffer.byteLength, expected.sizeBytes - position), position);
+        if (count < 1) throw new UnsafeObjectPathError("Managed file changed while being read.");
+        hash.update(buffer.subarray(0, count));
+        position += count;
+      }
+      const digest = hash.digest("hex") as Sha256Digest;
+      const after = fstatSync(fd);
+      this.assertOwnedManagedFile(after, "Managed file");
+      if (before.dev !== after.dev || before.ino !== after.ino || after.size !== expected.sizeBytes
+        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+        || digest !== expected.sha256) {
+        throw new UnsafeObjectPathError("Managed file metadata or bytes drifted.");
+      }
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        closeSync(fd!);
+      };
+      return Object.freeze({
+        sizeBytes: expected.sizeBytes,
+        sha256: expected.sha256,
+        stream(range?: Readonly<{ start: number; end: number }>): Readable {
+          if (closed) throw new UnsafeObjectPathError("Verified object read is closed.");
+          if (expected.sizeBytes === 0) {
+            if (range !== undefined) throw new UnsafeObjectPathError("Verified object range is invalid.");
+            return Readable.from([]);
+          }
+          const start = range?.start ?? 0;
+          const end = range?.end ?? expected.sizeBytes - 1;
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start < 0 || end < start || end >= expected.sizeBytes) {
+            throw new UnsafeObjectPathError("Verified object range is invalid.");
+          }
+          return createReadStream(target, { fd: fd!, autoClose: false, start, end });
+        },
+        close,
+      });
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      throw error;
+    }
   }
 
   transactionDirectory(transactionId: string): string {

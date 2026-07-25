@@ -73,7 +73,12 @@ import type {
   TemporaryDocumentState,
 } from "./product-domain.ts";
 import { MutationCoordinator, type DatabaseMutationStatement, type MutationCoordinatorOptions } from "./mutation-coordinator.ts";
-import { ProductObjectStore, sha256, type OwnerPath } from "./object-store.ts";
+import {
+  ProductObjectStore,
+  sha256,
+  type OwnerPath,
+  type VerifiedObjectRead,
+} from "./object-store.ts";
 import {
   openProductDatabase,
   withAtomicBatchSuccessRunContext,
@@ -576,6 +581,11 @@ export type BatchOutputCommit = Readonly<{
 }>;
 
 export type VisualOutputCommit = BatchOutputCommit;
+
+export type VerifiedRunOutputDownload = Readonly<{
+  output: Extract<OutputIndexRecord, { contractVersion: 4 }>;
+  read: VerifiedObjectRead;
+}>;
 
 export type BatchSuccessCommitReceipt = Readonly<{
   run: Extract<RunRecord, { contractVersion: 4 }>;
@@ -4900,7 +4910,7 @@ export class ProductStoreV2 {
       JOIN object_files f ON f.id = o.object_file_id
       JOIN runs r ON r.id = o.run_id
       WHERE o.run_id = ?
-      ORDER BY o.logical_name, o.id`).all(runId) as any[]).map((row) => {
+      ORDER BY coalesce(o.sample_index, -1), o.logical_name, o.id`).all(runId) as any[]).map((row) => {
       const verifiedFile = this.#verifiedMetadata(row);
       const record = {
         id: row.output_index_id,
@@ -4926,6 +4936,91 @@ export class ProductStoreV2 {
           outputContractDigest: row.output_contract_sha256,
         });
     });
+  }
+
+  openRunOutputDownload(input: {
+    projectId: string;
+    runId: string;
+    outputId: string;
+  }): VerifiedRunOutputDownload {
+    this.#assertOpen();
+    assertId(input.projectId);
+    assertId(input.runId);
+    assertId(input.outputId);
+    const row = this.#database.prepare(`SELECT
+        o.id AS output_index_id, o.run_id AS output_run_id,
+        o.object_file_id AS output_object_file_id, o.logical_name, o.output_type,
+        o.contract_version AS output_contract_version,
+        o.legacy_digest AS output_legacy_digest, o.sample_index, o.sample_id,
+        o.declared_role, o.output_contract_sha256,
+        o.created_at AS output_created_at, f.*, r.project_id AS run_project_id,
+        r.execution_description_sha256, r.sample_plan_json, r.limits_json
+      FROM projects p
+      JOIN runs r ON r.project_id = p.id
+      JOIN output_indexes o ON o.run_id = r.id
+      JOIN object_files f ON f.id = o.object_file_id
+      WHERE p.id = ? AND p.lifecycle_state != 'trashed'
+        AND r.id = ? AND r.contract_version = 4 AND r.status = 'succeeded'
+        AND o.id = ? AND o.contract_version = 4
+        AND f.owner_run_id = r.id AND f.kind = 'run_file'`
+    ).get(input.projectId, input.runId, input.outputId) as any;
+    if (!row) {
+      throw new ProductStoreV2Error("Output does not exist.");
+    }
+    const output = Object.assign({
+      id: row.output_index_id,
+      runId: row.output_run_id,
+      logicalName: row.logical_name,
+      outputType: row.output_type,
+      file: metadata(row),
+      createdAt: row.output_created_at,
+    }, {
+      contractVersion: 4 as const,
+      readOnly: false as const,
+      legacyDigest: null,
+      sampleIndex: row.sample_index,
+      sampleId: row.sample_id,
+      declaredRole: row.declared_role,
+      outputContractDigest: row.output_contract_sha256,
+    });
+    const execution = validateExecutionDescriptionV2(
+      this.#project(input.projectId).executionDescription,
+    );
+    const samples = JSON.parse(row.sample_plan_json) as Array<Record<string, unknown>>;
+    const limits = JSON.parse(row.limits_json) as Record<string, unknown>;
+    const sample = samples[output.sampleIndex];
+    const declaration = execution.outputs.find((candidate) =>
+      candidate.logicalName === output.logicalName);
+    const expectedContractDigest = canonicalDigest({
+      runId: output.runId,
+      logicalName: output.logicalName,
+      outputType: output.outputType,
+      sampleIndex: output.sampleIndex,
+      sampleId: output.sampleId,
+      declaredRole: output.declaredRole,
+    });
+    if (canonicalDigest(execution) !== row.execution_description_sha256
+      || !sample || sample.sampleIndex !== output.sampleIndex
+      || sample.sampleId !== output.sampleId
+      || !Number.isSafeInteger(limits.maxOutputBytes)
+      || output.file.sizeBytes > Number(limits.maxOutputBytes)
+      || output.file.sizeBytes > 64_000_000
+      || !declaration || declaration.role !== output.declaredRole
+      || declaration.mediaType !== output.file.mediaType
+      || output.outputContractDigest !== expectedContractDigest) {
+      throw new ProductStoreV2Error(
+        "output_integrity_failed: the output contradicts its frozen contract.",
+      );
+    }
+    const read = this.#objects.openVerifiedRead({
+      owner: { kind: "run", id: input.runId },
+      runProjectId: input.projectId,
+      relativePath: output.file.relativePath,
+    }, {
+      sizeBytes: output.file.sizeBytes,
+      sha256: output.file.sha256,
+    });
+    return Object.freeze({ output, read });
   }
 
   renameResource(kind: NamedManagedResourceKind, id: string, name: string, updatedAt: IsoTimestamp): void {

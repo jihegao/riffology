@@ -466,7 +466,7 @@ MVP 在本地 macOS 运行：
 | --- | --- | --- |
 | **1 — 数据基础** | SQLite/对象目录、ownership、原子 mutation/recovery、lifecycle、固定副本 Project primitive。 | 已实现并合并。 |
 | **2 — Agent 与 Model 工作区** | 持久 Conversations、OpenCode session/context、skills/scoped tools、documents/attachments、通用 Model workspace、technical checks。 | 已实现、合并，并完成真实 provider 两轮验收。 |
-| **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 进行中。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket 和 scoped Playwright c1-c3 已合并；c4 security closeout、generic output/event/direct controls 和普通风机导入未完成。普通风机 diagnostic-event 验收依赖 generic event ingestion。 |
+| **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 进行中。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket 和 scoped Playwright 已合并；generic output list/download 为 A3-2d1 review candidate，event/direct controls 和普通风机导入未完成。普通风机 diagnostic-event 验收依赖 generic event ingestion。 |
 | **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 等待 Stage 3 完成。 |
 
 详细切片状态记录在
