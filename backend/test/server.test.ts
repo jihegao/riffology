@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request } from "node:http";
 import test from "node:test";
 import { HttpOpenCodeAdapter, type OpenCodeAdapter, type OpenCodePrompt, type OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import { BackendApp, configuredBatchPythonExecutable } from "../src/server.ts";
@@ -211,6 +212,117 @@ test("agent timeout returns 504 without waiting for a hanging OpenCode abort", a
   assert.equal(response.status, 504);
   assert.equal((await response.json()).error.code, "agent_timeout");
   assert.ok(Date.now() - startedAt < 500, "the response must not wait for OpenCode abort cleanup");
+});
+
+test("legacy listener close bounds drain and force-closes an active SSE response", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-legacy-close-"));
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode: new FakeOpenCode(),
+    workspaceRoot: workspace,
+    defaultSessionId: "legacy-close",
+    legacyCloseDrainTimeoutMs: 10,
+  });
+  await app.initialize();
+  const address = await app.listen();
+  let outgoing: ReturnType<typeof request> | undefined;
+  try {
+    let responseStarted!: () => void;
+    const responseStartedPromise = new Promise<void>((resolve) => {
+      responseStarted = resolve;
+    });
+    const responseClosed = new Promise<void>((resolve, reject) => {
+      outgoing = request({
+        host: address.host,
+        port: address.port,
+        path: "/api/sessions/legacy-close/events",
+        headers: { accept: "text/event-stream" },
+      }, (response) => {
+        response.once("data", responseStarted);
+        response.once("close", resolve);
+        response.once("error", (error) => {
+          if ((error as NodeJS.ErrnoException).code === "ECONNRESET") resolve();
+          else reject(error);
+        });
+      });
+      outgoing.once("error", reject);
+      outgoing.end();
+    });
+    await responseStartedPromise;
+    let closeDeadline: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        app.close(),
+        new Promise<never>((_, reject) => {
+          closeDeadline = setTimeout(
+            () => reject(new Error("legacy listener close exceeded its bounded drain")),
+            500,
+          );
+        }),
+      ]);
+    } finally {
+      if (closeDeadline) clearTimeout(closeDeadline);
+    }
+    await responseClosed;
+    await assert.rejects(
+      fetch(`http://${address.host}:${address.port}/health`),
+      (error: unknown) => ["ECONNREFUSED", "fetch failed"].some((value) =>
+        String((error as NodeJS.ErrnoException).code ?? (error as Error).message).includes(value)),
+    );
+  } finally {
+    outgoing?.destroy();
+    await app.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("legacy listener close force-closes a handler stuck reading a request body", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-backend-legacy-stuck-"));
+  const app = new BackendApp({
+    mesa: new FakeMesa(),
+    openCode: new FakeOpenCode(),
+    workspaceRoot: workspace,
+    legacyCloseDrainTimeoutMs: 10,
+  });
+  await app.initialize();
+  const address = await app.listen();
+  let outgoing: ReturnType<typeof request> | undefined;
+  try {
+    let connected!: () => void;
+    const connectedPromise = new Promise<void>((resolve) => {
+      connected = resolve;
+    });
+    const clientClosed = new Promise<void>((resolve, reject) => {
+      outgoing = request({
+        host: address.host,
+        port: address.port,
+        method: "POST",
+        path: "/mcp",
+        headers: {
+          "content-length": "100",
+          "content-type": "application/json",
+        },
+      });
+      outgoing.once("socket", (socket) => {
+        if (socket.connecting) socket.once("connect", connected);
+        else connected();
+      });
+      outgoing.once("close", resolve);
+      outgoing.once("error", (error) => {
+        if (["ECONNRESET", "EPIPE"].includes((error as NodeJS.ErrnoException).code ?? "")) resolve();
+        else reject(error);
+      });
+      outgoing.write("{");
+    });
+    await connectedPromise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await app.close();
+    await clientClosed;
+  } finally {
+    outgoing?.destroy();
+    await app.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("development OpenCode skip is explicit and only loads the approved deterministic model", async (t) => {

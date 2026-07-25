@@ -376,27 +376,26 @@ The remaining claims begin only in the later gates:
   exact `127.0.0.1` boundary. This slice does not claim a frame route, proxy,
   cookie, nonce, WebSocket, or browser evidence.
   The review worktree gate reports focused network/server/listener tests
-  `43/43`; the full backend gate reports 396 total with 395 passed, zero failed,
-  and one optional installed-OpenCode smoke skipped. Web remains `104/104` and
-  its production build succeeds. A production-entrypoint smoke observed the
-  platform app at `http://[::1]:18787`, the empty broker at
-  `http://[::1]:18788`, exact health success, HTTP `421`
-  `platform_host_denied` for a wrong Host, HTTP `404`
-  `broker_route_denied`, and a successful existing Vite `/api` proxy POST.
-- **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
-  enforcement, frame-size, connection-count, and idle-time limits, plus the
-  same-origin local bootstrap, isolated-broker HttpOnly one-use frame session,
-  Origin/CORS rules, and parent DOM isolation in a real browser. Platform app
+  `46/46`; the full backend gate reports 399 total with 398 passed, zero failed,
+  and one optional installed-OpenCode smoke skipped. Web remains `104/104`, its
+  production-entry/Vite integration gate passes `1/1`, and its production build
+  succeeds. The automated integration starts the real production entrypoint on
+  configured temporary app/broker ports, observes exact health success, HTTP
+  `421` `platform_host_denied` for a wrong Host, HTTP `404`
+  `broker_route_denied`, and a successful Vite `/api` proxy POST whose
+  `changeOrigin` Host passes the exact app guard.
+- **A3-2b2 frame bootstrap and HTTP proxy — pending:** the same-origin local
+  bootstrap, isolated-broker HttpOnly one-use frame session,
+  Origin/CORS rules, and exact CSP/HTTP forwarding. Platform app
   and broker exact-bind `::1` on different server-owned ports and use
   `http://[::1]:<port>` URLs; the untrusted child remains IPv4
-  `127.0.0.1:<assigned-port>`. Tests prove app/broker cookies cross ports but
-  are not sent to the child host. The iframe demonstrably sends the
-  `SameSite=Strict` broker cookie, JavaScript cannot read the HttpOnly cookie,
-  and the different port origin cannot access the parent DOM.
+  `127.0.0.1:<assigned-port>`. Component and HTTP integration tests prove
+  exact cookie attributes and that platform cookies are never forwarded to
+  the child host.
 
   Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, and wrong
   Fetch-Site; its app cookie is host-only with `Path=/api/`. A new bootstrap
-  generation first revokes old frames and WS. Frame-session requires exact
+  generation invalidates older frame capabilities. Frame-session requires exact
   cookie, CSRF, Origin, and Fetch-Site. First nonce navigation succeeds without
   Origin only at the exact broker Host/path, only once, and no later than 60
   seconds after issue. Tests redeem within 60 seconds, reject after expiry, and
@@ -407,20 +406,28 @@ The remaining claims begin only in the later gates:
   evidence required by exact recovery.
   Post-redirect HTTP
   without Origin requires the broker cookie; HTTP with Origin requires exact
-  broker Origin. WS requires exact broker Origin and rejects missing, `null`,
-  app, child, and foreign values. Registry assertions cover browser-session
-  generation, Project, run, attempt generation, expiry, and socket set;
-  revocation closes sockets before removal. Three-party app/broker/child
-  headers and logs pass secret scans. Tests do not treat port separation or
-  Cookie `Path` as Cookie authorization. The broker cookie expires at
+  broker Origin. Frame registry assertions cover browser-session generation,
+  Project, run, attempt generation, and expiry. Tests do not treat port
+  separation or Cookie `Path` as Cookie authorization. The broker cookie expires at
   `min(attempt expiry, 15 minutes)`. App and broker cookies may omit `Secure` on
   current HTTP, but HTTPS fixtures require it.
 
   Every broker document must emit exact CSP
   `frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and must not
-  emit `X-Frame-Options: SAMEORIGIN`. A real browser proves the exact app can
-  embed the frame while another `::1` port, a different app, the IPv4 child,
-  and a foreign top-level page cannot.
+  emit `X-Frame-Options: SAMEORIGIN`.
+- **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
+  path/subprotocol enforcement, frame-size, connection-count, and idle-time
+  limits; strict broker Origin rejection for missing, `null`, app, child, and
+  foreign values; socket-set binding and socket-first generation/lifecycle
+  revocation; and three-party app/broker/child header, log, DTO, and SQLite
+  secret scans.
+- **A3-2b4 browser and security closeout — pending:** run the complete real-
+  browser negative matrix for cookie delivery, HttpOnly denial, parent-DOM
+  isolation, nonce replay/expiry/restart, CSP embedding, and live WebSocket
+  revocation. The exact app must embed the frame while another `::1` port, a
+  different app, the IPv4 child, and a foreign top-level page cannot. Then run
+  focused/full suites, obtain an independent security review, and synchronize
+  all implementation records.
 - **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
   explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
   script, upload, clipboard, and expired-capability rejection. Its internal

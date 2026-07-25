@@ -125,6 +125,17 @@ test("invalid or colliding configured ports fail closed", async () => {
 });
 
 test("broker bind failure never admits an app request and releases partial startup", async () => {
+  const appReservation = createServer();
+  await new Promise<void>((resolve, reject) => {
+    appReservation.once("error", reject);
+    appReservation.listen({ host: BROWSER_LOOPBACK_HOST, port: 0, ipv6Only: true }, resolve);
+  });
+  const appReservationAddress = appReservation.address();
+  assert.ok(appReservationAddress && typeof appReservationAddress !== "string");
+  const appPort = appReservationAddress.port;
+  await new Promise<void>((resolve, reject) =>
+    appReservation.close((error) => error ? reject(error) : resolve()));
+
   const occupied = createServer();
   await new Promise<void>((resolve, reject) => {
     occupied.once("error", reject);
@@ -136,6 +147,7 @@ test("broker bind failure never admits an app request and releases partial start
   try {
     await assert.rejects(
       BrowserNetworkTopology.start({
+        appPort,
         brokerPort: occupiedAddress.port,
         appHandler: (_request, response) => {
           handlerCalls += 1;
@@ -147,6 +159,13 @@ test("broker bind failure never admits an app request and releases partial start
         && error.code === "broker_listener_unavailable",
     );
     assert.equal(handlerCalls, 0);
+    const rebound = createServer();
+    await new Promise<void>((resolve, reject) => {
+      rebound.once("error", reject);
+      rebound.listen({ host: BROWSER_LOOPBACK_HOST, port: appPort, ipv6Only: true }, resolve);
+    });
+    await new Promise<void>((resolve, reject) =>
+      rebound.close((error) => error ? reject(error) : resolve()));
   } finally {
     await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
   }
@@ -376,6 +395,63 @@ test("BackendApp rolls back a failed legacy listen before browser-network retry"
     await app.close();
     await rm(workspace, { recursive: true, force: true });
     await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("BackendApp retries browser topology after broker bind failure releases its fixed app port", async () => {
+  const appReservation = createServer();
+  await new Promise<void>((resolve, reject) => {
+    appReservation.once("error", reject);
+    appReservation.listen({ host: BROWSER_LOOPBACK_HOST, port: 0, ipv6Only: true }, resolve);
+  });
+  const appReservationAddress = appReservation.address();
+  assert.ok(appReservationAddress && typeof appReservationAddress !== "string");
+  const appPort = appReservationAddress.port;
+  await new Promise<void>((resolve, reject) =>
+    appReservation.close((error) => error ? reject(error) : resolve()));
+
+  const occupiedBroker = createServer();
+  await new Promise<void>((resolve, reject) => {
+    occupiedBroker.once("error", reject);
+    occupiedBroker.listen({ host: BROWSER_LOOPBACK_HOST, port: 0, ipv6Only: true }, resolve);
+  });
+  const occupiedBrokerAddress = occupiedBroker.address();
+  assert.ok(occupiedBrokerAddress && typeof occupiedBrokerAddress !== "string");
+
+  const workspace = await mkdtemp(join(tmpdir(), "riff-browser-network-browser-retry-"));
+  const app = new BackendApp({
+    mesa: new NetworkFakeMesa(),
+    openCode: new NetworkFakeOpenCode(),
+    workspaceRoot: workspace,
+  });
+  await app.initialize();
+  try {
+    await assert.rejects(
+      app.listenBrowserNetwork(appPort, occupiedBrokerAddress.port),
+      (error: unknown) => error instanceof BrowserNetworkTopologyError
+        && error.code === "broker_listener_unavailable",
+    );
+    const rebound = createServer();
+    await new Promise<void>((resolve, reject) => {
+      rebound.once("error", reject);
+      rebound.listen({ host: BROWSER_LOOPBACK_HOST, port: appPort, ipv6Only: true }, resolve);
+    });
+    await new Promise<void>((resolve, reject) =>
+      rebound.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) =>
+      occupiedBroker.close((error) => error ? reject(error) : resolve()));
+
+    const network = await app.listenBrowserNetwork(appPort, 0);
+    assert.equal(network.app.port, appPort);
+    assert.notEqual(network.broker.port, appPort);
+    assert.equal((await raw(network.app, { method: "GET", path: "/health" })).status, 200);
+  } finally {
+    await app.close();
+    if (occupiedBroker.listening) {
+      await new Promise<void>((resolve, reject) =>
+        occupiedBroker.close((error) => error ? reject(error) : resolve()));
+    }
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 

@@ -71,7 +71,8 @@ this pair; the existing Vite UI remains a separate development proxy surface,
 not the future frame-capability app.
 The published A3-2a2c slice exposes neither the child port nor browser access.
 Visual completion remains HTTP `422` `visual_completion_not_supported`;
-A3-2b2/A3-2b3, browser acceptance, and A3-2c remain pending.
+A3-2b2 frame bootstrap/HTTP proxy, A3-2b3 WebSocket/revocation/secrecy,
+A3-2b4 browser and security closeout, and A3-2c remain pending.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -1374,19 +1375,23 @@ Output indexes never resolve outside the owning Project/run object root.
    production entrypoint exact-binds the platform technical origin and an empty
    broker to separate IPv6-loopback ports, enforces exact Host, serializes
    start/close, and preserves the child IPv4-only listener boundary.
-10. **A3-2b2/A3-2b3 isolated browser access — pending:** scoped broker/frame
-   capability, exact broker path, browser-session generation,
-   bootstrap/CSRF/nonce/cookie/Origin rules, HTTP and WebSocket enforcement,
-   socket-first revocation, three-party secret scans, and real-browser
-   isolation evidence.
-11. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
+10. **A3-2b2 frame bootstrap and HTTP proxy — pending:** scoped broker/frame
+   capability, exact broker path, browser-session generation, bootstrap/CSRF/
+   nonce/cookie/Origin rules, HTTP forwarding, and exact CSP.
+11. **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
+   path/subprotocol/limit enforcement, socket-first generation and lifecycle
+   revocation, and three-party secret scans.
+12. **A3-2b4 browser and security closeout — pending:** real-browser negative
+   isolation matrix, focused/full suites, independent security review, and
+   documentation synchronization for the completed A3-2b contract.
+13. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
    attempt observation, explicit one-turn interaction, bounded audit, and
    cross-scope denial.
-12. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
+14. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-13. **Integration — pending:** focused/full suites, independent contract/security review,
-   narrow Stage 3 browser evidence, documentation sync, PR merge, Issue #14
-   closure, and local `main` synchronization.
+15. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
+   verification and narrow browser evidence, then PR merge, Issue #14 closure,
+   and local `main` synchronization.
 
 No slice may use a healthy port, fixture-only run, mock Agent, file presence, or
 the historical wind-specific UI as proof of the full contract. Stage 4 / #15

@@ -229,8 +229,9 @@ failed, and one optional installed-OpenCode smoke skipped; its focused review
 regression gate passed 13/13, the real-process public vertical and
 DTO/error/log secrecy gate passed, web passed 104/104, and the production build
 succeeded. A3-2a2c was merged and published through PR #31 at merge commit
-`361b36f`. A3-2b1 network isolation is under review; A3-2b2/A3-2b3, browser
-acceptance, A3-2c, and A3-3 remain pending.
+`361b36f`. A3-2b1 network isolation is under review; A3-2b2 frame bootstrap/
+HTTP proxy, A3-2b3 WebSocket/revocation/secrecy, A3-2b4 browser acceptance and
+security closeout, A3-2c, and A3-3 remain pending.
 
 Focused Milestone A2 verification:
 

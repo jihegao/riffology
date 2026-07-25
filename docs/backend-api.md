@@ -337,10 +337,16 @@ target contracts, not current routes or acceptance evidence:
    rejects non-canonical Host counterexamples before invoking either handler.
    Startup and close are serialized and partial listener pairs do not admit
    requests. Route-specific Origin/Fetch-Site checks remain A3-2b2.
-6. **A3-2b2/A3-2b3 frame capability and forwarding — pending:** add browser
-   bootstrap, visual frame session, isolated broker HTTP, and exact WebSocket
-   forwarding on the A3-2b1 topology.
-7. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
+6. **A3-2b2 frame bootstrap and HTTP proxy — pending:** add browser bootstrap,
+   CSRF, cookies, one-time nonce redemption, visual frame sessions, isolated
+   broker HTTP forwarding, and exact CSP on the A3-2b1 topology.
+7. **A3-2b3 WebSocket, revocation, and secrecy — pending:** add exact path and
+   subprotocol forwarding, resource limits, generation/lifecycle revocation,
+   and three-party secret scans.
+8. **A3-2b4 browser and security closeout — pending:** run the real-browser
+   negative matrix, complete focused/full suites, obtain an independent
+   security review, and synchronize implementation records.
+9. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
    observation and explicit one-turn interaction authority.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample

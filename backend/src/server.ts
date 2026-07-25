@@ -78,6 +78,7 @@ export type BackendOptions = {
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
+  legacyCloseDrainTimeoutMs?: number;
 };
 
 export class BackendApp {
@@ -98,9 +99,11 @@ export class BackendApp {
   #browserNetwork?: BrowserNetworkTopology;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
+  readonly #legacyCloseDrainTimeoutMs: number;
 
   constructor(options: BackendOptions) {
     this.options = options;
+    this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
     this.store = options.store ?? new ProjectStore();
     this.gate2 = new Gate2Runtime(options.workspaceRoot, options.mesa, options.durableStore);
     this.gate3 = new Gate3Runtime(this.gate2, options.mesa, options.workspaceRoot, options.gate3FaultInjector);
@@ -244,8 +247,7 @@ export class BackendApp {
       if (this.#listenerMode === "closed") return;
       this.#listenerMode = "closed";
       if (this.#server) {
-        this.#server.closeIdleConnections?.();
-        await new Promise<void>((resolve, reject) => this.#server!.close((error) => error ? reject(error) : resolve()));
+        await closeServerWithDrain(this.#server, this.#legacyCloseDrainTimeoutMs);
         this.#server = undefined;
       }
       if (this.#browserNetwork) {
@@ -711,6 +713,36 @@ const bodyText = async (request: IncomingMessage, limit = 1_100_000): Promise<st
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
+};
+
+const exactLegacyCloseDrainTimeout = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 30_000) {
+    throw new Error("The legacy listener close-drain timeout must be an integer from 1 through 30000 milliseconds.");
+  }
+  return value;
+};
+
+const closeServerWithDrain = async (server: Server, timeoutMs: number): Promise<void> => {
+  server.closeIdleConnections?.();
+  if (!server.listening) return;
+  const closing = new Promise<void>((resolve, reject) =>
+    server.close((error) => error ? reject(error) : resolve()));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const drained = await Promise.race([
+      closing.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    if (!drained) {
+      server.closeAllConnections?.();
+      await closing;
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 };
 
 type MultipartFile = { filename: string; contentType: string; data: Buffer };
