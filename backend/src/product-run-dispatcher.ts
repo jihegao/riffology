@@ -43,6 +43,7 @@ export type ProductRunDispatcherOptions = Readonly<{
   store: ProductStoreV2;
   supervisor: BatchSupervisorPort;
   visualSupervisor?: VisualSupervisorPort;
+  revokeVisualAccess?: (runId: string) => void;
   now?: () => Date;
   leaseMs?: number;
   consumeOutput?: (candidate: BatchOutputCandidate) => Buffer;
@@ -59,6 +60,7 @@ export class ProductRunDispatcher {
   readonly #leaseMs: number;
   readonly #consumeOutput: (candidate: BatchOutputCandidate) => Buffer;
   readonly #consumeVisualOutput: (candidate: VisualOutputCandidate) => Buffer;
+  readonly #revokeVisualAccessHook: (runId: string) => void;
   readonly #generation = canonicalDigest({ dispatcher: randomUUID(), startedAt: Date.now() });
   #started = false;
   #stopping = false;
@@ -66,6 +68,7 @@ export class ProductRunDispatcher {
   #visualTail: Promise<void> = Promise.resolve();
   #lastError: Error | null = null;
   readonly #activeAborts = new Map<string, AbortController>();
+  readonly #activeVisualRuns = new Set<string>();
 
   constructor(options: ProductRunDispatcherOptions) {
     this.#store = options.store;
@@ -75,6 +78,7 @@ export class ProductRunDispatcher {
     this.#leaseMs = options.leaseMs ?? 30_000;
     this.#consumeOutput = options.consumeOutput ?? consumeBatchOutputCandidate;
     this.#consumeVisualOutput = options.consumeVisualOutput ?? consumeVisualOutputCandidate;
+    this.#revokeVisualAccessHook = options.revokeVisualAccess ?? (() => undefined);
     if (!Number.isSafeInteger(this.#leaseMs) || this.#leaseMs < 1_000 || this.#leaseMs > 300_000) {
       throw new Error("ProductRunDispatcher lease duration is invalid.");
     }
@@ -91,6 +95,9 @@ export class ProductRunDispatcher {
     }
     activeDispatcherByStore.set(this.#store, this);
     try {
+      for (const unit of this.#store.listPriorDispatcherRecoveryUnits()) {
+        if (unit.run.runKind === "visual") this.#revokeVisualAccess(unit.run.id);
+      }
       await new ProductRunRecovery({
         store: this.#store,
         supervisor: this.#supervisor,
@@ -123,6 +130,12 @@ export class ProductRunDispatcher {
   }
 
   requestCancellation(runId: string): void {
+    try {
+      this.#revokeVisualAccess(runId);
+    } catch (error) {
+      this.#latchFatal(asError(error));
+      return;
+    }
     this.#activeAborts.get(runId)?.abort();
     this.notify();
   }
@@ -131,6 +144,14 @@ export class ProductRunDispatcher {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    let revokeError: Error | null = null;
+    for (const runId of this.#activeVisualRuns) {
+      try {
+        this.#revokeVisualAccess(runId);
+      } catch (error) {
+        revokeError ??= asError(error);
+      }
+    }
     for (const abort of this.#activeAborts.values()) abort.abort();
     try {
       await Promise.all([this.#batchTail, this.#visualTail]);
@@ -139,6 +160,7 @@ export class ProductRunDispatcher {
         activeDispatcherByStore.delete(this.#store);
       }
     }
+    if (revokeError) throw revokeError;
   }
 
   async #drainBatch(): Promise<void> {
@@ -391,6 +413,7 @@ export class ProductRunDispatcher {
     supervisor: VisualSupervisorPort,
   ): Promise<void> {
     const attempt = attemptIdentity(claim);
+    this.#activeVisualRuns.add(attempt.runId);
     const sample = claim.run.samplePlan[0] as SuperviseVisualInput["run"]["sample"] | undefined;
     let planned: VisualScratchPlan | null = null;
     let registered: StoreVisualProcessIdentity | null = null;
@@ -435,6 +458,7 @@ export class ProductRunDispatcher {
         const at = this.#now();
         try {
           if (this.#store.isRunCancellationRequested(attempt.runId)) {
+            this.#revokeVisualAccess(attempt.runId);
             abort?.abort();
             return;
           }
@@ -453,6 +477,11 @@ export class ProductRunDispatcher {
           }
         } catch (error) {
           heartbeatError = error instanceof Error ? error : new Error("Visual dispatcher heartbeat failed.");
+          try {
+            this.#revokeVisualAccess(attempt.runId);
+          } catch (revokeError) {
+            heartbeatError = asError(revokeError);
+          }
           abort?.abort();
         }
       }, Math.max(250, Math.floor(this.#leaseMs / 3)));
@@ -538,6 +567,7 @@ export class ProductRunDispatcher {
           cleanedAt: cleanupReceipt.cleanedAt,
         });
         planned = null;
+        this.#revokeVisualAccess(attempt.runId);
         this.#store.finalizeVisualRunTerminal({
           ...attempt,
           expectedAttemptState: "running",
@@ -588,6 +618,7 @@ export class ProductRunDispatcher {
       const resources = visualResourceOverview(result);
       if (result.status === "succeeded" && !terminalOverride) {
         try {
+          this.#revokeVisualAccess(attempt.runId);
           this.#store.commitVisualRunSuccess({
             ...attempt,
             outputs: outputBytes.map(({ candidate, bytes }) => ({
@@ -611,6 +642,7 @@ export class ProductRunDispatcher {
         }
       }
       const terminal = terminalOverride ?? result;
+      this.#revokeVisualAccess(attempt.runId);
       this.#store.finalizeVisualRunTerminal({
         ...attempt,
         expectedAttemptState: "running",
@@ -652,6 +684,7 @@ export class ProductRunDispatcher {
       if (abort && this.#activeAborts.get(attempt.runId) === abort) {
         this.#activeAborts.delete(attempt.runId);
       }
+      this.#activeVisualRuns.delete(attempt.runId);
     }
   }
 
@@ -670,6 +703,11 @@ export class ProductRunDispatcher {
     finishedAt: string;
     supervisor: VisualSupervisorPort;
   }): boolean {
+    try {
+      this.#revokeVisualAccess(input.attempt.runId);
+    } catch {
+      return false;
+    }
     if (!input.result) {
       if (input.registered || input.planned) return false;
     } else {
@@ -768,6 +806,10 @@ export class ProductRunDispatcher {
       exitCode: result.exitCode,
       exitSignal: result.signal,
     });
+  }
+
+  #revokeVisualAccess(runId: string): void {
+    this.#revokeVisualAccessHook(runId);
   }
 
   #bestEffortUnwind(input: {

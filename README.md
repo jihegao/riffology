@@ -229,8 +229,18 @@ failed, and one optional installed-OpenCode smoke skipped; its focused review
 regression gate passed 13/13, the real-process public vertical and
 DTO/error/log secrecy gate passed, web passed 104/104, and the production build
 succeeded. A3-2a2c was merged and published through PR #31 at merge commit
-`361b36f`. A3-2b1 network isolation is under review; A3-2b2 frame bootstrap/
-HTTP proxy, A3-2b3 WebSocket/revocation/secrecy, A3-2b4 browser acceptance and
+`361b36f`. A3-2b1 network isolation and A3-2b2 frame bootstrap/HTTP proxy were
+merged and published through PR #33 and PR #35 respectively, and local `main`
+is synchronized. A3-2b3
+WebSocket/revocation/secrecy is also implemented and locally integrated under
+review, including real local broker/child socket evidence, bounded negative
+admission and upstream-handshake cases, attempt-global connection limits,
+generation/shutdown closure, and observable/persisted sentinel scans. This is
+not a merge or publication claim; the current focused frame/network/WebSocket
+regression combination passes 32/32, and the serial official backend gate reports
+464 total with 463 passed, zero failed, and one optional installed-OpenCode smoke
+skipped. Web remains 104/104, its network-entry integration passes 1/1, and the
+production build succeeds. A3-2b4 real-browser acceptance and independent
 security closeout, A3-2c, and A3-3 remain pending.
 
 Focused Milestone A2 verification:

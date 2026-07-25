@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { accessSync, constants, mkdirSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import type { Duplex } from "node:stream";
 import { ApiError, asApiError } from "./errors.ts";
 import { canonicalJsonV2, parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import { DurableProjectStore } from "./durable-project-store.ts";
@@ -36,16 +37,27 @@ import type { BrowserEvent, ProjectState, Scalar, UiCommand } from "./types.ts";
 import {
   BrowserNetworkTopology,
   networkJson,
+  rejectUpgrade,
   type BrowserNetworkAddress,
 } from "./browser-network-topology.ts";
 import {
   BrowserFrameCapability,
   BrowserFrameCapabilityError,
+  BrowserFrameInspectionTimeoutError,
+  type BrowserFrameConnectedPeer,
   type BrowserFrameTarget,
   type BrowserFrameTargetResolver,
   type BrowserRequestAdmission,
 } from "./browser-frame-capability.ts";
-import { inspectVisualListenerAsync } from "./visual-listener-inspector.ts";
+import {
+  BrowserWebSocketBridge,
+  BrowserWebSocketBridgeError,
+  type BrowserWebSocketPeerIdentity,
+} from "./browser-websocket-bridge.ts";
+import {
+  inspectVisualConnectedPeerAsync,
+  inspectVisualListenerAsync,
+} from "./visual-listener-inspector.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -94,6 +106,11 @@ export type BrowserFrameListenerInspector = (
   target: HealthyVisualFrameTarget,
 ) => Promise<boolean>;
 
+export type BrowserFrameConnectedPeerInspector = (
+  target: HealthyVisualFrameTarget,
+  peer: BrowserFrameConnectedPeer,
+) => Promise<boolean>;
+
 export const createProductBrowserFrameTargetResolver = (
   store: Pick<ProductStoreV2, "currentHealthyVisualFrameTarget">,
   inspect: BrowserFrameListenerInspector = async (target) => {
@@ -112,6 +129,25 @@ export const createProductBrowserFrameTargetResolver = (
     }
   },
   inspectionDeadlineMs = 5_000,
+  inspectConnectedPeer: BrowserFrameConnectedPeerInspector = async (target, peer) => {
+    if (peer.localHost !== "127.0.0.1"
+      || peer.remoteHost !== "127.0.0.1"
+      || peer.remotePort !== target.loopbackPort) return false;
+    try {
+      await inspectVisualConnectedPeerAsync({
+        runId: target.runId,
+        processAttemptId: target.processAttemptId,
+        pid: target.pid,
+        processStartToken: target.processStartToken,
+        processGroupId: target.processGroupId,
+        assignedPort: target.loopbackPort,
+        brokerLocalPort: peer.localPort,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
 ): BrowserFrameTargetResolver => {
   if (!Number.isSafeInteger(inspectionDeadlineMs)
     || inspectionDeadlineMs < 1 || inspectionDeadlineMs > 5_000) {
@@ -126,6 +162,47 @@ export const createProductBrowserFrameTargetResolver = (
   };
   let inspectionQueue: Promise<void> = Promise.resolve();
   let pendingInspections = 0;
+  const scheduleInspection = async (
+    expected: BrowserFrameTarget,
+    operation: (target: HealthyVisualFrameTarget) => Promise<boolean>,
+  ): Promise<boolean> => {
+    if (pendingInspections >= 16) return false;
+    pendingInspections += 1;
+    const prior = inspectionQueue;
+    let cancelled = false;
+    const task = prior.then(async (): Promise<boolean> => {
+      if (cancelled) return false;
+      const target = current(expected.projectId, expected.runId);
+      if (!target || !matchesBrowserFrameTarget(target, expected)) return false;
+      if (!await operation(target) || cancelled) return false;
+      const after = current(expected.projectId, expected.runId);
+      return Boolean(after
+        && matchesBrowserFrameTarget(after, expected)
+        && sameHealthyVisualFrameTarget(after, target));
+    });
+    inspectionQueue = task.then(() => undefined, () => undefined);
+    void task.then(
+      () => { pendingInspections -= 1; },
+      () => { pendingInspections -= 1; },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        task.catch(() => false),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            cancelled = true;
+            reject(new BrowserFrameInspectionTimeoutError());
+          }, inspectionDeadlineMs);
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof BrowserFrameInspectionTimeoutError) throw error;
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   return Object.freeze({
     resolve: async (projectId: string, runId: string): Promise<BrowserFrameTarget | null> => {
       const target = current(projectId, runId);
@@ -136,45 +213,18 @@ export const createProductBrowserFrameTargetResolver = (
         attemptGeneration: target.attemptGeneration,
         port: target.loopbackPort,
         expiresAtMs: Date.parse(target.attemptExpiresAt),
+        ...(target.webSocket ? { webSocket: target.webSocket } : {}),
       });
     },
-    inspect: async (expected: BrowserFrameTarget): Promise<boolean> => {
-      if (pendingInspections >= 16) return false;
-      pendingInspections += 1;
-      const prior = inspectionQueue;
-      let cancelled = false;
-      const task = prior.then(async (): Promise<boolean> => {
-        if (cancelled) return false;
-        const target = current(expected.projectId, expected.runId);
-        if (!target || !matchesBrowserFrameTarget(target, expected)) return false;
-        if (!await inspect(target) || cancelled) return false;
-        const after = current(expected.projectId, expected.runId);
-        return Boolean(after
-          && matchesBrowserFrameTarget(after, expected)
-          && sameHealthyVisualFrameTarget(after, target));
-      });
-      inspectionQueue = task.then(() => undefined, () => undefined);
-      void task.then(
-        () => { pendingInspections -= 1; },
-        () => { pendingInspections -= 1; },
-      );
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        return await Promise.race([
-          task.catch(() => false),
-          new Promise<false>((resolve) => {
-            timer = setTimeout(() => {
-              cancelled = true;
-              resolve(false);
-            }, inspectionDeadlineMs);
-          }),
-        ]);
-      } catch {
-        return false;
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    },
+    inspect: async (expected: BrowserFrameTarget): Promise<boolean> =>
+      scheduleInspection(expected, inspect),
+    inspectConnectedPeer: async (
+      expected: BrowserFrameTarget,
+      peer: BrowserFrameConnectedPeer,
+    ): Promise<boolean> => scheduleInspection(
+      expected,
+      (target) => inspectConnectedPeer(target, peer),
+    ),
   });
 };
 
@@ -185,7 +235,8 @@ const matchesBrowserFrameTarget = (
   && target.runId === expected.runId
   && target.attemptGeneration === expected.attemptGeneration
   && target.loopbackPort === expected.port
-  && Date.parse(target.attemptExpiresAt) === expected.expiresAtMs;
+  && Date.parse(target.attemptExpiresAt) === expected.expiresAtMs
+  && sameBrowserWebSocketPolicy(target.webSocket, expected.webSocket);
 
 const sameHealthyVisualFrameTarget = (
   left: HealthyVisualFrameTarget,
@@ -203,7 +254,20 @@ const sameHealthyVisualFrameTarget = (
   && left.loopbackHost === right.loopbackHost
   && left.loopbackPort === right.loopbackPort
   && left.healthPath === right.healthPath
-  && left.healthyAt === right.healthyAt;
+  && left.healthyAt === right.healthyAt
+  && sameBrowserWebSocketPolicy(left.webSocket, right.webSocket);
+
+const sameBrowserWebSocketPolicy = (
+  left: HealthyVisualFrameTarget["webSocket"] | BrowserFrameTarget["webSocket"],
+  right: HealthyVisualFrameTarget["webSocket"] | BrowserFrameTarget["webSocket"],
+): boolean => left === undefined && right === undefined
+  || Boolean(left && right
+    && left.path === right.path
+    && left.maxFrameBytes === right.maxFrameBytes
+    && left.maxConnections === right.maxConnections
+    && left.idleTimeoutMs === right.idleTimeoutMs
+    && left.subprotocols.length === right.subprotocols.length
+    && left.subprotocols.every((value, index) => value === right.subprotocols[index]));
 
 export class BackendApp {
   readonly store: ProjectStore;
@@ -222,6 +286,7 @@ export class BackendApp {
   #server?: Server;
   #browserNetwork?: BrowserNetworkTopology;
   #browserFrames?: BrowserFrameCapability;
+  #browserWebSockets?: BrowserWebSocketBridge;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
@@ -260,6 +325,7 @@ export class BackendApp {
         ...(options.a3VisualOutputConsumer
           ? { consumeVisualOutput: options.a3VisualOutputConsumer }
           : {}),
+        revokeVisualAccess: (runId) => this.#browserFrames?.revokeRun(runId),
       });
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
       const turnRuntime = new AgentTurnRuntime(this.productStore, skills);
@@ -360,6 +426,7 @@ export class BackendApp {
               brokerOrigin: broker.origin,
               targets: this.options.browserFrameTargetResolver ?? this.#productBrowserFrameTargets(),
             });
+            this.#browserWebSockets = new BrowserWebSocketBridge();
           },
           appHandler: async (request, response, address) => {
             if (await this.#handleBrowserFramePlatform(request, response, address)) return;
@@ -367,10 +434,13 @@ export class BackendApp {
           },
           brokerHandler: (request, response, address) =>
             this.#handleBrowserFrameBroker(request, response, address),
+          brokerUpgradeHandler: (request, socket, head, address) =>
+            this.#handleBrowserFrameWebSocket(request, socket, head, address),
         });
       } catch (error) {
         this.#browserFrames?.clear();
         this.#browserFrames = undefined;
+        this.#browserWebSockets = undefined;
         throw error;
       }
       this.#browserNetwork = network;
@@ -390,6 +460,7 @@ export class BackendApp {
       if (this.#browserNetwork) {
         this.#browserFrames?.clear();
         this.#browserFrames = undefined;
+        this.#browserWebSockets = undefined;
         await this.#browserNetwork.close();
         this.#browserNetwork = undefined;
       }
@@ -528,6 +599,59 @@ export class BackendApp {
       });
     } catch (error) {
       this.#browserFrameError(response, error);
+    }
+  }
+
+  async #handleBrowserFrameWebSocket(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    address: BrowserNetworkAddress,
+  ): Promise<void> {
+    const frames = this.#browserFrames;
+    const bridge = this.#browserWebSockets;
+    if (!frames || !bridge) {
+      rejectUpgrade(socket, 503, "broker_listener_unavailable");
+      return;
+    }
+    const owner = bridge.createOwner(socket);
+    let admission: Awaited<ReturnType<BrowserFrameCapability["admitWebSocket"]>> | undefined;
+    try {
+      const host = rawBrowserHeader(request, "host");
+      admission = await frames.admitWebSocket({
+        method: request.method ?? "",
+        host: typeof host === "string" ? host : undefined,
+        origin: rawBrowserHeader(request, "origin"),
+        cookie: rawBrowserHeader(request, "cookie"),
+        authorization: rawBrowserHeader(request, "authorization"),
+        path: request.url ?? "/",
+        protocols: rawBrowserHeader(request, "sec-websocket-protocol"),
+        upgrade: rawBrowserHeader(request, "upgrade"),
+        connection: rawBrowserHeader(request, "connection"),
+        version: rawBrowserHeader(request, "sec-websocket-version"),
+        key: rawBrowserHeader(request, "sec-websocket-key"),
+        extensions: rawBrowserHeader(request, "sec-websocket-extensions"),
+      }, owner);
+      await bridge.upgrade(request, socket, head, owner, {
+        childPort: admission.target.port,
+        childPath: admission.childPath,
+        declaredProtocols: admission.target.webSocket?.subprotocols ?? [],
+        maxFrameBytes: admission.maxFrameBytes,
+        idleTimeoutMs: admission.idleTimeoutMs,
+        expiresAtMs: admission.expiresAtMs,
+        brokerOrigin: address.origin,
+        inspectConnectedPeer: async (peer: BrowserWebSocketPeerIdentity): Promise<boolean> => {
+          await admission!.recheckConnected(toFrameConnectedPeer(peer));
+          return true;
+        },
+        live: admission.live,
+        markOpen: admission.markOpen,
+        onClosed: admission.release,
+      });
+    } catch (error) {
+      admission?.release();
+      const denied = webSocketUpgradeError(error);
+      rejectUpgrade(socket, denied.status, denied.code);
     }
   }
 
@@ -971,6 +1095,25 @@ const rawBrowserHeader = (
     }
   }
   return values.length === 0 ? undefined : values.length === 1 ? values[0] : Object.freeze(values);
+};
+
+const toFrameConnectedPeer = (
+  peer: BrowserWebSocketPeerIdentity,
+): BrowserFrameConnectedPeer => Object.freeze({
+  localHost: peer.localAddress,
+  localPort: peer.localPort,
+  remoteHost: peer.remoteAddress,
+  remotePort: peer.remotePort,
+});
+
+const webSocketUpgradeError = (
+  error: unknown,
+): Readonly<{ status: number; code: string }> => {
+  if (error instanceof BrowserFrameCapabilityError
+    || error instanceof BrowserWebSocketBridgeError) {
+    return Object.freeze({ status: error.status, code: error.code });
+  }
+  return Object.freeze({ status: 502, code: "visual_websocket_upstream_failed" });
 };
 
 const browserAdmission = (

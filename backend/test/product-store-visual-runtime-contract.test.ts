@@ -53,6 +53,13 @@ const EXECUTION = {
     entryPoint: "code/model.py",
     protocol: "riff-visual-v1",
     healthPath: "/healthz",
+    webSocket: {
+      path: "/events",
+      subprotocols: ["riff.visual.v1"],
+      maxFrameBytes: 65_536,
+      maxConnections: 2,
+      idleTimeoutMs: 30_000,
+    },
   },
   cancellation: { signal: "SIGTERM", graceMs: 1_000 },
 };
@@ -341,10 +348,43 @@ test("currentHealthyVisualFrameTarget returns only the exact healthy current vis
         loopbackPort: fixture.process.loopbackPort,
         healthPath: fixture.launch.healthPath,
         healthyAt: HEALTHY_AT,
+        webSocket: EXECUTION.visual.webSocket,
       },
     );
   } finally {
     closeFixture(fixture);
+  }
+});
+
+test("currentHealthyVisualFrameTarget revalidates the frozen run execution digest before exposing WebSocket policy", () => {
+  const fixture = createFixture("frame_execution_digest");
+  try {
+    makeHealthy(fixture);
+    fixture.store.close();
+    const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
+    try {
+      database.exec("DROP TRIGGER run_frozen_contract_immutable_v4");
+      database.prepare(
+        "UPDATE runs SET execution_description_sha256 = ? WHERE id = ?",
+      ).run(DIGEST_A, fixture.runId);
+    } finally {
+      database.close();
+    }
+    const reopened = ProductStoreV2.open(fixture.root);
+    try {
+      assert.throws(
+        () => reopened.currentHealthyVisualFrameTarget(
+          fixture.projectId,
+          fixture.runId,
+          { now: HEALTHY_AT },
+        ),
+        /visual_frame_unavailable/u,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(fixture.parent, { recursive: true, force: true });
   }
 });
 

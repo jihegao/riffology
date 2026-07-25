@@ -61,7 +61,8 @@ final full backend gate of 385 tests with 384 passed, zero failed, and one
 optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; the real public vertical passed; web passes 104/104 and
 the production build succeeds.
-The A3-2b1 implementation under review adds the isolated browser-network primitive and a
+The A3-2b1 implementation was merged and published through PR #33 and adds the
+isolated browser-network primitive and a
 `BackendApp.listenBrowserNetwork()` integration path. It exact-binds a platform
 app and an empty broker to distinct server-owned `::1` ports, rejects
 non-canonical Host values before either handler, and serializes startup/close
@@ -71,9 +72,17 @@ this pair; the existing Vite UI remains a separate development proxy surface,
 not the future frame-capability app.
 The published A3-2a2c slice exposes neither the child port nor browser access.
 Visual completion remains HTTP `422` `visual_completion_not_supported`;
-A3-2b2 frame bootstrap/HTTP proxy is under implementation.
-A3-2b3 WebSocket/revocation/secrecy, A3-2b4 browser and security closeout, and
-A3-2c remain pending.
+A3-2b2 frame bootstrap/HTTP proxy was merged and published through PR #35.
+A3-2b3 WebSocket/revocation/secrecy is implemented and locally
+integrated under review; its current server-level evidence includes fixed
+broker/child sockets, bounded negative admission/upstream handshakes,
+attempt-global cross-route connection limits, generation/shutdown closure, and
+observable/persisted sentinel scans. The focused frame/network/WebSocket
+regression combination passes 32/32; the serial official backend gate reports
+464 total with 463 passed, zero failed, and one optional smoke skipped. Web remains
+104/104, the network-entry integration passes 1/1, and the production build
+succeeds. This is not a publication or merge claim.
+A3-2b4 browser and security closeout and A3-2c remain pending.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -87,9 +96,9 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The published boundary through A3-2a2c remains implemented. The separate
-A3-2b1 implementation under review adds only the browser-network topology; the
-combined boundary is intentionally narrow:
+The published boundary through A3-2b2 remains implemented: A3-2b1 and A3-2b2
+were merged through PR #33 and PR #35. A3-2b3 is locally integrated under
+review; the combined boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -553,23 +562,26 @@ different-process, different-group, or otherwise ambiguous listener ownership
 fails closed before health can commit. The public API, DTOs, messages, and
 ordinary logs never expose the assigned port.
 
-WebSocket forwarding is denied unless the `webSocket` object exists. Its path
-must be one exact absolute same-origin path. `subprotocols` contains zero to
-eight unique tokens; a client offering an undeclared protocol is rejected, and
-an empty list permits only a connection without a subprotocol. Values are frozen
-with the run and must satisfy server ceilings:
+WebSocket forwarding is denied unless the run-frozen `webSocket` object exists.
+Its path is one exact absolute same-origin path below the minted broker route.
+`subprotocols` contains zero to eight unique tokens; every offered token must
+be declared and unique, the child selection must also have been offered, and
+an empty declaration permits only a connection without a subprotocol. Values
+are frozen with the run and must satisfy server ceilings:
 
 - `maxFrameBytes`: 1 through 1,048,576 bytes;
 - `maxConnections`: 1 through 8 concurrent connections for the attempt; and
 - `idleTimeoutMs`: 1,000 through 300,000 milliseconds.
 
-The proxy counts inbound and outbound frames, closes an oversized frame with
-code `1009`, closes policy violations with `1008`, denies connection number
-`maxConnections + 1`, and expires idle connections and all attempt capabilities
-at terminal reconciliation. It never forwards cookies, authorization headers,
-compression extensions, arbitrary paths, or cross-origin redirects. Stable
-admission/proxy errors include `visual_websocket_not_declared`,
-`visual_websocket_protocol_denied`, and `visual_websocket_limit`.
+The proxy bounds assembled messages, individual fragments, pending plus active
+attempt-wide connections, each direction's queued backpressure bytes, child
+handshake time, and idle duration. Each direction queues at most 16 messages
+and at most `maxFrameBytes` of payload. It applies the exact pre-upgrade
+statuses and post-upgrade close codes frozen below and in
+[ADR 0003](adr/0003-websocket-forwarding-and-revocation.md). It never forwards
+cookies, authorization headers, the raw browser Origin, compression extensions,
+capability routes/nonces, arbitrary paths, or redirects. The fixed child
+handshake instead carries a server-generated exact broker Origin.
 
 ### Official scaffold migration
 
@@ -1118,10 +1130,19 @@ cross-port frame. Broker documents/assets emit no permissive CORS header.
 Fetches require the
 broker cookie and live binding. When an HTTP `Origin` header is present it must
 equal the exact broker origin; a normal navigation or subresource request
-without `Origin` is allowed only with the cookie. WebSocket upgrade always
-requires the exact broker `Origin`, declared path/subprotocol, broker cookie,
-and live registry binding. Missing, `null`, app-origin, child-origin, or any
-other WebSocket origin is rejected. Bootstrap/session POST responses permit
+without `Origin` is allowed only with the cookie. WebSocket upgrade always uses
+the exact minted URL
+`ws://[::1]:<broker-port>/frame/c/<route-id><declared-absolute-path>` and
+requires exact broker `Host`, exact broker `Origin`, the exact declared path
+with no query or encoded alias, an offered subset of unique declared
+subprotocols, broker cookie, and live registry binding. Missing, duplicate,
+`null`, app-origin, child-origin, or any other WebSocket origin is rejected
+before child dial. The child leg is fixed to the recorded
+`127.0.0.1:<port><declared-path>`, follows no redirect, selects only a protocol
+both offered and declared, negotiates no compression extension, and receives
+no raw browser Origin, cookie, authorization, nonce, route, or arbitrary
+header. Its fixed handshake receives a server-generated exact broker Origin.
+Bootstrap/session POST responses permit
 only the exact app origin, credentials, explicit headers/methods, and never
 wildcard CORS.
 
@@ -1134,11 +1155,43 @@ nonce, including expired nonce values, capability, URL, and child-port secrets;
 the same values are absent from public DTOs. SQLite contains no browser nonce,
 cookie, frame URL, or capability; it retains child ports only in the
 schema-defined private process-attempt, launch, and health evidence required
-for exact recovery. That evidence cannot restore browser access. Backend restart, expiry,
-redemption replay, browser-session generation change, unhealthy attempt, or
-terminal state revokes access. Revocation first closes every registered socket
-and only then removes the registry entry; a fresh bootstrap/session request is
-required.
+for exact recovery. The authorized bootstrap/frame-session/redeem fields that
+necessarily carry their own transient value are explicit scan allowlist
+entries, not a false claim that the secret is globally absent. That evidence
+cannot restore browser access. Backend restart, expiry, redemption replay,
+browser-session generation change, unhealthy attempt, or terminal state
+revokes access. Dispatcher cancellation, unhealthy observation, visual
+terminalization, recovery, and stop call the idempotent
+`revokeVisualAccess(runId)` hook before the corresponding state commit or
+process abort. The hook remains callable for later attempts of the same run ID;
+the dispatcher never permanently memoizes a revoked run. Revocation starts
+closing every pending and registered socket before removing registry authority;
+a fresh bootstrap/session request is required.
+
+`maxConnections` counts pending and active sockets for the exact attempt across
+all minted routes. The 5,000 millisecond pending child handshake is part of the
+bound. `maxFrameBytes` limits each assembled text or binary message and every
+fragment in both directions. Per direction, queued backpressure payload is
+also capped at `maxFrameBytes`; the source pauses while it drains and overflow
+is additionally capped at 16 queued messages; exceeding either ceiling closes
+both legs with `1013`. Valid data or control activity resets the idle deadline.
+Malformed RFC framing closes `1002`, invalid assembled UTF-8 `1007`, assembled
+message overflow `1009`, queued-byte/backpressure overflow `1013`, idle timeout
+or absolute capability expiry `1001`, generation/lifecycle revocation and
+other application policy loss `1008`, and unexpected post-upgrade upstream
+failure `1011`. Pre-upgrade WebSocket results
+are frozen as `400/broker_request_failed` for parser-level malformed HTTP,
+`400/visual_websocket_protocol_denied` for parsed HTTP with malformed or
+duplicate Upgrade/Connection/version/key handshake structure,
+`405/visual_websocket_protocol_denied` for a non-GET attempt,
+`404/visual_websocket_not_declared`,
+`403/visual_frame_session_denied` for missing or invalid broker authority,
+`403/visual_websocket_protocol_denied` for offered-subprotocol or declared
+WebSocket policy denial,
+`429/visual_websocket_limit`,
+`502/visual_websocket_upstream_failed`, and
+`504/visual_websocket_timeout`; exact topology Host and broker-session failures
+retain their existing b1/b2 status and code.
 
 Visual runs remain `running` while healthy. Explicit stop is cancellation.
 Timeout/resource breaches use their matching terminal states. Normal exit after
@@ -1418,19 +1471,28 @@ Output indexes never resolve outside the owning Project/run object root.
    regressions; web is 104/104 and its production build succeeds. Visual
    completion remains HTTP `422`
    `visual_completion_not_supported`.
-9. **A3-2b1 network topology — implementation under review:** the backend
+9. **A3-2b1 network topology — merged and published through PR #33:** the backend
    production entrypoint exact-binds the platform technical origin and an empty
    broker to separate IPv6-loopback ports, enforces exact Host, serializes
    start/close, and preserves the child IPv4-only listener boundary.
-10. **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** scoped broker/frame
-   capability, exact broker path, browser-session generation, bootstrap/CSRF/
-   nonce/cookie/Origin rules, HTTP forwarding, and exact CSP.
-11. **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
-   path/subprotocol/limit enforcement, socket-first generation and lifecycle
-   revocation, and three-party secret scans.
+10. **A3-2b2 frame bootstrap and HTTP proxy — merged and published through
+    PR #35:** scoped broker/frame capability, exact broker
+   path, browser-session generation, bootstrap/CSRF/nonce/cookie/Origin rules,
+   HTTP forwarding, and exact CSP.
+11. **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
+   integrated, under review:** exact
+   minted broker URL/path/subprotocol enforcement, assembled-message,
+   connection/handshake/idle/backpressure limits, socket-first generation and
+   lifecycle revocation through `revokeVisualAccess(runId)`, stable
+   pre-upgrade status/codes and RFC close codes, and allowlist-aware
+   three-party observable/persisted secret scans. This status does not claim a
+   merge or publication.
 12. **A3-2b4 browser and security closeout — pending:** real-browser negative
-   isolation matrix, focused/full suites, independent security review, and
-   documentation synchronization for the completed A3-2b contract.
+   isolation matrix for the browser cookie jar, HttpOnly, browser-generated
+   WebSocket Origin/cookie delivery, iframe-relative WebSocket, CSP/sandbox/
+   hostile embedding, and page-observed live revocation; then focused/full
+   suites, independent security review, and documentation synchronization for
+   the completed A3-2b contract.
 13. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
    attempt observation, explicit one-turn interaction, bounded audit, and
    cross-scope denial.
