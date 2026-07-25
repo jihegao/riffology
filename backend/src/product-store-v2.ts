@@ -357,6 +357,60 @@ export type CancelRunInput = CancelRunIntent & Readonly<{
   requestedAt: IsoTimestamp;
 }>;
 
+export type TerminalRunStatus = "succeeded" | "failed" | "cancelled" | "timed_out";
+
+export type RunLifecycleBinding = Readonly<{
+  status: RunStatus;
+  terminalStatus: TerminalRunStatus | null;
+  terminalClosureDigest: string | null;
+  lifecycleDigest: string;
+}>;
+
+export type TrashRunIntent = Readonly<{
+  commandId: string;
+  projectId: string;
+  runId: string;
+  expectedLifecycleDigest: string;
+  confirmation: Readonly<{
+    action: "trash_run";
+    projectId: string;
+    runId: string;
+    terminalStatus: TerminalRunStatus;
+    terminalClosureDigest: string;
+  }>;
+}>;
+
+export type RestoreRunIntent = Readonly<{
+  commandId: string;
+  projectId: string;
+  runId: string;
+  expectedLifecycleDigest: string;
+}>;
+
+export type RunLifecycleCommandReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  projectId: string;
+  runId: string;
+  action: "trash_run" | "restore_run";
+  priorStatus: RunStatus;
+  status: RunStatus;
+  trashEntryId: string;
+  terminalClosureDigest: string;
+  lifecycleDigest: string;
+  committedAt: IsoTimestamp;
+}>;
+
+export type TrashRunInput = TrashRunIntent & Readonly<{
+  committedAt: IsoTimestamp;
+  beforeCommit?: () => void;
+}>;
+
+export type RestoreRunInput = RestoreRunIntent & Readonly<{
+  committedAt: IsoTimestamp;
+  beforeCommit?: () => void;
+}>;
+
 export type CreateFrozenRunInput = StartRunIntent & Readonly<{
   runId: string;
   expectedConfigurationDigest: string;
@@ -1437,8 +1491,10 @@ export class ProductStoreV2 {
     return this.#withImmediateTransaction(() => {
       const committed = this.#frozenRunCancelReceipt(input, intentDigest);
       if (committed) return committed;
-      const row = this.#database.prepare(
-        "SELECT * FROM runs WHERE id = ? AND project_id = ?",
+      const row = this.#database.prepare(`SELECT r.*
+        FROM runs r
+        JOIN projects p ON p.id = r.project_id
+        WHERE r.id = ? AND r.project_id = ? AND p.lifecycle_state != 'trashed'`
       ).get(input.runId, input.projectId) as any;
       if (!row) throw new ProductStoreV2Error("Run does not exist.");
       const run = runRecord(row);
@@ -1514,6 +1570,368 @@ export class ProductStoreV2 {
           mismatchMessage: "run_cancel_conflict: cancellation lost its durable compare-and-set.",
         }] : []),
       ]);
+      return receipt;
+    });
+  }
+
+  currentRunLifecycleBinding(
+    projectId: string,
+    runId: string,
+    includeTrashed = true,
+  ): RunLifecycleBinding {
+    this.#assertOpen();
+    assertId(projectId);
+    assertId(runId);
+    const row = this.#database.prepare(`SELECT r.*
+      FROM runs r
+      JOIN projects p ON p.id = r.project_id
+      WHERE r.id = ? AND r.project_id = ? AND p.lifecycle_state != 'trashed'`
+    ).get(runId, projectId) as any;
+    if (!row || row.status === "trashed" && !includeTrashed) {
+      throw new ProductStoreV2Error("Run does not exist.");
+    }
+    const run = runRecord(row);
+    if (run.contractVersion === 3) throw legacyReadOnlyError("run");
+    const terminalStatus = terminalRunStatus(
+      run.status === "trashed" ? row.pre_trash_status : run.status,
+    );
+    const outputs = this.listRunOutputs(runId).map((output) => ({
+      id: output.id,
+      runId: output.runId,
+      logicalName: output.logicalName,
+      outputType: output.outputType,
+      contractVersion: output.contractVersion,
+      legacyDigest: output.legacyDigest,
+      sampleIndex: output.contractVersion === 4 ? output.sampleIndex : null,
+      sampleId: output.contractVersion === 4 ? output.sampleId : null,
+      declaredRole: output.contractVersion === 4 ? output.declaredRole : null,
+      outputContractDigest: output.contractVersion === 4
+        ? output.outputContractDigest
+        : null,
+      file: {
+        id: output.file.id,
+        owner: output.file.owner,
+        kind: output.file.kind,
+        relativePath: output.file.relativePath,
+        mediaType: output.file.mediaType,
+        sizeBytes: output.file.sizeBytes,
+        sha256: output.file.sha256,
+        createdAt: output.file.createdAt,
+      },
+      createdAt: output.createdAt,
+    }));
+    const rawEventSet = this.#database.prepare(
+      "SELECT 1 FROM diagnostic_event_sets WHERE run_id = ?",
+    ).get(runId);
+    let eventSet: DiagnosticEventSetRecord | null = null;
+    if (rawEventSet) {
+      eventSet = this.listRunDiagnosticEvents({
+        projectId,
+        runId,
+        afterSequence: -1,
+        limit: 1,
+        types: [],
+        sampleIndexes: [],
+        occurredAtFrom: null,
+        occurredAtTo: null,
+        recoveryAudit: true,
+      }).binding.eventSet;
+    }
+    const terminalClosureDigest = terminalStatus === null
+      ? null
+      : canonicalDigest({
+        schemaVersion: 1,
+        projectId,
+        runId,
+        terminalStatus,
+        frozenRun: {
+          experimentConfigurationId: run.experimentConfigurationId,
+          runKind: run.runKind,
+          completionConversationId: run.completionConversationId,
+          frozenConfiguration: run.frozenConfiguration,
+          requestedSampleCount: run.requestedSampleCount,
+          executionDescriptionDigest: run.executionDescriptionDigest,
+          projectSnapshotDigest: run.projectSnapshotDigest,
+          frozenConfigurationDigest: run.frozenConfigurationDigest,
+          samplePlan: run.samplePlan,
+          samplePlanDigest: run.samplePlanDigest,
+          limits: run.limits,
+          limitsDigest: run.limitsDigest,
+          startReceiptDigest: run.startReceiptDigest,
+          createdAt: run.createdAt,
+        },
+        terminalEvidence: {
+          startedAt: run.startedAt,
+          finishedAt: run.finishedAt,
+          cancelRequestedAt: run.cancelRequestedAt,
+          terminalCode: run.terminalCode,
+          terminalDiagnostics: run.terminalDiagnostics,
+          resourceOverview: run.resourceOverview,
+          completionCardDisposition: run.completionCardDisposition,
+        },
+        outputs,
+        eventSet,
+      });
+    const trashHistory = (this.#database.prepare(`SELECT
+        id, prior_state, trashed_at, restored_at
+      FROM trash_entries WHERE run_id = ? ORDER BY id`
+    ).all(runId) as Array<{
+      id: string;
+      prior_state: string;
+      trashed_at: string;
+      restored_at: string | null;
+    }>).map((entry) => ({
+      id: entry.id,
+      priorStatus: entry.prior_state,
+      trashedAt: entry.trashed_at,
+      restoredAt: entry.restored_at,
+    }));
+    return Object.freeze({
+      status: run.status,
+      terminalStatus,
+      terminalClosureDigest,
+      lifecycleDigest: canonicalDigest({
+        schemaVersion: 1,
+        projectId,
+        runId,
+        status: run.status,
+        terminalStatus,
+        terminalClosureDigest,
+        updatedAt: run.updatedAt,
+        trashedAt: row.trashed_at,
+        trashHistory,
+      }),
+    });
+  }
+
+  trashRun(input: TrashRunInput): RunLifecycleCommandReceipt {
+    assertTrashRunInput(input);
+    const intentDigest = trashRunIntentDigest(input);
+    const replayed = this.#runLifecycleCommandReceipt(
+      input.commandId,
+      input.projectId,
+      input.runId,
+      "trash",
+      intentDigest,
+    );
+    if (replayed) return replayed;
+    return this.#withImmediateTransaction(() => {
+      const committed = this.#runLifecycleCommandReceipt(
+        input.commandId,
+        input.projectId,
+        input.runId,
+        "trash",
+        intentDigest,
+      );
+      if (committed) return committed;
+      const current = this.currentRunLifecycleBinding(input.projectId, input.runId, true);
+      if (current.status === "trashed") {
+        throw new ProductStoreV2Error(
+          "state_conflict: the run is already trashed.",
+        );
+      }
+      if (current.terminalStatus === null || current.terminalClosureDigest === null) {
+        throw new ProductStoreV2Error(
+          "run_not_terminal: only a terminal version-4 run can be trashed.",
+        );
+      }
+      if (current.lifecycleDigest !== input.expectedLifecycleDigest) {
+        throw new ProductStoreV2Error(
+          "state_conflict: the expected run lifecycle digest is stale.",
+        );
+      }
+      if (input.confirmation.projectId !== input.projectId
+        || input.confirmation.runId !== input.runId
+        || input.confirmation.terminalStatus !== current.terminalStatus
+        || input.confirmation.terminalClosureDigest !== current.terminalClosureDigest) {
+        throw new ProductStoreV2Error(
+          "state_conflict: the trash confirmation does not match the current terminal closure.",
+        );
+      }
+      const guarded = this.#database.prepare(`SELECT
+          updated_at, completion_card_disposition
+        FROM runs
+        WHERE id = ? AND project_id = ? AND contract_version = 4`
+      ).get(input.runId, input.projectId) as {
+        updated_at: string;
+        completion_card_disposition: string;
+      } | undefined;
+      if (!guarded) throw new ProductStoreV2Error("Run does not exist.");
+      if (guarded.completion_card_disposition === "pending") {
+        throw new ProductStoreV2Error(
+          "state_conflict: a run with a pending completion card cannot be trashed.",
+        );
+      }
+      const trashEntryId = `trash_${randomUUID().replaceAll("-", "")}`;
+      input.beforeCommit?.();
+      this.#executeDatabaseStatements([
+        {
+          sql: `UPDATE runs
+            SET status = 'trashed', pre_trash_status = ?, trashed_at = ?, updated_at = ?
+            WHERE id = ? AND project_id = ? AND contract_version = 4
+              AND status = ? AND updated_at = ?
+              AND completion_card_disposition != 'pending'
+              AND EXISTS (
+                SELECT 1 FROM projects p
+                WHERE p.id = runs.project_id AND p.lifecycle_state != 'trashed'
+              )`,
+          params: [
+            current.terminalStatus,
+            input.committedAt,
+            input.committedAt,
+            input.runId,
+            input.projectId,
+            current.terminalStatus,
+            guarded.updated_at,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "state_conflict: the run lifecycle changed before trash committed.",
+        },
+        {
+          sql: `INSERT INTO trash_entries
+            (id, run_id, prior_state, trashed_at)
+            VALUES (?, ?, ?, ?)`,
+          params: [
+            trashEntryId,
+            input.runId,
+            current.terminalStatus,
+            input.committedAt,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+      const resulting = this.currentRunLifecycleBinding(input.projectId, input.runId, true);
+      const receipt: RunLifecycleCommandReceipt = Object.freeze({
+        schemaVersion: 1,
+        commandId: input.commandId,
+        projectId: input.projectId,
+        runId: input.runId,
+        action: "trash_run",
+        priorStatus: current.terminalStatus,
+        status: "trashed",
+        trashEntryId,
+        terminalClosureDigest: current.terminalClosureDigest,
+        lifecycleDigest: resulting.lifecycleDigest,
+        committedAt: input.committedAt,
+      });
+      this.#insertRunLifecycleCommand(
+        input.commandId,
+        input.runId,
+        "trash",
+        intentDigest,
+        receipt,
+      );
+      return receipt;
+    });
+  }
+
+  restoreRun(input: RestoreRunInput): RunLifecycleCommandReceipt {
+    assertRestoreRunInput(input);
+    const intentDigest = restoreRunIntentDigest(input);
+    const replayed = this.#runLifecycleCommandReceipt(
+      input.commandId,
+      input.projectId,
+      input.runId,
+      "restore",
+      intentDigest,
+    );
+    if (replayed) return replayed;
+    return this.#withImmediateTransaction(() => {
+      const committed = this.#runLifecycleCommandReceipt(
+        input.commandId,
+        input.projectId,
+        input.runId,
+        "restore",
+        intentDigest,
+      );
+      if (committed) return committed;
+      const current = this.currentRunLifecycleBinding(input.projectId, input.runId, true);
+      if (current.status !== "trashed"
+        || current.terminalStatus === null
+        || current.terminalClosureDigest === null) {
+        throw new ProductStoreV2Error(
+          "state_conflict: only a trashed version-4 run can be restored.",
+        );
+      }
+      if (current.lifecycleDigest !== input.expectedLifecycleDigest) {
+        throw new ProductStoreV2Error(
+          "state_conflict: the expected run lifecycle digest is stale.",
+        );
+      }
+      const activeTrash = this.#database.prepare(`SELECT
+          t.id, t.prior_state, t.trashed_at, r.run_kind
+        FROM trash_entries t
+        JOIN runs r ON r.id = t.run_id
+        WHERE t.run_id = ? AND t.restored_at IS NULL`
+      ).get(input.runId) as {
+        id: string;
+        prior_state: TerminalRunStatus;
+        trashed_at: string;
+        run_kind: "batch" | "visual";
+      } | undefined;
+      if (!activeTrash || activeTrash.prior_state !== current.terminalStatus) {
+        throw new ProductStoreV2Error(
+          "state_conflict: the active run trash entry is missing or inconsistent.",
+        );
+      }
+      input.beforeCommit?.();
+      const restoreState = (): void => this.#executeDatabaseStatements([
+          {
+            sql: `UPDATE runs
+              SET status = ?, pre_trash_status = NULL, trashed_at = NULL, updated_at = ?
+              WHERE id = ? AND project_id = ? AND contract_version = 4
+                AND status = 'trashed' AND pre_trash_status = ?
+                AND EXISTS (
+                  SELECT 1 FROM projects p
+                  WHERE p.id = runs.project_id AND p.lifecycle_state != 'trashed'
+                )`,
+            params: [
+              current.terminalStatus,
+              input.committedAt,
+              input.runId,
+              input.projectId,
+              current.terminalStatus,
+            ],
+            expectedChanges: 1,
+            mismatchMessage: "state_conflict: the run lifecycle changed before restore committed.",
+          },
+          {
+            sql: `UPDATE trash_entries SET restored_at = ?
+              WHERE id = ? AND run_id = ? AND restored_at IS NULL`,
+            params: [input.committedAt, activeTrash.id, input.runId],
+            expectedChanges: 1,
+            mismatchMessage: "state_conflict: the run trash entry changed before restore committed.",
+          },
+        ]);
+      if (current.terminalStatus === "succeeded") {
+        const withSuccessContext = activeTrash.run_kind === "batch"
+          ? withAtomicBatchSuccessRunContext
+          : withAtomicVisualSuccessRunContext;
+        withSuccessContext(this.#database, input.runId, restoreState);
+      } else {
+        restoreState();
+      }
+      const resulting = this.currentRunLifecycleBinding(input.projectId, input.runId, true);
+      const receipt: RunLifecycleCommandReceipt = Object.freeze({
+        schemaVersion: 1,
+        commandId: input.commandId,
+        projectId: input.projectId,
+        runId: input.runId,
+        action: "restore_run",
+        priorStatus: "trashed",
+        status: current.terminalStatus,
+        trashEntryId: activeTrash.id,
+        terminalClosureDigest: current.terminalClosureDigest,
+        lifecycleDigest: resulting.lifecycleDigest,
+        committedAt: input.committedAt,
+      });
+      this.#insertRunLifecycleCommand(
+        input.commandId,
+        input.runId,
+        "restore",
+        intentDigest,
+        receipt,
+      );
       return receipt;
     });
   }
@@ -6712,7 +7130,8 @@ export class ProductStoreV2 {
       FROM run_commands c
       LEFT JOIN run_command_receipts q ON q.command_id = c.id AND q.run_id = c.run_id
       LEFT JOIN runs r ON r.id = c.run_id
-      WHERE c.id = ?`).get(intent.commandId) as any;
+      LEFT JOIN projects p ON p.id = r.project_id
+      WHERE c.id = ? AND p.lifecycle_state != 'trashed'`).get(intent.commandId) as any;
     if (!row) return null;
     if (row.command_kind !== "cancel" || row.request_key !== intent.commandId
       || row.intent_sha256 !== intentDigest) {
@@ -6746,6 +7165,137 @@ export class ProductStoreV2 {
       || ((row.cancel_requested_at === null) !== (row.first_cancel_command_id === null))
       || (receipt.applied && row.first_cancel_command_id !== receipt.commandId)) {
       throw new ProductStoreV2Error("Committed run-cancel receipt resource binding is corrupt.");
+    }
+    return Object.freeze({ ...receipt });
+  }
+
+  #insertRunLifecycleCommand(
+    commandId: string,
+    runId: string,
+    commandKind: "trash" | "restore",
+    intentDigest: string,
+    receipt: RunLifecycleCommandReceipt,
+  ): void {
+    const receiptJson = json(receipt);
+    const receiptDigest = canonicalDigest(receipt);
+    this.#executeDatabaseStatements([
+      {
+        sql: `INSERT INTO run_commands
+          (id, run_id, command_kind, request_key, intent_sha256, state,
+            outcome_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'committed', ?, ?, ?)`,
+        params: [
+          commandId,
+          runId,
+          commandKind,
+          commandId,
+          intentDigest,
+          receiptJson,
+          receipt.committedAt,
+          receipt.committedAt,
+        ],
+        expectedChanges: 1,
+      },
+      {
+        sql: `INSERT INTO run_command_receipts
+          (id, run_id, command_id, receipt_kind, payload_sha256,
+            payload_json, committed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          `receipt_${canonicalDigest(commandId).slice(0, 32)}`,
+          runId,
+          commandId,
+          `run.${commandKind}.v1`,
+          receiptDigest,
+          receiptJson,
+          receipt.committedAt,
+        ],
+        expectedChanges: 1,
+      },
+    ]);
+  }
+
+  #runLifecycleCommandReceipt(
+    commandId: string,
+    projectId: string,
+    runId: string,
+    commandKind: "trash" | "restore",
+    intentDigest: string,
+  ): RunLifecycleCommandReceipt | null {
+    const row = this.#database.prepare(`SELECT
+        c.run_id AS command_run_id, c.command_kind, c.request_key,
+        c.intent_sha256, c.state AS command_state, c.outcome_json,
+        q.receipt_kind, q.payload_sha256, q.payload_json, q.committed_at,
+        r.project_id, r.contract_version
+      FROM run_commands c
+      LEFT JOIN run_command_receipts q
+        ON q.command_id = c.id AND q.run_id = c.run_id
+      LEFT JOIN runs r ON r.id = c.run_id
+      LEFT JOIN projects p ON p.id = r.project_id
+      WHERE c.id = ? AND p.lifecycle_state != 'trashed'`
+    ).get(commandId) as any;
+    if (!row) return null;
+    if (row.command_kind !== commandKind
+      || row.request_key !== commandId
+      || row.intent_sha256 !== intentDigest
+      || row.command_run_id !== runId
+      || row.project_id !== projectId) {
+      throw new ProductStoreV2Error(
+        "idempotency_conflict: the run lifecycle command already exists with a different intent.",
+      );
+    }
+    if (row.contract_version !== 4) throw legacyReadOnlyError("run");
+    if (row.command_state !== "committed"
+      || row.receipt_kind !== `run.${commandKind}.v1`
+      || typeof row.payload_json !== "string"
+      || typeof row.outcome_json !== "string"
+      || row.committed_at === null) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the committed run lifecycle receipt is incomplete.",
+      );
+    }
+    let payload: unknown;
+    let outcome: unknown;
+    try {
+      payload = JSON.parse(row.payload_json);
+      outcome = JSON.parse(row.outcome_json);
+    } catch (error) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the committed run lifecycle receipt contains invalid JSON.",
+        { cause: error },
+      );
+    }
+    assertRunLifecycleCommandReceipt(payload);
+    const receipt = payload as RunLifecycleCommandReceipt;
+    if (canonicalDigest(receipt) !== row.payload_sha256
+      || !canonicalJsonV2(receipt).equals(canonicalJsonV2(outcome))
+      || receipt.commandId !== commandId
+      || receipt.projectId !== projectId
+      || receipt.runId !== runId
+      || receipt.action !== `${commandKind}_run`
+      || receipt.committedAt !== row.committed_at) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the committed run lifecycle receipt binding is corrupt.",
+      );
+    }
+    const trash = this.#database.prepare(`SELECT
+        run_id, prior_state, trashed_at, restored_at
+      FROM trash_entries WHERE id = ?`
+    ).get(receipt.trashEntryId) as {
+      run_id: string;
+      prior_state: string;
+      trashed_at: string;
+      restored_at: string | null;
+    } | undefined;
+    if (!trash || trash.run_id !== runId
+      || trash.prior_state !== (commandKind === "trash"
+        ? receipt.priorStatus
+        : receipt.status)
+      || (commandKind === "trash" && trash.trashed_at !== receipt.committedAt)
+      || (commandKind === "restore" && trash.restored_at !== receipt.committedAt)) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the committed run lifecycle trash binding is corrupt.",
+      );
     }
     return Object.freeze({ ...receipt });
   }
@@ -7050,6 +7600,52 @@ const assertCancelRunIntent = (intent: CancelRunIntent): void => {
   assertCommandId(intent.commandId);
   assertId(intent.projectId);
   assertId(intent.runId);
+};
+
+const assertTrashRunInput = (input: TrashRunInput): void => {
+  assertCommandId(input.commandId);
+  assertId(input.projectId);
+  assertId(input.runId);
+  assertDigest(input.expectedLifecycleDigest, "Expected run lifecycle digest");
+  if (!isExactIsoTimestamp(input.committedAt)) {
+    throw new ProductStoreV2Error("Run trash commit timestamp is invalid.");
+  }
+  if (input.beforeCommit !== undefined && typeof input.beforeCommit !== "function") {
+    throw new ProductStoreV2Error("Run trash beforeCommit callback is invalid.");
+  }
+  const confirmation = input.confirmation as unknown;
+  if (!confirmation || typeof confirmation !== "object" || Array.isArray(confirmation)
+    || Object.keys(confirmation).sort().join("\n") !== [
+      "action",
+      "projectId",
+      "runId",
+      "terminalClosureDigest",
+      "terminalStatus",
+    ].sort().join("\n")) {
+    throw new ProductStoreV2Error("Run trash confirmation is invalid.");
+  }
+  const value = confirmation as Record<string, unknown>;
+  if (value.action !== "trash_run"
+    || typeof value.projectId !== "string"
+    || typeof value.runId !== "string"
+    || terminalRunStatus(value.terminalStatus) === null
+    || typeof value.terminalClosureDigest !== "string"
+    || !DIGEST.test(value.terminalClosureDigest)) {
+    throw new ProductStoreV2Error("Run trash confirmation is invalid.");
+  }
+};
+
+const assertRestoreRunInput = (input: RestoreRunInput): void => {
+  assertCommandId(input.commandId);
+  assertId(input.projectId);
+  assertId(input.runId);
+  assertDigest(input.expectedLifecycleDigest, "Expected run lifecycle digest");
+  if (!isExactIsoTimestamp(input.committedAt)) {
+    throw new ProductStoreV2Error("Run restore commit timestamp is invalid.");
+  }
+  if (input.beforeCommit !== undefined && typeof input.beforeCommit !== "function") {
+    throw new ProductStoreV2Error("Run restore beforeCommit callback is invalid.");
+  }
 };
 
 const assertRunAttemptIdentity = (input: RunAttemptIdentity): void => {
@@ -7540,6 +8136,23 @@ const cancelRunIntentDigest = (intent: CancelRunIntent): string => canonicalDige
   runId: intent.runId,
 });
 
+const trashRunIntentDigest = (intent: TrashRunIntent): string => canonicalDigest({
+  schemaVersion: 1,
+  commandKind: "run.trash",
+  projectId: intent.projectId,
+  runId: intent.runId,
+  expectedLifecycleDigest: intent.expectedLifecycleDigest,
+  confirmation: intent.confirmation,
+});
+
+const restoreRunIntentDigest = (intent: RestoreRunIntent): string => canonicalDigest({
+  schemaVersion: 1,
+  commandKind: "run.restore",
+  projectId: intent.projectId,
+  runId: intent.runId,
+  expectedLifecycleDigest: intent.expectedLifecycleDigest,
+});
+
 const experimentUpdateIntentDigest = (input: ExperimentUpdateIntentV4): string => canonicalDigest({
   schemaVersion: 1,
   commandKind: "experiment.update",
@@ -7631,6 +8244,20 @@ const RUN_CANCEL_RECEIPT_KEYS = Object.freeze([
   "status",
   "cancelRequestedAt",
   "createdAt",
+].sort());
+
+const RUN_LIFECYCLE_RECEIPT_KEYS = Object.freeze([
+  "schemaVersion",
+  "commandId",
+  "projectId",
+  "runId",
+  "action",
+  "priorStatus",
+  "status",
+  "trashEntryId",
+  "terminalClosureDigest",
+  "lifecycleDigest",
+  "committedAt",
 ].sort());
 
 const EXPERIMENT_V4_RESPONSE_KEYS = Object.freeze([
@@ -7729,8 +8356,47 @@ const assertFrozenRunCancelReceipt: (value: unknown) => asserts value is FrozenR
   }
 };
 
+const assertRunLifecycleCommandReceipt:
+  (value: unknown) => asserts value is RunLifecycleCommandReceipt = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the receipt has an invalid shape.",
+      );
+    }
+    const receipt = value as Record<string, unknown>;
+    const action = receipt.action;
+    const priorStatus = receipt.priorStatus;
+    const status = receipt.status;
+    if (Object.keys(receipt).sort().join("\n") !== RUN_LIFECYCLE_RECEIPT_KEYS.join("\n")
+      || receipt.schemaVersion !== 1
+      || typeof receipt.commandId !== "string"
+      || typeof receipt.projectId !== "string"
+      || typeof receipt.runId !== "string"
+      || !["trash_run", "restore_run"].includes(String(action))
+      || typeof receipt.trashEntryId !== "string"
+      || !SAFE_ID.test(receipt.trashEntryId)
+      || typeof receipt.terminalClosureDigest !== "string"
+      || !DIGEST.test(receipt.terminalClosureDigest)
+      || typeof receipt.lifecycleDigest !== "string"
+      || !DIGEST.test(receipt.lifecycleDigest)
+      || !isExactIsoTimestamp(receipt.committedAt)
+      || (action === "trash_run"
+        && (terminalRunStatus(priorStatus) === null || status !== "trashed"))
+      || (action === "restore_run"
+        && (priorStatus !== "trashed" || terminalRunStatus(status) === null))) {
+      throw new ProductStoreV2Error(
+        "run_lifecycle_receipt_invalid: the receipt has an invalid shape.",
+      );
+    }
+  };
+
 const legacyReadOnlyError = (kind: "experiment" | "run"): ProductStoreV2Error =>
   new ProductStoreV2Error(`legacy_contract_read_only: version-3 ${kind} records are permanently read only.`);
+
+const terminalRunStatus = (value: unknown): TerminalRunStatus | null =>
+  ["succeeded", "failed", "cancelled", "timed_out"].includes(String(value))
+    ? value as TerminalRunStatus
+    : null;
 
 const stableTransactionId = (operation: string, id: string): string => `mutation_${operation}_${canonicalDigest(id).slice(0, 32)}`;
 const activeLifecycleGuard = (table: "models" | "projects" | "conversations", id: string): DatabaseMutationStatement => ({

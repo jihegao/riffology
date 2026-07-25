@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -121,6 +122,80 @@ const bootstrapAppSession = async (baseUrl: string): Promise<string> => {
   return cookie;
 };
 
+type BrowserMutationSession = Readonly<{
+  cookie: string;
+  csrfToken: string;
+}>;
+
+const bootstrapAppMutationSession = async (
+  baseUrl: string,
+): Promise<BrowserMutationSession> => {
+  const response = await fetch(`${baseUrl}/api/browser-session/bootstrap`, {
+    method: "POST",
+    headers: {
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+      "content-length": "0",
+    },
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.ok(cookie);
+  const body = await response.json() as any;
+  assert.match(body.csrfToken, /^[A-Za-z0-9_-]{43}$/u);
+  return { cookie, csrfToken: body.csrfToken };
+};
+
+const browserMutationHeaders = (
+  baseUrl: string,
+  session: BrowserMutationSession,
+) => ({
+  "content-type": "application/json",
+  cookie: session.cookie,
+  origin: baseUrl,
+  "sec-fetch-site": "same-origin",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-dest": "empty",
+  "x-riff-csrf": session.csrfToken,
+});
+
+const browserPost = (
+  baseUrl: string,
+  session: BrowserMutationSession,
+  url: string,
+  body: unknown,
+) => fetch(url, {
+  method: "POST",
+  headers: browserMutationHeaders(baseUrl, session),
+  body: JSON.stringify(body),
+});
+
+const startPausedDownload = (
+  url: string,
+  headers: Record<string, string>,
+): Promise<{
+  response: IncomingMessage;
+  firstChunkBytes: number;
+  terminated: Promise<void>;
+}> => new Promise((resolve, reject) => {
+  const request = httpRequest(url, { method: "GET", headers });
+  request.once("error", reject);
+  request.once("response", (response) => {
+    response.pause();
+    const terminated = new Promise<void>((done) => {
+      response.once("aborted", done);
+      response.once("close", done);
+    });
+    response.once("error", reject);
+    resolve({
+      response,
+      firstChunkBytes: 0,
+      terminated,
+    });
+  });
+  request.end();
+});
+
 const waitForRun = async (
   baseUrl: string,
   projectId: string,
@@ -241,12 +316,15 @@ if envelope["parameters"]["value"] == 99:
     time.sleep(30)
 target = args.riff_output_dir / "outputs" / "result.json"
 target.parent.mkdir(parents=True, exist_ok=True)
-target.write_text(json.dumps({
+payload = {
     "sampleIndex": envelope["sampleIndex"],
     "sampleId": envelope["sampleId"],
     "seed": envelope["seed"],
     "value": envelope["parameters"]["value"],
-}, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+}
+if envelope["parameters"]["value"] == 4:
+    payload["padding"] = "x" * 60000000
+target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
 `),
     }, {
       id: "file_a3_1_api_vertical_environment",
@@ -488,11 +566,11 @@ target.write_text(json.dumps({
     "succeeded",
   );
   assert.deepEqual(succeededAfterRestart, succeeded);
-  const restartedCookie = await bootstrapAppSession(baseUrl);
+  const mutationSession = await bootstrapAppMutationSession(baseUrl);
   const restartedDownload = await fetch(downloadUrl.replace(
     /^http:\/\/localhost:\d+/u,
     baseUrl,
-  ), { headers: browserOutputHeaders(restartedCookie) });
+  ), { headers: browserOutputHeaders(mutationSession.cookie) });
   assert.equal(restartedDownload.status, 200, await restartedDownload.clone().text());
   assert.deepEqual(Buffer.from(await restartedDownload.arrayBuffer()), fullBytes);
   const messagesAfterRestart = await listMessages(baseUrl, conversation.id);
@@ -500,6 +578,392 @@ target.write_text(json.dumps({
   assert.equal(messagesAfterRestart.filter((message) =>
     message.messageKind === "platform_card" && message.content?.runId === runStart.runId
   ).length, 1);
+
+  assert.equal(succeededAfterRestart.terminalStatus, "succeeded");
+  assert.match(succeededAfterRestart.terminalClosureDigest, /^[0-9a-f]{64}$/u);
+  assert.match(succeededAfterRestart.lifecycleDigest, /^[0-9a-f]{64}$/u);
+  const trashUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/trash`;
+  const trashRequest = {
+    commandId: "trash-a3-2d3-success",
+    expectedLifecycleDigest: succeededAfterRestart.lifecycleDigest,
+    confirmation: {
+      action: "trash_run",
+      projectId: project.id,
+      runId: runStart.runId,
+      terminalStatus: succeededAfterRestart.terminalStatus,
+      terminalClosureDigest: succeededAfterRestart.terminalClosureDigest,
+    },
+  };
+  const unauthenticatedTrash = await post(trashUrl, trashRequest);
+  assert.equal(unauthenticatedTrash.status, 403);
+  assert.equal(
+    unauthenticatedTrash.headers.get("cache-control"),
+    "private, no-store",
+  );
+  assert.equal(
+    unauthenticatedTrash.headers.get("x-content-type-options"),
+    "nosniff",
+  );
+  assert.equal(
+    (await unauthenticatedTrash.json() as any).error.code,
+    "run_control_denied",
+  );
+  const staleCsrfTrash = await fetch(trashUrl, {
+    method: "POST",
+    headers: {
+      ...browserMutationHeaders(baseUrl, mutationSession),
+      "x-riff-csrf": "A".repeat(43),
+    },
+    body: JSON.stringify(trashRequest),
+  });
+  assert.equal(staleCsrfTrash.status, 403);
+  const unknownTrashField = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    { ...trashRequest, unexpected: true },
+  );
+  assert.equal(unknownTrashField.status, 422);
+  assert.equal(
+    (await unknownTrashField.json() as any).error.code,
+    "unknown_field",
+  );
+  const parameterizedContentTypeTrash = await fetch(trashUrl, {
+    method: "POST",
+    headers: {
+      ...browserMutationHeaders(baseUrl, mutationSession),
+      "content-type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(trashRequest),
+  });
+  assert.equal(parameterizedContentTypeTrash.status, 415);
+  assert.equal(
+    (await parameterizedContentTypeTrash.json() as any).error.code,
+    "unsupported_media_type",
+  );
+  const crossProjectTrash = await browserPost(
+    baseUrl,
+    mutationSession,
+    `${baseUrl}/api/projects/project_other_scope/runs/${runStart.runId}/trash`,
+    trashRequest,
+  );
+  assert.equal(crossProjectTrash.status, 404);
+
+  const trashResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    trashRequest,
+  );
+  assert.equal(trashResponse.status, 200, await trashResponse.clone().text());
+  assert.equal(trashResponse.headers.get("cache-control"), "private, no-store");
+  assert.equal(trashResponse.headers.get("x-content-type-options"), "nosniff");
+  const trashReceipt = await trashResponse.json() as any;
+  assert.deepEqual(Object.keys(trashReceipt).sort(), [
+    "action",
+    "commandId",
+    "committedAt",
+    "lifecycleDigest",
+    "priorStatus",
+    "projectId",
+    "runId",
+    "schemaVersion",
+    "status",
+    "terminalClosureDigest",
+    "trashEntryId",
+  ]);
+  assert.equal(trashReceipt.action, "trash_run");
+  assert.equal(trashReceipt.priorStatus, "succeeded");
+  assert.equal(trashReceipt.status, "trashed");
+  assert.equal(
+    trashReceipt.terminalClosureDigest,
+    succeededAfterRestart.terminalClosureDigest,
+  );
+  assert.notEqual(
+    trashReceipt.lifecycleDigest,
+    succeededAfterRestart.lifecycleDigest,
+  );
+
+  const trashReplay = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    trashRequest,
+  );
+  assert.equal(trashReplay.status, 200);
+  assert.deepEqual(await trashReplay.json(), trashReceipt);
+  const changedTrashIntent = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    {
+      ...trashRequest,
+      confirmation: {
+        ...trashRequest.confirmation,
+        terminalStatus: "failed",
+      },
+    },
+  );
+  assert.equal(changedTrashIntent.status, 409);
+  assert.equal(
+    (await changedTrashIntent.json() as any).error.code,
+    "idempotency_conflict",
+  );
+
+  const trashedRunResponse = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}`,
+  );
+  assert.equal(trashedRunResponse.status, 200);
+  const trashedRun = await trashedRunResponse.json() as any;
+  assert.equal(trashedRun.status, "trashed");
+  assert.equal(trashedRun.terminalStatus, "succeeded");
+  assert.deepEqual(trashedRun.outputs, []);
+  assert.equal(
+    trashedRun.terminalClosureDigest,
+    succeededAfterRestart.terminalClosureDigest,
+  );
+  assert.equal(trashedRun.lifecycleDigest, trashReceipt.lifecycleDigest);
+  const trashedOutputList = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs`,
+    { headers: browserOutputHeaders(mutationSession.cookie) },
+  );
+  assert.equal(trashedOutputList.status, 404);
+  const trashedDownload = await fetch(downloadUrl.replace(
+    /^http:\/\/localhost:\d+/u,
+    baseUrl,
+  ), { headers: browserOutputHeaders(mutationSession.cookie) });
+  assert.equal(trashedDownload.status, 409);
+  assert.equal(
+    (await trashedDownload.json() as any).error.code,
+    "output_not_available",
+  );
+
+  const restoreUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/restore`;
+  const restoreRequest = {
+    commandId: "restore-a3-2d3-success",
+    expectedLifecycleDigest: trashedRun.lifecycleDigest,
+  };
+  const restoreResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    restoreUrl,
+    restoreRequest,
+  );
+  assert.equal(restoreResponse.status, 200, await restoreResponse.clone().text());
+  const restoreReceipt = await restoreResponse.json() as any;
+  assert.equal(restoreReceipt.action, "restore_run");
+  assert.equal(restoreReceipt.priorStatus, "trashed");
+  assert.equal(restoreReceipt.status, "succeeded");
+  assert.equal(
+    restoreReceipt.terminalClosureDigest,
+    succeededAfterRestart.terminalClosureDigest,
+  );
+  assert.notEqual(restoreReceipt.lifecycleDigest, trashReceipt.lifecycleDigest);
+  const restoredRun = await waitForRun(
+    baseUrl,
+    project.id,
+    runStart.runId,
+    "succeeded",
+  );
+  assert.equal(
+    restoredRun.terminalClosureDigest,
+    succeededAfterRestart.terminalClosureDigest,
+  );
+  assert.equal(restoredRun.lifecycleDigest, restoreReceipt.lifecycleDigest);
+  assert.deepEqual(restoredRun.outputs, succeededAfterRestart.outputs);
+  const staleLifecycleTrash = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    {
+      ...trashRequest,
+      commandId: "trash-a3-2d3-stale-lifecycle",
+    },
+  );
+  assert.equal(staleLifecycleTrash.status, 409);
+  assert.equal(
+    (await staleLifecycleTrash.json() as any).error.code,
+    "state_conflict",
+  );
+  const historicalTrashReplay = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    trashRequest,
+  );
+  assert.equal(historicalTrashReplay.status, 200);
+  assert.deepEqual(await historicalTrashReplay.json(), trashReceipt);
+  const secondTrashResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    trashUrl,
+    {
+      commandId: "trash-a3-2d3-second-generation",
+      expectedLifecycleDigest: restoredRun.lifecycleDigest,
+      confirmation: {
+        ...trashRequest.confirmation,
+        terminalStatus: restoredRun.terminalStatus,
+        terminalClosureDigest: restoredRun.terminalClosureDigest,
+      },
+    },
+  );
+  assert.equal(secondTrashResponse.status, 200);
+  const secondTrashReceipt = await secondTrashResponse.json() as any;
+  const historicalRestoreReplay = await browserPost(
+    baseUrl,
+    mutationSession,
+    restoreUrl,
+    restoreRequest,
+  );
+  assert.equal(historicalRestoreReplay.status, 200);
+  assert.deepEqual(await historicalRestoreReplay.json(), restoreReceipt);
+  assert.equal(
+    (await fetch(`${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}`)
+      .then((response) => response.json()) as any).status,
+    "trashed",
+  );
+  const originalOpenRunOutputDownload =
+    current.a2!.service.openRunOutputDownload.bind(current.a2!.service);
+  let fencedOpenAttempts = 0;
+  current.a2!.service.openRunOutputDownload = (...args) => {
+    fencedOpenAttempts += 1;
+    return originalOpenRunOutputDownload(...args);
+  };
+  const fencedAfterHistoricalRestore = await fetch(downloadUrl.replace(
+    /^http:\/\/localhost:\d+/u,
+    baseUrl,
+  ), { headers: browserOutputHeaders(mutationSession.cookie) });
+  assert.equal(fencedAfterHistoricalRestore.status, 409);
+  assert.equal(fencedOpenAttempts, 0);
+  current.a2!.service.openRunOutputDownload = originalOpenRunOutputDownload;
+  const secondRestoreResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    restoreUrl,
+    {
+      commandId: "restore-a3-2d3-second-generation",
+      expectedLifecycleDigest: secondTrashReceipt.lifecycleDigest,
+    },
+  );
+  assert.equal(secondRestoreResponse.status, 200);
+  const restoredDownload = await fetch(downloadUrl.replace(
+    /^http:\/\/localhost:\d+/u,
+    baseUrl,
+  ), { headers: browserOutputHeaders(mutationSession.cookie) });
+  assert.equal(restoredDownload.status, 200);
+  assert.deepEqual(Buffer.from(await restoredDownload.arrayBuffer()), fullBytes);
+
+  const streamExperimentResponse = await post(
+    `${baseUrl}/api/projects/${project.id}/experiment-configs`,
+    {
+      commandId: "create-a3-2d3-stream-experiment",
+      name: "A3-2d3 active download revocation",
+      configuration: {
+        schemaVersion: 1,
+        runKind: "batch",
+        parameters: { value: 4 },
+        sampling: { kind: "single", seed: 19 },
+      },
+    },
+  );
+  assert.equal(
+    streamExperimentResponse.status,
+    201,
+    await streamExperimentResponse.clone().text(),
+  );
+  const streamExperiment = await streamExperimentResponse.json() as any;
+  const streamStartResponse = await post(
+    `${baseUrl}/api/projects/${project.id}/runs`,
+    {
+      commandId: "start-a3-2d3-stream-run",
+      experimentConfigId: streamExperiment.id,
+    },
+  );
+  assert.equal(streamStartResponse.status, 201, await streamStartResponse.clone().text());
+  const streamStart = await streamStartResponse.json() as any;
+  const streamRun = await waitForRun(
+    baseUrl,
+    project.id,
+    streamStart.runId,
+    "succeeded",
+  );
+  assert.equal(streamRun.outputs.length, 1);
+  assert.ok(streamRun.outputs[0].sizeBytes > 60_000_000);
+  const streamDownloadUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${streamStart.runId}/outputs/`
+    + `${streamRun.outputs[0].id}/download`;
+  const pausedDownload = await startPausedDownload(
+    streamDownloadUrl,
+    browserOutputHeaders(mutationSession.cookie),
+  );
+  assert.equal(pausedDownload.response.statusCode, 200);
+  assert.ok(pausedDownload.firstChunkBytes < streamRun.outputs[0].sizeBytes);
+  assert.equal(pausedDownload.response.complete, false);
+
+  const streamTrashUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${streamStart.runId}/trash`;
+  const streamTrashResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    streamTrashUrl,
+    {
+      commandId: "trash-a3-2d3-active-download",
+      expectedLifecycleDigest: streamRun.lifecycleDigest,
+      confirmation: {
+        action: "trash_run",
+        projectId: project.id,
+        runId: streamStart.runId,
+        terminalStatus: streamRun.terminalStatus,
+        terminalClosureDigest: streamRun.terminalClosureDigest,
+      },
+    },
+  );
+  assert.equal(
+    streamTrashResponse.status,
+    200,
+    await streamTrashResponse.clone().text(),
+  );
+  const streamTrashReceipt = await streamTrashResponse.json() as any;
+  pausedDownload.response.resume();
+  await Promise.race([
+    pausedDownload.terminated,
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Trash did not terminate the active output download.")),
+        2_000,
+      );
+      timer.unref?.();
+    }),
+  ]);
+  assert.equal(pausedDownload.response.complete, false);
+  const fencedStreamDownload = await fetch(streamDownloadUrl, {
+    headers: browserOutputHeaders(mutationSession.cookie),
+  });
+  assert.equal(fencedStreamDownload.status, 409);
+  assert.equal(
+    (await fencedStreamDownload.json() as any).error.code,
+    "output_not_available",
+  );
+  const streamRestoreResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    `${baseUrl}/api/projects/${project.id}/runs/${streamStart.runId}/restore`,
+    {
+      commandId: "restore-a3-2d3-active-download",
+      expectedLifecycleDigest: streamTrashReceipt.lifecycleDigest,
+    },
+  );
+  assert.equal(streamRestoreResponse.status, 200);
+  const restoredStreamRange = await fetch(streamDownloadUrl, {
+    headers: {
+      ...browserOutputHeaders(mutationSession.cookie),
+      range: "bytes=0-31",
+    },
+  });
+  assert.equal(restoredStreamRange.status, 206);
+  assert.equal((await restoredStreamRange.arrayBuffer()).byteLength, 32);
 
   const blockerExperimentResponse = await patch(
     `${baseUrl}/api/projects/${project.id}/experiment-configs/${experiment.id}`,
@@ -563,8 +1027,17 @@ target.write_text(json.dumps({
   assert.equal(queuedTargetResponse.status, 200, await queuedTargetResponse.clone().text());
   assert.equal(((await queuedTargetResponse.json()) as any).status, "queued");
 
-  const cancelResponse = await post(
-    `${baseUrl}/api/projects/${project.id}/runs/${cancelStart.runId}/cancel`,
+  const cancelUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${cancelStart.runId}/cancel`;
+  const unauthenticatedCancel = await post(
+    cancelUrl,
+    { commandId: "cancel-a3-1-api-queued" },
+  );
+  assert.equal(unauthenticatedCancel.status, 403);
+  const cancelResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    cancelUrl,
     { commandId: "cancel-a3-1-api-queued" },
   );
   assert.equal(cancelResponse.status, 200, await cancelResponse.clone().text());
@@ -573,14 +1046,18 @@ target.write_text(json.dumps({
   assert.equal(cancelReceipt.code, "cancellation_requested");
   assert.equal(cancelReceipt.status, "cancelling");
 
-  const cancelReplayResponse = await post(
-    `${baseUrl}/api/projects/${project.id}/runs/${cancelStart.runId}/cancel`,
+  const cancelReplayResponse = await browserPost(
+    baseUrl,
+    mutationSession,
+    cancelUrl,
     { commandId: "cancel-a3-1-api-queued" },
   );
   assert.equal(cancelReplayResponse.status, 200);
   assert.deepEqual(await cancelReplayResponse.json(), cancelReceipt);
 
-  const blockerCancelResponse = await post(
+  const blockerCancelResponse = await browserPost(
+    baseUrl,
+    mutationSession,
     `${baseUrl}/api/projects/${project.id}/runs/${blockerStart.runId}/cancel`,
     { commandId: "cancel-a3-1-api-blocker" },
   );
@@ -953,6 +1430,69 @@ events = (
   );
   assert.equal(staleAfterRestore.status, 422);
   assert.equal((await staleAfterRestore.json() as any).error.code, "invalid_event_cursor");
+
+  const directControlSession = await bootstrapAppMutationSession(baseUrl);
+  const directControlReadHeaders =
+    browserOutputHeaders(directControlSession.cookie);
+  const freshCursorResponse = await fetch(
+    `${recoveredEventsUrl}?limit=1`,
+    { headers: directControlReadHeaders },
+  );
+  assert.equal(freshCursorResponse.status, 200);
+  const freshCursorPage = await freshCursorResponse.json() as any;
+  assert.equal(typeof freshCursorPage.nextCursor, "string");
+  const directRunResponse = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}`,
+  );
+  assert.equal(directRunResponse.status, 200);
+  const directRun = await directRunResponse.json() as any;
+  const directTrashResponse = await browserPost(
+    baseUrl,
+    directControlSession,
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}/trash`,
+    {
+      commandId: "trash-a3-2d3-event-cursor",
+      expectedLifecycleDigest: directRun.lifecycleDigest,
+      confirmation: {
+        action: "trash_run",
+        projectId: project.id,
+        runId: run.runId,
+        terminalStatus: directRun.terminalStatus,
+        terminalClosureDigest: directRun.terminalClosureDigest,
+      },
+    },
+  );
+  assert.equal(directTrashResponse.status, 200);
+  const directTrashReceipt = await directTrashResponse.json() as any;
+  const directTrashedRead = await fetch(
+    `${recoveredEventsUrl}?limit=1&cursor=${
+      encodeURIComponent(freshCursorPage.nextCursor)
+    }`,
+    { headers: directControlReadHeaders },
+  );
+  assert.equal(directTrashedRead.status, 409);
+  const directRestoreResponse = await browserPost(
+    baseUrl,
+    directControlSession,
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}/restore`,
+    {
+      commandId: "restore-a3-2d3-event-cursor",
+      expectedLifecycleDigest: directTrashReceipt.lifecycleDigest,
+    },
+  );
+  assert.equal(directRestoreResponse.status, 200);
+  const directStaleAfterRestore = await fetch(
+    `${recoveredEventsUrl}?limit=1&cursor=${
+      encodeURIComponent(freshCursorPage.nextCursor)
+    }`,
+    { headers: directControlReadHeaders },
+  );
+  assert.equal(directStaleAfterRestore.status, 422);
+  assert.equal(
+    (await directStaleAfterRestore.json() as any).error.code,
+    "invalid_event_cursor",
+  );
+
   await current.close();
   current = undefined;
   await rm(join(base, "product", ".diagnostic-event-cursor.key"));

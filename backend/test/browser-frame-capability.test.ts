@@ -96,6 +96,65 @@ test("Product reads require the current exact same-origin app session", () => {
   );
 });
 
+test("Product mutations require exact same-origin Fetch Metadata and current cookie plus CSRF", () => {
+  const fixture = createFixture();
+  const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
+  const request = mutationRequest(bootstrap);
+  assert.doesNotThrow(() => fixture.capability.authorizeAppMutation(request));
+
+  const deniedRequests = [
+    { ...request, method: "GET" },
+    { ...request, host: undefined },
+    { ...request, host: BROKER_HOST },
+    { ...request, host: [APP_HOST, APP_HOST] },
+    { ...request, origin: undefined },
+    { ...request, origin: BROKER_ORIGIN },
+    { ...request, origin: [APP_ORIGIN, APP_ORIGIN] },
+    { ...request, fetchSite: undefined },
+    { ...request, fetchSite: "same-site" },
+    { ...request, fetchSite: ["same-origin", "same-origin"] },
+    { ...request, fetchMode: undefined },
+    { ...request, fetchMode: "navigate" },
+    { ...request, fetchMode: ["cors", "cors"] },
+    { ...request, fetchDest: undefined },
+    { ...request, fetchDest: "document" },
+    { ...request, fetchDest: ["empty", "empty"] },
+    { ...request, cookie: undefined },
+    { ...request, cookie: "riff_app=wrong-token-value-that-is-long-enough" },
+    { ...request, cookie: [request.cookie, request.cookie] },
+    { ...request, cookie: `${request.cookie}; ${request.cookie}` },
+    { ...request, csrf: undefined },
+    { ...request, csrf: "wrong-token-value-that-is-long-enough" },
+    { ...request, csrf: [bootstrap.csrfToken, bootstrap.csrfToken] },
+    { ...request, authorization: "Bearer agent" },
+    { ...request, authorization: ["Bearer agent", "Bearer agent"] },
+  ];
+  for (const deniedRequest of deniedRequests) {
+    assert.throws(
+      () => fixture.capability.authorizeAppMutation(deniedRequest),
+      errorCode(deniedRequest.method === "GET"
+        ? "browser_method_denied"
+        : "browser_session_denied"),
+    );
+  }
+
+  fixture.advance(15 * 60_000);
+  assert.throws(
+    () => fixture.capability.authorizeAppMutation(request),
+    errorCode("browser_session_denied"),
+  );
+
+  fixture.advance(-15 * 60_000);
+  const current = fixture.capability.bootstrap(bootstrapRequest());
+  assert.doesNotThrow(
+    () => fixture.capability.authorizeAppMutation(mutationRequest(current)),
+  );
+  assert.throws(
+    () => fixture.capability.authorizeAppMutation(request),
+    errorCode("browser_session_denied"),
+  );
+});
+
 test("HTTPS mode is explicit and adds Secure to both cookie classes", async () => {
   const fixture = createFixture({
     appOrigin: "https://localhost:8787",
@@ -957,6 +1016,15 @@ const frameRequest = (
   ...bootstrapRequest(origin),
   cookie: cookiePair(bootstrap.setCookie),
   csrf: bootstrap.csrfToken,
+});
+
+const mutationRequest = (
+  bootstrap: { csrfToken: string; setCookie: string },
+  origin = APP_ORIGIN,
+) => ({
+  ...frameRequest(bootstrap, origin),
+  fetchMode: "cors",
+  fetchDest: "empty",
 });
 
 const issueAndRedeem = async (fixture: ReturnType<typeof createFixture>) => {

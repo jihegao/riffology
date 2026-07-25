@@ -88,8 +88,12 @@ Project-only read observation while exposing no interaction or caller-selected
 browser target. A3-2c3's one-use typed interaction was merged through PR #41
 and A3-2c4's live-CDP/real-Chromium security closeout through PR #42. A3-2d1
 output list/download was merged through PR #43. A3-2d2 strict diagnostic-event
-ingestion, schema-v12 atomic publication, and opaque cursor reads are a review-
-branch candidate; direct controls remain pending.
+ingestion, schema-v12 atomic publication, and opaque cursor reads were merged
+through PR #44; A3-2d3 direct controls are the active candidate.
+The d3 candidate gate reports 552 backend total with 551 passed, zero failed,
+and one optional installed-OpenCode smoke skipped; web passes 104/104,
+network entry 1/1, the production build and docs check succeed, and final
+independent security review reports no P0/P1 merge blocker.
 The c3 merge gate reports 525 backend tests with 524 passed, zero
 failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build succeeds, and three independent reviews
@@ -233,7 +237,7 @@ healthy owner. Schema-v5 live process rows lack v6 scratch/launch evidence and
 intentionally require fail-closed repair instead of speculative signalling.
 Eligible visual starts without a completion conversation use the existing
 Project-run route; visual starts with `completionConversationId` fail with
-`visual_completion_not_supported`. The A3-2d2 review candidate admits batch
+`visual_completion_not_supported`. A3-2d2, merged through PR #44, admits batch
 `domainEvents` only as strict diagnostic NDJSON with atomic terminal
 publication.
 
@@ -687,7 +691,7 @@ The current A3-1b batch implementation may claim hard enforcement only for:
 In the historical A3-1b batch-only boundary, `startupTimeMs`,
 `maxEventCount`, and `maxEventBytes` were frozen reserved fields and visual
 starts failed with `capability_not_available`. Published A3-2a2c enforces the
-visual startup budget and admits eligible visual starts. The A3-2d2 candidate
+visual startup budget and admits eligible visual starts. The merged A3-2d2
 enforces the frozen event count/byte budgets for declared diagnostic NDJSON.
 
 A3-2a2 adds one server-owned global visual cap,
@@ -945,10 +949,11 @@ Project APIs and records `not_requested`.
 ## Outputs, downloads, and bounded domain events
 
 This section is the A3-2d contract. A3-2d1 output list/download was merged
-through PR #43. The A3-2d2 review candidate implements declared diagnostic-
-event ingestion and opaque cursor reads. Store trash primitives already exist,
-but the complete Agent-independent direct-control surface is not yet
-published. Legacy wind/Gate event and download routes are not A3-2d evidence.
+through PR #43. A3-2d2 was merged through PR #44 and implements declared
+diagnostic-event ingestion and opaque cursor reads. Store trash primitives
+already exist, but the complete Agent-independent direct-control surface is the
+active A3-2d3 candidate and is not yet published. Legacy wind/Gate event and
+download routes are not A3-2d evidence.
 
 Output listing returns only `id`, `runId`, sample index/ID, logical name,
 declared role/type, media type, byte size, SHA-256, and created time. Download
@@ -961,9 +966,11 @@ Host, same-origin Fetch Metadata, and current Project/run/output ownership
 tuple; this is not a multi-user principal claim, and an ID is never a bearer
 credential. List and event-read responses are private,
 `no-store`. Mutation routes additionally require exact Origin, CSRF, JSON
-non-simple content type, command ID, and expected run revision or terminal
-closure digest. Trash requires explicit confirmation bound to that closure.
-Command retry is idempotent; changed intent fails.
+non-simple content type, command ID, and current browser-app admission. Cancel
+retains its published exact `{commandId}` body. The A3-2d3 candidate adds an
+`expectedLifecycleDigest` only to trash/restore, and trash requires explicit
+confirmation bound to `terminalClosureDigest`. Command retry is idempotent;
+changed intent fails.
 
 Download opens the allowlisted output with no symlink following, verifies
 same-run manifest identity and succeeded/not-trashed state, and uses that one
@@ -1032,6 +1039,46 @@ event cursors, confirmation tokens, active downloads, and dereference
 authority for completion links before committing the recoverable state.
 Restore returns only the original immutable terminal outputs/events and never
 revives an old capability, cursor, confirmation, or download.
+
+For the A3-2d3 review candidate, all direct run controls
+(`POST .../cancel`, `.../trash`, `.../restore`) admit only the current browser
+app: exact app `Host` and `Origin`, `Sec-Fetch-Site: same-origin`,
+`Sec-Fetch-Mode: cors`, `Sec-Fetch-Dest: empty`, current HttpOnly app cookie,
+matching CSRF token, and exact `application/json` framing are required. A
+browser `Authorization` header is not an alternative, and the legacy listener
+rejects these controls. This is an exact local browser authority boundary, not
+a multi-user principal claim.
+
+```ts
+type CancelProjectRunRequest = { commandId: string };
+
+type TrashProjectRunRequest = {
+  commandId: string;
+  expectedLifecycleDigest: string;
+  confirmation: {
+    action: "trash_run";
+    projectId: string;
+    runId: string;
+    terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out";
+    terminalClosureDigest: string;
+  };
+};
+
+type RestoreProjectRunRequest = {
+  commandId: string;
+  expectedLifecycleDigest: string;
+};
+```
+
+The candidate persists exact-replay `run.trash.v1` and `run.restore.v1`
+receipts. A `terminalClosureDigest` binds immutable terminal evidence and never
+changes; `lifecycleDigest` binds current status plus full ordered trash history
+and changes on each successful trash/restore. Only terminal v4 runs can be
+trashed, and restore returns exactly to the prior terminal status. The
+pre-commit revocation covers active output downloads plus current visual
+frame/WebSocket and Visual-Agent/Playwright authority; restore restores durable
+visibility only and never recreates an old capability, cursor, or download
+authority. This is still a review candidate, not merged acceptance evidence.
 
 ## Visual execution and scoped WebSocket access
 
@@ -1481,7 +1528,10 @@ WS     /frame/c/:routeId/<declared-websocket-path>                 # current A3-
 
 GET    /api/projects/:projectId/runs/:runId/outputs                # current A3-2d1
 GET|HEAD /api/projects/:projectId/runs/:runId/outputs/:outputId/download # current A3-2d1
-GET    /api/projects/:projectId/runs/:runId/diagnostic-events      # A3-2d2 candidate
+GET    /api/projects/:projectId/runs/:runId/diagnostic-events      # current A3-2d2
+POST   /api/projects/:projectId/runs/:runId/cancel                 # current route; d3 browser admission candidate
+POST   /api/projects/:projectId/runs/:runId/trash                  # A3-2d3 review candidate
+POST   /api/projects/:projectId/runs/:runId/restore                # A3-2d3 review candidate
 ```
 
 The legacy Gate runtime currently occupies the same textual
@@ -1706,9 +1756,9 @@ Output indexes never resolve outside the owning Project/run object root.
 14. **A3-2d generic outputs/events/direct controls — in progress:** d1's exact
    same-run output list/download with byte/digest revalidation was merged
    through PR #43. D2's bounded declared diagnostic-event ingestion,
-   schema-v12 atomic publication, and opaque run/filter-bound cursors are a
-   review-branch candidate. Agent-independent cancel/download/trash/restore
-   acceptance remains. Cancel is
+   schema-v12 atomic publication, and opaque run/filter-bound cursors were
+   merged through PR #44. Agent-independent cancel/download/trash/restore
+   acceptance is the active A3-2d3 candidate. Cancel is
    already current and download was merged in d1; the later controls slice adds
    trash/restore routes and proves the complete direct-control set without OpenCode. A3-3
    cannot declare wind diagnostic events until this slice is published.
