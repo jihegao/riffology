@@ -9,10 +9,12 @@
     "preview": "vite preview",
     "test": "vitest run && node --test test/*.integration.mjs",
     "test:watch": "vitest",
-    "test:e2e": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test",
+    "test:e2e": "npm run test:e2e:a4-2 && npm run test:e2e:a4-3 && npm run test:e2e:a4-4 && npm run test:e2e:a4-5 && npm run test:e2e:a3 && npm run test:e2e:a3-2b && npm run test:e2e:a3-2c4",
+    "test:e2e:product-entry": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test",
     "test:e2e:a4-2": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-home-shell.config.ts",
     "test:e2e:a4-3": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-conversation.config.ts",
     "test:e2e:a4-4": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-workspace.config.ts",
+    "test:e2e:a4-5": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-recovery.config.ts",
     "test:e2e:a3": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a3-product.config.ts",
     "test:e2e:a3-2b": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.visual.config.ts",
     "test:e2e:a3-2c4": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.visual-agent.config.ts"

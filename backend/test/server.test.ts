@@ -473,7 +473,7 @@ test("Mesa adapter exposes only stable allowlisted errors and redacts upstream p
   await assert.rejects(() => known.getWindRunReceipt!("project", "rk"), (error: unknown) => error instanceof ApiError && error.code === "receipt_not_found" && error.message === "The Mesa run receipt was not found." && !error.message.includes("private"));
 });
 
-test("Backend close revokes before a failing drain and still stops the dispatcher and Product Store", async () => {
+test("Product-only Backend close still closes Product Store after a failing dispatcher drain", async () => {
   const root = await mkdtemp(join(tmpdir(), "riff-close-order-"));
   const productStore = ProductStoreV2.open(join(root, "product"));
   const app = new BackendApp({
@@ -487,19 +487,9 @@ test("Backend close revokes before a failing drain and still stops the dispatche
     a3VisualSupervisor: {} as never,
   });
   const events: string[] = [];
-  const originalMcpRevokeAll = app.mcp.revokeAll.bind(app.mcp);
-  app.mcp.revokeAll = () => {
-    events.push("mcp_revoked");
-    originalMcpRevokeAll();
-  };
-  const originalGate2Close = app.gate2.close.bind(app.gate2);
-  app.gate2.close = async () => {
-    events.push("gate2_close");
-    await originalGate2Close();
-    throw new Error("injected gate2 close failure");
-  };
   app.productRunDispatcher!.stop = async () => {
     events.push("dispatcher_stop");
+    throw new Error("injected dispatcher stop failure");
   };
   const originalProductClose = productStore.close.bind(productStore);
   productStore.close = () => {
@@ -507,10 +497,8 @@ test("Backend close revokes before a failing drain and still stops the dispatche
     originalProductClose();
   };
   try {
-    await assert.rejects(() => app.close(), /injected gate2 close failure/u);
+    await assert.rejects(() => app.close(), /injected dispatcher stop failure/u);
     assert.deepEqual(events, [
-      "mcp_revoked",
-      "gate2_close",
       "dispatcher_stop",
       "product_close",
     ]);

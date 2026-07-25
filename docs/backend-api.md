@@ -2,8 +2,8 @@
 
 - Status: active
 - Role: normative contract
-- Scope: implemented Stage 2 and Stage 3 HTTP/API boundaries, A4-0 target
-  contracts, and retained legacy API history
+- Scope: implemented Stage 2 through A4-5 HTTP/API, startup/recovery boundaries,
+  and retained legacy API history
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
 - Last reviewed: 2026-07-25
 
@@ -13,7 +13,7 @@ The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
 implemented Agent/API boundary; the legacy Gate API retained below does not.
-`ProductStoreV2` through schema migration v14, execution
+`ProductStoreV2` through schema migration v15, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -364,7 +364,10 @@ the browser-session-guarded output/download/event-cursor reads across a
 same-port backend restart. The final shared
 shell remains #15 work. A4-1 now applies the same exact
 Host/Origin/Fetch/CSRF/session admission to every recognized Product API route.
-The legacy Gate API below still coexists until separately reviewed retirement.
+The legacy Gate API below is historical regression documentation. A4-5's
+production Product composition root neither constructs its runtimes nor routes
+requests to it; Product mode returns the closed Product `not_found` response
+for those old route families.
 
 ### A4-1 Product API boundary
 
@@ -507,12 +510,16 @@ adds only a bounded running-to-healthy startup wait; every subsequent Store
 identity, listener, digest, generation, expiry, and authority-fence recheck
 remains fail closed.
 
-Recovery failure never opens a partial Product API. The only admitted
-recovery-mode routes are the exact-app static shell, browser bootstrap, health,
-and `GET /api/recovery-status` with the closed path-free
-`{state,code,observedAt,retryable}` DTO. Every resource read or mutation,
-dispatch, Agent/tool, frame, and WebSocket route returns stable
-`503 recovery_required`.
+Recovery failure never opens a partial Product API. The implemented A4-5
+recovery-mode routes are the exact-app static shell,
+`POST /api/browser-session/bootstrap`, `GET /api/health`, and admitted
+`GET /api/recovery-status` with the closed path-free
+`{state,code,observedAt,retryable}` DTO. The ready form is the closed
+`{state:"ready",observedAt}` DTO. JSON uses `private, no-store`; neither form
+can expose a path, process, database, object, or recovery-manifest detail.
+Every resource read or mutation, dispatch, Agent/tool, visual host, broker HTTP,
+and broker WebSocket route returns stable `503 recovery_required`. Bootstrap is
+not resource authority: it only allows the shell to read recovery status.
 
 ### A3-2 visual API/runtime gates
 

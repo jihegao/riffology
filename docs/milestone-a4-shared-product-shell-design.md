@@ -1,7 +1,7 @@
 # Milestone A4 shared product shell design
 
-- Status: active; A4-0 through A4-3 merged, A4-4 dynamic workspace/execution
-  implemented as a narrow slice, A4-5 and A4-6 pending
+- Status: active; A4-0 through A4-4 merged, A4-5 recovery/cutover/retirement
+  implemented as a narrow slice, A4-6 pending
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -27,7 +27,9 @@ one Model/Project router, subordinate Conversation selection, and the shared
 responsive shell. A4-3 implements the persistent Conversation pane and its
 closed browser contracts. A4-4 implements the bounded renderer registry plus
 Model/Project Experiment/Run workspace without changing the backend startup
-path or retiring legacy product code. A4-5 and A4-6 remain pending. Only A4-6
+path or retiring legacy product code. A4-5 implements Product-first startup,
+recovery-only admission, read-only preflight, and manifest-proven retirement
+without running the A4-6 exit matrix. Only A4-6
 may claim the complete MVP browser story or close Issue #15.
 
 ## 2. Product invariants and non-goals
@@ -1004,6 +1006,50 @@ Visual-Agent Chromium 6/6; and the 27-document governance check plus
 `git diff --check`. Final independent Product/API/security,
 Accessibility/interaction, and Test/documentation consistency re-reviews each
 report P0=0/P1=0/P2=0 for the current A4-4 diff.
-A4-5 startup cutover/recovery/retirement and the continuous A4-6 browser matrix
-remain pending. All 69 final trace rows remain `pending`, and Issue #15 remains
-open.
+A4-5 startup cutover/recovery/retirement is implemented by the next narrow
+record; the continuous A4-6 browser matrix remains pending. All 69 final trace
+rows remain `pending`, and Issue #15 remains open.
+
+### A4-5 implementation record
+
+A4-5 changes startup and retirement without claiming the final browser story:
+
+- the production entry opens one explicit `RIFF_PRODUCT_ROOT`, never constructs
+  the Gate2/Gate3/legacy ProjectStore/MCP graph, and serves the built Product
+  shell directly from the exact app origin;
+- `ProductRunDispatcher.recoverBeforeStart()` completes prior batch/visual
+  reconciliation before registered Domain Pack installation, read-only legacy
+  preflight, fresh generation activation, or browser binding;
+- a recovery contradiction exposes only the CSP-protected static shell,
+  browser bootstrap, health, and admitted closed recovery status. Resource,
+  Agent/tool, visual-host, broker HTTP, and broker WebSocket authority all fail
+  with `503 recovery_required`;
+- the Product client checks this state before Home or owner loading and renders
+  one path-free global recovery page with observed time and retryability;
+- `?mode=legacy` and `?mode=evidence` no longer select another product. The old
+  Web apps and their dedicated Gate/Evidence test launchers are removed under
+  [`milestone-a4-5-retirement-manifest.md`](milestone-a4-5-retirement-manifest.md);
+  and
+- preflight uses exact non-recursive `lstat` reads. Local workspaces, outputs,
+  `.DS_Store`, ignored/untracked files, ordinary wind assets, generic
+  batch/visual/broker/Playwright authority, and Git history are outside the
+  removal manifest.
+
+Focused evidence includes the recovery-only app/broker/WebSocket/CSP test,
+read-only preflight before/after inode-and-byte identity test, mechanical
+baseline commit/blob/SHA-256/byte verification for every retirement row,
+dispatcher recovery/active-owner regression suite, Product component recovery
+state, Web build, and direct production-entry integration.
+
+The final A4-5 branch gate records backend 596 total / 595 passed / zero failed
+/ one optional installed-OpenCode smoke skipped; Web 27/27; production-entry
+integration 1/1; production build; A4-2, A4-3, A4-4, and A4-5 Chromium 1/1
+each; A3 Product restart Chromium 1/1; broker/WebSocket Chromium 6/6;
+Visual-Agent Chromium 6/6; and the 28-document governance check plus
+`git diff --check`. The default `npm run test:e2e` command aggregates those
+retained browser slices. Final independent Product/architecture,
+security/accessibility, and test/documentation re-reviews each report
+P0=0/P1=0/P2=0 for the current A4-5 diff.
+
+This is not A4-6 evidence. All 69 final traceability rows remain `pending`,
+Issue #15 remains OPEN, and no complete-MVP claim is made.

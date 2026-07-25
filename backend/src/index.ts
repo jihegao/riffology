@@ -1,32 +1,50 @@
-import { join, resolve } from "node:path";
-import { mkdirSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HttpMesaAdapter, UnavailableMesaAdapter } from "./mesa-adapter.ts";
 import { opencodeFromEnvironment } from "./opencode-adapter.ts";
-import { PlaywrightCdpProjector } from "./playwright-projection.ts";
 import { BackendApp } from "./server.ts";
 
-const root = join(fileURLToPath(new URL("..", import.meta.url)), ".riff-workspaces");
-mkdirSync(root, { recursive: true, mode: 0o700 });
-const mesa = process.env.MESA_SERVICE_URL ? new HttpMesaAdapter(process.env.MESA_SERVICE_URL) : new UnavailableMesaAdapter();
+const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const configuredProductRoot = process.env.RIFF_PRODUCT_ROOT;
+if (configuredProductRoot && !isAbsolute(configuredProductRoot)) {
+  throw new Error("RIFF_PRODUCT_ROOT must be an absolute application-owned directory.");
+}
+const productRoot = resolve(
+  configuredProductRoot ?? join(repositoryRoot, ".riff-product"),
+);
 const port = Number(process.env.PORT ?? 8787);
 const brokerPort = Number(process.env.RIFF_VISUAL_BROKER_PORT ?? 8788);
 const openCode = opencodeFromEnvironment();
-const app = new BackendApp({
-  mesa,
-  openCode,
-  a2OpenCode: openCode,
-  a2ProductRoot: process.env.RIFF_PRODUCT_ROOT ?? join(root, "milestone-a-product"),
-  ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
-  a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
-  a3InstallPreinstalledWind: true,
-  a3PreinstalledWindRepositoryRoot: resolve(import.meta.dirname, "../.."),
-  workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
-  defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
-  mcpUrl: process.env.RIFF_MCP_URL ?? `http://localhost:${port}/mcp`,
-  ...(process.env.RIFF_CDP_URL ? { projector: new PlaywrightCdpProjector(process.env.RIFF_CDP_URL) } : {}),
-  promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
-});
+const staticWebRoot = join(repositoryRoot, "web", "dist");
+let app: BackendApp;
+try {
+  app = new BackendApp({
+    openCode,
+    a2OpenCode: openCode,
+    a2ProductRoot: productRoot,
+    ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
+    a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    a3InstallPreinstalledWind: true,
+    a3PreinstalledWindRepositoryRoot: repositoryRoot,
+    repositoryRoot,
+    staticWebRoot,
+    recoveryOnlyOnFailure: true,
+    promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
+  });
+} catch (error) {
+  const failureClass = error instanceof Error ? error.name : "UnknownError";
+  console.error(`Riff Product store startup entered recovery-only mode (${failureClass}).`);
+  app = new BackendApp({
+    productOnly: true,
+    recoveryStatus: {
+      state: "recovery_required",
+      code: "product_store_unavailable",
+      observedAt: new Date().toISOString(),
+      retryable: false,
+    },
+    repositoryRoot,
+    staticWebRoot,
+  });
+}
 
 await app.initialize();
 const network = await app.listenBrowserNetwork(port, brokerPort);

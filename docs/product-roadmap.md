@@ -67,8 +67,12 @@
 > lifecycle/deletion controls, and honest read-only behavior. A4-4 implements
 > the bounded dynamic Model/Project workspace, real generic execution surfaces,
 > outputs/events/download, and exact-app restricted visual-host integration.
-> A4-5 and A4-6 remain pending. Only A4-6 may claim the complete MVP or close
-> #15.
+> A4-5 implements Product-first startup/recovery, direct static Product serving,
+> global recovery-required UX, read-only legacy preflight, and
+> identity/version/digest-manifest retirement of the old Web product entries;
+> protected local state and ordinary wind/generic execution assets remain
+> untouched. A4-6 remains pending. Only A4-6 may claim the complete MVP or
+> close #15.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

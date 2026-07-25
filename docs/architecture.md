@@ -15,10 +15,12 @@ documentation-only design gate. A4-1 implements the Product API, Store
 lifecycle/delete, and browser-admission portion. A4-2 consumes that
 boundary for the default Home, Model/Project routes, one
 responsive two-pane shell, and subordinate Conversation URL state. Startup
-cutover and final acceptance remain A4-5/A4-6 work. A4-3 adds the persistent
+cutover is implemented by A4-5; final acceptance remains A4-6 work. A4-3 adds the persistent
 Conversation browser projection and immutable provider-binding receipts. A4-4
 adds the bounded renderer registry and dynamic Model/Project Experiment/Run
-workspace while preserving all Stage 3 execution and broker authority.
+workspace while preserving all Stage 3 execution and broker authority. A4-5
+adds recovery-only admission, direct static Product serving, read-only legacy
+preflight, and manifest-proven browser-product retirement.
 `ProductStoreV2` over SQLite schema migration v15, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
@@ -154,15 +156,21 @@ registry and stale-Run response fencing. Model and output bytes are verified
 server-side before a renderer DTO is selected. Active HTML/SVG is never inline,
 and browser event payloads are replaced by a closed content-free
 shape/node-count/truncation summary.
-A4-1 implements the common API/admission/lifecycle/delete boundary; A4-5 owns startup
-cutover and manifest-proven retirement.
+A4-1 implements the common API/admission/lifecycle/delete boundary. A4-5 makes
+the production composition root Product-only: it opens ProductStoreV2, completes
+mutation and prior-dispatch recovery, installs registered Domain Packs, runs a
+read-only legacy preflight, activates a fresh dispatcher generation, and only
+then binds the browser network. Gate2/Gate3, legacy ProjectStore/MCP, and legacy
+OpenCode event bridges are not constructed by that entry.
 If Product recovery fails closed, A4-5 permits only the exact-app static shell,
 browser bootstrap, health, and one closed path-free recovery-status DTO; all
 resource reads, writes, dispatch, Agent, frame, and WebSocket routes remain
 `503 recovery_required`.
 
-The Product Vite page is a development proxy, not the exact platform
-authority. Bootstrap publishes separate exact `platformOrigin` and
+The production backend serves the built Product shell directly from the exact
+platform origin with a no-store index, immutable assets, strict CSP, no-follow
+file reads, and an allowlisted SPA route fallback. Vite is test/development
+infrastructure, not production authority. Bootstrap publishes separate exact `platformOrigin` and
 `brokerOrigin` values. For visual Runs the right pane derives only the fixed
 platform host route; it does not embed a broker nonce under the Vite origin.
 The existing no-store exact-app host performs bootstrap and frame issue, waits
