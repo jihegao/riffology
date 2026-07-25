@@ -554,7 +554,7 @@ The remaining claims begin only in the later gates:
   header/body/deadline limits, global/per-conversation concurrency, in-flight
   lifecycle abort, untrusted non-instruction context, no-network
   script-disabled snapshots, and Project-only MCP schema. Typed interaction
-  is the A3-2c3 candidate on its review branch, including schema-v11 durable
+  is the A3-2c3 candidate published in PR #41, including schema-v11 durable
   one-confirmation/one-mint enforcement and a single absolute bridge deadline.
   The current c3 candidate gate reports 525 backend tests with 524 passed,
   zero failed, and one optional installed-OpenCode smoke skipped; web passes

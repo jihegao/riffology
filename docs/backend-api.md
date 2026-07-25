@@ -614,7 +614,7 @@ are emitted as bounded MCP image content. Root HTML is rendered with scripts
 disabled and all subsequent HTTP/WebSocket traffic denied. No observation
 content or bytes enter the append-only audit.
 
-### A3-2c3 typed-interaction candidate (pending review and merge)
+### A3-2c3 typed-interaction candidate (PR #41, pending merge)
 
 This branch implements an internal MCP candidate, not a browser or public HTTP
 route.

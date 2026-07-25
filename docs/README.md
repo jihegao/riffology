@@ -76,8 +76,8 @@ implementation authority.
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
 backend-owned browser profile and exact process/listener/peer checks. A3-2c3's
-one-use typed interaction is a candidate on its review branch and remains
-pending review and merge; A3-2c4 remains pending and Stage 3 remains in progress.
+one-use typed interaction is published in PR #41 and remains pending merge;
+A3-2c4 remains pending and Stage 3 remains in progress.
 
 A3-3 diagnostic-event acceptance begins only after A3-2d publishes the
 generic event-ingestion boundary; legacy wind/Gate event routes are not
