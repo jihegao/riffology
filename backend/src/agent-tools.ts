@@ -44,7 +44,8 @@ export const isAgentToolName = (value: string): value is AgentToolName =>
 export const assertToolInputCannotOverrideScope = (input: Readonly<Record<string, unknown>>): void => {
   const forbidden = new Set([
     "capability", "conversationId", "externalSessionRef", "externalSessionGeneration",
-    "modelId", "owner", "ownerId", "ownerKind", "projectId", "sessionId", "turnId",
+    "cookie", "frameUrl", "modelId", "nonce", "owner", "ownerId", "ownerKind",
+    "path", "port", "projectId", "runId", "selector", "sessionId", "turnId", "url",
     "workspace", "workspacePath",
   ]);
   const inspect = (value: unknown): void => {

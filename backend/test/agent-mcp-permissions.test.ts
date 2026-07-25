@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentMcpServer } from "../src/agent-mcp.ts";
 import { toolsForOwner, type AgentToolGrant } from "../src/agent-tools.ts";
+import { McpToolServer as LegacyMcpToolServer } from "../src/mcp.ts";
+import { ProjectStore } from "../src/project-store.ts";
+import { SimulationActions } from "../src/simulation-actions.ts";
 
 const call = (name: string, args: Record<string, unknown> = {}) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
 
@@ -13,6 +16,9 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   const listed = await server.handle(projectCapability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes"));
+  assert.ok(!names.includes("riff_observe_current_visual"));
+  assert.ok(!names.includes("riff_interact_current_visual"));
+  assert.ok(!names.includes("riff_drive_workbench_ui"));
   const denied = await server.handle(projectCapability, call("riff_apply_model_changes", { requestKey: "r", changes: [{}] }));
   assert.equal((denied?.result as any).isError, true);
   const allowed = await server.handle(projectCapability, call("riff_create_temporary_document", { name: "Draft", mediaType: "text/markdown", content: "x" }));
@@ -27,6 +33,78 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
 });
 
+test("legacy CDP configuration never exposes or dispatches a Project Agent browser tool", async () => {
+  const prior = process.env.RIFF_CDP_URL;
+  process.env.RIFF_CDP_URL = "http://127.0.0.1:9222";
+  let calls = 0;
+  try {
+    const server = new AgentMcpServer({
+      async execute() {
+        calls += 1;
+        return {};
+      },
+    });
+    const capability = server.grant({
+      conversationId: "conversation_project",
+      owner: { kind: "project", id: "project_a" },
+      turnId: "turn_a",
+      externalSessionGeneration: 1,
+      allowedTools: toolsForOwner({ kind: "project", id: "project_a" }),
+    });
+    const listed = await server.handle(capability, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
+    for (const forbidden of [
+      "drive_workbench_ui",
+      "riff_drive_workbench_ui",
+      "riff_observe_current_visual",
+      "riff_interact_current_visual",
+    ]) assert.equal(names.includes(forbidden), false);
+    for (const forbidden of ["drive_workbench_ui", "riff_drive_workbench_ui"]) {
+      const denied = await server.handle(capability, call(forbidden));
+      assert.equal((denied?.result as any).isError, true);
+    }
+    assert.equal(calls, 0);
+  } finally {
+    if (prior === undefined) delete process.env.RIFF_CDP_URL;
+    else process.env.RIFF_CDP_URL = prior;
+  }
+});
+
+test("legacy MCP parser cannot reach a configured projector spy through a browser-shaped call", async () => {
+  let projectorCalls = 0;
+  const actions = new SimulationActions(
+    new ProjectStore(),
+    {} as never,
+    {
+      async project() {
+        projectorCalls += 1;
+        return { status: "succeeded", message: "must not run" };
+      },
+    },
+  );
+  const legacy = new LegacyMcpToolServer(actions);
+  const capability = legacy.grant("session_projector_isolation");
+  const listed = await legacy.handle(capability, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
+  assert.equal(names.includes("riff_drive_workbench_ui"), false);
+  const denied = await legacy.handle(
+    capability,
+    call("riff_drive_workbench_ui", {
+      intent: { kind: "click", target: "Run" },
+    }),
+  );
+  assert.equal((denied?.result as any).isError, true);
+  assert.equal(projectorCalls, 0);
+});
+
 test("Agent tool input cannot replace a server-owned scope", async () => {
   let calls = 0;
   const server = new AgentMcpServer({ async execute() { calls += 1; return {}; } });
@@ -34,7 +112,11 @@ test("Agent tool input cannot replace a server-owned scope", async () => {
   for (const injected of [
     { ownerId: "model_b" }, { modelId: "model_b" }, { projectId: "project_b" },
     { conversationId: "conversation_b" }, { workspacePath: "/tmp/other" }, { capability: "forged" },
+    { runId: "run_other" }, { url: "http://127.0.0.1:9999" }, { port: 9999 },
+    { path: "/tmp/other" }, { cookie: "secret" }, { nonce: "secret" },
+    { frameUrl: "http://127.0.0.1/frame" }, { selector: "#secret" },
     { nested: { ownerId: "model_b" } },
+    { nested: { runId: "run_other" } },
   ]) {
     const response = await server.handle(capability, call("riff_read_owner_summary", injected));
     assert.equal((response?.result as any).isError, true);

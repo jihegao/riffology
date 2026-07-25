@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { canonicalDigest, canonicalJsonV2 } from "../src/canonical-json-v2.ts";
+import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   configureProductDatabase,
   initializeProductSchema,
@@ -569,10 +570,10 @@ test("schema v8 migrates a clean v7 database, installs private health evidence, 
     ).all() as Array<{ name: string; sql: string }>;
     const batchSentinelBefore = readSentinel();
     initializeProductSchema(database);
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, PRODUCT_SCHEMA_VERSION);
     assert.equal((database.prepare(
       "SELECT version FROM product_schema WHERE singleton = 1",
-    ).get() as { version: number }).version, 9);
+    ).get() as { version: number }).version, PRODUCT_SCHEMA_VERSION);
     assert.ok(database.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'visual_health_receipts'",
     ).get());
@@ -599,6 +600,7 @@ test("schema v8 migration failure rolls back its table, trigger replacement, and
       ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 7),
       { version: 8, sql: `${PRODUCT_SCHEMA_V8_SQL}\nSELECT * FROM missing_v8_guard;` },
       PRODUCT_SCHEMA_MIGRATIONS[8],
+      PRODUCT_SCHEMA_MIGRATIONS[9],
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v8_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);

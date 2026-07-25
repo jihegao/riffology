@@ -2806,6 +2806,127 @@ export const PRODUCT_SCHEMA_V9_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'v4 run output object requires atomic successful terminal context'); END;
 `;
 
+/**
+ * A3-2c1 deliberately starts with durable, secret-free authority evidence only.
+ * Capability tokens, browser URLs, ports, cookies, nonces, raw inputs and page
+ * content remain process-local and must never be added to this table.
+ */
+export const PRODUCT_SCHEMA_V10_SQL = SQL`
+  CREATE TABLE visual_agent_audit_facts (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    capability_ref_sha256 TEXT NOT NULL CHECK (length(capability_ref_sha256) = 64 AND capability_ref_sha256 NOT GLOB '*[^0-9a-f]*'),
+    fact_kind TEXT NOT NULL CHECK (fact_kind IN ('mint', 'consume', 'outcome', 'failure', 'crash_gap')),
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    turn_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    run_attempt_id TEXT NOT NULL REFERENCES run_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    process_attempt_id TEXT NOT NULL REFERENCES process_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    attempt_generation INTEGER NOT NULL CHECK (attempt_generation >= 1),
+    process_identity_sha256 TEXT NOT NULL CHECK (length(process_identity_sha256) = 64 AND process_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+    capability_epoch_sha256 TEXT NOT NULL CHECK (length(capability_epoch_sha256) = 64 AND capability_epoch_sha256 NOT GLOB '*[^0-9a-f]*'),
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('observe', 'interact')),
+    action_kind TEXT NOT NULL CHECK (action_kind IN (
+      'structured_endpoint', 'accessibility_tree', 'dom_text', 'screenshot',
+      'click', 'type', 'select'
+    )),
+    locator_kind TEXT CHECK (locator_kind IS NULL OR locator_kind IN ('role_name', 'label')),
+    locator_role_sha256 TEXT CHECK (locator_role_sha256 IS NULL OR (length(locator_role_sha256) = 64 AND locator_role_sha256 NOT GLOB '*[^0-9a-f]*')),
+    locator_value_sha256 TEXT CHECK (locator_value_sha256 IS NULL OR (length(locator_value_sha256) = 64 AND locator_value_sha256 NOT GLOB '*[^0-9a-f]*')),
+    action_commitment_sha256 TEXT NOT NULL CHECK (length(action_commitment_sha256) = 64 AND action_commitment_sha256 NOT GLOB '*[^0-9a-f]*'),
+    value_sha256 TEXT CHECK (value_sha256 IS NULL OR (length(value_sha256) = 64 AND value_sha256 NOT GLOB '*[^0-9a-f]*')),
+    outcome_code TEXT CHECK (outcome_code IS NULL OR length(outcome_code) BETWEEN 1 AND 200),
+    capability_expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (turn_id, conversation_id)
+      REFERENCES agent_turns(id, conversation_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (
+      (operation_kind = 'observe'
+        AND action_kind IN ('structured_endpoint', 'accessibility_tree', 'dom_text', 'screenshot')
+        AND locator_kind IS NULL AND locator_role_sha256 IS NULL AND locator_value_sha256 IS NULL AND value_sha256 IS NULL)
+      OR (operation_kind = 'interact'
+        AND action_kind IN ('click', 'type', 'select')
+        AND locator_kind IN ('role_name', 'label')
+        AND locator_value_sha256 IS NOT NULL
+        AND ((locator_kind = 'role_name' AND locator_role_sha256 IS NOT NULL) OR (locator_kind = 'label' AND locator_role_sha256 IS NULL))
+        AND ((action_kind = 'click' AND value_sha256 IS NULL) OR (action_kind IN ('type', 'select') AND value_sha256 IS NOT NULL)))
+    ),
+    CHECK (
+      (fact_kind IN ('mint', 'consume') AND outcome_code IS NULL)
+      OR (fact_kind IN ('outcome', 'failure', 'crash_gap') AND outcome_code IS NOT NULL)
+    )
+  ) STRICT;
+
+  CREATE UNIQUE INDEX one_visual_agent_audit_mint_v10
+    ON visual_agent_audit_facts(capability_ref_sha256)
+    WHERE fact_kind = 'mint';
+  CREATE UNIQUE INDEX one_visual_agent_audit_consume_v10
+    ON visual_agent_audit_facts(capability_ref_sha256)
+    WHERE fact_kind = 'consume';
+  CREATE UNIQUE INDEX one_visual_agent_audit_terminal_v10
+    ON visual_agent_audit_facts(capability_ref_sha256)
+    WHERE fact_kind IN ('outcome', 'failure', 'crash_gap');
+  CREATE INDEX visual_agent_audit_turn_v10
+    ON visual_agent_audit_facts(conversation_id, turn_id, created_at, id);
+
+  CREATE TRIGGER visual_agent_audit_binding_v10
+  BEFORE INSERT ON visual_agent_audit_facts
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM conversations c
+      JOIN runs r ON r.id = NEW.run_id
+      JOIN run_attempts attempt ON attempt.id = NEW.run_attempt_id
+      JOIN process_attempts process ON process.id = NEW.process_attempt_id
+      WHERE c.id = NEW.conversation_id
+        AND c.project_id = NEW.project_id
+        AND r.project_id = NEW.project_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'visual'
+        AND attempt.run_id = r.id
+        AND attempt.attempt_generation = NEW.attempt_generation
+        AND process.run_attempt_id = attempt.id
+    ) THEN RAISE(ABORT, 'visual agent audit binding mismatch') END;
+
+    SELECT CASE WHEN NEW.fact_kind != 'mint' AND NOT EXISTS (
+      SELECT 1 FROM visual_agent_audit_facts mint
+      WHERE mint.capability_ref_sha256 = NEW.capability_ref_sha256
+        AND mint.fact_kind = 'mint'
+        AND mint.conversation_id = NEW.conversation_id
+        AND mint.turn_id = NEW.turn_id
+        AND mint.project_id = NEW.project_id
+        AND mint.run_id = NEW.run_id
+        AND mint.run_attempt_id = NEW.run_attempt_id
+        AND mint.process_attempt_id = NEW.process_attempt_id
+        AND mint.attempt_generation = NEW.attempt_generation
+        AND mint.process_identity_sha256 = NEW.process_identity_sha256
+        AND mint.capability_epoch_sha256 = NEW.capability_epoch_sha256
+        AND mint.operation_kind = NEW.operation_kind
+        AND mint.action_kind = NEW.action_kind
+        AND mint.locator_kind IS NEW.locator_kind
+        AND mint.locator_role_sha256 IS NEW.locator_role_sha256
+        AND mint.locator_value_sha256 IS NEW.locator_value_sha256
+        AND mint.action_commitment_sha256 = NEW.action_commitment_sha256
+        AND mint.value_sha256 IS NEW.value_sha256
+        AND mint.capability_expires_at = NEW.capability_expires_at
+    ) THEN RAISE(ABORT, 'visual agent audit fact does not match mint') END;
+
+    SELECT CASE WHEN NEW.fact_kind IN ('outcome', 'failure') AND NOT EXISTS (
+      SELECT 1 FROM visual_agent_audit_facts consumed
+      WHERE consumed.capability_ref_sha256 = NEW.capability_ref_sha256
+        AND consumed.fact_kind = 'consume'
+    ) THEN RAISE(ABORT, 'visual agent audit terminal fact requires consume') END;
+  END;
+
+  CREATE TRIGGER visual_agent_audit_immutable_update_v10
+  BEFORE UPDATE ON visual_agent_audit_facts
+  BEGIN SELECT RAISE(ABORT, 'visual agent audit facts are append-only'); END;
+
+  CREATE TRIGGER visual_agent_audit_immutable_delete_v10
+  BEFORE DELETE ON visual_agent_audit_facts
+  BEGIN SELECT RAISE(ABORT, 'visual agent audit facts are append-only'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -2816,4 +2937,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 7, sql: PRODUCT_SCHEMA_V7_SQL }),
   Object.freeze({ version: 8, sql: PRODUCT_SCHEMA_V8_SQL }),
   Object.freeze({ version: 9, sql: PRODUCT_SCHEMA_V9_SQL }),
+  Object.freeze({ version: 10, sql: PRODUCT_SCHEMA_V10_SQL }),
 ]);

@@ -82,6 +82,11 @@ import {
   type ProductDatabase,
 } from "./product-schema.ts";
 import { createModelWorkspaceCapability } from "./restricted-process.ts";
+import type {
+  VisualAgentAuditFactInput,
+  VisualAgentTarget,
+  VisualAgentTurnScope,
+} from "./agent-visual-authority.ts";
 
 const DATABASE_NAME = "product.sqlite3";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
@@ -678,6 +683,7 @@ export class ProductStoreV2 {
     this.#coordinator = coordinator;
     try {
       this.#reconcileInterruptedAgentState();
+      this.#reconcileVisualAgentAuditGaps();
       this.reconcileRunCompletionCards();
     }
     catch (error) { coordinator.close(); throw error; }
@@ -3417,6 +3423,184 @@ export class ProductStoreV2 {
   }
 
   /**
+   * Backend-private A3-2c authority scope. Project/run identity is never
+   * accepted from an Agent tool input.
+   */
+  resolveVisualAgentTurnScope(input: {
+    conversationId: string;
+    turnId: string;
+    externalSessionGeneration: number;
+  }): VisualAgentTurnScope {
+    this.#assertOpen();
+    assertId(input.conversationId);
+    assertId(input.turnId);
+    if (!Number.isSafeInteger(input.externalSessionGeneration)
+      || input.externalSessionGeneration < 1) {
+      throw new ProductStoreV2Error("visual_agent_unavailable: scoped visual authority is unavailable.");
+    }
+    const row = this.#database.prepare(`SELECT
+        c.id AS conversation_id,
+        c.project_id,
+        c.lifecycle_state AS conversation_lifecycle_state,
+        p.lifecycle_state AS project_lifecycle_state,
+        turn.input_message_id,
+        turn.state AS turn_state,
+        message.role AS input_role,
+        message.status AS input_status,
+        session.generation AS session_generation,
+        session.state AS session_state
+      FROM conversations c
+      JOIN projects p ON p.id = c.project_id
+      JOIN agent_turns turn
+        ON turn.id = ? AND turn.conversation_id = c.id
+      JOIN messages message
+        ON message.id = turn.input_message_id
+        AND message.conversation_id = c.id
+      LEFT JOIN agent_sessions session
+        ON session.conversation_id = c.id
+        AND session.generation = (
+          SELECT max(latest.generation)
+          FROM agent_sessions latest
+          WHERE latest.conversation_id = c.id
+        )
+      WHERE c.id = ?`
+    ).get(input.turnId, input.conversationId) as {
+      conversation_id: string;
+      project_id: string | null;
+      conversation_lifecycle_state: string;
+      project_lifecycle_state: string;
+      input_message_id: string | null;
+      turn_state: string;
+      input_role: string;
+      input_status: string;
+      session_generation: number | null;
+      session_state: string | null;
+    } | undefined;
+    if (!row
+      || !row.project_id
+      || !row.input_message_id
+      || row.conversation_lifecycle_state !== "active"
+      || row.project_lifecycle_state !== "active"
+      || row.turn_state !== "running"
+      || row.input_role !== "user"
+      || row.input_status !== "complete"
+      || row.session_state !== "available"
+      || row.session_generation !== input.externalSessionGeneration) {
+      throw new ProductStoreV2Error("visual_agent_unavailable: scoped visual authority is unavailable.");
+    }
+    return Object.freeze({
+      conversationId: row.conversation_id,
+      turnId: input.turnId,
+      immutableUserMessageId: row.input_message_id,
+      externalSessionGeneration: row.session_generation,
+      projectId: row.project_id,
+    });
+  }
+
+  /**
+   * Resolves one Project's sole current healthy visual attempt. Zero or
+   * multiple candidates are deliberately indistinguishable to callers.
+   */
+  currentHealthyVisualAgentTarget(
+    projectId: string,
+    options: Readonly<{ now?: IsoTimestamp }> = {},
+  ): VisualAgentTarget {
+    this.#assertOpen();
+    assertId(projectId);
+    const unavailable = (cause?: unknown): ProductStoreV2Error =>
+      new ProductStoreV2Error(
+        "visual_agent_unavailable: scoped visual authority is unavailable.",
+        cause === undefined ? undefined : { cause },
+      );
+    try {
+      const candidates = this.#database.prepare(`SELECT id
+        FROM runs
+        WHERE project_id = ?
+          AND contract_version = 4
+          AND run_kind = 'visual'
+          AND status = 'running'
+          AND cancel_requested_at IS NULL
+          AND finished_at IS NULL
+          AND terminal_code IS NULL
+          AND terminal_diagnostics_json IS NULL
+          AND resource_overview_json IS NULL
+        ORDER BY id`
+      ).all(projectId) as Array<{ id: string }>;
+      if (candidates.length !== 1) throw unavailable();
+      return this.currentHealthyVisualFrameTarget(projectId, candidates[0]!.id, options);
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error
+        && error.message.startsWith("visual_agent_unavailable:")) throw error;
+      throw unavailable(error);
+    }
+  }
+
+  recordVisualAgentAuditFact(input: VisualAgentAuditFactInput): void {
+    this.#assertOpen();
+    for (const id of [
+      input.id,
+      input.conversationId,
+      input.turnId,
+      input.projectId,
+      input.runId,
+      input.runAttemptId,
+      input.processAttemptId,
+    ]) assertId(id);
+    for (const digest of [
+      input.capabilityRefDigest,
+      input.processIdentityDigest,
+      input.capabilityEpochDigest,
+      input.actionCommitmentDigest,
+      ...(input.locatorRoleDigest ? [input.locatorRoleDigest] : []),
+      ...(input.locatorValueDigest ? [input.locatorValueDigest] : []),
+      ...(input.valueDigest ? [input.valueDigest] : []),
+    ]) {
+      if (!/^[0-9a-f]{64}$/u.test(digest)) {
+        throw new ProductStoreV2Error("Visual Agent audit digest is invalid.");
+      }
+    }
+    assertIsoTimestamp(input.createdAt, "Visual Agent audit timestamp");
+    assertIsoTimestamp(input.capabilityExpiresAt, "Visual Agent capability expiry");
+    this.#databaseMutation([{
+      sql: `INSERT INTO visual_agent_audit_facts
+        (id, capability_ref_sha256, fact_kind, conversation_id, turn_id,
+          project_id, run_id, run_attempt_id, process_attempt_id,
+          attempt_generation, process_identity_sha256,
+          capability_epoch_sha256, capability_expires_at, operation_kind,
+          action_kind, locator_kind,
+          locator_role_sha256, locator_value_sha256, action_commitment_sha256, value_sha256,
+          outcome_code, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?)`,
+      params: [
+        input.id,
+        input.capabilityRefDigest,
+        input.factKind,
+        input.conversationId,
+        input.turnId,
+        input.projectId,
+        input.runId,
+        input.runAttemptId,
+        input.processAttemptId,
+        input.attemptGeneration,
+        input.processIdentityDigest,
+        input.capabilityEpochDigest,
+        input.capabilityExpiresAt,
+        input.operationKind,
+        input.actionKind,
+        input.locatorKind,
+        input.locatorRoleDigest,
+        input.locatorValueDigest,
+        input.actionCommitmentDigest,
+        input.valueDigest,
+        input.outcomeCode,
+        input.createdAt,
+      ],
+      expectedChanges: 1,
+    }]);
+  }
+
+  /**
    * Backend-private resolver for the frame proxy. This deliberately reconstructs
    * one exact live identity from authoritative rows instead of projecting the
    * broader dispatcher-recovery surface.
@@ -5595,6 +5779,62 @@ export class ProductStoreV2 {
         AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = models.id AND t.state = 'running')`, params: [now], expectedChanges: checkingModels },
       { sql: `UPDATE model_technical_checks SET state = 'failed', results_json = '{"failureCode":"interrupted"}', finished_at = ? WHERE state = 'running'`, params: [now], expectedChanges: runningChecks },
     ]);
+  }
+
+  #reconcileVisualAgentAuditGaps(): void {
+    const gapCount = Number((this.#database.prepare(`SELECT count(*) AS count
+      FROM visual_agent_audit_facts mint
+      WHERE mint.fact_kind = 'mint'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM visual_agent_audit_facts terminal
+          WHERE terminal.capability_ref_sha256 = mint.capability_ref_sha256
+            AND terminal.fact_kind IN ('outcome', 'failure', 'crash_gap')
+        )`
+    ).get() as { count: number }).count);
+    if (gapCount === 0) return;
+    this.#databaseMutation([{
+      sql: `INSERT INTO visual_agent_audit_facts
+        (id, capability_ref_sha256, fact_kind, conversation_id, turn_id,
+          project_id, run_id, run_attempt_id, process_attempt_id,
+          attempt_generation, process_identity_sha256,
+          capability_epoch_sha256, capability_expires_at, operation_kind,
+          action_kind, locator_kind,
+          locator_role_sha256, locator_value_sha256, action_commitment_sha256, value_sha256,
+          outcome_code, created_at)
+        SELECT
+          'visualaudit_crash_' || mint.capability_ref_sha256,
+          mint.capability_ref_sha256,
+          'crash_gap',
+          mint.conversation_id,
+          mint.turn_id,
+          mint.project_id,
+          mint.run_id,
+          mint.run_attempt_id,
+          mint.process_attempt_id,
+          mint.attempt_generation,
+          mint.process_identity_sha256,
+          mint.capability_epoch_sha256,
+          mint.capability_expires_at,
+          mint.operation_kind,
+          mint.action_kind,
+          mint.locator_kind,
+          mint.locator_role_sha256,
+          mint.locator_value_sha256,
+          mint.action_commitment_sha256,
+          mint.value_sha256,
+          'backend_restart',
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        FROM visual_agent_audit_facts mint
+        WHERE mint.fact_kind = 'mint'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM visual_agent_audit_facts terminal
+            WHERE terminal.capability_ref_sha256 = mint.capability_ref_sha256
+              AND terminal.fact_kind IN ('outcome', 'failure', 'crash_gap')
+          )`,
+      expectedChanges: gapCount,
+    }]);
   }
 
   #model(id: string): ModelRecord {

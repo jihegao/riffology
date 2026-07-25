@@ -31,10 +31,11 @@
 > A3-1c-b adds schema migration v6 and fail-closed v4 cross-restart
 > attempt/process/scratch recovery before dispatcher-generation handoff.
 > A3-1c-c adds schema migration v7 and exactly-once deterministic platform
-> batch completion cards with startup reconciliation. Pending visual work is frozen
-> as A3-2a1 schema-v8 Store/recovery evidence while public visual starts still
-> reject, A3-2a2 real visual lifecycle, A3-2b isolated broker/frame/WebSocket,
-> and A3-2c scoped Playwright. A3-2a1 remains schema/Store/recovery plus
+> batch completion cards with startup reconciliation. A3-2a1 first froze
+> schema-v8 Store/recovery evidence while public visual starts still rejected;
+> A3-2a2 real visual lifecycle and the A3-2b isolated broker/frame/WebSocket
+> boundary are now published, while A3-2c scoped Playwright remains pending.
+> A3-2a1 remains schema/Store/recovery plus
 > negative admission only, hardening the existing v4 port/health shape and
 > rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
 > assigned output directory, a visual-only no-outbound sandbox, one active
@@ -45,9 +46,15 @@
 > same-site and SOP isolates DOM origins, while the untrusted child remains on
 > IPv4 `127.0.0.1` and receives no platform cookie. One-use capability,
 > ≤60-second nonce, generation, Origin, Host, registry, and exact-app
-> `frame-ancestors` checks remain authority. A3-3 remains the ordinary wind
-> import. This is not completion evidence
+> `frame-ancestors` checks remain authority. A3-2d still owns generic output
+> download, bounded domain-event ingestion, and Agent-independent direct
+> controls; A3-3 remains the ordinary wind import and its diagnostic-event
+> acceptance begins only after A3-2d. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
+
+> A3-2c1 is currently a local, unpublished authority/audit and legacy-CDP-
+> isolation foundation. It exposes no observation or interaction tool.
+> A3-2c2 through A3-2c4 remain pending.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

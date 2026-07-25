@@ -509,11 +509,77 @@ The remaining claims begin only in the later gates:
 - **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
   explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
   script, upload, clipboard, and expired-capability rejection. Its internal
-  capability never reuses the user's frame URL, app cookie, or broker cookie.
+  capability never reuses the user's frame URL, app cookie, broker cookie, or
+  ambient legacy CDP projector. Tests bind immutable audit metadata to the
+  originating conversation/turn/Project/run/attempt, prove restart/turn-end/
+  replay revocation, and accept interaction locators only by accessibility
+  role plus bounded accessible name or bounded label. CSS, XPath, arbitrary
+  text selectors, JavaScript, popup/navigation, upload, clipboard, permission,
+  credential, and unrestricted-download cases fail. Issuance binds
+  conversation, immutable human turn, Project, run, attempt generation/process
+  identity, capability epoch, one operation, and expiry; zero/multiple healthy
+  candidates fail. Tests revalidate that tuple at action time and cover project
+  selection change, attempt replacement/terminalization, action-kind/locator/
+  input-or-selection-value substitution, atomic consume-before-side-effect,
+  failure consumption, concurrent double-use, retry, timeout, browser crash,
+  and structural inability to attach the legacy CDP profile. A3-2c4 must prove
+  the live-CDP negative. `drive_workbench_ui` remains absent from the
+  Project/A3-2c tool schema and its server dispatch is rejected.
+  Audit tests cover mint/consume/outcome/failure/crash gap, secret redaction,
+  value-digest rather than raw-value retention, untrusted page-content
+  non-instruction, and bounded owner/TTL/digest/deletion behavior for explicitly
+  retained temporary observation documents.
+
+  The current unpublished A3-2c1 gate is narrower: it covers durable
+  conversation/turn/Project scope, exactly one healthy attempt, capability
+  mint/consume/revoke/restart crash-gap behavior, opaque consumed handles,
+  consume-before-revalidation, audit-write failures, double-use,
+  action/locator/value substitution, run/turn/close revocation, hard
+  TTL/registry bounds, production schema binding triggers, and legacy
+  projector zero-call isolation without claiming a live-CDP browser test. Its
+  audit canaries prove locator role/name-or-label and typed value are
+  digest-only and that no observation summary/content/bytes exist in the
+  table. A3-2c1 has no public tool or browser side effect. Actual
+  structured/accessibility/DOM/screenshot observation begins at A3-2c2; typed
+  interaction at A3-2c3; the live-CDP/real Chromium negative matrix and final
+  docs/security closeout at A3-2c4.
+  The branch-only c1 candidate gate reports backend 500 total/499 passed/zero
+  failed/one optional installed-OpenCode smoke skipped, web 104/104, network
+  entry 1/1, a successful production build, and independent security review
+  with no P0/P1/P2 finding. This is not publication or c2 evidence.
+- **A3-2d outputs/events/direct controls:** successful-run output list/download
+  rechecks same-run ownership, safe name, path, size, digest, MIME, range, and
+  limits; declared diagnostic NDJSON ingestion is atomic and enforces schema,
+  structure, depth, string, count, and byte bounds; pagination uses tamper-
+  evident opaque cursors bound to run and normalized filters. Direct cancel,
+  download, trash, and restore remain usable with OpenCode unavailable and
+  reject cross-owner, cross-run, nonterminal, stale, tampered, and restart
+  cases. List/download/event reads require exact app session/owner/Host/Fetch
+  Metadata and emit private no-store responses; mutations additionally require
+  exact Origin and CSRF. IDs are not bearer credentials. Commands
+  bind idempotency and expected revision/closure digest, with exact trash
+  confirmation. Download tests use one no-follow open descriptor, verify the
+  complete digest before any bytes, emit attachment/nosniff/no-store policy,
+  support only one normalized range, and bound concurrency/rate.
+  Cursor tests cover Project/run/contract/event-set/trash-generation/direction/
+  limit/all-filter binding, bounded parse, constant-time MAC, expiry/key epoch,
+  restart stability, deterministic invalidation, atomic first-start key
+  generation, owner-only permissions, concurrent first starts, missing/corrupt
+  key fail-closed behavior, and exclusion from SQLite/DTOs/backups/exports/logs/
+  errors/child environments. Strict NDJSON tests cover UTF-8/LF, duplicate
+  keys, depth/count/string limits, time/type/schema rules, and atomic event-set
+  publication. Diagnostic-event prompt-injection cases prove URL-, instruction-,
+  and tool-call-shaped content remains safely rendered, separately bounded
+  untrusted context and cannot authorize an action. Trash revokes active
+  downloads, cursors, confirmations, completion-link dereference, and
+  Playwright capabilities; restore revives only original immutable
+  outputs/events. Legacy Gate/wind endpoints are excluded from this evidence,
+  including the currently overlapping textual events path.
 
 Installer tests in A3-3 must pin and verify the execution-v2 scaffold and wind
 manifest IDs, versions, and concrete digests, including same-ID conflicts and
-mandatory re-scaffolding for unproven v1 Models.
+mandatory re-scaffolding for unproven v1 Models. A3-3 cannot claim ordinary
+wind diagnostic events until A3-2d is published.
 
 Mocks cover fault branches only. A3-1b batch acceptance uses a real generic
 subprocess. Visual acceptance still requires a real local visual process, and
@@ -658,6 +724,13 @@ parameter edit and reset; blocking issue; resolution plus project-owner
 endorsement; generated views; 100/3/seed-2 baseline; identity-consistent results
 and non-claim labels. Provider/model health is checked first and unavailable
 configuration fails closed.
+
+The implementation and deterministic gates do not depend on provider quota.
+For the live smoke only, if the approved `opencode-go` quota is exhausted
+before the run starts, the operator may select the exact catalog entry for
+`opencode` `deepseek-v4-flash-free` and start a new acceptance conversation.
+Riff never silently falls back, and it never changes provider/model inside a
+conversation after the first accepted user turn.
 
 Deterministic fixtures remain component-test tools only. A screenshot without
 domain-state assertions is insufficient. The test checks persisted project and
