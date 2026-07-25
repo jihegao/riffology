@@ -586,8 +586,8 @@ temporary document. Typed interaction accepts only accessibility role plus
 bounded accessible name, or a bounded label—not CSS, XPath, arbitrary text
 selectors, JavaScript, or caller-supplied URLs.
 
-On the current unpublished working branch, A3-2c1 implements only the
-backend-private authority and audit foundation. It derives scope from the
+A3-2c1, merged through PR #38, implements only the backend-private authority
+and audit foundation. It derives scope from the
 durable conversation and originating turn, requires exactly one current healthy
 Project visual attempt, consumes before revalidation or side effect, and
 revokes on turn release, dispatcher run revocation, backend close, expiry, and
@@ -597,7 +597,7 @@ epoch/reference, locator role/name-or-label, and typed value. It stores no
 capability, browser URL/port/cookie/nonce, locator text, typed value,
 observation summary/content, DOM, or screenshot bytes. A3-2c1 adds no HTTP
 route, Playwright runner, or OpenCode observation/interaction tool; those remain
-A3-2c2+ work and this branch is not merge evidence.
+A3-2c2+ work.
 
 A3-2d follows the existing committed output index but adds the missing generic
 public surface: same-run list/download with path/size/digest revalidation,

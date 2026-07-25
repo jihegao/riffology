@@ -160,8 +160,8 @@ A3-2c1 does not claim that evidence.
 Only the platform may invoke a fixed legacy mirror intent after the matching
 domain commit.
 
-The current unpublished A3-2c1 branch stops at a backend-private authority,
-append-only audit, revocation, and legacy-projector-isolation foundation. It has
+A3-2c1, merged through PR #38, stops at a backend-private authority, append-only
+audit, revocation, and legacy-projector-isolation foundation. It has
 no Playwright runner/transport and does not expose either future A3-2c tool.
 Audit facts retain only bound IDs, finite lifecycle/operation/action/locator
 kinds, and SHA-256 commitments; locator role/name-or-label, typed value,

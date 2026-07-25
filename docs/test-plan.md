@@ -530,7 +530,7 @@ The remaining claims begin only in the later gates:
   non-instruction, and bounded owner/TTL/digest/deletion behavior for explicitly
   retained temporary observation documents.
 
-  The current unpublished A3-2c1 gate is narrower: it covers durable
+  The published A3-2c1 gate is narrower: it covers durable
   conversation/turn/Project scope, exactly one healthy attempt, capability
   mint/consume/revoke/restart crash-gap behavior, opaque consumed handles,
   consume-before-revalidation, audit-write failures, double-use,
@@ -543,10 +543,10 @@ The remaining claims begin only in the later gates:
   structured/accessibility/DOM/screenshot observation begins at A3-2c2; typed
   interaction at A3-2c3; the live-CDP/real Chromium negative matrix and final
   docs/security closeout at A3-2c4.
-  The branch-only c1 candidate gate reports backend 500 total/499 passed/zero
+  The merged c1 gate reports backend 500 total/499 passed/zero
   failed/one optional installed-OpenCode smoke skipped, web 104/104, network
   entry 1/1, a successful production build, and independent security review
-  with no P0/P1/P2 finding. This is not publication or c2 evidence.
+  with no P0/P1/P2 finding. This is not c2 evidence.
 - **A3-2d outputs/events/direct controls:** successful-run output list/download
   rechecks same-run ownership, safe name, path, size, digest, MIME, range, and
   limits; declared diagnostic NDJSON ingestion is atomic and enforces schema,
