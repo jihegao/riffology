@@ -356,8 +356,8 @@ target contracts, not current routes or acceptance evidence:
    `405/visual_websocket_protocol_denied`; missing broker authority is
    `403/visual_frame_session_denied`; offered-subprotocol/policy denial is
    `403/visual_websocket_protocol_denied`.
-8. **A3-2b4 browser and security closeout — implemented and Chromium-verified,
-   publication review pending:** the production exact-app host page, browser
+8. **A3-2b4 browser and security closeout — merged and published through
+   PR #37:** the production exact-app host page, browser
    cookie jar/HttpOnly/SameSite behavior, nonce redirect/replay, relative
    resources, CSP/SOP/sandbox hostile embedding, native WebSocket
    Origin/cookie/subprotocol, Service Worker denial, no-store reload, and

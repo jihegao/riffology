@@ -152,7 +152,7 @@ product.
   landed Project foundation, A3-1a frozen-planning boundary, and A3-1b generic
   batch execution plus A3-1c cancellation/restart recovery and exactly-once
   batch completion cards plus the published A3-2a1/A3-2a2 and A3-2b1/b2/b3
-  visual runtime from the Chromium-verified A3-2b4 publication review,
+  visual runtime through the published Chromium-verified A3-2b4 closeout,
   pending A3-2c scoped Playwright, and A3-3 ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
@@ -170,9 +170,9 @@ product.
 - [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
   OpenCode/session/context contract followed by the legacy Gate contract.
 - [`backend-api.md`](backend-api.md): current Stage 2 plus published A3-1,
-  A3-2a, and A3-2b1/b2/b3 API/runtime boundary, the Chromium-verified A3-2b4
-  publication review, and the pending A3-2c gate, followed by the retained legacy
+  A3-2a, and A3-2b1/b2/b3 API/runtime boundary, the published
+  Chromium-verified A3-2b4 closeout, and the pending A3-2c gate, followed by the retained legacy
   Gate project API target.
 - [`test-plan.md`](test-plan.md): current Stage 2 acceptance, published A3-1,
-  A3-2a, and A3-2b1/b2/b3 evidence, Chromium-verified A3-2b4 review evidence,
+  A3-2a, and A3-2b1/b2/b3 evidence, published Chromium-verified A3-2b4 evidence,
   pending A3-2c/A3-3 gates, and retained legacy Gate test history.

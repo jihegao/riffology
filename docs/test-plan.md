@@ -491,8 +491,8 @@ The remaining claims begin only in the later gates:
   `405/visual_websocket_protocol_denied`, broker authority
   `403/visual_frame_session_denied`, and offered-subprotocol/policy
   `403/visual_websocket_protocol_denied`.
-- **A3-2b4 browser and security closeout — implemented and Chromium-verified,
-  publication review pending:** `cd web && npm run test:e2e:a3-2b` passes 5/5
+- **A3-2b4 browser and security closeout — merged and published through
+  PR #37:** `cd web && npm run test:e2e:a3-2b` passes 5/5
   on Playwright-managed Chromium. It proves real cookie-jar HttpOnly/SameSite delivery,
   one-use nonce redirect/replay denial, relative resources, child credential
   stripping, no-store reload, `worker-src 'none'` Service Worker denial,

@@ -237,8 +237,8 @@ broker/child socket evidence, bounded negative
 admission and upstream-handshake cases, attempt-global connection limits,
 generation/shutdown closure, and observable/persisted sentinel scans. Its
 publication backend gate reported 464 total with 463 passed, zero failed, and
-one optional installed-OpenCode smoke skipped. A3-2b4 is implemented and
-Chromium-verified under publication review: the dedicated browser security
+one optional installed-OpenCode smoke skipped. A3-2b4 was merged and published
+through PR #37: the dedicated Chromium browser security
 matrix passes 5/5 and the complete Chromium suite passes 8/8. The current
 backend gate reports 466 total with 465 passed, zero failed, and one optional
 installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and

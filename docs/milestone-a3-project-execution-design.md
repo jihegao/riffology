@@ -81,8 +81,8 @@ observable/persisted sentinel scans. The focused frame/network/WebSocket
 regression combination passes 32/32; the serial official backend gate reports
 464 total with 463 passed, zero failed, and one optional smoke skipped. Web remains
 104/104, the network-entry integration passes 1/1, and the production build
-succeeds. A3-2b4 is implemented and Chromium-verified under publication
-review; its dedicated real-browser matrix passes 5/5. A3-2c remains pending.
+succeeds. A3-2b4 was merged and published through PR #37; its dedicated
+real-browser matrix passes 5/5. A3-2c remains pending.
 The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
@@ -100,9 +100,9 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The published boundary through A3-2b3 remains implemented: A3-2b1, A3-2b2,
-and A3-2b3 were merged through PR #33, PR #35, and PR #36. A3-2b4 is
-Chromium-verified under publication review; the combined boundary is
+The published boundary through A3-2b4 remains implemented: A3-2b1, A3-2b2,
+A3-2b3, and A3-2b4 were merged through PR #33, PR #35, PR #36, and PR #37.
+The combined boundary is
 intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
@@ -1504,8 +1504,8 @@ Output indexes never resolve outside the owning Project/run object root.
    lifecycle revocation through `revokeVisualAccess(runId)`, stable
    pre-upgrade status/codes and RFC close codes, and allowlist-aware
    three-party observable/persisted secret scans.
-12. **A3-2b4 browser and security closeout — implemented and
-   Chromium-verified, publication review pending:** real-browser negative
+12. **A3-2b4 browser and security closeout — merged and published through
+   PR #37:** real-browser negative
    isolation matrix covers the browser cookie jar, HttpOnly, browser-generated
    WebSocket Origin/cookie delivery, iframe-relative WebSocket, CSP/sandbox/
    hostile embedding, Service Worker denial, no-store revocation, and
