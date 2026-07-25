@@ -94,8 +94,8 @@ The d3 merge gate reports 552 backend total with 551 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build and docs check succeed, and final
 independent security review reports no P0/P1 merge blocker.
-The A3-2d4 review candidate adds no new runtime contract. Its fault-injected
-production API/revocation-wiring matrix proves that the pre-commit callback
+The A3-2d4 review candidate in Draft PR #46 adds no new runtime contract. Its
+fault-injected production API/revocation-wiring matrix proves that the pre-commit callback
 invalidates an unredeemed frame nonce, a redeemed frame route, an open
 WebSocket, and a minted Visual-Agent capability, and that restore cannot revive
 old authority. Durable Store mutation/receipt evidence remains the published
@@ -1772,7 +1772,7 @@ Output indexes never resolve outside the owning Project/run object root.
    acceptance was merged through PR #45. Cancel is
    already current and download was merged in d1; d3 adds trash/restore routes
    and proves the complete direct-control set without OpenCode.
-15. **A3-2d4 cross-authority revocation — review candidate:** one
+15. **A3-2d4 cross-authority revocation — Draft PR #46 review candidate:** one
    fault-injected production API/revocation-wiring flow revokes an unredeemed
    nonce, redeemed frame, open WebSocket, and Visual-Agent capability; restore
    cannot revive them. Focused backend passes 65/65 and dedicated broker

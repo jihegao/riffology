@@ -616,7 +616,7 @@ The remaining claims begin only in the later gates:
   PR #45 merge gate is 552 backend total/551 passed/zero failed/one optional
   OpenCode smoke skipped, web 104/104, network entry 1/1, successful build,
   and 24-file docs check. Final independent security review reports no P0/P1.
-  The A3-2d4 review candidate now covers the combined route-level
+  The A3-2d4 review candidate in Draft PR #46 now covers the combined route-level
   frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent revocation matrix.
   A focused Node route test and a real Chromium flow fault-inject the lifecycle
   service while calling the production trash/restore API and revocation wiring.

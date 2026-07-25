@@ -69,8 +69,8 @@ still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
 broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
 A3-2d1 output access, A3-2d2 diagnostic events, and A3-2d3 direct controls
 were merged through PRs #43, #44, and #45. A3-2d4 is the current
-cross-authority revocation review candidate; A3-3 ordinary wind import remains
-a pending #14 slice.
+cross-authority revocation review candidate in Draft PR #46; A3-3 ordinary wind
+import remains a pending #14 slice.
 Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
