@@ -62,10 +62,13 @@
 > It fixes slice ownership and PRD/API/UI/test traceability but changes no
 > runtime behavior. A4-1 implements the Product API/lifecycle/deletion
 > boundary. A4-2 is merged as the default Home, one Model/Project router, and
-> the responsive shared-shell foundation. A4-3 is implemented as a narrow slice with
+> the responsive shared-shell foundation. A4-3 is merged as a narrow slice with
 > persistent named Conversations, provider lock, safe durable cards,
-> lifecycle/deletion controls, and honest read-only behavior. A4-4 through
-> A4-6 remain pending. Only A4-6 may claim the complete MVP or close #15.
+> lifecycle/deletion controls, and honest read-only behavior. A4-4 implements
+> the bounded dynamic Model/Project workspace, real generic execution surfaces,
+> outputs/events/download, and exact-app restricted visual-host integration.
+> A4-5 and A4-6 remain pending. Only A4-6 may claim the complete MVP or close
+> #15.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

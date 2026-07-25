@@ -34,7 +34,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
   await expect(page.getByTestId("workspace-owner-card")).toContainText(
-    "Dynamic Model and Project renderers arrive in A4-4",
+    "Technically executable",
   );
   const ownerCard = await page.getByTestId("workspace-owner-card").elementHandle();
   expect(ownerCard).not.toBeNull();
@@ -56,7 +56,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByTestId("shell-owner-heading")).not.toHaveText("Loading workspace…");
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
-  await expect(page.getByTestId("workspace-owner-card")).toContainText("project");
+  await expect(page.getByTestId("workspace-owner-card")).toContainText("fixed copy");
 
   await page.getByRole("heading", { name: "Workspace", exact: true }).focus();
   await page.setViewportSize({ width: 640, height: 900 });

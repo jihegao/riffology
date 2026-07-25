@@ -469,6 +469,16 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   }]);
   assert.equal(JSON.stringify(outputList).includes("relativePath"), false);
   assert.equal(JSON.stringify(outputList).includes("objectFileId"), false);
+  const renderableResponse = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs/${succeeded.outputs[0].id}/renderable`,
+    { headers: outputHeaders },
+  );
+  assert.equal(renderableResponse.status, 200, await renderableResponse.clone().text());
+  const renderable = await renderableResponse.json() as any;
+  assert.equal(renderable.kind, "json");
+  assert.equal(renderable.title, "result");
+  assert.equal(renderable.value.value, 2);
+  assert.equal(JSON.stringify(renderable).includes("relativePath"), false);
   const downloadUrl =
     `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs/${succeeded.outputs[0].id}/download`;
   const fullDownload = await fetch(downloadUrl, { headers: outputHeaders });
@@ -1302,8 +1312,11 @@ events = (
     type: "repair_started",
     occurredAt: "2026-07-25T02:00:01.000Z",
     payload: {
-      message: "https://example.invalid is untrusted data",
-      value: 1,
+      schemaVersion: 1,
+      disposition: "redacted",
+      shape: "object",
+      observedNodeCount: 3,
+      truncated: false,
     },
   });
   assert.equal(firstPage.truncated, true);

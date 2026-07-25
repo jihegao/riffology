@@ -15,9 +15,10 @@ documentation-only design gate. A4-1 implements the Product API, Store
 lifecycle/delete, and browser-admission portion. A4-2 consumes that
 boundary for the default Home, Model/Project routes, one
 responsive two-pane shell, and subordinate Conversation URL state. Startup
-cutover, renderers/execution, and final acceptance remain A4-4 through A4-6
-work. A4-3 adds the persistent Conversation browser projection and immutable
-provider-binding receipts.
+cutover and final acceptance remain A4-5/A4-6 work. A4-3 adds the persistent
+Conversation browser projection and immutable provider-binding receipts. A4-4
+adds the bounded renderer registry and dynamic Model/Project Experiment/Run
+workspace while preserving all Stage 3 execution and broker authority.
 `ProductStoreV2` over SQLite schema migration v15, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
@@ -148,14 +149,27 @@ It uses `/`, `/models/:id`, `/projects/:id`, and subordinate
 mounted right owner workspace. A4-3 implements the full left pane with
 owner-scoped lifecycle collections, durable provider lock, safe cards, and
 explicit read-only state. Model and Project workspace data remains a
-truthful bounded summary until A4-4 installs the renderer/execution registry.
-A4-1 implements the common API/admission/lifecycle/delete boundary; A4-4 owns
-dynamic right content, and A4-5 owns startup
+truthful server-declared projection; A4-4 installs the renderer/execution
+registry and stale-Run response fencing. Model and output bytes are verified
+server-side before a renderer DTO is selected. Active HTML/SVG is never inline,
+and browser event payloads are replaced by a closed content-free
+shape/node-count/truncation summary.
+A4-1 implements the common API/admission/lifecycle/delete boundary; A4-5 owns startup
 cutover and manifest-proven retirement.
 If Product recovery fails closed, A4-5 permits only the exact-app static shell,
 browser bootstrap, health, and one closed path-free recovery-status DTO; all
 resource reads, writes, dispatch, Agent, frame, and WebSocket routes remain
 `503 recovery_required`.
+
+The Product Vite page is a development proxy, not the exact platform
+authority. Bootstrap publishes separate exact `platformOrigin` and
+`brokerOrigin` values. For visual Runs the right pane derives only the fixed
+platform host route; it does not embed a broker nonce under the Vite origin.
+The existing no-store exact-app host performs bootstrap and frame issue, waits
+only through the bounded running-to-healthy startup window, verifies the exact
+broker origin, and embeds the broker iframe. SameSite=Strict, exact Host/
+Origin/Fetch/CSRF, CSP `frame-ancestors`, listener/process identity, frozen Run
+digest, generation, expiry, and revocation remain the authority chain.
 
 The A4-1 implementation adds a closed projection layer over ProductStoreV2,
 schema-v14 receipt-first lifecycle and deletion transactions, exact

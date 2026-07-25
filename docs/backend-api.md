@@ -138,6 +138,19 @@ type ProjectRunDto = {
   terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out" | null;
   terminalClosureDigest: string | null;
   lifecycleDigest: string | null;
+  seedCount: number;
+  stepOrHorizon: string | number | null;
+  durationMs: number | null;
+  resourceOverview: {
+    maxConcurrencyObserved?: number;
+    stdoutBytes?: number;
+    stderrBytes?: number;
+    outputFiles?: number;
+    outputBytes?: number;
+    stdoutTruncated?: boolean;
+    stderrTruncated?: boolean;
+    healthVerified?: boolean;
+  } | null;
   outputs: ProjectOutputDto[];
 };
 
@@ -425,8 +438,7 @@ Public DTOs and errors use closed allowlist serializers; scanners are
 regression evidence, not the secrecy boundary. A4-1 tests cover cross-owner
 use, response-loss replay, restart, fixed-copy isolation, preview-not-delete,
 stale/consumed/generation-bound confirmation, closure and byte-index drift,
-active authority, cache policy, and exact durable-receipt replay. The renderer
-state machine remains an A4-4 target.
+active authority, cache policy, and exact durable-receipt replay.
 Permanent delete is blocked by every descendant in-flight turn, check, Run,
 process/lease, download, frame, WebSocket, and tool/Visual-Agent capability. It
 does not implicitly cancel or revoke them; commit uses the relevant writer and
@@ -451,6 +463,49 @@ rationale, intent, affected resources, and raw tool payloads. Expected provider
 failure is a durable HTTP-200 `mode: "read_only"` result so the browser can
 announce product state without a network-console error; malformed, unauthorized,
 cross-owner, stale, and admission failures remain HTTP errors.
+
+A4-4 exposes the final dynamic-workspace projections through the same Product
+browser admission:
+
+- `GET /api/models/:modelId/workspace`,
+  `POST /api/models/:modelId/technical-checks`,
+  `GET /api/models/:modelId/renderables/:fileId`, and
+  `GET|HEAD /api/models/:modelId/files/:fileId/download`;
+- Project workspace plus Experiment create/update and Run start/read/
+  cancel/trash/restore;
+- checked output list/download and
+  `GET /api/projects/:projectId/runs/:runId/outputs/:outputId/renderable`; and
+- bounded diagnostic-event cursor reads with optional exact `type` and
+  `sampleIndex` filters.
+
+Renderer DTO selection is server-owned and media-type closed. Markdown and
+code are bounded UTF-8 text, CSV has unique headers and bounded rectangular
+cells, JSON uses the duplicate-key-rejecting canonical parser and bounded
+node/depth traversal, charts require unique categories, and diagrams require
+unique/referenced identities. HTML, SVG, and unsupported types become opaque
+attachment DTOs; their verified downloads use attachment disposition,
+`private, no-store`, `nosniff`, and `CSP: sandbox`. The browser never receives
+an object path.
+
+Public diagnostic-event payloads are never projected by key or value. The
+browser receives only a closed `{schemaVersion, disposition, shape,
+observedNodeCount, truncated}` summary under a depth/node inspection budget;
+event sequence, sample, type, and time remain visible. This makes arbitrary
+Model-controlled credentials, paths, tool envelopes, and strings
+unrepresentable in the public payload DTO. Run DTOs expose public lifecycle
+status, derived sample/seed/step-or-horizon/duration facts, a closed
+numeric/boolean resource summary, and checked output metadata. Frozen
+configuration, sample-plan rows, server limits, child ports, process identity,
+scratch paths, raw diagnostics, and authority tokens remain private.
+
+Bootstrap now includes the server-owned exact `platformOrigin` alongside
+`brokerOrigin`. The Vite client validates this origin and derives only
+`/browser/projects/:projectId/runs/:runId/visual`; it does not redeem a broker
+nonce under the development origin. The exact-app visual host retains the
+published A3 bootstrap/frame contract. Product-backed frame target resolution
+adds only a bounded running-to-healthy startup wait; every subsequent Store
+identity, listener, digest, generation, expiry, and authority-fence recheck
+remains fail closed.
 
 Recovery failure never opens a partial Product API. The only admitted
 recovery-mode routes are the exact-app static shell, browser bootstrap, health,

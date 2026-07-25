@@ -28,11 +28,12 @@ import {
   type RunLimitsV1,
 } from "./product-store-v2.ts";
 import type { VerifiedObjectRead } from "./object-store.ts";
-import { planExperiment } from "./experiment-planner.ts";
+import { planExperiment, type ExperimentPlan } from "./experiment-planner.ts";
 import {
   assertRunCapabilityV2,
   ExecutionProtocolV2Error,
   validateExecutionDescriptionV2,
+  type ExecutionDescriptionV2,
 } from "./execution-protocol-v2.ts";
 import type {
   ExperimentConfigurationRecord,
@@ -66,6 +67,15 @@ import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-ru
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentOperation } from "./agent-visual-authority.ts";
 import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 import { MutationRecoveryError } from "./mutation-coordinator.ts";
+import {
+  rendererDto,
+  RendererRegistryError,
+  type RendererDto,
+} from "./renderer-registry.ts";
+import {
+  publicExecutionDescription,
+  type PublicExecutionDescriptionV2,
+} from "./public-execution-description.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -82,6 +92,8 @@ export type ProjectCreationDto = {
 
 export type ProjectWorkspaceProjectionDto = {
   project: ProjectCreationDto["project"];
+  execution: PublicExecutionDescriptionV2;
+  executionDescriptionDigest: string;
   files: Array<Pick<StoredObjectMetadata, "id" | "mediaType" | "sizeBytes" | "sha256" | "createdAt">>;
   conversations: ConversationDto[];
   experimentConfigurations: ExperimentConfigurationDto[];
@@ -90,7 +102,11 @@ export type ProjectWorkspaceProjectionDto = {
 
 export type ExperimentConfigurationDto =
   | (Extract<ExperimentConfigurationRecord, { contractVersion: 3 }> & { recordDigest: null })
-  | (Extract<ExperimentConfigurationRecord, { contractVersion: 4 }> & { recordDigest: string });
+  | (Extract<ExperimentConfigurationRecord, { contractVersion: 4 }> & {
+      recordDigest: string;
+      samplePreview: readonly Record<string, unknown>[];
+      samplePreviewTruncated: boolean;
+    });
 
 export type ProjectOutputDto = {
   id: string;
@@ -116,6 +132,11 @@ export type RunOutputAccessDto = Pick<ProjectOutputDto,
 
 export type RunOutputDownload = Readonly<{
   output: RunOutputAccessDto;
+  read: VerifiedObjectRead;
+}>;
+
+export type ModelFileDownload = Readonly<{
+  file: Pick<StoredObjectMetadata, "id" | "mediaType" | "sizeBytes" | "sha256">;
   read: VerifiedObjectRead;
 }>;
 
@@ -147,6 +168,10 @@ export type ProjectRunDto = {
   terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out" | null;
   terminalClosureDigest: string | null;
   lifecycleDigest: string | null;
+  seedCount: number;
+  stepOrHorizon: string | number | null;
+  durationMs: number | null;
+  resourceOverview: Readonly<Record<string, number | boolean>> | null;
   outputs: ProjectOutputDto[];
 };
 
@@ -213,6 +238,47 @@ export class AgentWorkspaceService {
   modelWorkspace(modelId: string): ModelWorkspaceProjectionDto { return this.technicalChecks.workspace(modelId); }
   startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheckDto> { return this.technicalChecks.start(modelId, commandId); }
   getTechnicalCheck(modelId: string, checkId: string): TechnicalCheckDto { return this.technicalChecks.read(modelId, checkId); }
+  modelRenderable(modelIdInput: string, fileIdInput: string): RendererDto {
+    const modelId = boundedId(modelIdInput);
+    const fileId = boundedId(fileIdInput);
+    try {
+      const workspace = this.modelWorkspace(modelId);
+      const file = workspace.files.find((candidate) => candidate.id === fileId);
+      if (!file) throw new ApiError(404, "resource_not_found", "The declared Model resource does not exist.");
+      return rendererDto({
+        title: file.relativePath,
+        mediaType: file.mediaType,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        bytes: this.store.readObjectFile(file.id),
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof RendererRegistryError) {
+        throw new ApiError(422, error.code, error.message);
+      }
+      throw storeApiError(error);
+    }
+  }
+
+  openModelFileDownload(modelIdInput: string, fileIdInput: string): ModelFileDownload {
+    const modelId = boundedId(modelIdInput);
+    const fileId = boundedId(fileIdInput);
+    try {
+      const opened = this.store.openModelFileDownload({ modelId, fileId });
+      return Object.freeze({
+        file: Object.freeze({
+          id: opened.file.id,
+          mediaType: opened.file.mediaType,
+          sizeBytes: opened.file.sizeBytes,
+          sha256: opened.file.sha256,
+        }),
+        read: opened.read,
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
 
   async discoverProviders(): Promise<ProviderDiscoveryDto> {
     try {
@@ -505,18 +571,32 @@ export class AgentWorkspaceService {
     const id = boundedId(projectId);
     try {
       const project = this.store.getProject(id);
+      const execution = validateExecutionDescriptionV2(project.executionDescription);
       return {
         project: publicProject(project),
+      execution: publicExecutionDescription(execution),
+        executionDescriptionDigest: canonicalDigest(execution),
         files: this.store.listObjectFiles({ kind: "project", id }).filter((file) => file.kind === "project_model_snapshot").map(publicFile),
         conversations: this.store.listConversations({ kind: "project", id }),
-        experimentConfigurations: this.store.listExperimentConfigurations(id).map(publicExperimentConfiguration),
-        runs: this.store.listRuns(id).map((run) =>
+        experimentConfigurations: this.store.listExperimentConfigurations(id).map((record) =>
+          publicExperimentConfiguration(
+            record,
+            record.contractVersion === 4
+              ? planExperiment({
+                  configuration: record.configuration,
+                  inputSchema: execution.inputs.schema,
+                  maxSamples: MAX_EXPERIMENT_SAMPLES,
+                })
+              : null,
+          )),
+        runs: this.store.listRuns(id, { includeTrashed: true }).map((run) =>
           publicRun(
             run,
             run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [],
             run.contractVersion === 4
               ? this.store.currentRunLifecycleBinding(id, run.id)
               : undefined,
+            execution,
           )),
       };
     } catch (error) { throw storeApiError(error); }
@@ -527,12 +607,16 @@ export class AgentWorkspaceService {
     const runId = boundedId(runIdInput);
     try {
       const run = this.store.getRun(projectId, runId, { includeTrashed: true });
+      const execution = validateExecutionDescriptionV2(
+        this.store.getProject(projectId, { includeTrashed: true }).executionDescription,
+      );
       return publicRun(
         run,
         run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [],
         run.contractVersion === 4
           ? this.store.currentRunLifecycleBinding(projectId, runId)
           : undefined,
+        execution,
       );
     } catch (error) { throw storeApiError(error); }
   }
@@ -562,6 +646,36 @@ export class AgentWorkspaceService {
           publicOutputAccess(record as Extract<OutputIndexRecord, { contractVersion: 4 }>)),
       };
     } catch (error) {
+      throw outputApiError(error);
+    }
+  }
+
+  runOutputRenderable(
+    projectIdInput: string,
+    runIdInput: string,
+    outputIdInput: string,
+  ): RendererDto {
+    const projectId = boundedId(projectIdInput);
+    const runId = boundedId(runIdInput);
+    const outputId = boundedId(outputIdInput);
+    try {
+      this.listRunOutputs(projectId, runId);
+      const output = this.store.listRunOutputs(runId).find((candidate) => candidate.id === outputId);
+      if (!output || output.contractVersion !== 4) {
+        throw new ApiError(404, "output_not_found", "The requested output was not found.");
+      }
+      return rendererDto({
+        title: output.logicalName,
+        mediaType: output.file.mediaType,
+        sizeBytes: output.file.sizeBytes,
+        sha256: output.file.sha256,
+        bytes: this.store.readObjectFile(output.file.id),
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof RendererRegistryError) {
+        throw new ApiError(422, error.code, error.message);
+      }
       throw outputApiError(error);
     }
   }
@@ -630,7 +744,7 @@ export class AgentWorkspaceService {
           sampleIndex: event.sampleIndex,
           type: event.type,
           occurredAt: event.occurredAt,
-          payload: event.payload,
+          payload: publicDiagnosticEventPayload(event.payload),
         }))),
         hasMore: page.hasMore,
         binding: page.binding,
@@ -838,7 +952,7 @@ export class AgentWorkspaceService {
         name,
         plan,
         createdAt: this.#now(),
-      }));
+      }), plan);
     } catch (error) { throw storeApiError(error); }
   }
 
@@ -869,7 +983,13 @@ export class AgentWorkspaceService {
         ...(name === undefined ? {} : { name }),
         ...(configuration === undefined ? {} : { configuration }),
       });
-      if (replayed) return publicExperimentConfiguration(replayed);
+      if (replayed) {
+        return publicExperimentConfiguration(replayed, planExperiment({
+          configuration: replayed.configuration,
+          inputSchema: this.#projectInputSchema(projectId),
+          maxSamples: MAX_EXPERIMENT_SAMPLES,
+        }));
+      }
     } catch (error) { throw storeApiError(error); }
     const plan = configuration === undefined ? undefined : planExperiment({
       configuration,
@@ -877,7 +997,7 @@ export class AgentWorkspaceService {
       maxSamples: MAX_EXPERIMENT_SAMPLES,
     });
     try {
-      return publicExperimentConfiguration(this.store.updateExperimentV4({
+      const updated = this.store.updateExperimentV4({
         commandId,
         id: configId,
         projectId,
@@ -886,6 +1006,11 @@ export class AgentWorkspaceService {
         ...(name === undefined ? {} : { name }),
         ...(configuration === undefined ? {} : { configuration, plan: plan! }),
         updatedAt: this.#now(),
+      });
+      return publicExperimentConfiguration(updated, planExperiment({
+        configuration: updated.configuration,
+        inputSchema: this.#projectInputSchema(projectId),
+        maxSamples: MAX_EXPERIMENT_SAMPLES,
       }));
     } catch (error) { throw storeApiError(error); }
   }
@@ -1280,6 +1405,37 @@ export class AgentWorkspaceService {
   }
 }
 
+export const publicDiagnosticEventPayload = (
+  payload: Record<string, unknown> | readonly unknown[],
+): Record<string, unknown> => {
+  let nodes = 0;
+  let truncated = false;
+  const inspect = (value: unknown, depth: number): void => {
+    if (truncated) return;
+    nodes += 1;
+    if (nodes > 2_000 || depth > 12) {
+      truncated = true;
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 256) truncated = true;
+      for (const child of value.slice(0, 256)) inspect(child, depth + 1);
+    } else if (value && typeof value === "object") {
+      const children = Object.values(value);
+      if (children.length > 256) truncated = true;
+      for (const child of children.slice(0, 256)) inspect(child, depth + 1);
+    }
+  };
+  inspect(payload, 0);
+  return Object.freeze({
+    schemaVersion: 1,
+    disposition: "redacted",
+    shape: Array.isArray(payload) ? "array" : "object",
+    observedNodeCount: Math.min(nodes, 2_000),
+    truncated,
+  });
+};
+
 const publicModel = (record: ModelRecord): ModelCreationDto["model"] => ({
   id: record.id,
   name: record.name,
@@ -1308,7 +1464,10 @@ const publicFile = (file: StoredObjectMetadata): ProjectWorkspaceProjectionDto["
   createdAt: file.createdAt,
 });
 
-const publicExperimentConfiguration = (record: ExperimentConfigurationRecord): ExperimentConfigurationDto => record.contractVersion === 4
+const publicExperimentConfiguration = (
+  record: ExperimentConfigurationRecord,
+  plan: ExperimentPlan | null = null,
+): ExperimentConfigurationDto => record.contractVersion === 4
   ? {
       id: record.id,
       projectId: record.projectId,
@@ -1324,6 +1483,8 @@ const publicExperimentConfiguration = (record: ExperimentConfigurationRecord): E
       configurationDigest: record.configurationDigest,
       sampleCount: record.sampleCount,
       recordDigest: experimentConfigurationRecordDigest(record),
+      samplePreview: Object.freeze((plan?.samples ?? []).slice(0, 100)),
+      samplePreviewTruncated: (plan?.samples.length ?? 0) > 100,
     }
   : {
       id: record.id,
@@ -1377,6 +1538,7 @@ const publicRun = (
   record: RunRecord,
   outputs: OutputIndexRecord[],
   lifecycle?: RunLifecycleBinding,
+  execution?: ExecutionDescriptionV2,
 ): ProjectRunDto => ({
   id: record.id,
   projectId: record.projectId,
@@ -1401,8 +1563,71 @@ const publicRun = (
   terminalStatus: lifecycle?.terminalStatus ?? null,
   terminalClosureDigest: lifecycle?.terminalClosureDigest ?? null,
   lifecycleDigest: lifecycle?.lifecycleDigest ?? null,
+  seedCount: record.contractVersion === 4
+    ? new Set(record.samplePlan.map((sample) => sample.seed)
+      .filter((seed) => seed !== null && seed !== undefined)).size
+    : 0,
+  stepOrHorizon: execution?.overview?.stepOrHorizonPointer
+    ? publicConfigurationScalar(
+        record.frozenConfiguration,
+        execution.overview.stepOrHorizonPointer,
+      )
+    : null,
+  durationMs: record.startedAt && record.finishedAt
+    ? Math.max(0, Date.parse(record.finishedAt) - Date.parse(record.startedAt))
+    : null,
+  resourceOverview: record.contractVersion === 4
+    ? publicResourceOverview(record.resourceOverview)
+    : null,
   outputs: outputs.map(publicOutput),
 });
+
+const PUBLIC_RESOURCE_FIELDS = Object.freeze([
+  "maxConcurrencyObserved",
+  "stdoutBytes",
+  "stderrBytes",
+  "outputFiles",
+  "outputBytes",
+  "stdoutTruncated",
+  "stderrTruncated",
+  "healthVerified",
+] as const);
+
+const publicResourceOverview = (
+  value: Record<string, unknown> | null,
+): Readonly<Record<string, number | boolean>> | null => {
+  if (value === null) return null;
+  const result: Record<string, number | boolean> = {};
+  for (const field of PUBLIC_RESOURCE_FIELDS) {
+    const candidate = value[field];
+    if (typeof candidate === "boolean") {
+      result[field] = candidate;
+    } else if (typeof candidate === "number"
+      && Number.isSafeInteger(candidate) && candidate >= 0) {
+      result[field] = candidate;
+    }
+  }
+  return Object.freeze(result);
+};
+
+const publicConfigurationScalar = (
+  configuration: Record<string, unknown>,
+  pointer: string,
+): string | number | null => {
+  if (!pointer.startsWith("/") || pointer.length > 1_024) return null;
+  let current: unknown = configuration;
+  for (const encoded of pointer.slice(1).split("/")) {
+    const segment = encoded.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (!current || typeof current !== "object" || Array.isArray(current)
+      || !Object.hasOwn(current, segment)) return null;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return typeof current === "number" && Number.isFinite(current)
+    ? current
+    : typeof current === "string" && current.length <= 256
+      ? current
+      : null;
+};
 
 const publicRunStart = (receipt: FrozenRunStartReceipt): RunStartDto => ({
   schemaVersion: 1,

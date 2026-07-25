@@ -3,11 +3,13 @@ import {
   useId,
   useRef,
   useState,
+  useCallback,
   type FormEvent,
   type ReactNode,
 } from "react";
 import { defaultProductClient, type ProductClient } from "./api";
 import { ConversationPane } from "./ConversationPane";
+import { WorkspacePane } from "./WorkspacePane";
 import { navigateProduct, readProductRoute, workspaceHref } from "./router";
 import type {
   HomeDto,
@@ -402,19 +404,27 @@ function SharedShell({
   const conversationPaneRef = useRef<HTMLElement>(null);
   const workspacePaneRef = useRef<HTMLElement>(null);
   const lastFocusedElementRef = useRef<Element | null>(null);
+  const workspaceRequestSequence = useRef(0);
+
+  const loadWorkspace = useCallback(async () => {
+    const sequence = ++workspaceRequestSequence.current;
+    setError(undefined);
+    try {
+      const next = await client.workspace(route.kind, route.id);
+      if (workspaceRequestSequence.current === sequence) setWorkspace(next);
+    } catch (cause) {
+      if (workspaceRequestSequence.current === sequence) {
+        setError(messageOf(cause, "The workspace could not be loaded."));
+      }
+    }
+  }, [client, route.kind, route.id]);
 
   useEffect(() => {
-    let active = true;
     setWorkspace(undefined);
-    setError(undefined);
-    void client.workspace(route.kind, route.id).then((value) => {
-      if (active) setWorkspace(value);
-    }).catch((cause) => {
-      if (active) setError(messageOf(cause, "The workspace could not be loaded."));
-    });
+    void loadWorkspace();
     ownerHeadingRef.current?.focus();
-    return () => { active = false; };
-  }, [client, route.kind, route.id]);
+    return () => { workspaceRequestSequence.current += 1; };
+  }, [loadWorkspace]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
@@ -522,14 +532,15 @@ function SharedShell({
             <p className="product-eyebrow">CURRENT OBJECT</p>
             <h2 id="workspace-heading" ref={workspaceHeadingRef} tabIndex={-1}>Workspace</h2>
           </div>
-          <article className="product-workspace-card" data-testid="workspace-owner-card">
-            <span className="product-badge">{route.kind}</span>
-            <h3>{workspace?.owner.name ?? route.id}</h3>
-            {workspace?.owner.technicalStatus && <p>Technical status: {workspace.owner.technicalStatus}</p>}
-            <p>
-              This object remains mounted while Conversations change. Dynamic Model and Project renderers arrive in A4-4.
-            </p>
-          </article>
+          {!workspace && !error && <p className="product-empty" role="status">Loading dynamic workspace…</p>}
+          {workspace && (
+            <WorkspacePane
+              client={client}
+              workspace={workspace}
+              selectedConversationId={route.conversationId}
+              refresh={loadWorkspace}
+            />
+          )}
         </section>
       </div>
     </main>

@@ -4862,7 +4862,7 @@ export class ProductStoreV2 {
       const attemptHeartbeatMs = Date.parse(attempt.heartbeatAt);
       const leaseWindowMs = Date.parse(attempt.leaseExpiresAt) - attemptHeartbeatMs;
       if (!Number.isSafeInteger(leaseWindowMs) || leaseWindowMs < 1
-        || processHeartbeatMs > attemptHeartbeatMs
+        || processHeartbeatMs > nowMs
         || nowMs - processHeartbeatMs >= leaseWindowMs) {
         throw unavailable();
       }
@@ -7275,6 +7275,29 @@ export class ProductStoreV2 {
     const inspected = this.#objects.readWithInspection(ownerPath(row));
     if (!inspected || inspected.sha256 !== row.sha256 || inspected.sizeBytes !== row.size_bytes) throw new ProductStoreV2Error("Stored object metadata or bytes drifted.");
     return inspected.bytes;
+  }
+
+  openModelFileDownload(input: {
+    modelId: string;
+    fileId: string;
+  }): Readonly<{ file: StoredObjectMetadata; read: VerifiedObjectRead }> {
+    this.#assertOpen();
+    assertId(input.modelId);
+    assertId(input.fileId);
+    const row = this.#database.prepare(`SELECT f.*
+      FROM models m
+      JOIN object_files f ON f.owner_model_id = m.id
+      WHERE m.id = ? AND m.lifecycle_state != 'trashed'
+        AND f.id = ? AND f.kind IN
+          ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')`
+    ).get(input.modelId, input.fileId) as ObjectRow | undefined;
+    if (!row) throw new ProductStoreV2Error("Model file does not exist.");
+    const file = metadata(row);
+    const read = this.#objects.openVerifiedRead(ownerPath(row), {
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+    });
+    return Object.freeze({ file, read });
   }
 
   #sessionProjection(conversationId: string): "none" | "connecting" | "available" | "lost" | "read_only" {

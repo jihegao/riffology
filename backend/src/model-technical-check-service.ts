@@ -9,12 +9,20 @@ import { ModelTechnicalChecker } from "./model-technical-checker.ts";
 import { resolveModelWorkspace } from "./model-workspace.ts";
 import type { ModelRecord, StoredObjectMetadata } from "./product-domain.ts";
 import { ProductStoreV2, ProductStoreV2Error, type TechnicalCheckRecord } from "./product-store-v2.ts";
+import {
+  validateExecutionDescriptionV2,
+} from "./execution-protocol-v2.ts";
+import {
+  publicExecutionDescription,
+  type PublicExecutionDescriptionV2,
+} from "./public-execution-description.ts";
 
 export type ModelTechnicalCheckerPort = { check(input: ModelTechnicalCheckInput): Promise<ModelTechnicalCheckResult> };
 
 export type ModelWorkspaceProjectionDto = {
   model: Pick<ModelRecord, "id" | "name" | "technicalStatus" | "runMode" | "updatedAt">;
   digest: string;
+  execution: PublicExecutionDescriptionV2;
   files: Array<Pick<StoredObjectMetadata, "id" | "kind" | "relativePath" | "mediaType" | "sizeBytes" | "sha256">>;
 };
 
@@ -54,6 +62,9 @@ export class ModelTechnicalCheckService {
     return {
       model: { id: model.id, name: model.name, technicalStatus: model.technicalStatus, runMode: model.runMode, updatedAt: model.updatedAt },
       digest: projectionDigest(files),
+      execution: publicExecutionDescription(
+        validateExecutionDescriptionV2(model.executionDescription),
+      ),
       files: files.map(({ id, kind, relativePath, mediaType, sizeBytes, sha256 }) => ({ id, kind, relativePath, mediaType, sizeBytes, sha256 })),
     };
   }

@@ -247,6 +247,16 @@ export class MilestoneA2Api {
         privateJson(response, 200, this.service.listRunOutputs(projectId, parts[4]));
         return true;
       }
+      if (request.method === "GET" && parts.length === 8
+        && parts[5] === "outputs" && parts[7] === "renderable") {
+        this.#authorizeOutputRead(request, url);
+        privateJson(
+          response,
+          200,
+          this.service.runOutputRenderable(projectId, parts[4], parts[6]),
+        );
+        return true;
+      }
       if (request.method === "GET" && parts.length === 6
         && parts[5] === "diagnostic-events") {
         this.#authorizeEventRead(request);
@@ -388,6 +398,15 @@ export class MilestoneA2Api {
       if (request.method === "POST" && parts.length === 4 && parts[3] === "technical-checks") {
         const body = await strictJsonBody(request, ["commandId"]);
         json(response, 200, await this.service.startTechnicalCheck(modelId, requiredString(body.commandId, "commandId")));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 5 && parts[3] === "renderables") {
+        privateJson(response, 200, this.service.modelRenderable(modelId, parts[4]));
+        return true;
+      }
+      if ((request.method === "GET" || request.method === "HEAD")
+        && parts.length === 6 && parts[3] === "files" && parts[5] === "download") {
+        this.#downloadModelFile(request, response, modelId, parts[4]);
         return true;
       }
       if (request.method === "GET" && parts.length === 5 && parts[3] === "technical-checks") {
@@ -986,6 +1005,44 @@ export class MilestoneA2Api {
     }
   }
 
+  #downloadModelFile(
+    request: IncomingMessage,
+    response: ServerResponse,
+    modelId: string,
+    fileId: string,
+  ): void {
+    const opened = this.service.openModelFileDownload(modelId, fileId);
+    let handedOff = false;
+    const close = (): void => opened.read.close();
+    try {
+      const headers = {
+        "cache-control": "private, no-store",
+        "content-disposition": `attachment; filename="${downloadFilename(opened.file.id, opened.file.mediaType)}"`,
+        "content-length": String(opened.read.sizeBytes),
+        "content-security-policy": "sandbox",
+        "content-type": safeDownloadMediaType(opened.file.mediaType),
+        etag: `"sha256-${opened.file.sha256}"`,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      };
+      response.writeHead(200, headers);
+      if (request.method === "HEAD") {
+        response.end();
+        return;
+      }
+      const stream = opened.read.stream();
+      stream.once("error", () => {
+        close();
+        response.destroy();
+      });
+      response.once("close", close);
+      handedOff = true;
+      stream.pipe(response);
+    } finally {
+      if (!handedOff) close();
+    }
+  }
+
   #revokeOutputDownloads(runId: string): void {
     this.#outputDownloadsRevokedRuns.add(runId);
     const revokers = [...(this.#outputDownloadRevokersByRun.get(runId) ?? [])];
@@ -1141,7 +1198,7 @@ const productRoute = (method: string, parts: string[]): boolean => {
     return true;
   }
   if (parts[1] === "models" && parts.length >= 4
-    && ["GET", "POST"].includes(method)) {
+    && ["GET", "HEAD", "POST"].includes(method)) {
     return true;
   }
   return parts[1] === "projects" && parts.length >= 4

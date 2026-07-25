@@ -138,7 +138,7 @@ unavailability honestly, and keeps the Model/Project workspace content
 explicitly bounded to A4-4. Deprecated `?mode=legacy` and `?mode=evidence`
 compatibility entries remain only until the manifest-proven A4-5 retirement.
 
-A4-3 is implemented as a narrow slice. The persistent left pane now owns
+A4-3 is merged as a narrow slice. The persistent left pane now owns
 named Conversation creation, selection, rename, archive, restore, trash, and
 preview/confirm permanent deletion. Exact provider/model binding is durable and
 locks after the first accepted user message. Messages, safe attachment metadata,
@@ -146,12 +146,27 @@ temporary-document cards, and redacted skill/action records survive selection
 changes; the right owner workspace remains mounted. Expected provider failure
 returns HTTP 200 with `mode: "read_only"`, persists the user message, creates no
 assistant message, and leaves direct lifecycle controls available. Schema v15
-adds immutable provider-binding command receipts. A4-4 through A4-6 remain
-pending, all final trace rows remain pending, and Issue #15 stays open. Its
-complete gate is backend 586 total/585 passed/zero failed/one optional skip,
-Web 116/116, network 1/1, A4-3 Chromium 1/1, retained Chromium 15/15,
-Visual-Agent Chromium 6/6, production build, documentation governance, and
-three final independent reviews at P0=0/P1=0/P2=0.
+adds immutable provider-binding command receipts.
+
+A4-4 implements the dynamic right workspace on its narrow branch. A
+server-declared renderer registry admits bounded Markdown, code, CSV table,
+strict JSON, chart, and diagram DTOs; HTML, SVG, and unsupported media stay
+opaque and downloadable. Model workspaces expose declared resources and
+technical checks. Project workspaces expose fixed-copy identity, editable
+Experiment configurations, deterministic sample preview, frozen batch/visual
+Runs, status, outputs, diagnostic events with content-free payload summaries,
+downloads, cancel,
+trash/restore, and the existing exact-app restricted visual host. The ordinary
+wind import remains data, while a separate generic visual fixture proves the
+Core path has no wind branch. Vite remains a development proxy and cannot
+impersonate the exact platform origin; the exact platform host owns broker
+iframe redemption. A4-5 and A4-6 remain pending, all final trace rows remain
+pending, and Issue #15 stays open. The A4-4 branch gate is backend 592
+total/591 passed/zero failed/one optional skip, Web 127/127, network 1/1,
+dedicated A4-4 Chromium 1/1, retained A4-2 and A4-3 Chromium 1/1 each,
+retained Chromium 15/15, Visual-Agent Chromium 6/6, production build, and
+27-document governance. Independent A4-4 review results are recorded before
+this branch is published.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and

@@ -504,6 +504,43 @@ test("production frame resolver revalidates Store identity and serializes asynch
   assert.equal(await resolver.inspect(target), false);
 });
 
+test("production frame resolver tolerates the bounded running-to-healthy startup window", async () => {
+  const attemptExpiresAt = new Date(Date.now() + 120_000).toISOString();
+  let calls = 0;
+  const resolver = createProductBrowserFrameTargetResolver(
+    {
+      currentHealthyVisualFrameTarget: (): HealthyVisualFrameTarget => {
+        calls += 1;
+        if (calls < 3) throw new Error("visual_frame_unavailable");
+        return Object.freeze({
+          projectId: "project_alpha",
+          runId: "run_alpha",
+          attemptId: "attempt_alpha",
+          attemptGeneration: 1,
+          dispatcherGeneration: "d".repeat(64),
+          attemptExpiresAt,
+          processAttemptId: "process_alpha",
+          pid: 9_001,
+          processStartToken: "start-alpha",
+          processGroupId: 9_001,
+          loopbackHost: "127.0.0.1",
+          loopbackPort: 41_237,
+          healthPath: "/healthz",
+          healthyAt: new Date().toISOString(),
+        });
+      },
+    },
+    async () => true,
+    5_000,
+    async () => true,
+    250,
+  );
+
+  const target = await resolver.resolve("project_alpha", "run_alpha");
+  assert.equal(target?.attemptGeneration, 1);
+  assert.equal(calls, 3);
+});
+
 test("production frame resolver bounds its global asynchronous inspection queue", async () => {
   const attemptExpiresAt = new Date(Date.now() + 120_000).toISOString();
   const healthyAt = new Date().toISOString();

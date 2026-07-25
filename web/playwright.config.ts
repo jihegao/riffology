@@ -6,6 +6,7 @@ export default defineConfig({
     "a3-product-integration.spec.ts",
     "a4-home-shell.spec.ts",
     "a4-conversation.spec.ts",
+    "a4-workspace.spec.ts",
   ],
   timeout: 30_000,
   use: {
