@@ -160,10 +160,11 @@ after terminal commit and verified cleanup. Stop aborts and joins all lanes
 before Store close.
 
 The platform app and broker both exact-bind IPv6 loopback `::1` on different
-server-owned ports and expose `http://[::1]:<port>` URLs. The port split gives
+server-owned ports and expose exact `http://localhost:<port>` browser
+authorities. The port split gives
 same-origin-policy DOM isolation while the shared host remains same-site for
 `SameSite=Strict`. Their cookies still cross ports and are not isolated from
-each other; the real host boundary is that platform `::1` cookies are not sent
+each other; the real host boundary is that platform `localhost` cookies are not sent
 to the untrusted visual child on `127.0.0.1`.
 
 The app cookie is host-only, HttpOnly, and `Path=/api/`. Bootstrap requires
@@ -177,7 +178,7 @@ Origin when one is present; WS always requires the exact broker Origin. The
 broker cookie expires at `min(attempt expiry, 15 minutes)`. Both cookies may
 omit `Secure` on current HTTP and must set it under future HTTPS. Every broker
 document permits framing only through CSP
-`frame-ancestors http://[::1]:<exact-app-port>`; wildcard ancestors and
+`frame-ancestors http://localhost:<exact-app-port>`; wildcard ancestors and
 `X-Frame-Options: SAMEORIGIN` are forbidden. The capability registry
 binds browser-session generation, Project, run, attempt generation, expiry, and
 socket set. Revocation closes sockets before deleting state. Cookie `Path` is

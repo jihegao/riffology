@@ -66,7 +66,7 @@ test("bridge waits for the fixed child peer, selects an exact protocol, and forw
   await listen(broker, "::1");
   t.after(() => close(broker));
   const brokerAddress = broker.address() as AddressInfo;
-  browserOrigin = `http://[::1]:${brokerAddress.port}`;
+  browserOrigin = `http://localhost:${brokerAddress.port}`;
   const browser = new WebSocket(
     `ws://[::1]:${brokerAddress.port}/frame/c/opaque/socket`,
     ["riff.v1"],
@@ -143,7 +143,7 @@ test("bridge maps idle expiry to 1001 and releases its owner exactly once", asyn
   await listen(broker, "::1");
   t.after(() => close(broker));
   const brokerAddress = broker.address() as AddressInfo;
-  brokerOrigin = `http://[::1]:${brokerAddress.port}`;
+  brokerOrigin = `http://localhost:${brokerAddress.port}`;
   const browser = new WebSocket(`ws://[::1]:${brokerAddress.port}/socket`, {
     origin: brokerOrigin,
     headers: { cookie: "riff_frame_secret=browser-secret" },
@@ -202,7 +202,7 @@ test("capability revocation terminates the attached child during handshake and c
     await listen(broker, "::1");
     context.after(() => close(broker));
     const address = broker.address() as AddressInfo;
-    brokerOrigin = `http://[::1]:${address.port}`;
+    brokerOrigin = `http://localhost:${address.port}`;
     const browser = new WebSocket(`ws://[::1]:${address.port}/socket`, {
       origin: brokerOrigin,
       headers: { cookie: "a=b" },
@@ -275,7 +275,7 @@ test("capability revocation terminates the attached child during handshake and c
     await listen(broker, "::1");
     context.after(() => close(broker));
     const address = broker.address() as AddressInfo;
-    brokerOrigin = `http://[::1]:${address.port}`;
+    brokerOrigin = `http://localhost:${address.port}`;
     const browser = new WebSocket(`ws://[::1]:${address.port}/socket`, {
       origin: brokerOrigin,
       headers: { cookie: "a=b" },
@@ -346,7 +346,7 @@ test("capability revocation terminates the attached child during handshake and c
     await listen(broker, "::1");
     context.after(() => close(broker));
     const address = broker.address() as AddressInfo;
-    brokerOrigin = `http://[::1]:${address.port}`;
+    brokerOrigin = `http://localhost:${address.port}`;
     const uncaught: Error[] = [];
     const onUncaught = (error: Error): void => {
       uncaught.push(error);
@@ -415,7 +415,7 @@ test("bridge maps oversized messages to 1009 and child failure to 1011", async (
   await listen(broker, "::1");
   t.after(() => close(broker));
   const brokerAddress = broker.address() as AddressInfo;
-  brokerOrigin = `http://[::1]:${brokerAddress.port}`;
+  brokerOrigin = `http://localhost:${brokerAddress.port}`;
   const connectBrowser = (): WebSocket => new WebSocket(
     `ws://[::1]:${brokerAddress.port}/socket`,
     {
@@ -474,7 +474,7 @@ test("raw frames preserve fragmentation and control frames, map protocol errors,
   await listen(broker, "::1");
   t.after(() => close(broker));
   const address = broker.address() as AddressInfo;
-  brokerOrigin = `http://[::1]:${address.port}`;
+  brokerOrigin = `http://localhost:${address.port}`;
 
   const fragmented = await RawWebSocketClient.connect(address.port, brokerOrigin);
   t.after(() => fragmented.destroy());
@@ -521,7 +521,7 @@ test("bridge rejects duplicate-sensitive or undeclared handshake protocols befor
       "Upgrade", "websocket",
       "Sec-WebSocket-Version", "13",
       "Sec-WebSocket-Key", "MDEyMzQ1Njc4OWFiY2RlZg==",
-      "Origin", "http://[::1]:18080",
+      "Origin", "http://localhost:18080",
       "Cookie", "a=b",
       "Sec-WebSocket-Protocol", "foreign",
     ],
@@ -536,7 +536,7 @@ test("bridge rejects duplicate-sensitive or undeclared handshake protocols befor
       maxFrameBytes: 1_024,
       idleTimeoutMs: 1_000,
       expiresAtMs: Date.now() + 10_000,
-      brokerOrigin: "http://[::1]:18080",
+      brokerOrigin: "http://localhost:18080",
       inspectConnectedPeer: async () => true,
       live: () => true,
       markOpen: () => undefined,
@@ -591,7 +591,7 @@ test("pre-101 denials leave the raw socket writable for stable HTTP status and c
   await listen(broker, "::1");
   t.after(() => close(broker));
   const address = broker.address() as AddressInfo;
-  brokerOrigin = `http://[::1]:${address.port}`;
+  brokerOrigin = `http://localhost:${address.port}`;
 
   const cases = [
     {

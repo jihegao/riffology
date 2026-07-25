@@ -151,9 +151,9 @@ product.
   active Stage 3 / #14 contract and implementation ledger. It distinguishes the
   landed Project foundation, A3-1a frozen-planning boundary, and A3-1b generic
   batch execution plus A3-1c cancellation/restart recovery and exactly-once
-  batch completion cards plus the published A3-2a1/A3-2a2 visual runtime from
-  the pending A3-2b broker/frame/WebSocket, A3-2c scoped Playwright, and A3-3
-  ordinary wind import.
+  batch completion cards plus the published A3-2a1/A3-2a2 and A3-2b1/b2/b3
+  visual runtime through the published Chromium-verified A3-2b4 closeout,
+  pending A3-2c scoped Playwright, and A3-3 ordinary wind import.
 - [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
   authoritative Gate 0 source mapping, scope, claims, workflow policy, and exit
   contract.
@@ -169,10 +169,10 @@ product.
 - [`mesa-service.md`](mesa-service.md): target Mesa model, event, revision, and artifact contract.
 - [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
   OpenCode/session/context contract followed by the legacy Gate contract.
-- [`backend-api.md`](backend-api.md): current Stage 2 plus published A3-1 and
-  A3-2a API/runtime boundary, the A3-2b1 implementation under review, and the
-  pending A3-2b2/A3-2b3/A3-2b4/A3-2c gates, followed by the retained legacy
+- [`backend-api.md`](backend-api.md): current Stage 2 plus published A3-1,
+  A3-2a, and A3-2b1/b2/b3 API/runtime boundary, the published
+  Chromium-verified A3-2b4 closeout, and the pending A3-2c gate, followed by the retained legacy
   Gate project API target.
-- [`test-plan.md`](test-plan.md): current Stage 2 acceptance, published A3-1 and
-  A3-2a evidence, A3-2b1 focused evidence, pending
-  A3-2b2/A3-2b3/A3-2b4/A3-2c/A3-3 gates, and retained legacy Gate test history.
+- [`test-plan.md`](test-plan.md): current Stage 2 acceptance, published A3-1,
+  A3-2a, and A3-2b1/b2/b3 evidence, published Chromium-verified A3-2b4 evidence,
+  pending A3-2c/A3-3 gates, and retained legacy Gate test history.

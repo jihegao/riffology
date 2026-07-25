@@ -515,7 +515,7 @@ const assertAdmission = (input: BrowserWebSocketBridgeAdmission): void => {
     || input.idleTimeoutMs > 300_000
     || !Number.isSafeInteger(input.expiresAtMs)
     || input.expiresAtMs <= Date.now()
-    || !/^https?:\/\/\[::1\]:\d+$/u.test(input.brokerOrigin)) {
+    || !/^https?:\/\/localhost:\d+$/u.test(input.brokerOrigin)) {
     throw new BrowserWebSocketBridgeError(403, "visual_websocket_protocol_denied");
   }
 };

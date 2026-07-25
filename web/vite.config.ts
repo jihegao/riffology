@@ -12,7 +12,8 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: `http://[::1]:${platformAppPort}`,
-        changeOrigin: true
+        changeOrigin: false,
+        headers: { Host: `localhost:${platformAppPort}` }
       }
     }
   },

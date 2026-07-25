@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 const require = createRequire(new URL("../web/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const baseUrl = process.env.RIFF_DEMO_URL ?? "http://127.0.0.1:5173";
-const backendUrl = process.env.RIFF_BACKEND_URL ?? "http://[::1]:8787";
+const backendUrl = process.env.RIFF_BACKEND_URL ?? "http://localhost:8787";
 const timeout = Number(process.env.RIFF_LIVE_TIMEOUT_MS ?? 60_000);
 const screenshotPath = resolve("test-results", "riff-live-e2e.png");
 let stage = "bootstrap";

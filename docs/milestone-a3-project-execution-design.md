@@ -73,16 +73,20 @@ not the future frame-capability app.
 The published A3-2a2c slice exposes neither the child port nor browser access.
 Visual completion remains HTTP `422` `visual_completion_not_supported`;
 A3-2b2 frame bootstrap/HTTP proxy was merged and published through PR #35.
-A3-2b3 WebSocket/revocation/secrecy is implemented and locally
-integrated under review; its current server-level evidence includes fixed
+A3-2b3 WebSocket/revocation/secrecy was merged through PR #36 at `bb54b2a`;
+its server-level evidence includes fixed
 broker/child sockets, bounded negative admission/upstream handshakes,
 attempt-global cross-route connection limits, generation/shutdown closure, and
 observable/persisted sentinel scans. The focused frame/network/WebSocket
 regression combination passes 32/32; the serial official backend gate reports
 464 total with 463 passed, zero failed, and one optional smoke skipped. Web remains
 104/104, the network-entry integration passes 1/1, and the production build
-succeeds. This is not a publication or merge claim.
-A3-2b4 browser and security closeout and A3-2c remain pending.
+succeeds. A3-2b4 was merged and published through PR #37; its dedicated
+real-browser matrix passes 5/5. A3-2c remains pending.
+The complete Chromium suite passes 8/8. The current backend gate reports 466
+total with 465 passed, zero failed, and one optional installed-OpenCode smoke
+skipped; web passes 104/104, network entry 1/1, and the production build
+succeeds.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -96,9 +100,10 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The published boundary through A3-2b2 remains implemented: A3-2b1 and A3-2b2
-were merged through PR #33 and PR #35. A3-2b3 is locally integrated under
-review; the combined boundary is intentionally narrow:
+The published boundary through A3-2b4 remains implemented: A3-2b1, A3-2b2,
+A3-2b3, and A3-2b4 were merged through PR #33, PR #35, PR #36, and PR #37.
+The combined boundary is
+intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -180,7 +185,8 @@ review; the combined boundary is intentionally narrow:
   cleanup evidence before inspection or signalling and preserves visual
   completion disposition as `not_requested`; and
 - the A3-2b1 browser-network entrypoint exact-binds separate app and
-  broker servers to literal IPv6 loopback, derives canonical bracketed origins
+  broker servers to literal IPv6 loopback, derives CSP-compatible exact
+  localhost browser authorities
   from their actual ports, and denies Host counterexamples before application
   code; and
 - the existing Project-run start route admits an eligible visual experiment
@@ -1037,9 +1043,18 @@ Visual applications are capability-base compatible and use relative document,
 CSS, script, and fetch references; root-absolute application routes are not
 rewritten or authorized.
 
+The exact app serves
+`GET|HEAD /browser/projects/{projectId}/runs/{runId}/visual`. The fixed
+no-store document retains its bootstrap CSRF and broker frame URL only in
+closure memory. `GET` admits only a top-level navigation with
+`Sec-Fetch-Site: none|same-origin`, `Sec-Fetch-Mode: navigate`, and
+`Sec-Fetch-Dest: document`; a hostile local same-site page therefore cannot
+use cross-origin top-level navigation to rotate the browser generation.
+`HEAD` is side-effect free and does not bootstrap.
+
 Stage 3 first establishes a local browser-session capability through
 `POST /api/browser-session/bootstrap` on the platform app origin
-`http://[::1]:<app-port>`. Both platform app and broker bind exact IPv6
+`http://localhost:<app-port>`. Both platform app and broker bind exact IPv6
 loopback `::1`, on different server-owned ports, and reject any other listener
 address or `Host:port`. The bootstrap sets a random host-only HttpOnly,
 SameSite=Strict cookie with no `Domain`, `Path=/api/`, and returns a separate
@@ -1065,17 +1080,20 @@ only `POST` and preflight `OPTIONS`; CORS permits only the exact app origin with
 credentials, methods `POST, OPTIONS`, and headers
 `Content-Type, X-Riff-CSRF`. Both successful POSTs return HTTP `201`. The
 response contains one `frameUrl`
-on `http://[::1]:<broker-port>` with a random single-use nonce. The in-memory
+on `http://localhost:<broker-port>` with a random single-use nonce. The in-memory
 registry binds it to
 `{browserSessionGeneration, projectId, runId, attemptGeneration, expiry}` with
 expiry no later than 60 seconds after issuance or the attempt expiry, whichever
 comes first, and owns the capability's live socket set.
 
 The app and broker are different origins because their server-owned ports
-differ, but remain same-site on host `::1`, so `SameSite=Strict` can be sent in
-the iframe. Platform cookies are not isolated from each other by port and
-`Path` is not a trusted security boundary. The real host isolation is between
-the platform `::1` cookies and the untrusted visual child at `127.0.0.1`;
+differ, but remain same-site on host `localhost`, so `SameSite=Strict` can be
+sent in the iframe. Platform cookies are not isolated from each other by port
+and `Path` is not a trusted security boundary. The real host isolation is
+between the platform `localhost` cookies and the untrusted visual child at
+`127.0.0.1`. Same-numbered IPv4 denial reservations hold the app and broker
+ports on `127.0.0.1` for the topology lifetime, preventing a child-side
+listener from taking over either `localhost` authority through IPv4 resolution;
 platform cookies are never sent to the child.
 
 The first nonce-bearing iframe navigation normally has no `Origin`. It is
@@ -1122,9 +1140,9 @@ concurrent HTTP requests. Stable results are `browser_method_denied` (`405`),
 
 Every broker document response emits CSP
 `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
-font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none';
 form-action 'none'; frame-src 'none'; frame-ancestors
-http://[::1]:<exact-app-port>` with no wildcard or alternate app origin. It
+http://localhost:<exact-app-port>` with no wildcard or alternate app origin. It
 must not emit any `X-Frame-Options`, which could block the authorized
 cross-port frame. Broker documents/assets emit no permissive CORS header.
 Fetches require the
@@ -1132,7 +1150,7 @@ broker cookie and live binding. When an HTTP `Origin` header is present it must
 equal the exact broker origin; a normal navigation or subresource request
 without `Origin` is allowed only with the cookie. WebSocket upgrade always uses
 the exact minted URL
-`ws://[::1]:<broker-port>/frame/c/<route-id><declared-absolute-path>` and
+`ws://localhost:<broker-port>/frame/c/<route-id><declared-absolute-path>` and
 requires exact broker `Host`, exact broker `Origin`, the exact declared path
 with no query or encoded alias, an offered subset of unique declared
 subprotocols, broker cookie, and live registry binding. Missing, duplicate,
@@ -1479,20 +1497,23 @@ Output indexes never resolve outside the owning Project/run object root.
     PR #35:** scoped broker/frame capability, exact broker
    path, browser-session generation, bootstrap/CSRF/nonce/cookie/Origin rules,
    HTTP forwarding, and exact CSP.
-11. **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
-   integrated, under review:** exact
+11. **A3-2b3 WebSocket, revocation, and secrecy — merged and published through
+   PR #36 at `bb54b2a`:** exact
    minted broker URL/path/subprotocol enforcement, assembled-message,
    connection/handshake/idle/backpressure limits, socket-first generation and
    lifecycle revocation through `revokeVisualAccess(runId)`, stable
    pre-upgrade status/codes and RFC close codes, and allowlist-aware
-   three-party observable/persisted secret scans. This status does not claim a
-   merge or publication.
-12. **A3-2b4 browser and security closeout — pending:** real-browser negative
-   isolation matrix for the browser cookie jar, HttpOnly, browser-generated
+   three-party observable/persisted secret scans.
+12. **A3-2b4 browser and security closeout — merged and published through
+   PR #37:** real-browser negative
+   isolation matrix covers the browser cookie jar, HttpOnly, browser-generated
    WebSocket Origin/cookie delivery, iframe-relative WebSocket, CSP/sandbox/
-   hostile embedding, and page-observed live revocation; then focused/full
-   suites, independent security review, and documentation synchronization for
-   the completed A3-2b contract.
+   hostile embedding, Service Worker denial, no-store revocation, and
+   page-observed live revocation/reconnect denial. The dedicated matrix passes
+   5/5 and the complete Chromium suite passes 8/8. The current backend gate
+   reports 466 total with 465 passed, zero failed, and one optional
+   installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
+   and the production build succeeds. This is a Chromium-only claim.
 13. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
    attempt observation, explicit one-turn interaction, bounded audit, and
    cross-scope denial.

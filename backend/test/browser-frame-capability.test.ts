@@ -15,10 +15,10 @@ import {
   type FrameHttpTransportResponse,
 } from "../src/browser-frame-capability.ts";
 
-const APP_ORIGIN = "http://[::1]:8787";
-const BROKER_ORIGIN = "http://[::1]:18788";
-const APP_HOST = "[::1]:8787";
-const BROKER_HOST = "[::1]:18788";
+const APP_ORIGIN = "http://localhost:8787";
+const BROKER_ORIGIN = "http://localhost:18788";
+const APP_HOST = "localhost:8787";
+const BROKER_HOST = "localhost:18788";
 const WEB_SOCKET_POLICY = Object.freeze({
   path: "/events",
   subprotocols: Object.freeze(["riff.visual.v1", "riff.visual.json"]),
@@ -42,10 +42,10 @@ test("bootstrap requires the exact browser boundary and emits a bounded HTTP coo
   );
 
   for (const request of [
-    { ...bootstrapRequest(), host: "localhost:8787" },
+    { ...bootstrapRequest(), host: "[::1]:8787" },
     { ...bootstrapRequest(), origin: undefined },
     { ...bootstrapRequest(), origin: "null" },
-    { ...bootstrapRequest(), origin: "http://[::1]:9999" },
+    { ...bootstrapRequest(), origin: "http://localhost:9999" },
     { ...bootstrapRequest(), origin: [APP_ORIGIN, APP_ORIGIN] },
     { ...bootstrapRequest(), fetchSite: "same-site" },
     { ...bootstrapRequest(), authorization: "Bearer agent" },
@@ -56,14 +56,14 @@ test("bootstrap requires the exact browser boundary and emits a bounded HTTP coo
 
 test("HTTPS mode is explicit and adds Secure to both cookie classes", async () => {
   const fixture = createFixture({
-    appOrigin: "https://[::1]:8787",
-    brokerOrigin: "https://[::1]:18788",
+    appOrigin: "https://localhost:8787",
+    brokerOrigin: "https://localhost:18788",
     secureCookies: true,
   });
-  const bootstrap = fixture.capability.bootstrap(bootstrapRequest("https://[::1]:8787"));
+  const bootstrap = fixture.capability.bootstrap(bootstrapRequest("https://localhost:8787"));
   assert.match(bootstrap.setCookie, /; Secure$/u);
   const frame = await fixture.capability.issueFrameSession(
-    frameRequest(bootstrap, "https://[::1]:8787"),
+    frameRequest(bootstrap, "https://localhost:8787"),
     { projectId: "project", runId: "run" },
   );
   const redeemed = await fixture.capability.redeem({
@@ -73,8 +73,8 @@ test("HTTPS mode is explicit and adds Secure to both cookie classes", async () =
   });
   assert.match(redeemed.setCookie, /; Secure$/u);
   assert.throws(() => createFixture({
-    appOrigin: "http://[::1]:8787",
-    brokerOrigin: "http://[::1]:18788",
+    appOrigin: "http://localhost:8787",
+    brokerOrigin: "http://localhost:18788",
     secureCookies: true,
   }), /Secure cookie mode/u);
 });
@@ -792,7 +792,7 @@ test("native transport enforces real header, streaming body, and deadline bounds
 });
 
 test("constructor and injected dependencies fail closed", () => {
-  assert.throws(() => createFixture({ appOrigin: "http://localhost:8787" }), /exact bracketed IPv6/u);
+  assert.throws(() => createFixture({ appOrigin: "http://[::1]:8787" }), /exact localhost authority/u);
   assert.throws(() => createFixture({ brokerOrigin: APP_ORIGIN }), /must be distinct/u);
   const fixture = createFixture({ random: () => new Uint8Array(31) });
   assert.throws(() => fixture.capability.bootstrap(bootstrapRequest()), /CSPRNG returned an invalid result/u);
