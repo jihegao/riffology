@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -139,7 +147,48 @@ const fixture = (): { parent: string; store: ProductStoreV2 } => {
     resourceOverview: {},
     finishedAt: NOW,
   });
+  store.createFrozenRun({
+    commandId: "command_start_cancelled_preview",
+    runId: "run_cancelled_preview",
+    projectId: "project_alpha",
+    experimentConfigId: "experiment_alpha",
+    completionConversationId: "conversation_project",
+    expectedConfigurationDigest: plan.configurationDigest,
+    plan,
+    projectSnapshotDigest: project.modelSnapshotDigest,
+    executionDescriptionDigest: canonicalDigest(project.executionDescription),
+    limits: LIMITS,
+    createdAt: NOW,
+  });
+  store.cancelRun({
+    commandId: "command_cancel_preview",
+    projectId: "project_alpha",
+    runId: "run_cancelled_preview",
+    requestedAt: NOW,
+  });
+  assert.equal(
+    store.finalizeNextCancelledQueuedRun({ finishedAt: NOW })?.status,
+    "cancelled",
+  );
+  store.startTechnicalCheck({
+    id: "technical_check_alpha",
+    modelId: "model_alpha",
+    limits: { wallTimeMs: 1_000 },
+    startedAt: NOW,
+  });
+  store.finishTechnicalCheck({
+    id: "technical_check_alpha",
+    state: "passed",
+    results: { exitCode: 0 },
+    finishedAt: NOW,
+  });
   store.close();
+  const database = openProductDatabase(join(parent, "store", "product.sqlite3"));
+  database.prepare(
+    `UPDATE model_technical_checks SET log_object_file_id = ?
+     WHERE id = ?`,
+  ).run("file_adopted", "technical_check_alpha");
+  database.close();
   store = ProductStoreV2.open(join(parent, "store"));
   return { parent, store };
 };
@@ -159,6 +208,10 @@ test("permanent-delete previews are deterministic exact closures with composite 
 
     const project = store.previewPermanentDelete("project", "project_alpha");
     assert.ok(project.records.some((item) => item.table === "runs" && item.key.id === "run_alpha"));
+    assert.ok(project.records.some((item) =>
+      item.table === "runs" && item.key.id === "run_cancelled_preview"));
+    assert.ok(project.records.some((item) =>
+      item.table === "run_commands" && item.key.id === "command_cancel_preview"));
     assert.ok(project.records.some((item) => item.table === "output_indexes"));
     assert.ok(project.records.some((item) =>
       item.table === "run_completion_cards" && item.key.run_id === "run_alpha"));
@@ -189,7 +242,10 @@ test("permanent-delete previews are deterministic exact closures with composite 
     assert.ok(document.exclusions.some((item) => item.kind === "conversation"));
 
     const experiment = store.previewPermanentDelete("experiment", "experiment_alpha");
-    assert.deepEqual(experiment.blockingReferences, [{ kind: "run", id: "run_alpha" }]);
+    assert.deepEqual(experiment.blockingReferences, [
+      { kind: "run", id: "run_alpha" },
+      { kind: "run", id: "run_cancelled_preview" },
+    ]);
     assert.ok(experiment.records.some((item) => item.table === "experiment_command_receipts"
       && item.key.command_id === "command_create_preview"));
     assert.ok(experiment.exclusions.some((item) => item.kind === "project"));
@@ -222,8 +278,8 @@ test("permanent-delete previews are deterministic exact closures with composite 
   } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
 });
 
-test("preview fails closed on digest drift, symlinks, and owner/path mismatches without touching an outside sentinel", () => {
-  for (const mode of ["digest", "symlink", "owner", "unsafe_total"] as const) {
+test("preview fails closed on digest drift, symlinks, unindexed files, and owner/path mismatches without touching an outside sentinel", () => {
+  for (const mode of ["digest", "symlink", "unindexed", "owner", "unsafe_total"] as const) {
     const created = fixture();
     const { parent } = created;
     let store = created.store;
@@ -232,7 +288,7 @@ test("preview fails closed on digest drift, symlinks, and owner/path mismatches 
     try {
       if (mode === "digest") {
         writeFileSync(join(store.root, "objects/models/model_alpha/code/model.py"), "changed");
-        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /metadata or bytes drifted|digest drift/u);
+        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /metadata or bytes drifted|digest drift|unindexed or drifted files/u);
         assert.throws(() => store.createModel({ id: "model_alpha", name: "Alpha", technicalStatus: "executable", runMode: "batch", executionDescription: { entryPoint: "model.py" }, createdAt: NOW,
           files: [{ id: "file_model", kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('alpha')\n") }] }), /drift/u);
       } else if (mode === "symlink") {
@@ -240,6 +296,15 @@ test("preview fails closed on digest drift, symlinks, and owner/path mismatches 
         unlinkSync(target);
         symlinkSync(outside, target);
         assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /symlink/u);
+      } else if (mode === "unindexed") {
+        writeFileSync(
+          join(store.root, "objects/models/model_alpha/code/unindexed.py"),
+          "outside index",
+        );
+        assert.throws(
+          () => store.previewPermanentDelete("model", "model_alpha"),
+          /unindexed or drifted files/u,
+        );
       } else if (mode === "owner") {
         store.close();
         const database = openProductDatabase(join(store.root, "product.sqlite3"));
@@ -249,16 +314,299 @@ test("preview fails closed on digest drift, symlinks, and owner/path mismatches 
         ).run("a".repeat(64), NOW);
         database.close();
         store = ProductStoreV2.open(join(parent, "store"));
-        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /metadata or bytes drifted|digest drift/u);
+        assert.throws(
+          () => store.previewPermanentDelete("model", "model_alpha"),
+          /metadata or bytes drifted|digest drift|unindexed or drifted files/u,
+        );
       } else {
         store.close();
         const database = openProductDatabase(join(store.root, "product.sqlite3"));
         database.prepare("UPDATE object_files SET size_bytes = ? WHERE owner_model_id = ?").run(Number.MAX_SAFE_INTEGER, "model_alpha");
         database.close();
         store = ProductStoreV2.open(join(parent, "store"));
-        assert.throws(() => store.previewPermanentDelete("model", "model_alpha"), /byte total is not a safe integer/u);
+        assert.throws(
+          () => store.previewPermanentDelete("model", "model_alpha"),
+          /byte total is not a safe integer|unindexed or drifted files/u,
+        );
       }
       assert.equal(readFileSync(outside, "utf8"), "sentinel");
     } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
+  }
+});
+
+test("lifecycle receipts replay exactly and permanent Project deletion preserves its fixed source Model", () => {
+  const { parent, store } = fixture();
+  try {
+    const firstDigest = store.resourceRecordDigest("project", "project_alpha");
+    const renamed = store.executeLifecycleCommand({
+      commandId: "command_lifecycle_rename",
+      action: "rename",
+      kind: "project",
+      id: "project_alpha",
+      expectedRecordDigest: firstDigest,
+      name: "Renamed Project",
+      committedAt: "2026-07-22T04:01:00.000Z",
+    });
+    assert.equal(renamed.currentLifecycleState, "active");
+    assert.notEqual(renamed.currentRecordDigest, firstDigest);
+    assert.deepEqual(store.executeLifecycleCommand({
+      commandId: "command_lifecycle_rename",
+      action: "rename",
+      kind: "project",
+      id: "project_alpha",
+      expectedRecordDigest: firstDigest,
+      name: "Renamed Project",
+      committedAt: "2026-07-22T04:01:00.000Z",
+    }), renamed);
+    assert.throws(() => store.executeLifecycleCommand({
+      commandId: "command_lifecycle_rename",
+      action: "rename",
+      kind: "project",
+      id: "project_alpha",
+      expectedRecordDigest: firstDigest,
+      name: "Changed intent",
+      committedAt: "2026-07-22T04:01:00.000Z",
+    }), /different intent/u);
+    const trashed = store.executeLifecycleCommand({
+      commandId: "command_lifecycle_trash",
+      action: "trash",
+      kind: "project",
+      id: "project_alpha",
+      expectedRecordDigest: renamed.currentRecordDigest,
+      committedAt: "2026-07-22T04:02:00.000Z",
+    });
+    assert.equal(trashed.currentLifecycleState, "trashed");
+    const preview = store.previewPermanentDelete("project", "project_alpha");
+    assert.deepEqual(preview.blockingReferences, []);
+    const confirmation = {
+      action: "permanently_delete",
+      kind: "project",
+      id: "project_alpha",
+      recordCount: preview.records.length,
+      fileCount: preview.files.length,
+      totalBytes: preview.totalBytes,
+    };
+    const canonicalIntentDigest = canonicalDigest({
+      kind: "project",
+      id: "project_alpha",
+      previewToken: preview.previewToken,
+      stateToken: preview.stateToken,
+      confirmation,
+    });
+    const receipt = store.commitPermanentDelete({
+      commandId: "command_delete_project",
+      kind: "project",
+      id: "project_alpha",
+      previewToken: preview.previewToken,
+      stateToken: preview.stateToken,
+      canonicalIntentDigest,
+      committedAt: "2026-07-22T04:03:00.000Z",
+    });
+    assert.equal(receipt.recordCount, preview.records.length);
+    assert.equal(receipt.fileCount, preview.files.length);
+    assert.equal(store.listProjects({ includeArchived: true, includeTrashed: true }).length, 0);
+    assert.equal(store.listModels({ includeArchived: true, includeTrashed: true }).length, 1);
+    store.trashResource("temporary_document", "document_model", NOW);
+    store.trashResource("model", "model_alpha", NOW);
+    const modelPreview = store.previewPermanentDelete("model", "model_alpha");
+    assert.deepEqual(modelPreview.blockingReferences, []);
+    assert.ok(modelPreview.records.some((record) =>
+      record.table === "model_technical_checks"
+      && record.key.id === "technical_check_alpha"));
+    assert.ok(modelPreview.records.some((record) =>
+      record.table === "trash_entries"));
+    const modelConfirmation = {
+      action: "permanently_delete",
+      kind: "model",
+      id: "model_alpha",
+      recordCount: modelPreview.records.length,
+      fileCount: modelPreview.files.length,
+      totalBytes: modelPreview.totalBytes,
+    };
+    const modelIntentDigest = canonicalDigest({
+      kind: "model",
+      id: "model_alpha",
+      previewToken: modelPreview.previewToken,
+      stateToken: modelPreview.stateToken,
+      confirmation: modelConfirmation,
+    });
+    store.commitPermanentDelete({
+      commandId: "command_delete_model_after_project",
+      kind: "model",
+      id: "model_alpha",
+      previewToken: modelPreview.previewToken,
+      stateToken: modelPreview.stateToken,
+      canonicalIntentDigest: modelIntentDigest,
+      committedAt: "2026-07-22T04:04:00.000Z",
+    });
+    assert.equal(
+      store.listModels({ includeArchived: true, includeTrashed: true }).length,
+      0,
+    );
+    store.close();
+    const reopened = ProductStoreV2.open(join(parent, "store"));
+    try {
+      assert.deepEqual(reopened.permanentDeleteReceipt(
+        "command_delete_project",
+        "project",
+        "project_alpha",
+        canonicalIntentDigest,
+      ), receipt);
+      assert.throws(() => reopened.permanentDeleteReceipt(
+        "command_delete_project",
+        "project",
+        "project_alpha",
+        "f".repeat(64),
+      ), /different intent/u);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch {}
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("preinstalled manifest identity blocks Project deletion across restart", () => {
+  const { parent, store: initialStore } = fixture();
+  let store = initialStore;
+  try {
+    store.claimPreinstalledManifestInstallation({
+      manifestId: "manifest_delete_guard",
+      manifestVersion: 1,
+      manifestDigest: "b".repeat(64),
+      modelId: "model_alpha",
+      projectId: "project_alpha",
+      experimentConfigurationId: "experiment_alpha",
+      claimedAt: NOW,
+    });
+    store.markPreinstalledManifestInstallationReady({
+      manifestId: "manifest_delete_guard",
+      manifestVersion: 1,
+      manifestDigest: "b".repeat(64),
+      readyAt: NOW,
+    });
+    store.trashResource("project", "project_alpha", NOW);
+    const preview = store.previewPermanentDelete("project", "project_alpha");
+    assert.ok(preview.blockingReferences.some((reference) =>
+      reference.kind === "preinstalled_manifest"
+      && reference.id === "manifest_delete_guard"));
+    assert.throws(
+      () => store.commitPermanentDelete({
+        commandId: "command_delete_preinstalled_project",
+        kind: "project",
+        id: "project_alpha",
+        previewToken: preview.previewToken,
+        stateToken: preview.stateToken,
+        canonicalIntentDigest: "c".repeat(64),
+        committedAt: NOW,
+      }),
+      /blocking references/u,
+    );
+    store.close();
+    store = ProductStoreV2.open(join(parent, "store"));
+    assert.equal(store.listProjects({ includeTrashed: true }).length, 1);
+    assert.equal(
+      store.getPreinstalledManifestInstallation(
+        "manifest_delete_guard",
+        1,
+      )?.state,
+      "ready",
+    );
+  } finally {
+    store.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("failed staged-delete recovery poisons the Store before any later lifecycle write", () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-delete-poison-"));
+  const root = join(parent, "store");
+  const target = join(root, "objects/models/model_poison/code/model.py");
+  let armed = false;
+  const store = ProductStoreV2.openForTesting(root, {
+    coordinatorOptions: {
+      faultInjector: (point) => {
+        if (armed && point === "after_database_changes") {
+          writeFileSync(target, "interposed");
+          throw new Error("injected staged-delete recovery fault");
+        }
+      },
+    },
+  });
+  try {
+    store.createModel({
+      id: "model_poison",
+      name: "Poison",
+      technicalStatus: "executable",
+      runMode: "batch",
+      executionDescription: {
+        schemaVersion: 2,
+        runtime: "python",
+        runMode: "batch",
+        dependencyFile: "environment/requirements.txt",
+        inputs: {
+          schemaProfile: "riff-json-schema-2020-12-v1",
+          schema: INPUT_SCHEMA,
+          smoke: { seed: 1 },
+        },
+        outputs: [{
+          logicalName: "result.csv",
+          relativePath: "outputs/result.csv",
+          mediaType: "text/csv",
+          required: true,
+          role: "table",
+        }],
+        batch: { entryPoint: "code/model.py", protocol: "riff-batch-v1" },
+        cancellation: { signal: "SIGTERM", graceMs: 1_000 },
+      },
+      createdAt: NOW,
+      files: [{
+        id: "file_poison",
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        bytes: Buffer.from("print('poison')\n"),
+      }],
+    });
+    store.trashResource("model", "model_poison", NOW);
+    const preview = store.previewPermanentDelete("model", "model_poison");
+    const confirmation = {
+      action: "permanently_delete",
+      kind: "model",
+      id: "model_poison",
+      recordCount: preview.records.length,
+      fileCount: preview.files.length,
+      totalBytes: preview.totalBytes,
+    };
+    const intentDigest = canonicalDigest({
+      kind: "model",
+      id: "model_poison",
+      previewToken: preview.previewToken,
+      stateToken: preview.stateToken,
+      confirmation,
+    });
+    armed = true;
+    assert.throws(() => store.commitPermanentDelete({
+      commandId: "command_delete_poison",
+      kind: "model",
+      id: "model_poison",
+      previewToken: preview.previewToken,
+      stateToken: preview.stateToken,
+      canonicalIntentDigest: intentDigest,
+      committedAt: NOW,
+    }), /recovery failed.*retained/iu);
+    assert.throws(() => store.executeLifecycleCommand({
+      commandId: "command_after_poison",
+      action: "restore",
+      kind: "model",
+      id: "model_poison",
+      expectedRecordDigest: "a".repeat(64),
+      committedAt: NOW,
+    }), /requires mutation recovery/u);
+    assert.equal(existsSync(join(root, ".mutation-writer.lock")), true);
+  } finally {
+    store.close();
+    rmSync(parent, { recursive: true, force: true });
   }
 });

@@ -66,6 +66,8 @@ test("production exact-app visual host is a fixed no-store self-only page", asyn
   assert.ok(inlineScript);
   assert.doesNotThrow(() => new Function(inlineScript));
   assert.match(page.text, /id="visual-host" data-status="loading" data-stage="bootstrap"/u);
+  assert.match(page.text, /"content-type": "application\/json"/u);
+  assert.match(page.text, /body: "\{\}"/u);
   assert.match(
     page.text,
     /id="visual-frame"[^>]+sandbox="allow-scripts allow-same-origin"[^>]+referrerpolicy="no-referrer"/u,
@@ -181,6 +183,8 @@ test("BackendApp completes the one-use frame HTTP flow without leaking browser c
   const appBoundary = {
     origin: network.app.origin,
     "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
   };
   const bootstrap = await raw(network.app, "POST", "/api/browser-session/bootstrap", appBoundary);
   assert.equal(bootstrap.status, 201);
@@ -325,6 +329,8 @@ test("platform frame endpoints reject foreign origins, missing CSRF, methods, an
   const bootstrap = await raw(network.app, "POST", "/api/browser-session/bootstrap", {
     origin: network.app.origin,
     "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
   });
   const missingCsrf = await raw(
     network.app,
@@ -362,6 +368,89 @@ test("platform frame endpoints reject foreign origins, missing CSRF, methods, an
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers["access-control-allow-origin"], network.app.origin);
   assert.equal(preflight.headers["access-control-allow-credentials"], "true");
+});
+
+test("only an admitted bootstrap revokes prior Product Agent and visual authority", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-frame-rotation-"));
+  let revokeCount = 0;
+  const visualAuthority = {
+    observationAvailable: false,
+    interactionAvailable: false,
+    revokeAll: () => { revokeCount += 1; },
+    revokeRun: () => {},
+    revokeTurn: () => {},
+    hasActiveScope: () => false,
+  };
+  const app = new BackendApp({
+    mesa: new FrameFakeMesa(),
+    openCode: new FrameFakeOpenCode(),
+    workspaceRoot: workspace,
+    a2ProductRoot: join(workspace, "product"),
+    a2OpenCode: {
+      initialize: async () => ({
+        status: "unconfigured",
+        modelId: null,
+      }),
+      discoverProviderModels: async () => [],
+      getSession: async () => undefined,
+      createSession: async () => {
+        throw new Error("unused");
+      },
+      injectContext: async () => {
+        throw new Error("unused");
+      },
+      promptWithModel: async () => {
+        throw new Error("unused");
+      },
+      prompt: async () => {},
+      abort: async () => {},
+    },
+    a3VisualAuthority: visualAuthority as any,
+    browserFrameTargetResolver: {
+      resolve: async () => null,
+      inspect: async () => false,
+    },
+  });
+  await app.initialize();
+  const network = await app.listenBrowserNetwork();
+  t.after(async () => {
+    await app.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+  const baseline = revokeCount;
+  const denied = await raw(
+    network.app,
+    "POST",
+    "/api/browser-session/bootstrap",
+    {
+      origin: "http://localhost:5173",
+      "sec-fetch-site": "same-site",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
+    },
+  );
+  assert.equal(denied.status, 403);
+  assert.equal(revokeCount, baseline);
+  const admitted = {
+    origin: network.app.origin,
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
+  };
+  assert.equal((await raw(
+    network.app,
+    "POST",
+    "/api/browser-session/bootstrap",
+    admitted,
+  )).status, 201);
+  assert.equal(revokeCount, baseline + 1);
+  assert.equal((await raw(
+    network.app,
+    "POST",
+    "/api/browser-session/bootstrap",
+    admitted,
+  )).status, 201);
+  assert.equal(revokeCount, baseline + 2);
 });
 
 test("production frame resolver revalidates Store identity and serializes asynchronous OS inspections", async () => {
@@ -543,9 +632,20 @@ const raw = async (
   text: string;
   json: any;
 }> => new Promise((resolve, reject) => {
+  const automaticBootstrapBody = method === "POST"
+    && path === "/api/browser-session/bootstrap"
+    && headers["content-length"] === undefined
+    && headers["transfer-encoding"] === undefined;
+  const body = automaticBootstrapBody ? "{}" : "";
   const outgoing = request({
     family: 6,
-    headers: { host: address.authority, ...headers },
+    headers: {
+      host: address.authority,
+      ...(automaticBootstrapBody
+        ? { "content-type": "application/json", "content-length": "2" }
+        : {}),
+      ...headers,
+    },
     host: address.host,
     method,
     path,
@@ -565,7 +665,7 @@ const raw = async (
     });
   });
   outgoing.once("error", reject);
-  outgoing.end();
+  outgoing.end(body);
 });
 
 const cookiePair = (header: string | string[] | undefined): string => {

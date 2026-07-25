@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 13 as const;
+export const PRODUCT_SCHEMA_VERSION = 14 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -297,3 +297,36 @@ export type PermanentDeletePreview = {
   /** Digest of target and dependency state, used to reject stale previews. */
   stateToken: Sha256Digest;
 };
+
+export type ProductLifecycleKind = "model" | "project" | "conversation";
+export type ProductLifecycleAction = "rename" | "archive" | "restore" | "trash";
+
+export type ProductLifecycleReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  action: ProductLifecycleAction;
+  kind: ProductLifecycleKind;
+  id: ProductId;
+  previousLifecycleState: LifecycleState;
+  currentLifecycleState: LifecycleState;
+  previousRecordDigest: Sha256Digest;
+  currentRecordDigest: Sha256Digest;
+  committedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
+}>;
+
+export type PermanentDeleteReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  action: "permanently_delete";
+  kind: ProductLifecycleKind;
+  id: ProductId;
+  recordCount: number;
+  fileCount: number;
+  totalBytes: number;
+  previewToken: Sha256Digest;
+  stateToken: Sha256Digest;
+  canonicalIntentDigest: Sha256Digest;
+  committedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
+}>;

@@ -289,6 +289,63 @@ test("ready replay rejects drifted fixed-copy Project bytes", async () => {
   }
 });
 
+test("ready replay preserves ordinary user lifecycle and name changes", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-a3-wind-ready-lifecycle-"));
+  const root = join(parent, "product");
+  let store: ProductStoreV2 | undefined;
+  try {
+    store = ProductStoreV2.open(root);
+    const installed = await new PreinstalledWindInstaller({
+      store,
+      repositoryRoot: REPOSITORY_ROOT,
+      technicalChecker: fakeChecker,
+    }).install();
+    store.renameResource(
+      "model",
+      installed.modelId,
+      "User-renamed ordinary wind Model",
+      "2026-07-25T00:00:01.000Z",
+    );
+    store.archiveResource(
+      "project",
+      installed.projectId,
+      "2026-07-25T00:00:02.000Z",
+    );
+    store.trashResource(
+      "experiment",
+      installed.experimentConfigurationId,
+      "2026-07-25T00:00:03.000Z",
+    );
+    store.close();
+    store = ProductStoreV2.open(root);
+    const replay = await new PreinstalledWindInstaller({
+      store,
+      repositoryRoot: REPOSITORY_ROOT,
+      technicalChecker: fakeChecker,
+    }).install();
+    assert.equal(replay.state, "ready");
+    assert.equal(
+      store.listModels({ includeArchived: true, includeTrashed: true })[0]!.name,
+      "User-renamed ordinary wind Model",
+    );
+    assert.equal(
+      store.listProjects({ includeArchived: true, includeTrashed: true })[0]!
+        .lifecycleState,
+      "archived",
+    );
+    assert.equal(
+      store.listExperimentConfigurations(installed.projectId, {
+        includeArchived: true,
+        includeTrashed: true,
+      })[0]!.lifecycleState,
+      "trashed",
+    );
+  } finally {
+    store?.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("installer rejects drifted stable Model bytes before claiming the manifest", async () => {
   const parent = mkdtempSync(join(tmpdir(), "riff-a3-wind-model-drift-"));
   const root = join(parent, "product");

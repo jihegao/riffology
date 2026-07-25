@@ -13,7 +13,7 @@ The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
 implemented Agent/API boundary; the legacy Gate API retained below does not.
-`ProductStoreV2` through schema migration v13, execution
+`ProductStoreV2` through schema migration v14, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -346,17 +346,14 @@ PR #47. Final Stage 3 Integration adds no route: an isolated real Chromium
 context drives the existing Product create/config/run contracts and, separately,
 the browser-session-guarded output/download/event-cursor reads across a
 same-port backend restart. The final shared
-shell remains #15 work. This is not evidence that every Product mutation
-already enforces browser admission: current output/event/download reads and
-direct run controls are session guarded, while uniform Host/Origin/Fetch/CSRF
-admission for all Stage 4 browser APIs remains A4-1. The legacy Gate API below still coexists until
-separately reviewed retirement.
+shell remains #15 work. A4-1 now applies the same exact
+Host/Origin/Fetch/CSRF/session admission to every recognized Product API route.
+The legacy Gate API below still coexists until separately reviewed retirement.
 
-### A4-0 target API boundary (design only)
+### A4-1 Product API boundary
 
-The target contracts are specified in
+The implemented contracts are specified in
 [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
-No route in this subsection is claimed as implemented by A4-0.
 
 - `GET /api/home`, `GET /api/models`, and `GET /api/projects` provide bounded,
   stable resource summaries and executable-Model options for New Project.
@@ -377,12 +374,55 @@ No route in this subsection is claimed as implemented by A4-0.
   old app/frame/WebSocket/Visual-Agent revocation before response.
 - The local app session is browser admission, not a user/account principal.
 
-A4-1 owns implementation and negative tests for cross-owner use, response-loss
-replay, restart, fixed-copy isolation, preview-not-delete, stale confirmation,
-changed deletion closure, cache reuse, and exact durable-receipt replay. Public
-DTOs and errors use closed allowlist serializers; scanners are regression
-evidence, not the secrecy boundary. The exact delete/renderer/admission
-state machines remain normative in the A4 design.
+The exact collection queries are absent or one
+`lifecycle=active|archived|trashed`; duplicates and unknown queries fail.
+Models/Projects use stable recent-activity/name/id ordering, while executable
+Model options use normalized name/id ordering. `collectionDigest` excludes
+`generatedAt` and provider readiness.
+
+Lifecycle routes are:
+
+- `PATCH /api/resources/{model|project|conversation}/{id}` with exact
+  `{commandId,name,expectedRecordDigest}`;
+- `POST .../{archive|restore|trash}` with exact
+  `{commandId,expectedRecordDigest}`;
+- `POST .../permanent-delete-preview` with exact `{}`; and
+- `POST .../permanent-delete` with `commandId`, all three preview/state/
+  confirmation tokens, and the exact typed count/byte confirmation.
+
+Preview returns only target identity, counts, total bytes, reason-coded blockers
+and exclusions, three opaque tokens, and expiry. It never returns table names,
+raw rows, paths, or file content. The process-local 32-byte confirmation token
+is single-use, bound to browser generation and the complete preview/count
+tuple, and expires within five minutes. Any attempted consume invalidates it.
+Successful lifecycle and deletion commands persist immutable receipt-first
+replay records in schema v14. Same intent returns the exact receipt after
+response loss or restart; changed intent fails.
+
+Permanent deletion is coordinated with exact no-follow file identity
+`{device,inode,linkCount=1,type=file,size,digest}`. Indexed files are moved to
+recoverable coordinator staging before the SQLite mutation; rollback restores
+the same identity and roll-forward removes only the staged closure. The source
+descriptor stays open across staging and the reopened staged inode is matched
+before SQL. Immediate foreign keys are deferred only by the dedicated
+permanent-delete transaction so closed FK cycles commit atomically or fail as
+one unit. Direct deletion of immutable history is possible only while a
+process-private SQLite UDF context is active; no durable table marker can
+survive restart or independently enable evidence deletion. Recovery schema-v2
+manifests carry exact file identity, while pre-A4 v1 manifests retain an
+explicit compatible rollback/roll-forward reader.
+
+The filesystem contract assumes the backend is the sole Product object writer,
+and provider/Model/visual-child processes never receive Product-root
+filesystem authority. It does not claim resistance to a separate hostile
+same-OS-user process with arbitrary access to all user-owned files.
+
+Public DTOs and errors use closed allowlist serializers; scanners are
+regression evidence, not the secrecy boundary. A4-1 tests cover cross-owner
+use, response-loss replay, restart, fixed-copy isolation, preview-not-delete,
+stale/consumed/generation-bound confirmation, closure and byte-index drift,
+active authority, cache policy, and exact durable-receipt replay. The renderer
+state machine remains an A4-4 target.
 Permanent delete is blocked by every descendant in-flight turn, check, Run,
 process/lease, download, frame, WebSocket, and tool/Visual-Agent capability. It
 does not implicitly cancel or revoke them; commit uses the relevant writer and
@@ -534,11 +574,12 @@ identity. Health-only, receipt-only, timestamp mismatch, later update, and
 second receipt fail. Because pre-v8 public visual dispatch never existed, any
 unproven pre-v8 visual `health_at` or live process evidence fails migration
 closed instead of becoming healthy. All evidence remains private.
-Schema v9 is the current product-database authority. It is required because the
-prior v4 atomic-success and output-object/index triggers were batch-only. The v9
-replacement binds the internal success context to both run identity and run
-kind, preserves the batch contract, and permits visual success/output writes
-only with the matching visual context and complete visual success evidence.
+Schema v9 introduced the visual-success trigger foundation retained by the
+current schema v14. It was required because the prior v4 atomic-success and
+output-object/index triggers were batch-only. The v9 replacement binds the
+internal success context to both run identity and run kind, preserves the batch
+contract, and permits visual success/output writes only with the matching
+visual context and complete visual success evidence.
 No Project workspace, run DTO, transcript, completion record, error, or
 ordinary log may expose a child port or convert it into a public URL. Port
 selection has a bounded local close-then-bind TOCTOU window; A3 does not claim

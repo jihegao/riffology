@@ -69,7 +69,11 @@ const bootstrap = async (page: Page): Promise<string> => {
   const response = await request<{
     csrfToken: string;
     generation: number;
-  }>(page, "/api/browser-session/bootstrap", { method: "POST" });
+  }>(page, "/api/browser-session/bootstrap", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
   expect(response.status).toBe(201);
   expect(response.body.generation).toBeGreaterThan(0);
   expect(response.body.csrfToken).toMatch(/^[A-Za-z0-9_-]+$/u);

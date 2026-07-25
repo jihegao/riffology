@@ -663,9 +663,9 @@ browser download, then restarts the backend on the same app/broker ports. It boo
 process-local browser authority after restart and proves durable Project,
 Experiment, Run, event, and output reads with zero console errors. This closes
 the narrow Stage 3 browser gate, not the Stage 4 shared-shell or full MVP E2E.
-It does not claim uniform browser admission for create/edit/start; A4-1 owns
-that Host/Origin/Fetch/CSRF contract. Existing focused browser-capability tests
-remain the negative evidence for the guarded reads and direct controls.
+At that revision it did not claim uniform browser admission for
+create/edit/start. A4-1 now implements that Host/Origin/Fetch/CSRF contract;
+the Stage 3 scenario remains evidence only for its named revision.
 
 ## Stage 4 design and future acceptance
 
@@ -676,9 +676,11 @@ whose implementation rows all remain `pending`, and independent Product,
 Architecture, and Security review with P0=0/P1=0. It does not add or satisfy a
 runtime/browser test.
 
-A4-1 through A4-5 must add focused contract, owner-scope, failure, idempotency,
-restart, secrecy, lifecycle/deletion, responsive, keyboard, renderer, Agent,
-Run, recovery, and exact legacy-manifest evidence in their owning slices. A4-6
+A4-1 adds focused contract, owner-scope, failure, idempotency, restart,
+secrecy, lifecycle/deletion, schema-v14, exact-file-identity, and
+authority-issuance-fence evidence. A4-2 through A4-5 must add responsive,
+keyboard, renderer, Agent, Run, recovery, and exact legacy-manifest evidence in
+their owning slices. A4-6
 alone owns one continuous real-Chromium exit scenario covering Home/four
 entries, creation and opening of a functional generic New Model workspace,
 ordinary wind Model, real multi-turn provider use, a second persistent
@@ -686,7 +688,7 @@ Conversation, fixed-copy Project, Conversation-led Experiment edit, real batch
 outputs/events/download, user-requested analysis, restricted visual frame,
 backend restart, provider-unavailable read-only behavior, 1440x900, narrow
 viewport, keyboard, 200% zoom, and zero unexpected console errors. None of
-those Stage 4 acceptance rows is complete on A4-0.
+those Stage 4 acceptance rows is complete on A4-0 or A4-1.
 
 A4-1 deletion negatives include Model, Project, and Conversation targets with
 in-flight turns/checks/Runs/processes plus active download/frame/WebSocket/tool
@@ -722,6 +724,29 @@ were not accepted as gate results; the recorded backend and network/browser
 results are the successful local runs with those required OS capabilities.
 These regressions prove the design change did not alter existing behavior; they
 do not satisfy any Stage 4 implementation or MVP exit row.
+
+### A4-1 Product API evidence
+
+The 2026-07-25 A4-1 slice implements backend contracts only. Focused tests
+cover closed Home/collection DTOs, uniform browser admission, lifecycle
+receipt replay, preview/confirm delete, token consumption and generation
+rotation, exact indexed-byte closure, symlink/hardlink/unindexed/drift
+negatives, fixed-copy preservation, restart replay, and the resource authority
+deletion fence. Historical Agent/Project/run/frame/WebSocket tests were moved
+through the same real browser session contract rather than receiving a bypass.
+
+The visible entry remains the legacy/Evidence switch. No Home, router, shared
+shell, Conversation pane, renderer, startup cutover, cleanup, full Chromium
+exit matrix, Issue closure, or MVP claim is evidence of A4-1. All 69
+traceability rows therefore remain `pending` until their full listed owners
+merge and A4-6 verifies them continuously.
+
+The complete A4-1 branch gate records backend 583 total / 582 passed / zero
+failed / one optional installed-OpenCode smoke skipped; web 104/104 plus
+network-entry 1/1; production web build passed; 27 Markdown files and
+`git diff --check` passed. These counts are branch evidence, not post-merge or
+A4-6 browser evidence. Independent Product/correctness, Architecture, and
+Security final reviews each report P0=0/P1=0/P2=0 for the current A4-1 diff.
 
 ---
 

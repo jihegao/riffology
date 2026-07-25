@@ -118,6 +118,17 @@ recovery, and precise retirement boundaries. It changes no runtime behavior;
 every A4 implementation row remains pending, and only A4-6 may claim the
 complete MVP or close #15.
 
+A4-1 now implements the shared Product browser-API foundation without changing
+the visible legacy/Evidence entry. Schema v14 adds durable Model/Project/
+Conversation lifecycle receipts and permanent-delete receipts. `GET /api/home`,
+the lifecycle-filtered Model/Project collections, generic rename/archive/
+restore/trash commands, and explicit preview/confirm permanent deletion all use
+one exact browser-session Host/Origin/Fetch/CSRF boundary. Permanent deletion
+fails closed on reference, byte/index, process, download, frame/WebSocket,
+Agent/tool, generation, token, or closure drift and preserves fixed-copy
+lineage. A4-2 through A4-6 remain pending; no Stage 4 UI or complete-MVP claim
+is made here.
+
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
 Stage 3 does not authorize their deletion. The final Models/Projects home,

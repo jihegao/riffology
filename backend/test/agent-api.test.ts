@@ -106,16 +106,58 @@ const start = async (
     defaultSessionId: "legacy-test",
   });
   await app.initialize();
-  const address = await app.listen();
-  return { app, baseUrl: `http://127.0.0.1:${address.port}` };
+  const network = await app.listenBrowserNetwork();
+  const baseUrl = network.app.origin;
+  const response = await globalThis.fetch(`${baseUrl}/api/browser-session/bootstrap`, {
+    method: "POST",
+    body: "{}",
+    headers: {
+      "content-type": "application/json",
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
+    },
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.ok(cookie);
+  const payload = await response.json() as { csrfToken: string };
+  browserSessions.set(baseUrl, { cookie, csrfToken: payload.csrfToken });
+  return { app, baseUrl };
 };
 
-const post = (url: string, body: unknown) => fetch(url, {
+const browserSessions = new Map<string, { cookie: string; csrfToken: string }>();
+
+const apiFetch = (
+  input: string | URL | Request,
+  init: RequestInit = {},
+): Promise<Response> => {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  const baseUrl = url.origin;
+  const session = browserSessions.get(baseUrl);
+  if (!session || url.pathname === "/api/browser-session/bootstrap") {
+    return globalThis.fetch(input, init);
+  }
+  const method = (init.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const headers = new Headers(init.headers);
+  headers.set("cookie", session.cookie);
+  headers.set("sec-fetch-site", "same-origin");
+  headers.set("sec-fetch-mode", "cors");
+  headers.set("sec-fetch-dest", "empty");
+  if (method !== "GET" && method !== "HEAD") {
+    headers.set("origin", baseUrl);
+    headers.set("x-riff-csrf", session.csrfToken);
+  }
+  return globalThis.fetch(input, { ...init, headers });
+};
+
+const post = (url: string, body: unknown) => apiFetch(url, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
-const patch = (url: string, body: unknown) => fetch(url, {
+const patch = (url: string, body: unknown) => apiFetch(url, {
   method: "PATCH",
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
@@ -215,10 +257,10 @@ test("A2 providers, atomic Model creation, conversations, live turn, and public 
   const { app, baseUrl } = await start(base, openCode);
   t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
 
-  const providers = await (await fetch(`${baseUrl}/api/providers`)).json() as any;
+  const providers = await (await apiFetch(`${baseUrl}/api/providers`)).json() as any;
   assert.deepEqual(providers, { mode: "live", providerModels: openCode.catalogue });
 
-  const html = await (await fetch(`${baseUrl}/a2`)).text();
+  const html = await (await apiFetch(`${baseUrl}/a2`)).text();
   assert.match(html, /Milestone A2 technical acceptance surface/u);
   assert.match(html, /not the Milestone A shared product shell/u);
   assert.doesNotMatch(html, /externalSessionRef|opaque-session|authorization|password|capability/u);
@@ -235,9 +277,9 @@ test("A2 providers, atomic Model creation, conversations, live turn, and public 
   assert.equal((await unknown.json() as any).error.code, "unknown_field");
 
   const ownerUrl = `${baseUrl}/api/objects/model/${created.model.id}/conversations`;
-  const listed = await (await fetch(ownerUrl)).json() as any;
+  const listed = await (await apiFetch(ownerUrl)).json() as any;
   assert.deepEqual(listed.conversations.map((item: any) => item.id), [created.conversation.id]);
-  const detail = await (await fetch(`${baseUrl}/api/conversations/${created.conversation.id}`)).json() as any;
+  const detail = await (await apiFetch(`${baseUrl}/api/conversations/${created.conversation.id}`)).json() as any;
   assert.equal(detail.sessionState, "none");
 
   const attachmentResponse = await post(`${baseUrl}/api/conversations/${created.conversation.id}/attachments`, {
@@ -254,7 +296,7 @@ test("A2 providers, atomic Model creation, conversations, live turn, and public 
   });
   assert.equal(attachmentConflict.status, 409);
   assert.equal((await attachmentConflict.json() as any).error.code, "idempotency_conflict");
-  const documents = await (await fetch(`${baseUrl}/api/conversations/${created.conversation.id}/documents`)).json() as any;
+  const documents = await (await apiFetch(`${baseUrl}/api/conversations/${created.conversation.id}/documents`)).json() as any;
   assert.deepEqual(documents, { documents: [] });
 
   const turnResponse = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
@@ -344,7 +386,7 @@ test("restart preserves completed transcript while provider loss persists a fail
 
   const second = await start(base, openCode);
   try {
-    const messages = await (await fetch(`${second.baseUrl}/api/conversations/${created.conversation.id}/messages`)).json() as any;
+    const messages = await (await apiFetch(`${second.baseUrl}/api/conversations/${created.conversation.id}/messages`)).json() as any;
     assert.deepEqual(messages.messages.map((message: any) => message.role), ["user", "assistant"]);
     assert.deepEqual(messages.messages.map((message: any) => message.messageKind), ["conversation", "conversation"]);
     openCode.catalogue = [];
@@ -385,7 +427,7 @@ test("Model workspace projection and technical-check start/read are digest-bound
   t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
   const created = await createModel(baseUrl, "technical-model");
 
-  const workspaceResponse = await fetch(`${baseUrl}/api/models/${created.model.id}/workspace`);
+  const workspaceResponse = await apiFetch(`${baseUrl}/api/models/${created.model.id}/workspace`);
   assert.equal(workspaceResponse.status, 200);
   const workspace = await workspaceResponse.json() as any;
   assert.equal(workspace.model.technicalStatus, "draft");
@@ -403,7 +445,7 @@ test("Model workspace projection and technical-check start/read are digest-bound
   assert.equal(started.claim, "technical_execution_only");
   assert.equal(checker.calls, 1);
 
-  const readResponse = await fetch(`${baseUrl}/api/models/${created.model.id}/technical-checks/${started.id}`);
+  const readResponse = await apiFetch(`${baseUrl}/api/models/${created.model.id}/technical-checks/${started.id}`);
   assert.equal(readResponse.status, 200);
   const read = await readResponse.json() as any;
   assert.deepEqual(read, started);
@@ -454,7 +496,7 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json() as any).error.code, "idempotency_conflict");
 
-  const workspaceResponse = await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`);
+  const workspaceResponse = await apiFetch(`${baseUrl}/api/projects/${project.project.id}/workspace`);
   assert.equal(workspaceResponse.status, 200);
   const workspace = await workspaceResponse.json() as any;
   assert.deepEqual(workspace.project, project.project);
@@ -471,7 +513,7 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   assert.equal(conversationResponse.status, 201);
   const conversation = await conversationResponse.json() as any;
   assert.deepEqual(conversation.owner, { kind: "project", id: project.project.id });
-  const workspaceWithConversation = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
+  const workspaceWithConversation = await (await apiFetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
   assert.deepEqual(workspaceWithConversation.conversations.map((item: any) => item.id), [conversation.id]);
 
   const baselineConfiguration = {
@@ -640,7 +682,7 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   assert.equal(lostConcurrentName.status, 409);
   assert.equal((await lostConcurrentName.json() as any).error.code, "stale_record");
 
-  const workspaceWithExperiment = await (await fetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
+  const workspaceWithExperiment = await (await apiFetch(`${baseUrl}/api/projects/${project.project.id}/workspace`)).json() as any;
   assert.deepEqual(workspaceWithExperiment.experimentConfigurations.map((item: any) => ({ id: item.id, sampleCount: item.sampleCount })), [
     { id: experiment.id, sampleCount: 4 },
   ]);
@@ -951,7 +993,7 @@ target.write_text(
   assert.deepEqual(await publicStartRetry.json(), publicStart);
   let publicRun: any;
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const publicRunRead = await fetch(`${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}`);
+    const publicRunRead = await apiFetch(`${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}`);
     assert.equal(publicRunRead.status, 200);
     publicRun = await publicRunRead.json() as any;
     if (publicRun.status === "succeeded") break;
@@ -972,8 +1014,8 @@ target.write_text(
     `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
     { commandId: "command_public_cancel_unknown", signal: "SIGKILL" },
   );
-  assert.equal(rejectedCancelAuthority.status, 403);
-  assert.equal((await rejectedCancelAuthority.json() as any).error.code, "run_control_denied");
+  assert.equal(rejectedCancelAuthority.status, 422);
+  assert.equal((await rejectedCancelAuthority.json() as any).error.code, "unknown_field");
   const publicCancel = app.a2!.service.cancelRun({
     projectId: outputProject.id,
     runId: publicStart.runId,
@@ -998,7 +1040,7 @@ target.write_text(
   });
   assert.deepEqual(publicCancelRetry, publicCancel);
   assert.deepEqual(requestedCancellationRunIds, [publicStart.runId, publicStart.runId]);
-  const outputWorkspace = await (await fetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
+  const outputWorkspace = await (await apiFetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
   const projectedRunWithOutput = outputWorkspace.runs.find((run: any) => run.id === publicStart.runId);
   assert.deepEqual(Object.keys(projectedRunWithOutput).sort(), [
     "cancelRequestedAt", "completionCardDisposition", "contractVersion", "createdAt",
@@ -1073,7 +1115,7 @@ test("technical-check rejects checker evidence whose snapshot digests differ fro
   assert.notEqual(result.capturedWorkspaceDigest, "f".repeat(64));
   assert.notEqual(result.executionDescriptionDigest, "e".repeat(64));
   assert.equal(result.checks[0].code, "technical_check_snapshot_mismatch");
-  const workspace = await (await fetch(`${baseUrl}/api/models/${created.model.id}/workspace`)).json() as any;
+  const workspace = await (await apiFetch(`${baseUrl}/api/models/${created.model.id}/workspace`)).json() as any;
   assert.equal(workspace.model.technicalStatus, "failed");
 });
 
@@ -1104,7 +1146,7 @@ test("technical-check CAS preserves newer draft files and execution description 
   const result = await response.json() as any;
   assert.equal(result.state, "passed", "historical check evidence remains terminal");
   assert.equal(result.publication, "superseded", "stale evidence must not publish technical status");
-  const workspace = await (await fetch(`${baseUrl}/api/models/${created.model.id}/workspace`)).json() as any;
+  const workspace = await (await apiFetch(`${baseUrl}/api/models/${created.model.id}/workspace`)).json() as any;
   assert.equal(workspace.model.technicalStatus, "draft");
   assert.notEqual(workspace.digest, result.capturedWorkspaceDigest);
   const currentDescription = app.productStore!.listModels({ includeArchived: true }).find((item) => item.id === created.model.id)!.executionDescription;

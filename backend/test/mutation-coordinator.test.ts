@@ -144,6 +144,90 @@ test("crash after commit is rolled forward when SQLite and coordinator reopen", 
   }
 });
 
+test("legacy v1 delete manifests roll back and roll forward across upgrade", () => {
+  for (const committed of [false, true]) {
+    const fixture = createFixture();
+    const bytes = Buffer.from(
+      committed ? "legacy committed delete" : "legacy uncommitted delete",
+    );
+    const transactionId = committed
+      ? "mutation_v1_delete_committed"
+      : "mutation_v1_delete_uncommitted";
+    try {
+      fixture.objects.atomicReplace(
+        fixture.objects.ensureOwnerParent(MODEL_TARGET),
+        bytes,
+      );
+      insertObjectRow(fixture.database, "file_alpha", bytes);
+      const directory = fixture.objects.createTransactionDirectory(
+        transactionId,
+      );
+      fixture.objects.writeDurable(
+        join(directory, "backup/00000000.bin"),
+        bytes,
+      );
+      fixture.objects.unlinkExact(
+        fixture.objects.resolveOwnerPath(MODEL_TARGET),
+      );
+      const core = {
+        schemaVersion: 1,
+        transactionId,
+        createdAt: NOW,
+        operations: [{
+          operation: "delete",
+          target: MODEL_TARGET,
+          stagedRelativePath: null,
+          backupRelativePath: "backup/00000000.bin",
+          priorSha256: sha256(bytes),
+          priorSizeBytes: bytes.byteLength,
+          nextSha256: null,
+          nextSizeBytes: null,
+        }],
+      };
+      const manifestSha256 = sha256(
+        Buffer.from(`${JSON.stringify(core)}\n`),
+      );
+      fixture.objects.publishRecoveryManifest(
+        transactionId,
+        Buffer.from(`${JSON.stringify({ ...core, manifestSha256 })}\n`),
+      );
+      if (committed) {
+        fixture.database.prepare(
+          "DELETE FROM object_files WHERE id = ?",
+        ).run("file_alpha");
+        fixture.database.prepare(
+          `INSERT INTO committed_mutations
+           (transaction_id, manifest_sha256, committed_at)
+           VALUES (?, ?, ?)`,
+        ).run(transactionId, manifestSha256, NOW);
+      }
+      const recovered = makeCoordinator(fixture.database, fixture.objects);
+      if (committed) {
+        assert.equal(fixture.objects.inspect(MODEL_TARGET), null);
+        assert.equal(
+          (fixture.database.prepare(
+            "SELECT count(*) AS count FROM object_files",
+          ).get() as { count: number }).count,
+          0,
+        );
+      } else {
+        assert.equal(fixture.objects.read(MODEL_TARGET).equals(bytes), true);
+        assert.equal(
+          (fixture.database.prepare(
+            "SELECT count(*) AS count FROM object_files",
+          ).get() as { count: number }).count,
+          1,
+        );
+      }
+      assert.deepEqual(fixture.objects.recoveryManifestIds(), []);
+      recovered.close();
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("orphan staging left before a manifest is durably published is removed on recovery", () => {
   const fixture = createFixture();
   try {

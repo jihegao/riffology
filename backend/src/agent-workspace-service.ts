@@ -29,13 +29,33 @@ import type {
   ModelRecord,
   OutputIndexRecord,
   ProjectRecord,
+  ProductLifecycleAction,
+  ProductLifecycleKind,
+  ProductLifecycleReceipt,
+  PermanentDeleteReceipt,
   RunRecord,
   StoredObjectMetadata,
 } from "./product-domain.ts";
+import {
+  executableModelOptions,
+  homeDto,
+  orderedModels,
+  orderedProjects,
+  publicPermanentDeletePreview,
+  type HomeDto,
+  type ModelSummaryDto,
+  type ProjectSummaryDto,
+  type PublicPermanentDeletePreviewDto,
+} from "./product-api-dto.ts";
+import {
+  PermanentDeleteAdmission,
+  PermanentDeleteAdmissionError,
+} from "./permanent-delete-admission.ts";
 import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
 import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentOperation } from "./agent-visual-authority.ts";
 import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
+import { MutationRecoveryError } from "./mutation-coordinator.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -148,6 +168,7 @@ export class AgentWorkspaceService {
   readonly #scopedMcpUrl?: (capability: string) => string;
   readonly #onRunQueued?: (runId: string, cancellationRequested: boolean) => void;
   readonly #visualDispatchAvailable: boolean;
+  readonly #permanentDeleteAdmission = new PermanentDeleteAdmission();
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
   readonly technicalChecks: ModelTechnicalCheckService;
@@ -184,10 +205,231 @@ export class AgentWorkspaceService {
   getTechnicalCheck(modelId: string, checkId: string): TechnicalCheckDto { return this.technicalChecks.read(modelId, checkId); }
 
   async discoverProviders(): Promise<ProviderDiscoveryDto> {
-    try { return { mode: "live", providerModels: await this.openCode.discoverProviderModels() }; }
+    try {
+      return {
+        mode: "live",
+        providerModels: (await this.openCode.discoverProviderModels()).map((model) =>
+          Object.freeze({
+            providerId: model.providerId,
+            modelId: model.modelId,
+            qualifiedId: model.qualifiedId,
+          })),
+      };
+    }
     catch (error) {
       const auth = error instanceof ApiError && (error.status === 401 || error.code === "opencode_auth_failed");
       return { mode: "read_only", reason: auth ? "opencode_auth_failed" : "opencode_unavailable", providerModels: [] };
+    }
+  }
+
+  async home(): Promise<HomeDto> {
+    const models = orderedModels(this.store, this.store.listModels());
+    const projects = orderedProjects(this.store, this.store.listProjects());
+    return homeDto(
+      this.#now(),
+      models,
+      projects,
+      executableModelOptions(models),
+      await this.discoverProviders(),
+    );
+  }
+
+  listModelsByLifecycle(
+    lifecycle: "active" | "archived" | "trashed",
+  ): ModelSummaryDto[] {
+    return orderedModels(
+      this.store,
+      this.store.listModels({
+        includeArchived: lifecycle === "archived",
+        includeTrashed: lifecycle === "trashed",
+      }).filter((record) => record.lifecycleState === lifecycle),
+    );
+  }
+
+  listProjectsByLifecycle(
+    lifecycle: "active" | "archived" | "trashed",
+  ): ProjectSummaryDto[] {
+    return orderedProjects(
+      this.store,
+      this.store.listProjects({
+        includeArchived: lifecycle === "archived",
+        includeTrashed: lifecycle === "trashed",
+      }).filter((record) => record.lifecycleState === lifecycle),
+    );
+  }
+
+  lifecycleCommand(input: {
+    commandId: string;
+    action: ProductLifecycleAction;
+    kind: ProductLifecycleKind;
+    id: string;
+    expectedRecordDigest: string;
+    name?: string;
+  }): ProductLifecycleReceipt {
+    try {
+      return this.store.executeLifecycleCommand({
+        commandId: boundedKey(input.commandId, "commandId"),
+        action: input.action,
+        kind: input.kind,
+        id: boundedId(input.id),
+        expectedRecordDigest: input.expectedRecordDigest,
+        ...(input.name === undefined
+          ? {}
+          : { name: boundedName(input.name, "Resource name") }),
+        committedAt: this.#now(),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  permanentDeletePreview(input: {
+    kind: ProductLifecycleKind;
+    id: string;
+    browserGeneration: number;
+    runtimeBlockers?: readonly { kind: string; id: string }[];
+  }): PublicPermanentDeletePreviewDto {
+    try {
+      const preview = this.store.previewPermanentDelete(input.kind, boundedId(input.id));
+      const activity = [
+        ...this.store.permanentDeleteActivityBlockers(input.kind, input.id),
+        ...this.#pendingTurnBlockers(preview),
+        ...(input.runtimeBlockers ?? []),
+      ];
+      const combined = {
+        ...preview,
+        blockingReferences: [...preview.blockingReferences, ...activity]
+          .sort((left, right) => left.kind < right.kind ? -1
+            : left.kind > right.kind ? 1
+              : left.id < right.id ? -1
+                : left.id > right.id ? 1
+                  : 0),
+      };
+      const issued = this.#permanentDeleteAdmission.issue({
+        generation: input.browserGeneration,
+        kind: input.kind,
+        id: input.id,
+        previewToken: preview.previewToken,
+        stateToken: preview.stateToken,
+        recordCount: preview.records.length,
+        fileCount: preview.files.length,
+        totalBytes: preview.totalBytes,
+      });
+      return publicPermanentDeletePreview(
+        input.kind,
+        combined,
+        issued.confirmationToken,
+        issued.expiresAt,
+      );
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  permanentDelete(input: {
+    commandId: string;
+    kind: ProductLifecycleKind;
+    id: string;
+    browserGeneration: number;
+    previewToken: string;
+    stateToken: string;
+    confirmationToken: string;
+    confirmation: Readonly<{
+      action: "permanently_delete";
+      kind: ProductLifecycleKind;
+      id: string;
+      recordCount: number;
+      fileCount: number;
+      totalBytes: number;
+    }>;
+    commitWithFence?: (
+      preview: ReturnType<ProductStoreV2["previewPermanentDelete"]>,
+      commit: () => PermanentDeleteReceipt,
+    ) => PermanentDeleteReceipt;
+  }): PermanentDeleteReceipt {
+    const commandId = boundedKey(input.commandId, "commandId");
+    const id = boundedId(input.id);
+    const canonicalIntentDigest = canonicalDigest({
+      kind: input.kind,
+      id,
+      previewToken: input.previewToken,
+      stateToken: input.stateToken,
+      confirmation: input.confirmation,
+    });
+    try {
+      const replay = this.store.permanentDeleteReceipt(
+        commandId,
+        input.kind,
+        id,
+        canonicalIntentDigest,
+      );
+      if (replay) return replay;
+      this.#permanentDeleteAdmission.consume(input.confirmationToken, {
+        generation: input.browserGeneration,
+        kind: input.kind,
+        id,
+        previewToken: input.previewToken,
+        stateToken: input.stateToken,
+        recordCount: input.confirmation.recordCount,
+        fileCount: input.confirmation.fileCount,
+        totalBytes: input.confirmation.totalBytes,
+      });
+      if (input.confirmation.action !== "permanently_delete"
+        || input.confirmation.kind !== input.kind
+        || input.confirmation.id !== id) {
+        throw new ApiError(
+          422,
+          "permanent_delete_confirmation_mismatch",
+          "Permanent-delete confirmation does not match the route.",
+        );
+      }
+      const preview = this.store.previewPermanentDelete(input.kind, id);
+      if (preview.previewToken !== input.previewToken
+        || preview.stateToken !== input.stateToken
+        || preview.records.length !== input.confirmation.recordCount
+        || preview.files.length !== input.confirmation.fileCount
+        || preview.totalBytes !== input.confirmation.totalBytes) {
+        throw new ApiError(
+          409,
+          "permanent_delete_state_changed",
+          "The permanent-delete preview is stale.",
+        );
+      }
+      const blockers = [
+        ...preview.blockingReferences,
+        ...this.store.permanentDeleteActivityBlockers(input.kind, id),
+        ...this.#pendingTurnBlockers(preview),
+      ];
+      if (blockers.length > 0) {
+        throw new ApiError(
+          409,
+          "permanent_delete_blocked",
+          "The resource cannot be permanently deleted while references or work remain.",
+        );
+      }
+      const commit = (): PermanentDeleteReceipt =>
+        this.store.commitPermanentDelete({
+          commandId,
+          kind: input.kind,
+          id,
+          previewToken: input.previewToken,
+          stateToken: input.stateToken,
+          canonicalIntentDigest,
+          committedAt: this.#now(),
+        });
+      return input.commitWithFence
+        ? input.commitWithFence(preview, commit)
+        : commit();
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof PermanentDeleteAdmissionError) {
+        throw new ApiError(
+          409,
+          "permanent_delete_confirmation_invalid",
+          "The permanent-delete confirmation is invalid or expired.",
+        );
+      }
+      throw storeApiError(error);
     }
   }
 
@@ -683,6 +925,17 @@ export class AgentWorkspaceService {
     catch (error) { throw storeApiError(error); }
   }
 
+  #pendingTurnBlockers(
+    preview: ReturnType<ProductStoreV2["previewPermanentDelete"]>,
+  ): Array<{ kind: "agent_turn_active"; id: string }> {
+    const conversationIds = preview.records
+      .filter((record) => record.table === "conversations")
+      .map((record) => String(record.key.id));
+    return conversationIds
+      .filter((id) => this.#conversationTurnTails.has(id))
+      .map((id) => ({ kind: "agent_turn_active" as const, id }));
+  }
+
   getConversation(conversationId: string): ConversationDto {
     try { return this.store.getConversation(boundedId(conversationId)); }
     catch (error) { throw storeApiError(error); }
@@ -1114,6 +1367,14 @@ const asReadOnlyReason = (code: string | null | undefined): AgentReadOnlyReason 
 
 const storeApiError = (error: unknown): ApiError => {
   if (error instanceof ApiError) return error;
+  if (error instanceof MutationRecoveryError
+    && /committed transaction ID cannot be reused/u.test(error.message)) {
+    return new ApiError(
+      409,
+      "idempotency_conflict",
+      "That creation command was already committed and permanently retired.",
+    );
+  }
   if (!(error instanceof ProductStoreV2Error)) return new ApiError(500, "internal_error", "The Agent workspace could not complete the request.");
   if (/does not exist/u.test(error.message)) return new ApiError(404, "resource_not_found", "The requested resource does not exist.");
   if (/^legacy_contract_read_only:/u.test(error.message)) return new ApiError(409, "legacy_contract_read_only", "The legacy execution contract is read-only.");

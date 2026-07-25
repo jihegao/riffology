@@ -119,6 +119,8 @@ test("run trash route revokes every visual authority and restore cannot revive i
     host: `localhost:${port}`,
     origin: appOrigin,
     fetchSite: "same-origin",
+    fetchMode: "cors",
+    fetchDest: "empty",
   });
   const appMutation = {
     method: "POST",

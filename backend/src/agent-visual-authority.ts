@@ -152,6 +152,13 @@ export class VisualAgentAuthority {
   readonly #epochDigest: string;
   readonly #observer?: Pick<VisualAgentObserver, "observe">;
   readonly #interactor?: Pick<VisualAgentInteractor, "interact">;
+  readonly #authorityIssuanceAllowed: (
+    scope: Readonly<{
+      projectIds: ReadonlySet<string>;
+      conversationIds: ReadonlySet<string>;
+      runIds: ReadonlySet<string>;
+    }>,
+  ) => boolean;
   readonly #maxActiveObservations: number;
   readonly #maxActiveInteractions: number;
   readonly #activeObservationsByConversation = new Map<string, number>();
@@ -172,6 +179,13 @@ export class VisualAgentAuthority {
       interactor?: Pick<VisualAgentInteractor, "interact">;
       maxActiveObservations?: number;
       maxActiveInteractions?: number;
+      authorityIssuanceAllowed?: (
+        scope: Readonly<{
+          projectIds: ReadonlySet<string>;
+          conversationIds: ReadonlySet<string>;
+          runIds: ReadonlySet<string>;
+        }>,
+      ) => boolean;
     }> = {},
   ) {
     this.#store = store;
@@ -188,6 +202,8 @@ export class VisualAgentAuthority {
     );
     this.#observer = options.observer;
     this.#interactor = options.interactor;
+    this.#authorityIssuanceAllowed = options.authorityIssuanceAllowed
+      ?? (() => true);
     this.#maxActiveObservations = boundedPositiveInteger(
       options.maxActiveObservations ?? DEFAULT_MAX_ACTIVE_OBSERVATIONS,
       "Visual observation concurrency limit",
@@ -409,6 +425,13 @@ export class VisualAgentAuthority {
     } catch {
       throw denied();
     }
+    if (!this.#authorityIssuanceAllowed({
+      projectIds: new Set([scope.projectId]),
+      conversationIds: new Set([scope.conversationId]),
+      runIds: new Set([target.runId]),
+    })) {
+      throw denied();
+    }
     const targetExpiryMs = Date.parse(target.attemptExpiresAt);
     if (!Number.isFinite(targetExpiryMs) || targetExpiryMs <= now.getTime()) throw denied();
     const expiresAtMs = Math.min(now.getTime() + this.#ttlMs, targetExpiryMs);
@@ -535,6 +558,17 @@ export class VisualAgentAuthority {
       (grant) => grant.target.runId === runId,
       "run_revoked",
     );
+  }
+
+  hasActiveScope(input: {
+    projectIds: ReadonlySet<string>;
+    runIds: ReadonlySet<string>;
+  }): boolean {
+    this.#sweepExpired();
+    return [...this.#grants.values()].some((grant) =>
+      !grant.terminal
+      && (input.projectIds.has(grant.scope.projectId)
+        || input.runIds.has(grant.target.runId)));
   }
 
   revokeAll(): void {

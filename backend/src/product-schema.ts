@@ -14,6 +14,7 @@ type AtomicRunSuccessContext = Readonly<{
 
 const atomicRunSuccessContexts = new WeakMap<ProductDatabase, AtomicRunSuccessContext>();
 const runCompletionReconciliationContexts = new WeakMap<ProductDatabase, string>();
+const permanentDeleteContexts = new WeakSet<ProductDatabase>();
 const atomicVisualHealthContexts = new WeakMap<
   ProductDatabase,
   Readonly<{ processAttemptId: string; healthyAt: string }>
@@ -87,6 +88,25 @@ export const withAtomicVisualHealthContext = <T>(
   }
 };
 
+/**
+ * @internal ProductStoreV2-only capability. Unlike a table marker, this
+ * authority cannot survive a crash or be enabled by durable database bytes.
+ */
+export const withPermanentDeleteContext = <T>(
+  database: ProductDatabase,
+  body: () => T,
+): T => {
+  if (permanentDeleteContexts.has(database)) {
+    throw new Error("A permanent-delete context is already active.");
+  }
+  permanentDeleteContexts.add(database);
+  try {
+    return body();
+  } finally {
+    permanentDeleteContexts.delete(database);
+  }
+};
+
 export const PRODUCT_DATABASE_PRAGMAS = Object.freeze({
   foreignKeys: true,
   journalMode: "WAL",
@@ -112,6 +132,8 @@ export const configureProductDatabase = (database: ProductDatabase): void => {
     const context = atomicVisualHealthContexts.get(database);
     return context?.processAttemptId === processAttemptId && context.healthyAt === healthyAt ? 1 : 0;
   });
+  database.function("riff_permanent_delete_context", () =>
+    permanentDeleteContexts.has(database) ? 1 : 0);
   database.exec(SQL`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
@@ -3303,6 +3325,179 @@ export const PRODUCT_SCHEMA_V13_SQL = SQL`
   END;
 `;
 
+export const PRODUCT_SCHEMA_V14_SQL = SQL`
+  DROP TRIGGER experiment_legacy_delete_v4;
+  CREATE TRIGGER experiment_legacy_delete_v4
+  BEFORE DELETE ON experiment_configurations
+  WHEN OLD.contract_version = 3
+    AND riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'legacy experiment contract is read only'); END;
+
+  DROP TRIGGER experiment_receipt_delete_v4;
+  CREATE TRIGGER experiment_receipt_delete_v4
+  BEFORE DELETE ON experiment_command_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'experiment receipt is immutable'); END;
+
+  DROP TRIGGER run_legacy_delete_v4;
+  CREATE TRIGGER run_legacy_delete_v4
+  BEFORE DELETE ON runs
+  WHEN OLD.contract_version = 3
+    AND riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'legacy run contract is read only'); END;
+
+  DROP TRIGGER output_legacy_delete_v4;
+  CREATE TRIGGER output_legacy_delete_v4
+  BEFORE DELETE ON output_indexes
+  WHEN OLD.contract_version = 3
+    AND riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'legacy output contract is read only'); END;
+
+  DROP TRIGGER run_receipt_delete_v4;
+  CREATE TRIGGER run_receipt_delete_v4
+  BEFORE DELETE ON run_command_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'run receipt is immutable'); END;
+
+  DROP TRIGGER run_command_terminal_delete_v5;
+  CREATE TRIGGER run_command_terminal_delete_v5
+  BEFORE DELETE ON run_commands
+  WHEN OLD.state IN ('committed', 'rejected')
+    AND riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'terminal run command is immutable'); END;
+
+  DROP TRIGGER run_attempt_delete_v5;
+  CREATE TRIGGER run_attempt_delete_v5
+  BEFORE DELETE ON run_attempts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'v4 run attempts cannot be deleted directly'); END;
+
+  DROP TRIGGER process_attempt_delete_v5;
+  CREATE TRIGGER process_attempt_delete_v5
+  BEFORE DELETE ON process_attempts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'v4 process attempts cannot be deleted directly'); END;
+
+  DROP TRIGGER scratch_lease_delete_v6;
+  CREATE TRIGGER scratch_lease_delete_v6
+  BEFORE DELETE ON run_scratch_leases
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'scratch leases are immutable recovery evidence'); END;
+
+  DROP TRIGGER launch_manifest_delete_v6;
+  CREATE TRIGGER launch_manifest_delete_v6
+  BEFORE DELETE ON process_launch_manifests
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'launch manifests are immutable recovery evidence'); END;
+
+  DROP TRIGGER recovery_action_delete_v6;
+  CREATE TRIGGER recovery_action_delete_v6
+  BEFORE DELETE ON run_recovery_actions
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'recovery actions are immutable evidence'); END;
+
+  DROP TRIGGER platform_card_delete_v7;
+  CREATE TRIGGER platform_card_delete_v7
+  BEFORE DELETE ON messages
+  WHEN OLD.message_kind = 'platform_card'
+    AND riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'platform completion card is immutable'); END;
+
+  DROP TRIGGER run_completion_card_delete_v7;
+  CREATE TRIGGER run_completion_card_delete_v7
+  BEFORE DELETE ON run_completion_cards
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'run completion card receipt is immutable'); END;
+
+  DROP TRIGGER visual_health_receipt_delete_v8;
+  CREATE TRIGGER visual_health_receipt_delete_v8
+  BEFORE DELETE ON visual_health_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'visual health receipts are immutable evidence'); END;
+
+  DROP TRIGGER visual_agent_audit_immutable_delete_v10;
+  CREATE TRIGGER visual_agent_audit_immutable_delete_v10
+  BEFORE DELETE ON visual_agent_audit_facts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'visual agent audit facts are append-only'); END;
+
+  DROP TRIGGER diagnostic_event_sets_immutable_delete_v12;
+  CREATE TRIGGER diagnostic_event_sets_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_event_sets
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event sets are immutable'); END;
+
+  DROP TRIGGER diagnostic_event_files_immutable_delete_v12;
+  CREATE TRIGGER diagnostic_event_files_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_event_files
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event files are immutable'); END;
+
+  DROP TRIGGER diagnostic_events_immutable_delete_v12;
+  CREATE TRIGGER diagnostic_events_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_events
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'diagnostic events are immutable'); END;
+
+  CREATE TABLE resource_lifecycle_receipts (
+    command_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL CHECK (action IN ('rename', 'archive', 'restore', 'trash')),
+    resource_kind TEXT NOT NULL CHECK (resource_kind IN ('model', 'project', 'conversation')),
+    resource_id TEXT NOT NULL,
+    intent_sha256 TEXT NOT NULL CHECK (
+      length(intent_sha256) = 64
+      AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json)
+      AND json_type(receipt_json, '$') = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64
+      AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    committed_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TRIGGER resource_lifecycle_receipts_immutable_update_v14
+  BEFORE UPDATE ON resource_lifecycle_receipts
+  BEGIN SELECT RAISE(ABORT, 'resource lifecycle receipt is immutable'); END;
+
+  CREATE TRIGGER resource_lifecycle_receipts_immutable_delete_v14
+  BEFORE DELETE ON resource_lifecycle_receipts
+  BEGIN SELECT RAISE(ABORT, 'resource lifecycle receipt is immutable'); END;
+
+  CREATE TABLE permanent_delete_receipts (
+    command_id TEXT PRIMARY KEY,
+    resource_kind TEXT NOT NULL CHECK (resource_kind IN ('model', 'project', 'conversation')),
+    resource_id TEXT NOT NULL,
+    canonical_intent_sha256 TEXT NOT NULL CHECK (
+      length(canonical_intent_sha256) = 64
+      AND canonical_intent_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json)
+      AND json_type(receipt_json, '$') = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+      AND json_extract(receipt_json, '$.action') = 'permanently_delete'
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64
+      AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    committed_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TRIGGER permanent_delete_receipts_immutable_update_v14
+  BEFORE UPDATE ON permanent_delete_receipts
+  BEGIN SELECT RAISE(ABORT, 'permanent-delete receipt is immutable'); END;
+
+  CREATE TRIGGER permanent_delete_receipts_immutable_delete_v14
+  BEFORE DELETE ON permanent_delete_receipts
+  BEGIN SELECT RAISE(ABORT, 'permanent-delete receipt is immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -3317,4 +3512,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 11, sql: PRODUCT_SCHEMA_V11_SQL }),
   Object.freeze({ version: 12, sql: PRODUCT_SCHEMA_V12_SQL }),
   Object.freeze({ version: 13, sql: PRODUCT_SCHEMA_V13_SQL }),
+  Object.freeze({ version: 14, sql: PRODUCT_SCHEMA_V14_SQL }),
 ]);

@@ -93,7 +93,31 @@ class AcceptanceOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   async abort(): Promise<void> {}
 }
 
-const post = (url: string, body: unknown): Promise<Response> => fetch(url, {
+const browserSessions = new Map<string, { cookie: string; csrfToken: string }>();
+
+const apiFetch = (
+  input: string | URL | Request,
+  init: RequestInit = {},
+): Promise<Response> => {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  const session = browserSessions.get(url.origin);
+  if (!session || url.pathname === "/api/browser-session/bootstrap") {
+    return globalThis.fetch(input, init);
+  }
+  const method = (init.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const headers = new Headers(init.headers);
+  headers.set("cookie", session.cookie);
+  headers.set("sec-fetch-site", "same-origin");
+  headers.set("sec-fetch-mode", "cors");
+  headers.set("sec-fetch-dest", "empty");
+  if (method !== "GET" && method !== "HEAD") {
+    headers.set("origin", url.origin);
+    headers.set("x-riff-csrf", session.csrfToken);
+  }
+  return globalThis.fetch(input, { ...init, headers });
+};
+
+const post = (url: string, body: unknown): Promise<Response> => apiFetch(url, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
@@ -125,10 +149,27 @@ const start = async (base: string): Promise<{
     }),
   });
   await app.initialize();
-  const address = await app.listen();
+  const network = await app.listenBrowserNetwork();
+  const baseUrl = network.app.origin;
+  const response = await globalThis.fetch(`${baseUrl}/api/browser-session/bootstrap`, {
+    method: "POST",
+    body: "{}",
+    headers: {
+      "content-type": "application/json",
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
+    },
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.ok(cookie);
+  const payload = await response.json() as { csrfToken: string };
+  browserSessions.set(baseUrl, { cookie, csrfToken: payload.csrfToken });
   return {
     app,
-    baseUrl: `http://127.0.0.1:${address.port}`,
+    baseUrl,
     scratchRoot,
   };
 };
@@ -139,7 +180,7 @@ const waitForSucceededRun = async (
   runId: string,
 ): Promise<any> => {
   for (let attempt = 0; attempt < 800; attempt += 1) {
-    const response = await fetch(`${baseUrl}/api/projects/${projectId}/runs/${runId}`);
+    const response = await apiFetch(`${baseUrl}/api/projects/${projectId}/runs/${runId}`);
     assert.equal(response.status, 200, await response.clone().text());
     const run = await response.json() as any;
     if (run.status === "succeeded") return run;
@@ -380,7 +421,7 @@ test("A3-2a2c public Project run route executes one real visual run without leak
   assertNoCompletionEvidence(current, startReceipt.runId);
   assert.equal(current.productStore!.listRunAttempts(startReceipt.runId).length, 1);
 
-  const workspaceResponse = await fetch(`${baseUrl}/api/projects/${project.id}/workspace`);
+  const workspaceResponse = await apiFetch(`${baseUrl}/api/projects/${project.id}/workspace`);
   assert.equal(workspaceResponse.status, 200, await workspaceResponse.clone().text());
   const workspace = await workspaceResponse.json();
   const errorResponse = await post(`${baseUrl}/api/projects/${project.id}/runs`, {
@@ -409,7 +450,7 @@ test("A3-2a2c public Project run route executes one real visual run without leak
     startReceipt.runId,
   );
   assert.deepEqual(succeededAfterRestart, succeeded);
-  const workspaceAfterRestartResponse = await fetch(
+  const workspaceAfterRestartResponse = await apiFetch(
     `${baseUrl}/api/projects/${project.id}/workspace`,
   );
   assert.equal(

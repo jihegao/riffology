@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { ProductDatabase } from "./product-schema.ts";
-import { ProductObjectStore, type OwnerPath, sha256, type WriterLock } from "./object-store.ts";
+import {
+  type ProductDatabase,
+  withPermanentDeleteContext,
+} from "./product-schema.ts";
+import {
+  ProductObjectStore,
+  type FileIdentity,
+  type OwnerPath,
+  sha256,
+  type WriterLock,
+} from "./object-store.ts";
 
 export type MutationFaultPoint = "after_manifest" | "after_database_changes" | "after_files_promoted" | "after_sqlite_commit";
 
@@ -37,12 +46,13 @@ type ManifestOperation = {
   backupRelativePath: string | null;
   priorSha256: string | null;
   priorSizeBytes: number | null;
+  priorIdentity?: FileIdentity | null;
   nextSha256: string | null;
   nextSizeBytes: number | null;
 };
 
 type ManifestCore = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   transactionId: string;
   createdAt: string;
   operations: ManifestOperation[];
@@ -89,11 +99,38 @@ export class MutationCoordinator {
     this.#closed = true;
   }
 
+  assertUsable(): void {
+    if (this.#closed || this.#poisoned) {
+      throw new MutationRecoveryError(
+        "Mutation coordinator is closed or poisoned.",
+      );
+    }
+  }
+
   execute(input: {
     transactionId?: string;
     files: FileMutation[];
     statements: DatabaseMutationStatement[];
   }): void {
+    this.#execute(input, false);
+  }
+
+  executePermanentDelete(input: {
+    transactionId: string;
+    files: FileMutation[];
+    statements: DatabaseMutationStatement[];
+  }): void {
+    withPermanentDeleteContext(
+      this.database,
+      () => this.#execute(input, true),
+    );
+  }
+
+  #execute(input: {
+    transactionId?: string;
+    files: FileMutation[];
+    statements: DatabaseMutationStatement[];
+  }, deferForeignKeys: boolean): void {
     if (this.#closed || this.#poisoned) throw new MutationRecoveryError("Mutation coordinator is closed or poisoned.");
     this.#validateExecutionPlan(input);
     const transactionId = input.transactionId ?? `mutation_${randomUUID().replaceAll("-", "")}`;
@@ -106,10 +143,16 @@ export class MutationCoordinator {
       this.#fault?.("after_manifest");
       this.database.exec("BEGIN IMMEDIATE");
       transactionOpen = true;
+      if (deferForeignKeys) {
+        this.database.exec("PRAGMA defer_foreign_keys = ON");
+      }
       this.#assertPriorState(manifest);
       this.#validateOwnership("before_mutate", manifest);
+      this.#stageDeletes(manifest);
+      this.#assertStagedDeletes(manifest);
       this.#runStatements(input.statements);
       this.#validateOwnership("after_mutate", manifest);
+      this.#assertStagedDeletes(manifest);
       this.database.prepare(`INSERT INTO committed_mutations (transaction_id, manifest_sha256, committed_at)
         VALUES (?, ?, ?)`
       ).run(transactionId, manifest.manifestSha256, this.#clock());
@@ -130,7 +173,15 @@ export class MutationCoordinator {
           throw new MutationRecoveryError("SQLite rollback failed; recovery material and writer lock were retained.", { cause: rollbackError });
         }
       }
-      this.#recoverOne(manifest);
+      try {
+        this.#recoverOne(manifest);
+      } catch (recoveryError) {
+        this.#poisoned = true;
+        throw new MutationRecoveryError(
+          "Mutation recovery failed; recovery material and writer lock were retained.",
+          { cause: recoveryError },
+        );
+      }
       throw error;
     }
   }
@@ -163,8 +214,14 @@ export class MutationCoordinator {
           throw new MutationRecoveryError("The prior object digest does not match the mutation precondition.");
         }
         const suffix = String(index).padStart(8, "0");
-        const backupRelativePath = prior ? `backup/${suffix}.bin` : null;
-        if (prior && backupRelativePath) this.objects.writeDurable(`${directory}/${backupRelativePath}`, prior.bytes);
+        const backupRelativePath = prior
+          ? mutation.operation === "delete"
+            ? `removed/${suffix}.bin`
+            : `backup/${suffix}.bin`
+          : null;
+        if (prior && mutation.operation === "write" && backupRelativePath) {
+          this.objects.writeDurable(`${directory}/${backupRelativePath}`, prior.bytes);
+        }
         let stagedRelativePath: string | null = null;
         let nextSha256: string | null = null;
         let nextSizeBytes: number | null = null;
@@ -181,11 +238,17 @@ export class MutationCoordinator {
           backupRelativePath,
           priorSha256: prior?.sha256 ?? null,
           priorSizeBytes: prior?.sizeBytes ?? null,
+          priorIdentity: prior ? inspectionWithoutBytes(prior) : null,
           nextSha256,
           nextSizeBytes,
         });
       });
-      const core: ManifestCore = { schemaVersion: 1, transactionId, createdAt: this.#clock(), operations };
+      const core: ManifestCore = {
+        schemaVersion: 2,
+        transactionId,
+        createdAt: this.#clock(),
+        operations,
+      };
       const manifest: RecoveryManifest = { ...core, manifestSha256: sha256(manifestCoreBytes(core)) };
       this.objects.publishRecoveryManifest(transactionId, manifestBytes(manifest));
       return manifest;
@@ -210,11 +273,51 @@ export class MutationCoordinator {
   #rollForward(manifest: RecoveryManifest): void {
     const directory = this.objects.transactionDirectory(manifest.transactionId);
     for (const operation of manifest.operations) {
-      const current = this.objects.inspect(operation.target);
+      const current = this.objects.inspectIdentity(operation.target);
       if (operation.operation === "delete") {
-        if (!current) continue;
-        if (current.sha256 !== operation.priorSha256 || current.sizeBytes !== operation.priorSizeBytes) throw new MutationRecoveryError("Delete target changed during recovery.");
-        this.objects.unlinkExact(this.objects.resolveOwnerPath(operation.target));
+        if (!current) {
+          if (manifest.schemaVersion === 2) {
+            const stagedPath = this.#transactionFile(
+              directory,
+              operation.backupRelativePath!,
+              "removed",
+            );
+            if (existsSync(stagedPath)) {
+              const staged = this.objects.inspectManagedPath(stagedPath);
+              if (!operation.priorIdentity
+                || !sameInspection(staged, operation.priorIdentity)) {
+                throw new MutationRecoveryError(
+                  "Staged delete identity changed during recovery.",
+                );
+              }
+            } else if (existsSync(directory)) {
+              throw new MutationRecoveryError(
+                "Staged delete bytes are missing during recovery.",
+              );
+            }
+          }
+          continue;
+        }
+        if (manifest.schemaVersion === 1) {
+          if (current.sha256 !== operation.priorSha256
+            || current.sizeBytes !== operation.priorSizeBytes) {
+            throw new MutationRecoveryError(
+              "Legacy delete target changed during recovery.",
+            );
+          }
+          this.objects.unlinkExact(
+            this.objects.resolveOwnerPath(operation.target),
+          );
+          continue;
+        }
+        if (!operation.priorIdentity || !sameInspection(current, operation.priorIdentity)) {
+          throw new MutationRecoveryError("Delete target changed during recovery.");
+        }
+        this.objects.stageExactRemoval(
+          operation.target,
+          operation.priorIdentity,
+          this.#transactionFile(directory, operation.backupRelativePath!, "removed"),
+        );
         continue;
       }
       if (current?.sha256 === operation.nextSha256 && current.sizeBytes === operation.nextSizeBytes) continue;
@@ -229,11 +332,48 @@ export class MutationCoordinator {
   #rollBack(manifest: RecoveryManifest): void {
     const directory = this.objects.transactionDirectory(manifest.transactionId);
     for (const operation of [...manifest.operations].reverse()) {
-      const current = this.objects.inspect(operation.target);
+      const current = this.objects.inspectIdentity(operation.target);
       if (operation.priorSha256 === null) {
         if (!current) continue;
         if (current.sha256 !== operation.nextSha256 || current.sizeBytes !== operation.nextSizeBytes) throw new MutationRecoveryError("Uncommitted target changed before rollback.");
         this.objects.unlinkExact(this.objects.resolveOwnerPath(operation.target));
+        continue;
+      }
+      if (operation.operation === "delete") {
+        if (manifest.schemaVersion === 1) {
+          if (current?.sha256 === operation.priorSha256
+            && current.sizeBytes === operation.priorSizeBytes) {
+            continue;
+          }
+          if (current) {
+            throw new MutationRecoveryError(
+              "Legacy removal target changed before rollback.",
+            );
+          }
+          const legacyBackup = this.#transactionFile(
+            directory,
+            operation.backupRelativePath!,
+            "backup",
+          );
+          this.#verifyInternalFile(
+            legacyBackup,
+            operation.priorSha256,
+            operation.priorSizeBytes!,
+          );
+          this.objects.atomicReplace(
+            this.objects.ensureOwnerParent(operation.target),
+            this.objects.readManagedFile(legacyBackup),
+          );
+          continue;
+        }
+        if (!operation.priorIdentity) {
+          throw new MutationRecoveryError("Removal rollback identity is missing.");
+        }
+        this.objects.restoreExactRemoval(
+          operation.target,
+          operation.priorIdentity,
+          this.#transactionFile(directory, operation.backupRelativePath!, "removed"),
+        );
         continue;
       }
       if (current?.sha256 === operation.priorSha256 && current.sizeBytes === operation.priorSizeBytes) continue;
@@ -258,7 +398,11 @@ export class MutationCoordinator {
     try { value = JSON.parse(this.objects.readManagedFile(path).toString("utf8")); } catch { throw new MutationRecoveryError("Recovery manifest is not valid JSON."); }
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationRecoveryError("Recovery manifest has an invalid shape.");
     const manifest = value as RecoveryManifest;
-    if (manifest.schemaVersion !== 1 || manifest.transactionId !== transactionId || typeof manifest.createdAt !== "string" || !Array.isArray(manifest.operations) || !/^[0-9a-f]{64}$/u.test(String(manifest.manifestSha256))) {
+    if (![1, 2].includes(manifest.schemaVersion)
+      || manifest.transactionId !== transactionId
+      || typeof manifest.createdAt !== "string"
+      || !Array.isArray(manifest.operations)
+      || !/^[0-9a-f]{64}$/u.test(String(manifest.manifestSha256))) {
       throw new MutationRecoveryError("Recovery manifest identity is invalid.");
     }
     const { manifestSha256, ...core } = manifest;
@@ -269,14 +413,29 @@ export class MutationCoordinator {
       const validSize = (size: unknown): boolean => size === null || typeof size === "number" && Number.isSafeInteger(size) && size >= 0;
       const priorPairValid = Boolean(operation) && (operation.priorSha256 === null) === (operation.priorSizeBytes === null);
       const nextPairValid = Boolean(operation) && (operation.nextSha256 === null) === (operation.nextSizeBytes === null);
+      const priorIdentityValid = manifest.schemaVersion === 1
+        ? operation?.priorIdentity === undefined
+        : operation?.priorIdentity !== undefined
+          && (operation.priorIdentity === null)
+            === (operation.priorSha256 === null)
+          && (operation.priorIdentity === null
+            || validInspection(operation.priorIdentity)
+              && operation.priorIdentity.sha256 === operation.priorSha256
+              && operation.priorIdentity.sizeBytes
+                === operation.priorSizeBytes);
       if (!operation || !["write", "delete"].includes(operation.operation)
         || !validDigest(operation.priorSha256) || !validDigest(operation.nextSha256)
         || !validSize(operation.priorSizeBytes) || !validSize(operation.nextSizeBytes)
         || !priorPairValid || !nextPairValid
-        || operation.backupRelativePath !== (operation.priorSha256 === null ? null : `backup/${suffix}.bin`)
+        || operation.backupRelativePath !== (operation.priorSha256 === null
+          ? null
+          : manifest.schemaVersion === 2 && operation.operation === "delete"
+            ? `removed/${suffix}.bin`
+            : `backup/${suffix}.bin`)
         || operation.stagedRelativePath !== (operation.operation === "write" ? `next/${suffix}.bin` : null)
         || operation.operation === "delete" && operation.priorSha256 === null
-        || (operation.operation === "write" ? operation.nextSha256 === null : operation.nextSha256 !== null)) {
+        || (operation.operation === "write" ? operation.nextSha256 === null : operation.nextSha256 !== null)
+        || !priorIdentityValid) {
         throw new MutationRecoveryError("Recovery manifest operation is invalid.");
       }
       this.objects.resolveOwnerPath(operation.target);
@@ -285,15 +444,72 @@ export class MutationCoordinator {
   }
 
   #assertPriorState(manifest: RecoveryManifest): void {
+    if (manifest.schemaVersion !== 2) {
+      throw new MutationRecoveryError(
+        "Only current recovery manifests may start a mutation.",
+      );
+    }
     for (const operation of manifest.operations) {
-      const current = this.objects.inspect(operation.target);
-      if ((current?.sha256 ?? null) !== operation.priorSha256 || (current?.sizeBytes ?? null) !== operation.priorSizeBytes) {
+      const current = this.objects.inspectIdentity(operation.target);
+      const priorIdentity = operation.priorIdentity;
+      if (priorIdentity === undefined
+        || (priorIdentity === null
+          ? current !== null
+          : current === null || !sameInspection(current, priorIdentity))) {
         throw new MutationRecoveryError("An object changed after staging and before database commit.");
       }
     }
   }
 
-  #transactionFile(directory: string, relativePath: string, kind: "next" | "backup"): string {
+  #stageDeletes(manifest: RecoveryManifest): void {
+    if (manifest.schemaVersion !== 2) {
+      throw new MutationRecoveryError(
+        "Only current recovery manifests may stage deletes.",
+      );
+    }
+    const directory = this.objects.transactionDirectory(manifest.transactionId);
+    for (const operation of manifest.operations) {
+      if (operation.operation !== "delete") continue;
+      if (!operation.priorIdentity) {
+        throw new MutationRecoveryError("Delete target identity is missing.");
+      }
+      this.objects.stageExactRemoval(
+        operation.target,
+        operation.priorIdentity,
+        this.#transactionFile(directory, operation.backupRelativePath!, "removed"),
+      );
+    }
+  }
+
+  #assertStagedDeletes(manifest: RecoveryManifest): void {
+    if (manifest.schemaVersion !== 2) return;
+    const directory = this.objects.transactionDirectory(
+      manifest.transactionId,
+    );
+    for (const operation of manifest.operations) {
+      if (operation.operation !== "delete" || !operation.priorIdentity) {
+        continue;
+      }
+      const staged = this.objects.inspectManagedPath(
+        this.#transactionFile(
+          directory,
+          operation.backupRelativePath!,
+          "removed",
+        ),
+      );
+      if (!sameInspection(staged, operation.priorIdentity)) {
+        throw new MutationRecoveryError(
+          "Staged delete identity changed before database commit.",
+        );
+      }
+    }
+  }
+
+  #transactionFile(
+    directory: string,
+    relativePath: string,
+    kind: "next" | "backup" | "removed",
+  ): string {
     if (!new RegExp(`^${kind}/\\d{8}\\.bin$`, "u").test(relativePath)) throw new MutationRecoveryError("Recovery file path is invalid.");
     return `${directory}/${relativePath}`;
   }
@@ -311,7 +527,15 @@ export class MutationCoordinator {
 
   #validateExecutionPlan(input: Record<string, unknown>): void {
     const keys = Object.keys(input).sort();
-    if (keys.some((key) => !["files", "statements", "transactionId"].includes(key))) throw new MutationRecoveryError("Mutation plan contains unsupported executable fields.");
+    if (keys.some((key) => ![
+      "files",
+      "statements",
+      "transactionId",
+    ].includes(key))) {
+      throw new MutationRecoveryError(
+        "Mutation plan contains unsupported executable fields.",
+      );
+    }
     if (!Array.isArray(input.files) || !Array.isArray(input.statements) || input.statements.length < 1) throw new MutationRecoveryError("Mutation plan requires files and at least one database statement.");
     for (const value of input.statements) {
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationRecoveryError("Database mutation statement is invalid.");
@@ -335,6 +559,35 @@ export class MutationCoordinator {
   }
 }
 
+const inspectionWithoutBytes = (
+  inspection: FileIdentity & { bytes: Buffer },
+): FileIdentity => ({
+  device: inspection.device,
+  inode: inspection.inode,
+  linkCount: inspection.linkCount,
+  type: inspection.type,
+  sizeBytes: inspection.sizeBytes,
+  sha256: inspection.sha256,
+});
+
+const validInspection = (value: unknown): value is FileIdentity => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const inspection = value as Partial<FileIdentity>;
+  return typeof inspection.device === "string" && /^\d+$/u.test(inspection.device)
+    && typeof inspection.inode === "string" && /^\d+$/u.test(inspection.inode)
+    && inspection.linkCount === 1 && inspection.type === "file"
+    && Number.isSafeInteger(inspection.sizeBytes) && Number(inspection.sizeBytes) >= 0
+    && typeof inspection.sha256 === "string" && /^[0-9a-f]{64}$/u.test(inspection.sha256);
+};
+
+const sameInspection = (left: FileIdentity, right: FileIdentity): boolean =>
+  left.device === right.device
+  && left.inode === right.inode
+  && left.linkCount === right.linkCount
+  && left.type === right.type
+  && left.sizeBytes === right.sizeBytes
+  && left.sha256 === right.sha256;
+
 const baselineSqliteObjectOwnershipValidator = (database: ProductDatabase, phase: OwnershipValidationPhase, operations: readonly PlannedObjectMutation[]): void => {
   for (const operation of operations) {
     const { column, table } = ownerBinding(operation.target);
@@ -344,10 +597,10 @@ const baselineSqliteObjectOwnershipValidator = (database: ProductDatabase, phase
       if (operation.priorSha256 === null ? row !== undefined : !owner || operation.target.owner.kind === "run" && owner.project_id !== operation.target.runProjectId || !row || row.sha256 !== operation.priorSha256 || row.size_bytes !== operation.priorSizeBytes) {
         throw new MutationRecoveryError("Planned existing object is not bound to matching database metadata.");
       }
-    } else if (!owner || operation.target.owner.kind === "run" && owner.project_id !== operation.target.runProjectId) {
-      throw new MutationRecoveryError("Planned object owner does not exist or is outside its Project after mutation.");
     } else if (operation.operation === "delete") {
       if (row) throw new MutationRecoveryError("Deleted object metadata remains after the database mutation.");
+    } else if (!owner || operation.target.owner.kind === "run" && owner.project_id !== operation.target.runProjectId) {
+      throw new MutationRecoveryError("Planned object owner does not exist or is outside its Project after mutation.");
     } else if (!row || row.sha256 !== operation.nextSha256 || row.size_bytes !== operation.nextSizeBytes) {
       throw new MutationRecoveryError("Written object is not bound to matching database metadata after mutation.");
     }

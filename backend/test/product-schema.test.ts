@@ -165,7 +165,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v13 and expose Agent and execution records", () => {
+test("schema migrations advance sequentially from v1 through v14 and expose Agent, execution, and lifecycle receipt records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
@@ -177,7 +177,8 @@ test("schema migrations advance sequentially from v1 through v13 and expose Agen
     assert.equal(columns.some(({ name }) => name === "adoption_purpose"), true);
     for (const table of ["agent_turns", "dispatcher_state", "run_attempts", "process_attempts", "run_commands", "run_command_receipts",
       "experiment_command_receipts", "run_completion_cards", "visual_health_receipts",
-      "diagnostic_event_sets", "diagnostic_event_files", "diagnostic_events"]) {
+      "diagnostic_event_sets", "diagnostic_event_files", "diagnostic_events",
+      "resource_lifecycle_receipts", "permanent_delete_receipts"]) {
       assert.equal(Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)), true, table);
     }
   } finally {
@@ -185,7 +186,7 @@ test("schema migrations advance sequentially from v1 through v13 and expose Agen
   }
 });
 
-test("ordered v2 through v13 migration locks legacy providers and preserves execution migration atomicity", () => {
+test("ordered v2 through v14 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);

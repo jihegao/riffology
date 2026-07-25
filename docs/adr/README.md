@@ -1,9 +1,9 @@
 # Architecture decision records
 
-- Status: Proposed — A3-2b implementation gate
-- Role: active design
-- Scope: derived review checklists for A3-2b browser isolation and forwarding
-- Source of truth: active A3 design and backend API contract
+- Status: active
+- Role: normative contract
+- Scope: browser isolation, forwarding, Product admission, and deletion decisions
+- Source of truth: PRD, active stage designs, backend API contract, and implementation
 - Last reviewed: 2026-07-25
 
 This directory extracts stable architecture decisions from the active A3 design
@@ -19,6 +19,7 @@ checklists; the active A3 design and API documents remain the source of truth.
 | [0001](0001-isolated-browser-network-topology.md) | Isolate the app/broker origins from the visual child | Proposed — A3-2b implementation gate |
 | [0002](0002-browser-frame-capability.md) | Bootstrap and redeem a browser-scoped frame capability | Proposed — A3-2b implementation gate |
 | [0003](0003-websocket-forwarding-and-revocation.md) | Enforce frozen WebSocket limits, revocation, and secrecy | Proposed — A3-2b implementation gate |
+| [0004](0004-product-browser-admission-and-deletion.md) | Use one Product browser boundary and fenced preview/confirm permanent deletion | Accepted — A4-1 |
 
 ## Source contract
 

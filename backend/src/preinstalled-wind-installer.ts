@@ -61,6 +61,15 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
   async install(): Promise<PreinstalledWindInstallResult> {
     const manifest = this.#manifest;
     try {
+      const priorInstallation = this.#store.getPreinstalledManifestInstallation(
+        manifest.manifestId,
+        manifest.manifestVersion,
+      );
+      if (priorInstallation?.state === "ready") {
+        this.#verifyInstallationIdentity(priorInstallation);
+        this.#verifyReadyResources();
+        return result(manifest);
+      }
       const existingModel = this.#store.listModels({
         includeArchived: true,
         includeTrashed: true,
@@ -96,7 +105,7 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
         maxSamples: 1,
       });
       if (installation.state === "ready") {
-        this.#verifyReadyResources(baselinePlan.configurationDigest);
+        this.#verifyReadyResources();
         return result(manifest);
       }
 
@@ -142,7 +151,7 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
         manifestDigest: manifest.manifestDigest,
         readyAt: manifest.createdAt,
       });
-      this.#verifyReadyResources(baselinePlan.configurationDigest);
+      this.#verifyReadyResources();
       return result(manifest);
     } catch (error) {
       if (
@@ -197,7 +206,7 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
     throw conflict("the ordinary Model technical check exhausted recovery attempts");
   }
 
-  #verifyReadyResources(expectedConfigurationDigest: string): void {
+  #verifyReadyResources(): void {
     const manifest = this.#manifest;
     const project = this.#store.listProjects({
       includeArchived: true,
@@ -205,7 +214,6 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
     }).find((candidate) => candidate.id === manifest.projectId);
     if (
       !project
-      || project.lifecycleState !== "active"
       || project.sourceModelId !== manifest.modelId
       || canonicalDigest(project.executionDescription)
         !== canonicalDigest(manifest.executionDescription)
@@ -226,12 +234,27 @@ export class PreinstalledWindInstaller implements PreinstalledWindInstallerPort 
         candidate.id === manifest.experimentConfigurationId);
     if (
       !experiment
-      || experiment.lifecycleState !== "active"
       || experiment.contractVersion !== 4
-      || experiment.configurationDigest !== expectedConfigurationDigest
-      || experiment.sampleCount !== 1
     ) {
       throw conflict("the synthetic baseline Experiment drifted");
+    }
+  }
+
+  #verifyInstallationIdentity(
+    installation: NonNullable<
+      ReturnType<ProductStoreV2["getPreinstalledManifestInstallation"]>
+    >,
+  ): void {
+    const manifest = this.#manifest;
+    if (
+      installation.manifestDigest !== manifest.manifestDigest
+      || installation.modelId !== manifest.modelId
+      || installation.projectId !== manifest.projectId
+      || installation.experimentConfigurationId
+        !== manifest.experimentConfigurationId
+      || installation.claimedAt !== manifest.createdAt
+    ) {
+      throw conflict("the ready manifest installation identity drifted");
     }
   }
 

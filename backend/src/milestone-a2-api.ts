@@ -3,6 +3,11 @@ import { ApiError } from "./errors.ts";
 import { parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import type { ConversationOwner } from "./agent-domain.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import type {
+  PermanentDeleteReceipt,
+  PermanentDeletePreview,
+  ProductLifecycleKind,
+} from "./product-domain.ts";
 import {
   DiagnosticEventCursorCodec,
   DiagnosticEventCursorError,
@@ -11,8 +16,16 @@ import {
 
 export class MilestoneA2Api {
   readonly service: AgentWorkspaceService;
-  readonly #authorizeProductRead?: (request: IncomingMessage) => void;
-  readonly #authorizeProductMutation?: (request: IncomingMessage) => void;
+  readonly #authorizeProductRead?: (request: IncomingMessage) => number | void;
+  readonly #authorizeProductMutation?: (request: IncomingMessage) => number | void;
+  readonly #requireBrowserAdmission: boolean;
+  readonly #resourceDeleteRuntimeBlockers?: (
+    preview: PermanentDeletePreview,
+  ) => readonly { kind: string; id: string }[];
+  readonly #commitResourcePermanentDelete?: (
+    preview: PermanentDeletePreview,
+    commit: () => PermanentDeleteReceipt,
+  ) => PermanentDeleteReceipt;
   readonly #revokeRunAccess?: (runId: string) => void;
   readonly #diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
   #activeOutputDownloads = 0;
@@ -25,8 +38,16 @@ export class MilestoneA2Api {
   constructor(
     service: AgentWorkspaceService,
     options: Readonly<{
-      authorizeProductRead?: (request: IncomingMessage) => void;
-      authorizeProductMutation?: (request: IncomingMessage) => void;
+      authorizeProductRead?: (request: IncomingMessage) => number | void;
+      authorizeProductMutation?: (request: IncomingMessage) => number | void;
+      requireBrowserAdmission?: boolean;
+      resourceDeleteRuntimeBlockers?: (
+        preview: PermanentDeletePreview,
+      ) => readonly { kind: string; id: string }[];
+      commitResourcePermanentDelete?: (
+        preview: PermanentDeletePreview,
+        commit: () => PermanentDeleteReceipt,
+      ) => PermanentDeleteReceipt;
       revokeRunAccess?: (runId: string) => void;
       diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
     }> = {},
@@ -34,6 +55,9 @@ export class MilestoneA2Api {
     this.service = service;
     this.#authorizeProductRead = options.authorizeProductRead;
     this.#authorizeProductMutation = options.authorizeProductMutation;
+    this.#requireBrowserAdmission = options.requireBrowserAdmission ?? false;
+    this.#resourceDeleteRuntimeBlockers = options.resourceDeleteRuntimeBlockers;
+    this.#commitResourcePermanentDelete = options.commitResourcePermanentDelete;
     this.#revokeRunAccess = options.revokeRunAccess;
     this.#diagnosticEventCursorCodec = options.diagnosticEventCursorCodec;
   }
@@ -56,8 +80,26 @@ export class MilestoneA2Api {
       return true;
     }
     if (parts[0] !== "api") return false;
+    let browserGeneration = 0;
+    if (this.#requireBrowserAdmission
+      && productRoute(request.method ?? "", parts)) {
+      browserGeneration = this.#authorizeProductApi(request, url);
+    }
+    if (request.method === "GET" && parts.length === 2 && parts[1] === "home") {
+      exactQuery(url, []);
+      privateJson(response, 200, await this.service.home());
+      return true;
+    }
+    if (request.method === "GET" && parts.length === 2
+      && (parts[1] === "models" || parts[1] === "projects")) {
+      const lifecycle = lifecycleQuery(url);
+      privateJson(response, 200, parts[1] === "models"
+        ? { models: this.service.listModelsByLifecycle(lifecycle) }
+        : { projects: this.service.listProjectsByLifecycle(lifecycle) });
+      return true;
+    }
     if (request.method === "GET" && parts.length === 2 && parts[1] === "providers") {
-      json(response, 200, await this.service.discoverProviders());
+      privateJson(response, 200, await this.service.discoverProviders());
       return true;
     }
     if (request.method === "POST" && parts.length === 2 && parts[1] === "models") {
@@ -69,6 +111,97 @@ export class MilestoneA2Api {
         modelId: requiredString(body.modelId, "modelId"),
       }));
       return true;
+    }
+    if (parts.length >= 4 && parts[1] === "resources") {
+      const kind = publicLifecycleKind(parts[2]);
+      const id = parts[3];
+      if (request.method === "PATCH" && parts.length === 4) {
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "expectedRecordDigest", "name"],
+        );
+        privateJson(response, 200, this.service.lifecycleCommand({
+          commandId: requiredString(body.commandId, "commandId"),
+          action: "rename",
+          kind,
+          id,
+          expectedRecordDigest: requiredString(
+            body.expectedRecordDigest,
+            "expectedRecordDigest",
+          ),
+          name: requiredString(body.name, "name"),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && ["archive", "restore", "trash"].includes(parts[4]!)) {
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "expectedRecordDigest"],
+        );
+        privateJson(response, 200, this.service.lifecycleCommand({
+          commandId: requiredString(body.commandId, "commandId"),
+          action: parts[4] as "archive" | "restore" | "trash",
+          kind,
+          id,
+          expectedRecordDigest: requiredString(
+            body.expectedRecordDigest,
+            "expectedRecordDigest",
+          ),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && parts[4] === "permanent-delete-preview") {
+        await strictJsonBody(request, []);
+        const preview = this.service.store.previewPermanentDelete(kind, id);
+        const runtimeBlockers = this.#runtimeDeleteBlockers(preview);
+        privateJson(response, 200, this.service.permanentDeletePreview({
+          kind,
+          id,
+          browserGeneration,
+          runtimeBlockers,
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && parts[4] === "permanent-delete") {
+        const body = await strictJsonBody(request, [
+          "commandId",
+          "previewToken",
+          "stateToken",
+          "confirmationToken",
+          "confirmation",
+        ]);
+        const confirmation = permanentDeleteConfirmation(body.confirmation);
+        privateJson(response, 200, this.service.permanentDelete({
+          commandId: requiredString(body.commandId, "commandId"),
+          kind,
+          id,
+          browserGeneration,
+          previewToken: requiredString(body.previewToken, "previewToken"),
+          stateToken: requiredString(body.stateToken, "stateToken"),
+          confirmationToken: requiredString(
+            body.confirmationToken,
+            "confirmationToken",
+          ),
+          confirmation,
+          commitWithFence: (preview, commit) => {
+            const blockers = this.#runtimeDeleteBlockers(preview);
+            if (blockers.length > 0) {
+              throw new ApiError(
+                409,
+                "permanent_delete_active_authority",
+                "The resource still has active browser or execution authority.",
+              );
+            }
+            return this.#commitResourcePermanentDelete
+              ? this.#commitResourcePermanentDelete(preview, commit)
+              : commit();
+          },
+        }));
+        return true;
+      }
     }
     if (request.method === "POST" && parts.length === 2 && parts[1] === "projects") {
       const body = await strictJsonBody(request, ["commandId", "name", "modelId"]);
@@ -316,6 +449,106 @@ export class MilestoneA2Api {
       }
     }
     return false;
+  }
+
+  #authorizeProductApi(request: IncomingMessage, url: URL): number {
+    const method = request.method ?? "";
+    if (method === "GET" || method === "HEAD") {
+      const collectionQuery = method === "GET"
+        && /^\/api\/(?:models|projects)$/u.test(url.pathname);
+      const eventQuery = method === "GET"
+        && /\/diagnostic-events$/u.test(url.pathname);
+      if (url.search !== "" && !collectionQuery && !eventQuery) {
+        throw new ApiError(
+          422,
+          "invalid_product_query",
+          "This Product API read does not accept query parameters.",
+        );
+      }
+      const contentLength = exactProductRawHeader(request, "content-length");
+      if (exactProductRawHeader(request, "transfer-encoding") !== undefined
+        || contentLength !== undefined && contentLength !== "0"
+        || exactProductRawHeader(request, "if-none-match") !== undefined
+        || exactProductRawHeader(request, "if-modified-since") !== undefined
+        || exactProductRawHeader(request, "if-range") !== undefined) {
+        throw new ApiError(
+          422,
+          "invalid_product_read",
+          "Product reads require one unconditional empty request.",
+        );
+      }
+      if (!this.#authorizeProductRead) {
+        throw new ApiError(
+          403,
+          "browser_session_denied",
+          "The Product API requires a current browser session.",
+        );
+      }
+      try {
+        return Number(this.#authorizeProductRead(request) ?? 0);
+      } catch {
+        throw new ApiError(
+          403,
+          "browser_session_denied",
+          "The Product API requires a current browser session.",
+        );
+      }
+    }
+    if (url.search !== "") {
+      throw new ApiError(
+        422,
+        "invalid_product_mutation",
+        "Product mutations do not accept query parameters.",
+      );
+    }
+    const contentLength = exactProductRawHeader(request, "content-length");
+    if (exactProductRawHeader(request, "transfer-encoding") !== undefined
+      || contentLength === undefined
+      || !/^(?:[1-9]\d{0,6})$/u.test(contentLength)
+      || Number(contentLength) > 1_600_000) {
+      throw new ApiError(
+        422,
+        "invalid_product_mutation",
+        "Product mutations require one bounded JSON body.",
+      );
+    }
+    if (exactProductRawHeader(request, "content-type") !== "application/json") {
+      throw new ApiError(
+        415,
+        "unsupported_media_type",
+        "Product mutations require exact application/json.",
+      );
+    }
+    if (!this.#authorizeProductMutation) {
+      throw new ApiError(
+        403,
+        "browser_session_denied",
+        "The Product API requires a current browser session.",
+      );
+    }
+    try {
+      return Number(this.#authorizeProductMutation(request) ?? 0);
+    } catch {
+      throw new ApiError(
+        403,
+        "browser_session_denied",
+        "The Product API requires a current browser session.",
+      );
+    }
+  }
+
+  #runtimeDeleteBlockers(
+    preview: PermanentDeletePreview,
+  ): Array<{ kind: string; id: string }> {
+    const blockers: Array<{ kind: string; id: string }> = [];
+    for (const record of preview.records) {
+      if (record.table !== "runs" || typeof record.key.id !== "string") continue;
+      if ((this.#activeOutputDownloadsByRun.get(record.key.id) ?? 0) > 0) {
+        blockers.push({ kind: "output_download_active", id: record.key.id });
+      }
+    }
+    blockers.push(...(this.#resourceDeleteRuntimeBlockers?.(preview) ?? []));
+    return blockers;
   }
 
   #authorizeOutputRead(request: IncomingMessage, url: URL): void {
@@ -744,6 +977,21 @@ const exactEventRawHeader = (
   }
 };
 
+const exactProductRawHeader = (
+  request: IncomingMessage,
+  name: string,
+): string | undefined => {
+  try {
+    return exactRawHeader(request, name);
+  } catch {
+    throw new ApiError(
+      422,
+      "invalid_product_request",
+      "The Product API request contains a duplicate header.",
+    );
+  }
+};
+
 const exactRunControlRawHeader = (
   request: IncomingMessage,
   name: string,
@@ -820,6 +1068,75 @@ const privateJson = (
   response.end(bytes);
 };
 
+const productRoute = (method: string, parts: string[]): boolean => {
+  if (parts[0] !== "api") return false;
+  if (method === "GET" && parts.length === 2
+    && ["home", "models", "projects", "providers"].includes(parts[1]!)) {
+    return true;
+  }
+  if (method === "POST" && parts.length === 2
+    && ["models", "projects"].includes(parts[1]!)) {
+    return true;
+  }
+  if (parts[1] === "resources" && parts.length >= 4
+    && ["PATCH", "POST"].includes(method)) {
+    return true;
+  }
+  if (parts[1] === "objects" && parts[4] === "conversations"
+    && ["GET", "POST"].includes(method)) {
+    return true;
+  }
+  if (parts[1] === "conversations"
+    && ["GET", "POST"].includes(method)) {
+    return true;
+  }
+  if (parts[1] === "models" && parts.length >= 4
+    && ["GET", "POST"].includes(method)) {
+    return true;
+  }
+  return parts[1] === "projects" && parts.length >= 4
+    && ["GET", "HEAD", "POST", "PATCH"].includes(method);
+};
+
+const exactQuery = (url: URL, allowed: readonly string[]): void => {
+  const allowedSet = new Set(allowed);
+  for (const key of url.searchParams.keys()) {
+    if (!allowedSet.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new ApiError(
+        422,
+        "invalid_product_query",
+        "The Product API query is invalid.",
+      );
+    }
+  }
+};
+
+const lifecycleQuery = (
+  url: URL,
+): "active" | "archived" | "trashed" => {
+  exactQuery(url, ["lifecycle"]);
+  const lifecycle = url.searchParams.get("lifecycle") ?? "active";
+  if (!["active", "archived", "trashed"].includes(lifecycle)) {
+    throw new ApiError(
+      422,
+      "invalid_lifecycle_filter",
+      "The lifecycle filter is invalid.",
+    );
+  }
+  return lifecycle as "active" | "archived" | "trashed";
+};
+
+const publicLifecycleKind = (value: string): ProductLifecycleKind => {
+  if (value !== "model" && value !== "project" && value !== "conversation") {
+    throw new ApiError(
+      422,
+      "invalid_resource_kind",
+      "The resource kind is invalid.",
+    );
+  }
+  return value;
+};
+
 const ownerFromRoute = (kind: string, id: string): ConversationOwner => {
   if (kind !== "model" && kind !== "project") throw new ApiError(422, "invalid_owner", "Conversation owner must be model or project.");
   return { kind, id };
@@ -830,7 +1147,7 @@ const strictJsonBody = async (
   allowed: string[],
   optional: string[] = [],
   maximumBytes = 128_000,
-  rejectDuplicateKeys = false,
+  _rejectDuplicateKeys = false,
 ): Promise<Record<string, unknown>> => {
   const contentType = String(request.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") throw new ApiError(415, "unsupported_media_type", "Use application/json.");
@@ -845,7 +1162,7 @@ const strictJsonBody = async (
   let value: unknown;
   try {
     const text = Buffer.concat(chunks).toString("utf8");
-    value = rejectDuplicateKeys ? parseCanonicalJsonV2(text) : JSON.parse(text);
+    value = parseCanonicalJsonV2(text);
   }
   catch { throw new ApiError(422, "invalid_json", "The request body must be valid JSON."); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_request", "The request body must be an object.");
@@ -858,6 +1175,60 @@ const strictJsonBody = async (
 const requiredString = (value: unknown, name: string): string => {
   if (typeof value !== "string") throw new ApiError(422, "invalid_request", `${name} must be text.`);
   return value;
+};
+
+const permanentDeleteConfirmation = (value: unknown): {
+  action: "permanently_delete";
+  kind: ProductLifecycleKind;
+  id: string;
+  recordCount: number;
+  fileCount: number;
+  totalBytes: number;
+} => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(
+      422,
+      "invalid_permanent_delete_confirmation",
+      "The permanent-delete confirmation is invalid.",
+    );
+  }
+  const confirmation = value as Record<string, unknown>;
+  const keys = Object.keys(confirmation).sort();
+  if (keys.join("\n") !== [
+    "action",
+    "fileCount",
+    "id",
+    "kind",
+    "recordCount",
+    "totalBytes",
+  ].join("\n")
+    || confirmation.action !== "permanently_delete"
+    || typeof confirmation.id !== "string") {
+    throw new ApiError(
+      422,
+      "invalid_permanent_delete_confirmation",
+      "The permanent-delete confirmation is invalid.",
+    );
+  }
+  const kind = publicLifecycleKind(String(confirmation.kind));
+  for (const key of ["recordCount", "fileCount", "totalBytes"] as const) {
+    if (!Number.isSafeInteger(confirmation[key])
+      || Number(confirmation[key]) < 0) {
+      throw new ApiError(
+        422,
+        "invalid_permanent_delete_confirmation",
+        "The permanent-delete confirmation is invalid.",
+      );
+    }
+  }
+  return {
+    action: "permanently_delete",
+    kind,
+    id: confirmation.id,
+    recordCount: Number(confirmation.recordCount),
+    fileCount: Number(confirmation.fileCount),
+    totalBytes: Number(confirmation.totalBytes),
+  };
 };
 
 const trashRunConfirmation = (value: unknown): {
@@ -937,7 +1308,12 @@ const strictBase64 = (value: unknown): Buffer => {
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   const body = JSON.stringify(payload);
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  });
   response.end(body);
 };
 

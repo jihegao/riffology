@@ -222,6 +222,56 @@ test("frame session binds exact app cookie, CSRF, target identity, and generatio
   );
 });
 
+test("frame authority issuance rechecks and fails closed while resource deletion is fenced", async () => {
+  let checks = 0;
+  const fixture = createFixture({
+    authorityIssuanceAllowed: () => {
+      checks += 1;
+      return checks === 1;
+    },
+  });
+  const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
+  await assert.rejects(
+    fixture.capability.issueFrameSession(
+      frameRequest(bootstrap),
+      { projectId: "project-a", runId: "run-a" },
+    ),
+    errorCode("visual_frame_unavailable"),
+  );
+  assert.equal(fixture.resolved.length, 1);
+  assert.equal(checks, 2);
+});
+
+test("pending frame and redeem-in-progress authority block deletion and redeem rechecks its fence", async () => {
+  let checks = 0;
+  const fixture = createFixture({
+    authorityIssuanceAllowed: () => {
+      checks += 1;
+      return checks <= 2;
+    },
+  });
+  const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
+  const issued = await fixture.capability.issueFrameSession(
+    frameRequest(bootstrap),
+    { projectId: "project-a", runId: "run-a" },
+  );
+  const scope = {
+    projectIds: new Set(["project-a"]),
+    runIds: new Set(["run-a"]),
+  };
+  assert.equal(fixture.capability.hasActiveScope(scope), true);
+  await assert.rejects(
+    fixture.capability.redeem({
+      method: "GET",
+      host: BROKER_HOST,
+      path: new URL(issued.frameUrl).pathname,
+    }),
+    errorCode("visual_frame_unavailable"),
+  );
+  assert.equal(checks, 3);
+  assert.equal(fixture.capability.hasActiveScope(scope), false);
+});
+
 test("nonce redemption is atomic, one-use, no-Origin, nonce-free, and independently cookied", async () => {
   const fixture = createFixture();
   const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
@@ -908,6 +958,9 @@ type FixtureOptions = {
   inspectConnectedPeer?: NonNullable<
     ConstructorParameters<typeof BrowserFrameCapability>[0]["targets"]["inspectConnectedPeer"]
   >;
+  authorityIssuanceAllowed?: NonNullable<
+    ConstructorParameters<typeof BrowserFrameCapability>[0]["authorityIssuanceAllowed"]
+  >;
 };
 
 const createFixture = (options: FixtureOptions = {}) => {
@@ -952,6 +1005,9 @@ const createFixture = (options: FixtureOptions = {}) => {
           : {}),
       },
       ...(selectedTransport ? { transport: selectedTransport } : {}),
+      ...(options.authorityIssuanceAllowed
+        ? { authorityIssuanceAllowed: options.authorityIssuanceAllowed }
+        : {}),
     }),
     inspectTarget: async (): Promise<boolean> => fixture.inspectAllowed,
   };
@@ -1007,6 +1063,8 @@ const bootstrapRequest = (origin = APP_ORIGIN) => ({
   host: APP_HOST,
   origin,
   fetchSite: "same-origin",
+  fetchMode: "cors",
+  fetchDest: "empty",
 });
 
 const frameRequest = (

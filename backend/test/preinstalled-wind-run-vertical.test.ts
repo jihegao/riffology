@@ -28,9 +28,16 @@ class NoOpenCode implements OpenCodeAdapter {
   async abort(): Promise<void> {}
 }
 
-const post = (url: string, body: unknown) => fetch(url, {
+type BrowserSession = Readonly<{ cookie: string; csrfToken: string }>;
+
+const post = (url: string, body: unknown, session: BrowserSession) => fetch(url, {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: {
+    ...browserHeaders(session.cookie),
+    "content-type": "application/json",
+    origin: new URL(url).origin,
+    "x-riff-csrf": session.csrfToken,
+  },
   body: JSON.stringify(body),
 });
 
@@ -39,12 +46,14 @@ const waitForSucceeded = async (
   projectId: string,
   runId: string,
   app: BackendApp,
+  session: BrowserSession,
 ): Promise<any> => {
   for (let attempt = 0; attempt < 900; attempt += 1) {
     let response: Response;
     try {
       response = await fetch(
         `${baseUrl}/api/projects/${projectId}/runs/${runId}`,
+        { headers: browserHeaders(session.cookie) },
       );
     } catch (error) {
       if (attempt === 899) throw error;
@@ -76,19 +85,23 @@ const errorChain = (input: unknown): string => {
   return messages.join(" <- ");
 };
 
-const bootstrap = async (baseUrl: string): Promise<string> => {
+const bootstrap = async (baseUrl: string): Promise<BrowserSession> => {
   const response = await fetch(`${baseUrl}/api/browser-session/bootstrap`, {
     method: "POST",
+    body: "{}",
     headers: {
+      "content-type": "application/json",
       origin: baseUrl,
       "sec-fetch-site": "same-origin",
-      "content-length": "0",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
     },
   });
   assert.equal(response.status, 201, await response.clone().text());
   const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
   assert.ok(cookie);
-  return cookie;
+  const body = await response.json() as { csrfToken: string };
+  return { cookie, csrfToken: body.csrfToken };
 };
 
 const browserHeaders = (cookie: string) => ({
@@ -126,7 +139,11 @@ test("preinstalled Wind Project completes a real ordinary run and survives backe
     });
     await app.initialize();
     const network = await app.listenBrowserNetwork();
-    return { app, baseUrl: network.app.origin };
+    return {
+      app,
+      baseUrl: network.app.origin,
+      session: await bootstrap(network.app.origin),
+    };
   };
 
   let started = await start();
@@ -137,6 +154,7 @@ test("preinstalled Wind Project completes a real ordinary run and survives backe
       commandId: "run-preinstalled-wind-baseline",
       experimentConfigId: manifest.experimentConfigurationId,
     },
+    started.session,
   );
   assert.equal(runResponse.status, 201, await runResponse.clone().text());
   const receipt = await runResponse.json() as any;
@@ -145,6 +163,7 @@ test("preinstalled Wind Project completes a real ordinary run and survives backe
     manifest.projectId,
     receipt.runId,
     current,
+    started.session,
   );
   assert.deepEqual(
     succeeded.outputs.map((output: any) => output.logicalName).sort(),
@@ -153,11 +172,10 @@ test("preinstalled Wind Project completes a real ordinary run and survives backe
   assert.equal(succeeded.terminalCode, "run_succeeded");
   assert.equal(succeeded.completionCardDisposition, "not_requested");
 
-  let cookie = await bootstrap(started.baseUrl);
   let eventsResponse = await fetch(
     `${started.baseUrl}/api/projects/${manifest.projectId}/runs/${receipt.runId}`
       + "/diagnostic-events?limit=3",
-    { headers: browserHeaders(cookie) },
+    { headers: browserHeaders(started.session.cookie) },
   );
   assert.equal(eventsResponse.status, 200, await eventsResponse.clone().text());
   let events = await eventsResponse.json() as any;
@@ -175,11 +193,10 @@ test("preinstalled Wind Project completes a real ordinary run and survives backe
   current = undefined;
   started = await start();
   current = started.app;
-  cookie = await bootstrap(started.baseUrl);
   eventsResponse = await fetch(
     `${started.baseUrl}/api/projects/${manifest.projectId}/runs/${receipt.runId}`
       + "/diagnostic-events?limit=3",
-    { headers: browserHeaders(cookie) },
+    { headers: browserHeaders(started.session.cookie) },
   );
   assert.equal(eventsResponse.status, 200, await eventsResponse.clone().text());
   events = await eventsResponse.json() as any;
