@@ -1,7 +1,7 @@
 # Milestone A4 shared product shell design
 
-- Status: active design gate; A4-0 documentation-only contract,
-  A4-1 through A4-6 pending
+- Status: active; A4-0 design gate complete, A4-1 Product API implemented,
+  A4-2 through A4-6 pending
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -21,9 +21,10 @@ Stage 4 began only after all hard prerequisites were verified:
 - local `main...origin/main` was `0 0`; and
 - the only unrelated untracked entry, `.DS_Store`, remained untouched.
 
-A4-0 is documentation only. It changes no route, Store behavior, startup path,
-renderer, UI, or local product data. A4-1 through A4-6 remain pending. Only
-A4-6 may claim the complete MVP browser story or close Issue #15.
+A4-0 was documentation only. A4-1 now implements the bounded Product
+API/lifecycle/deletion slice described below without changing startup path,
+renderer, router, or UI. A4-2 through A4-6 remain pending. Only A4-6 may claim
+the complete MVP browser story or close Issue #15.
 
 ## 2. Product invariants and non-goals
 
@@ -75,7 +76,9 @@ full applicable gates, merge, and synchronize local and remote state.
 
 ## 4. Target browser routes and Home DTO
 
-These are target contracts, not current implementation claims.
+The collection, lifecycle, deletion, and browser-admission contracts in this
+section are implemented by A4-1. Product router and visible Home contracts
+remain A4-2 targets.
 
 ### 4.1 Product router
 
@@ -435,17 +438,25 @@ The prepared file manifest contains only Store-indexed canonical root-relative
 paths and exact `{device, inode, nlink, type, size, digest}` identity. Absolute
 or traversing paths, symlinks, special files, external hardlinks, duplicate
 inodes, unindexed files, and closure-external references are rejected. Under the
-single writer/mutation lock, each target is rechecked immediately adjacent to
-its own remove/stage action using a locked/opened trusted ancestor and
-descriptor-relative no-follow operation (or an equivalently reviewed primitive).
-That per-target check repeats ancestor and exact
-`{device,inode,nlink,type,size,digest}` identity; one batch-wide check before the
-first action is insufficient. Deletion is non-recursive and driven only by the
-manifest. Before database commit, exact files move to coordinator-owned staging
-so mid-plan drift restores already staged targets; after database commit,
-recovery rolls forward the exact staged manifest. Any per-target drift stops
-the plan and enters deterministic recovery. Prepared, committed, and recovery
-evidence is durable so a crash cannot trigger guessed cleanup.
+single backend writer/mutation lock, each target is opened with `O_NOFOLLOW`;
+the source descriptor remains open across the atomic path rename into
+coordinator-owned staging, and the staged file is reopened and matched by
+device, inode, link count, size, and digest before SQL proceeds. The same
+staged identities are rechecked after SQL and before commit. Rollback and any
+recovery that must stage or consume still-present removal evidence repeat the
+exact-identity check; an already-cleaned committed recovery has no target or
+staging bytes left to infer. Deletion is non-recursive and manifest-driven; any
+mismatch poisons the live Store and retains the writer lock and recovery
+material.
+
+This local-workspace guarantee assumes the backend is the only Product object
+writer. Provider, Model, visual child, and broker processes never receive the
+Product object-root path or filesystem authority. A separate hostile process
+already running as the same OS user with arbitrary filesystem access is outside
+the deployment guarantee; such a process can mutate all user-owned Product
+bytes independently of this API. A native descriptor-relative rename is not
+claimed. New manifests use recovery schema v2; pre-A4 v1 manifests remain
+readable and are rolled back or forward using their original backup semantics.
 
 Confirmation tokens are process-local and invalid after restart. An uncommitted
 command must preview again; a committed exact-intent command replays its durable
@@ -745,8 +756,8 @@ Run success as decision fitness, or a backend/API harness as shared-shell UI.
 
 A4-0 requires independent Product, Architecture, and Security review with
 P0=0 and P1=0 before merge. Reviewers for the design gate do not implement the
-design. A4-1 coding cannot begin until A4-0 is merged and local/remote `main`
-are synchronized.
+design. A4-1 coding began only after A4-0 was merged and local/remote `main`
+were synchronized.
 
 ### A4-0 review record
 
@@ -762,3 +773,49 @@ were fixed and re-reviewed:
 
 This record accepts only the documentation design gate. It is not an A4
 implementation, browser-shell, deletion, cutover, or complete-MVP acceptance.
+
+### A4-1 implementation record
+
+A4-1 implements the backend-only Product API slice:
+
+- schema v14 immutable lifecycle and permanent-delete receipts plus a
+  process-private SQLite UDF purge context that cannot persist after crash;
+- closed Home, Model, Project, executable-Model, lifecycle, blocker, exclusion,
+  and delete-receipt projections;
+- generic Model/Project/Conversation rename/archive/restore/trash routes;
+- real side-effect-free preview followed by single-use, browser-generation-
+  bound typed confirmation and exact durable deletion;
+- one Product browser admission boundary for all recognized Product reads and
+  mutations, with private no-store responses; and
+- exact byte/index identity, mutation recovery, runtime blockers, and a held
+  authority-issuance fence across delete commit.
+
+Focused evidence covers Model/Project/Conversation lifecycle, fixed-copy
+isolation, cross-owner and unknown-field denial, response-loss/restart replay,
+preview-not-delete, stale/consumed/rotated tokens, closure drift, symlink,
+hardlink, unindexed bytes, active Run/process/download/frame/WebSocket/tool
+authority, delayed-FK delete cycles, v1/v2 rollback/roll-forward, poisoned
+recovery, and browser secrecy. Ready preinstalled resources retain ordinary
+rename/archive/trash state across restart; the immutable manifest identity
+blocks permanent deletion but is not a lifecycle lock.
+
+The A4-1 record does not implement or verify Home DOM, routing, shared shell,
+Conversation UI, workspace renderers, startup cutover, legacy retirement, or
+the continuous A4-6 Chromium matrix. For that reason every row in section 11
+remains `pending`, and Issue #15 remains open.
+
+The branch gate is backend 583 total / 582 passed / zero failed / one optional
+installed-OpenCode smoke skipped; web 104/104 and network-entry 1/1;
+production build passed; 27 Markdown files and `git diff --check` passed.
+
+Three independent read-only reviewers who did not implement A4-1 completed
+final review after all findings were fixed and re-reviewed:
+
+| Review | Final result |
+| --- | --- |
+| Product/correctness | P0=0, P1=0, P2=0 |
+| Architecture | P0=0, P1=0, P2=0 |
+| Security | P0=0, P1=0, P2=0 |
+
+This review accepts only the A4-1 Product API implementation. It does not
+accept any visible Stage 4 workflow or the complete MVP.

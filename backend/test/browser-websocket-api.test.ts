@@ -337,6 +337,8 @@ test("BackendApp enforces the real broker WebSocket boundary and closes live soc
   const sharedBootstrap = await raw(network.app, "POST", "/api/browser-session/bootstrap", {
     origin: network.app.origin,
     "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
   });
   assert.equal(sharedBootstrap.status, 201);
   const firstRoute = await issueFromBootstrap(network, target, sharedBootstrap);
@@ -412,6 +414,8 @@ test("BackendApp enforces the real broker WebSocket boundary and closes live soc
   const rotated = await raw(network.app, "POST", "/api/browser-session/bootstrap", {
     origin: network.app.origin,
     "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
   });
   assert.equal(rotated.status, 201);
   assert.equal((await rotationClose).code, 1008);
@@ -468,6 +472,8 @@ const mintFrameSession = async (
   const bootstrap = await raw(network.app, "POST", "/api/browser-session/bootstrap", {
     origin: network.app.origin,
     "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
   });
   assert.equal(bootstrap.status, 201);
   return issueFromBootstrap(network, target, bootstrap);
@@ -487,6 +493,8 @@ const issueFromBootstrap = async (
     {
       origin: network.app.origin,
       "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
       cookie: appCookie,
       "x-riff-csrf": csrfToken,
     },
@@ -603,9 +611,20 @@ const raw = async (
   text: string;
   json: any;
 }> => await new Promise((resolve, reject) => {
+  const automaticBootstrapBody = method === "POST"
+    && path === "/api/browser-session/bootstrap"
+    && headers["content-length"] === undefined
+    && headers["transfer-encoding"] === undefined;
+  const body = automaticBootstrapBody ? "{}" : "";
   const outgoing = request({
     family: 6,
-    headers: { host: address.authority, ...headers },
+    headers: {
+      host: address.authority,
+      ...(automaticBootstrapBody
+        ? { "content-type": "application/json", "content-length": "2" }
+        : {}),
+      ...headers,
+    },
     host: address.host,
     method,
     path,
@@ -625,7 +644,7 @@ const raw = async (
     });
   });
   outgoing.once("error", reject);
-  outgoing.end();
+  outgoing.end(body);
 });
 
 const cookiePair = (header: string | string[] | undefined): string => {

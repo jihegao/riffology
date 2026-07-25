@@ -148,6 +148,9 @@ export type BrowserFrameCapabilityOptions = {
   random?: (size: number) => Uint8Array;
   targets: BrowserFrameTargetResolver;
   transport?: FrameHttpTransport;
+  authorityIssuanceAllowed?: (
+    scope: Readonly<{ projectIds: ReadonlySet<string>; runIds: ReadonlySet<string> }>,
+  ) => boolean;
 };
 
 export class BrowserFrameCapabilityError extends Error {
@@ -187,6 +190,9 @@ export class BrowserFrameCapability {
   readonly #random: (size: number) => Uint8Array;
   readonly #targets: BrowserFrameTargetResolver;
   readonly #transport: FrameHttpTransport;
+  readonly #authorityIssuanceAllowed: NonNullable<
+    BrowserFrameCapabilityOptions["authorityIssuanceAllowed"]
+  >;
   #generation = 0;
   #appSession?: AppSession;
   readonly #nonces = new Map<string, FrameCapability>();
@@ -207,6 +213,8 @@ export class BrowserFrameCapability {
     this.#random = options.random ?? randomBytes;
     this.#targets = options.targets;
     this.#transport = options.transport ?? new FixedChildHttpTransport();
+    this.#authorityIssuanceAllowed = options.authorityIssuanceAllowed
+      ?? (() => true);
   }
 
   bootstrap(request: BrowserRequestAdmission): {
@@ -240,7 +248,7 @@ export class BrowserFrameCapability {
    * session is proof of a current human browser session, while Project/run
    * ownership remains bound and checked by the Product service.
    */
-  authorizeAppRead(request: BrowserRequestAdmission): void {
+  authorizeAppRead(request: BrowserRequestAdmission): number {
     if (request.method !== "GET" && request.method !== "HEAD") {
       throw denied(405, "browser_method_denied");
     }
@@ -259,6 +267,7 @@ export class BrowserFrameCapability {
       || !safeDigestEqual(session.cookieDigest, digest(cookie))) {
       throw denied(403, "browser_session_denied");
     }
+    return session.generation;
   }
 
   /**
@@ -266,12 +275,12 @@ export class BrowserFrameCapability {
    * app session. Resource ownership and mutation preconditions remain the
    * responsibility of the Product service.
    */
-  authorizeAppMutation(request: BrowserRequestAdmission): void {
+  authorizeAppMutation(request: BrowserRequestAdmission): number {
     if (exactSingle(request.fetchMode) !== "cors"
       || exactSingle(request.fetchDest) !== "empty") {
       throw denied(403, "browser_session_denied");
     }
-    this.#requireAppSession(request);
+    return this.#requireAppSession(request, ["POST", "PATCH"]).generation;
   }
 
   async issueFrameSession(
@@ -279,6 +288,13 @@ export class BrowserFrameCapability {
     identity: { projectId: string; runId: string },
   ): Promise<{ frameUrl: string; expiresAtMs: number }> {
     const session = this.#requireAppSession(request);
+    const authorityScope = {
+      projectIds: new Set([identity.projectId]),
+      runIds: new Set([identity.runId]),
+    };
+    if (!this.#authorityIssuanceAllowed(authorityScope)) {
+      throw denied(409, "visual_frame_unavailable");
+    }
     const target = await this.#targets.resolve(exactId(identity.projectId), exactId(identity.runId));
     const now = exactNow(this.#now());
     if (!target || target.projectId !== identity.projectId || target.runId !== identity.runId
@@ -287,6 +303,9 @@ export class BrowserFrameCapability {
     }
     if (!this.#appSession || this.#appSession.generation !== session.generation || this.#appSession.expiresAtMs <= now) {
       throw denied(403, "browser_session_denied");
+    }
+    if (!this.#authorityIssuanceAllowed(authorityScope)) {
+      throw denied(409, "visual_frame_unavailable");
     }
     const nonce = this.#secret();
     const routeId = this.#secret();
@@ -303,6 +322,7 @@ export class BrowserFrameCapability {
       nonceExpiresAtMs: expiresAtMs,
       brokerSessionExpiresAtMs: 0,
       inFlight: 0,
+      redeeming: false,
       epoch: 0,
       sockets: new Set(),
     };
@@ -326,10 +346,20 @@ export class BrowserFrameCapability {
       throw denied(404, "visual_frame_nonce_invalid");
     }
     this.#nonces.delete(nonceKey);
+    capability.redeeming = true;
     const now = exactNow(this.#now());
+    let inspected = false;
+    try {
+      inspected = await this.#inspectHttp(capability.target);
+    } catch (error) {
+      capability.redeeming = false;
+      this.#routes.delete(capability.routeId);
+      throw error;
+    }
     if (capability.nonceExpiresAtMs <= now
       || !this.#live(capability, now)
-      || !await this.#inspectHttp(capability.target)) {
+      || !inspected) {
+      capability.redeeming = false;
       this.#routes.delete(capability.routeId);
       throw denied(404, "visual_frame_nonce_invalid");
     }
@@ -337,8 +367,17 @@ export class BrowserFrameCapability {
     if (this.#routes.get(capability.routeId) !== capability
       || capability.nonceExpiresAtMs <= inspectedAt
       || !this.#live(capability, inspectedAt)) {
+      capability.redeeming = false;
       this.#routes.delete(capability.routeId);
       throw denied(404, "visual_frame_nonce_invalid");
+    }
+    if (!this.#authorityIssuanceAllowed({
+      projectIds: new Set([capability.target.projectId]),
+      runIds: new Set([capability.target.runId]),
+    })) {
+      capability.redeeming = false;
+      this.#routes.delete(capability.routeId);
+      throw denied(409, "visual_frame_unavailable");
     }
     const cookieName = `riff_frame_${this.#secret().slice(0, 22)}`;
     const cookieValue = this.#secret();
@@ -349,6 +388,7 @@ export class BrowserFrameCapability {
     capability.cookieName = cookieName;
     capability.cookieDigest = digest(cookieValue);
     capability.brokerSessionExpiresAtMs = expiresAtMs;
+    capability.redeeming = false;
     const path = `/frame/c/${capability.routeId}/`;
     return {
       location: path,
@@ -495,6 +535,12 @@ export class BrowserFrameCapability {
       throw denied(403, "visual_frame_session_denied");
     }
     const offeredSubprotocols = exactWebSocketProtocols(request.protocols, policy);
+    if (!this.#authorityIssuanceAllowed({
+      projectIds: new Set([capability.target.projectId]),
+      runIds: new Set([capability.target.runId]),
+    })) {
+      throw denied(409, "visual_frame_unavailable");
+    }
     const attemptKey = webSocketAttemptKey(capability.target);
     const attemptSockets = this.#attemptSockets.get(attemptKey) ?? new Set<FrameWebSocketRegistration>();
     if (attemptSockets.size >= policy.maxConnections
@@ -608,6 +654,22 @@ export class BrowserFrameCapability {
     }
   }
 
+  hasActiveScope(input: {
+    projectIds: ReadonlySet<string>;
+    runIds: ReadonlySet<string>;
+  }): boolean {
+    const now = exactNow(this.#now());
+    return [...this.#routes.values()].some((capability) =>
+      (capability.redeeming
+        || capability.inFlight > 0
+        || capability.sockets.size > 0
+        || capability.brokerSessionExpiresAtMs > now
+        || capability.nonceExpiresAtMs > now
+          && this.#nonces.has(capability.nonceDigest.toString("hex")))
+      && (input.projectIds.has(capability.target.projectId)
+        || input.runIds.has(capability.target.runId)));
+  }
+
   clear(): void {
     for (const [routeId, capability] of [...this.#routes]) {
       this.#revokeCapability(routeId, capability);
@@ -622,18 +684,24 @@ export class BrowserFrameCapability {
   #requireAppAdmission(
     request: BrowserRequestAdmission,
     code: "browser_session_denied",
+    methods: readonly string[] = ["POST"],
   ): void {
-    if (request.method !== "POST") throw denied(405, "browser_method_denied");
+    if (!methods.includes(request.method)) throw denied(405, "browser_method_denied");
     if (request.host !== this.#appOrigin.host
       || exactSingle(request.origin) !== this.#appOrigin.origin
       || exactSingle(request.fetchSite) !== "same-origin"
+      || exactSingle(request.fetchMode) !== "cors"
+      || exactSingle(request.fetchDest) !== "empty"
       || request.authorization !== undefined) {
       throw denied(403, code);
     }
   }
 
-  #requireAppSession(request: BrowserRequestAdmission): AppSession {
-    this.#requireAppAdmission(request, "browser_session_denied");
+  #requireAppSession(
+    request: BrowserRequestAdmission,
+    methods: readonly string[] = ["POST"],
+  ): AppSession {
+    this.#requireAppAdmission(request, "browser_session_denied", methods);
     const session = this.#appSession;
     const now = exactNow(this.#now());
     const cookie = exactCookie(request.cookie, "riff_app");
@@ -719,6 +787,7 @@ type FrameCapability = {
   cookieDigest?: Buffer;
   brokerSessionExpiresAtMs: number;
   inFlight: number;
+  redeeming: boolean;
   epoch: number;
   sockets: Set<FrameWebSocketRegistration>;
 };

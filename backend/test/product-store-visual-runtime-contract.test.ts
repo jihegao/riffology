@@ -485,6 +485,38 @@ test("visual authority uses durable Project turn scope and persists a secret-fre
       status: "succeeded",
       code: "observation_succeeded",
     });
+    const conversationDelete = fixture.store.previewPermanentDelete(
+      "conversation",
+      "conversation_visual_agent_authority",
+    );
+    assert.ok(conversationDelete.blockingReferences.some((reference) =>
+      reference.kind === "visual_run_audit"));
+    fixture.store.trashResource(
+      "conversation",
+      "conversation_visual_agent_authority",
+      NOW,
+    );
+    const trashedConversationDelete = fixture.store.previewPermanentDelete(
+      "conversation",
+      "conversation_visual_agent_authority",
+    );
+    assert.throws(() => fixture.store.commitPermanentDelete({
+      commandId: "command_delete_visual_audit_conversation",
+      kind: "conversation",
+      id: "conversation_visual_agent_authority",
+      previewToken: trashedConversationDelete.previewToken,
+      stateToken: trashedConversationDelete.stateToken,
+      canonicalIntentDigest: "d".repeat(64),
+      committedAt: NOW,
+    }), /blocking references/u);
+    const projectDelete = fixture.store.previewPermanentDelete(
+      "project",
+      fixture.projectId,
+    );
+    assert.equal(projectDelete.blockingReferences.some((reference) =>
+      reference.kind === "visual_run_audit"), false);
+    assert.ok(projectDelete.records.some((record) =>
+      record.table === "visual_agent_audit_facts"));
     fixture.store.close();
     const database = openProductDatabase(join(fixture.root, "product.sqlite3"));
     try {

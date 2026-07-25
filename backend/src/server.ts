@@ -35,6 +35,10 @@ import {
   type PreinstalledWindInstallerPort,
 } from "./preinstalled-wind-installer.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
+import {
+  authorityScopeForPermanentDelete,
+  ProductAuthorityDeletionFence,
+} from "./product-authority-deletion-fence.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 import { VisualAgentObserver } from "./visual-agent-observer.ts";
 import { VisualAgentInteractor } from "./visual-agent-interactor.ts";
@@ -376,6 +380,7 @@ export class BackendApp {
   readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
   readonly #agentTurnRuntime?: AgentTurnRuntime;
+  readonly #authorityDeletionFence = new ProductAuthorityDeletionFence();
   readonly #preinstalledWindInstaller?: PreinstalledWindInstallerPort;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
@@ -447,6 +452,8 @@ export class BackendApp {
         ?? new VisualAgentAuthority(this.productStore, {
           observer: options.a3VisualObserver ?? new VisualAgentObserver(),
           interactor: options.a3VisualInteractor ?? new VisualAgentInteractor(),
+          authorityIssuanceAllowed: (scope) =>
+            this.#authorityDeletionFence.issuanceAllowed(scope),
         });
       this.productRunDispatcher = new ProductRunDispatcher({
         store: this.productStore,
@@ -465,8 +472,41 @@ export class BackendApp {
       const skills = new SimulationSkillCatalog(options.a2SkillRoot ?? process.cwd(), options.a2AllowedSkills ?? []);
       const turnRuntime = new AgentTurnRuntime(this.productStore, skills, {
         visualAuthority,
+        authorityIssuanceAllowed: (scope) =>
+          this.#authorityDeletionFence.issuanceAllowed(scope),
       });
       this.#agentTurnRuntime = turnRuntime;
+      const resourceDeleteRuntimeBlockers = (
+        preview: import("./product-domain.ts").PermanentDeletePreview,
+      ): Array<{ kind: string; id: string }> => {
+        const conversationIds = new Set(preview.records
+          .filter((record) => record.table === "conversations")
+          .map((record) => String(record.key.id)));
+        const projectIds = new Set(preview.records
+          .filter((record) => record.table === "projects")
+          .map((record) => String(record.key.id)));
+        const runIds = new Set(preview.records
+          .filter((record) => record.table === "runs")
+          .map((record) => String(record.key.id)));
+        const blockers: Array<{ kind: string; id: string }> = [];
+        if (this.#browserFrames?.hasActiveScope({ projectIds, runIds })) {
+          blockers.push({
+            kind: "browser_authority_active",
+            id: preview.target.id,
+          });
+        }
+        if (turnRuntime.hasActiveAuthority({
+          conversationIds,
+          projectIds,
+          runIds,
+        })) {
+          blockers.push({
+            kind: "tool_authority_active",
+            id: preview.target.id,
+          });
+        }
+        return blockers;
+      };
       this.a2 = new MilestoneA2Api(
         new AgentWorkspaceService(
           this.productStore,
@@ -488,7 +528,7 @@ export class BackendApp {
             if (this.#listenerMode !== "browser" || !frames || !address) {
               throw new BrowserFrameCapabilityError(403, "browser_session_denied");
             }
-            frames.authorizeAppRead(browserAdmission(request, address));
+            return frames.authorizeAppRead(browserAdmission(request, address));
           },
           authorizeProductMutation: (request) => {
             if (this.#listenerMode !== "browser") {
@@ -499,8 +539,24 @@ export class BackendApp {
             if (!frames || !address) {
               throw new BrowserFrameCapabilityError(403, "browser_session_denied");
             }
-            frames.authorizeAppMutation(browserAdmission(request, address));
+            return frames.authorizeAppMutation(browserAdmission(request, address));
           },
+          requireBrowserAdmission: true,
+          resourceDeleteRuntimeBlockers,
+          commitResourcePermanentDelete: (preview, commit) =>
+            this.#authorityDeletionFence.withFence(
+              authorityScopeForPermanentDelete(preview),
+              () => {
+                if (resourceDeleteRuntimeBlockers(preview).length > 0) {
+                  throw new ApiError(
+                    409,
+                    "permanent_delete_active_authority",
+                    "The resource still has active browser or execution authority.",
+                  );
+                }
+                return commit();
+              },
+            ),
           revokeRunAccess: (runId) => {
             this.#browserFrames?.revokeRun(runId);
             visualAuthority.revokeRun(runId);
@@ -593,6 +649,8 @@ export class BackendApp {
               appOrigin: app.origin,
               brokerOrigin: broker.origin,
               targets: this.options.browserFrameTargetResolver ?? this.#productBrowserFrameTargets(),
+              authorityIssuanceAllowed: (scope) =>
+                this.#authorityDeletionFence.issuanceAllowed(scope),
             });
             this.#browserWebSockets = new BrowserWebSocketBridge();
           },
@@ -729,7 +787,14 @@ export class BackendApp {
         this.#browserFramePreflight(request, response, address);
         return true;
       }
-      exactEmptyBrowserBody(request, "browser_session_denied");
+      if (bootstrap && request.method !== "POST") {
+        throw new BrowserFrameCapabilityError(405, "browser_method_denied");
+      }
+      if (bootstrap) {
+        await exactEmptyJsonObject(request);
+      } else {
+        exactEmptyBrowserBody(request, "browser_session_denied");
+      }
       if (url.search !== "") throw new BrowserFrameCapabilityError(403, "browser_session_denied");
       const frames = this.#browserFrames;
       if (!frames) throw new BrowserFrameCapabilityError(503, "browser_session_denied");
@@ -737,6 +802,7 @@ export class BackendApp {
       const cors = browserCorsHeaders(address.origin);
       if (bootstrap) {
         const result = frames.bootstrap(admission);
+        this.#agentTurnRuntime?.revokeAll();
         networkJsonWithHeaders(response, 201, {
           schemaVersion: 1,
           generation: result.generation,
@@ -957,7 +1023,13 @@ export class BackendApp {
       const runControl = request.method === "POST"
         && /^\/api\/projects\/[^/]+\/runs\/[^/]+\/(?:cancel|trash|restore)$/u
           .test(requestUrl.pathname);
-      const write = gate3 ? canonicalJson : runControl ? privateApiJson : json;
+      const productApi = /^\/api\/(?:home|providers|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
+        .test(requestUrl.pathname);
+      const write = gate3
+        ? canonicalJson
+        : runControl || productApi
+          ? privateApiJson
+          : json;
       write(
         response,
         apiError.status,
@@ -1368,7 +1440,11 @@ const browserVisualHostPage = (
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
-      headers: { accept: "application/json" }
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: "{}"
     });
     if (!bootstrapResponse.ok) {
       throw new Error(await responseCode(bootstrapResponse, "browser_session_denied"));
@@ -1516,6 +1592,31 @@ const exactEmptyBrowserBody = (
     || contentLength !== undefined && contentLength !== "0") {
     const status = code === "visual_frame_proxy_limit_exceeded" ? 502 : code === "visual_frame_nonce_invalid" ? 404 : 403;
     throw new BrowserFrameCapabilityError(status, code);
+  }
+};
+
+const exactEmptyJsonObject = async (
+  request: IncomingMessage,
+): Promise<void> => {
+  const contentLength = rawBrowserHeader(request, "content-length");
+  const contentType = rawBrowserHeader(request, "content-type");
+  if (rawBrowserHeader(request, "transfer-encoding") !== undefined
+    || contentLength !== "2"
+    || contentType !== "application/json") {
+    throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.byteLength;
+    if (size > 2) {
+      throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+    }
+    chunks.push(bytes);
+  }
+  if (Buffer.concat(chunks).toString("utf8") !== "{}") {
+    throw new BrowserFrameCapabilityError(403, "browser_session_denied");
   }
 };
 

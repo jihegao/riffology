@@ -7,14 +7,14 @@ The current product authority is the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md) and
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md)
 refine its implemented storage and Agent boundaries.
-The documentation-only
+The
 [`Stage 4 shared-shell design`](milestone-a4-shared-product-shell-design.md)
 defines the target Home, router, shell state, renderer registry, lifecycle,
-browser-admission, recovery, and cutover architecture. A4-0 is a design gate
-only: it has not changed startup, routing, HTTP
-admission, Store behavior, or the browser UI, and A4-1 through A4-6 remain
-pending.
-`ProductStoreV2` over SQLite schema migration v13, execution contract v4, and
+browser-admission, recovery, and cutover architecture. A4-0 was the
+documentation-only design gate. A4-1 implements the Product API, Store
+lifecycle/delete, and browser-admission portion without changing startup,
+router, or visible UI; A4-2 through A4-6 remain pending.
+`ProductStoreV2` over SQLite schema migration v14, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
@@ -138,13 +138,29 @@ Home collections
   -> ProductStoreV2 lifecycle, mutation, deletion, and recovery authority
 ```
 
-This diagram is target architecture, not current implementation evidence.
-A4-1 owns the common API/admission/lifecycle boundary, A4-2 through A4-4 own
-the visible shell, and A4-5 owns startup cutover and manifest-proven retirement.
+The Home/router/shell portion of this diagram remains target architecture.
+A4-1 implements the common API/admission/lifecycle/delete boundary; A4-2
+through A4-4 own the visible shell, and A4-5 owns startup cutover and
+manifest-proven retirement.
 If Product recovery fails closed, A4-5 permits only the exact-app static shell,
 browser bootstrap, health, and one closed path-free recovery-status DTO; all
 resource reads, writes, dispatch, Agent, frame, and WebSocket routes remain
 `503 recovery_required`.
+
+The A4-1 implementation adds a closed projection layer over ProductStoreV2,
+schema-v14 receipt-first lifecycle and deletion transactions, exact
+device/inode/link-count/size/digest file identity, recoverable staged file
+removal, a process-private SQLite purge UDF, v1/v2 recovery compatibility, and
+a process-local deletion fence. The fence is held across the
+synchronous durable delete commit; asynchronous frame and Agent issuers recheck
+it immediately before minting authority. The commit also rechecks active
+downloads, frame/WebSocket routes, tool/Visual-Agent grants, turns, checks,
+Runs, process/lease/recovery evidence, preview/state tokens, and the exact
+indexed byte closure. Browser DTOs never serialize raw table rows, paths,
+OpenCode session IDs, process identity, credentials, or child authority.
+The Product object tree is a single-backend-writer boundary and is never
+granted to provider, Model, visual-child, or broker processes; arbitrary
+same-UID filesystem mutation is outside the local deployment guarantee.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

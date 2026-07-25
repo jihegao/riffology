@@ -32,22 +32,51 @@ export class AgentTurnRuntime implements AgentToolExecutor {
   readonly mcp: AgentMcpServer;
   readonly visualAuthority?: VisualAgentAuthority;
   readonly #now: () => string;
+  readonly #authorityIssuanceAllowed: (
+    scope: Readonly<{
+      modelIds?: ReadonlySet<string>;
+      projectIds?: ReadonlySet<string>;
+      conversationIds: ReadonlySet<string>;
+    }>,
+  ) => boolean;
   readonly #consumedVisualInteractionGrants = new WeakSet<AgentToolGrant>();
 
   constructor(store: ProductStoreV2, skills: SimulationSkillCatalog, options: {
     now?: () => string;
     capabilityTtlMs?: number;
     visualAuthority?: VisualAgentAuthority;
+    authorityIssuanceAllowed?: (
+      scope: Readonly<{
+        modelIds?: ReadonlySet<string>;
+        projectIds?: ReadonlySet<string>;
+        conversationIds: ReadonlySet<string>;
+      }>,
+    ) => boolean;
   } = {}) {
     this.store = store;
     this.skills = skills;
     this.#now = options.now ?? (() => new Date().toISOString());
     this.mcp = new AgentMcpServer(this, { ttlMs: options.capabilityTtlMs });
     this.visualAuthority = options.visualAuthority;
+    this.#authorityIssuanceAllowed = options.authorityIssuanceAllowed
+      ?? (() => true);
   }
 
   async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[]; confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation }): Promise<PreparedAgentTurnRuntime> {
     const conversation = this.store.getConversation(input.conversationId);
+    const authorityScope = {
+      conversationIds: new Set([input.conversationId]),
+      ...(conversation.owner.kind === "model"
+        ? { modelIds: new Set([conversation.owner.id]) }
+        : { projectIds: new Set([conversation.owner.id]) }),
+    };
+    if (!this.#authorityIssuanceAllowed(authorityScope)) {
+      throw new ApiError(
+        409,
+        "resource_deletion_in_progress",
+        "The resource is being permanently deleted.",
+      );
+    }
     const runtime = await this.store.getConversationRuntime(input.conversationId);
     if (!runtime) throw new ApiError(409, "conversation_not_ready", "The conversation is not ready for an Agent turn.");
     const intentText = input.text.replace(/(?:^|\s)\$[a-z0-9][a-z0-9-]{1,63}(?=\s|$)/gu, " ").trim();
@@ -83,6 +112,13 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       allowedTools.delete("riff_apply_model_changes");
       allowedTools.delete("riff_transition_temporary_document");
       allowedTools.delete("riff_adopt_attachment");
+    }
+    if (!this.#authorityIssuanceAllowed(authorityScope)) {
+      throw new ApiError(
+        409,
+        "resource_deletion_in_progress",
+        "The resource is being permanently deleted.",
+      );
     }
     const capability = this.mcp.grant({
       conversationId: input.conversationId,
@@ -122,6 +158,18 @@ export class AgentTurnRuntime implements AgentToolExecutor {
 
   revokeVisualRun(runId: string): void {
     this.visualAuthority?.revokeRun(runId);
+  }
+
+  hasActiveAuthority(input: {
+    conversationIds: ReadonlySet<string>;
+    projectIds: ReadonlySet<string>;
+    runIds: ReadonlySet<string>;
+  }): boolean {
+    return this.mcp.hasActiveConversation(input.conversationIds)
+      || Boolean(this.visualAuthority?.hasActiveScope({
+        projectIds: input.projectIds,
+        runIds: input.runIds,
+      }));
   }
 
   handle(capability: string | undefined, request: unknown) {

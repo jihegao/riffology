@@ -171,7 +171,11 @@ test("Chromium observes generation revocation before state reuse and cannot reco
     expect(finalFrameUrl).toMatch(/\/frame\/c\//u);
 
     const rotationStatus = await page.evaluate(async () => {
-      const response = await fetch("/api/browser-session/bootstrap", { method: "POST" });
+      const response = await fetch("/api/browser-session/bootstrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
       return response.status;
     });
     expect(rotationStatus).toBe(201);
@@ -382,7 +386,11 @@ test("Chromium rejects an unredeemed nonce after the attempt expiry", async ({ p
   try {
     await page.goto(`${stack.network!.app.origin}/health`);
     const frameUrl = await page.evaluate(async ({ projectId, runId }) => {
-      const bootstrap = await fetch("/api/browser-session/bootstrap", { method: "POST" });
+      const bootstrap = await fetch("/api/browser-session/bootstrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
       const session = await bootstrap.json();
       const issued = await fetch(
         `/api/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/visual-frame-session`,

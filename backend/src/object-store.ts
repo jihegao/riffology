@@ -35,8 +35,17 @@ export type OwnerPath = {
 };
 
 export type FileInspection = { sizeBytes: number; sha256: Sha256Digest };
-export type InspectedFile = FileInspection & { bytes: Buffer };
+export type FileIdentity = FileInspection & {
+  device: string;
+  inode: string;
+  linkCount: 1;
+  type: "file";
+  sizeBytes: number;
+  sha256: Sha256Digest;
+};
+export type InspectedFile = FileIdentity & { bytes: Buffer };
 export type WriterLock = { instanceId: string; path: string };
+export type OwnerFileIdentity = FileIdentity & { relativePath: string };
 
 /**
  * A backend-only handle for a run artifact that has been completely verified
@@ -120,7 +129,92 @@ export class ProductObjectStore {
 
   inspect(input: OwnerPath): FileInspection | null {
     const inspected = this.readWithInspection(input);
-    return inspected ? { sizeBytes: inspected.sizeBytes, sha256: inspected.sha256 } : null;
+    return inspected ? {
+      sizeBytes: inspected.sizeBytes,
+      sha256: inspected.sha256,
+    } : null;
+  }
+
+  inspectIdentity(input: OwnerPath): FileIdentity | null {
+    const inspected = this.readWithInspection(input);
+    return inspected ? {
+      device: inspected.device,
+      inode: inspected.inode,
+      linkCount: inspected.linkCount,
+      type: inspected.type,
+      sizeBytes: inspected.sizeBytes,
+      sha256: inspected.sha256,
+    } : null;
+  }
+
+  listOwnerFiles(
+    owner: ResourceOwner,
+    runProjectId?: string,
+  ): OwnerFileIdentity[] {
+    const root = this.ownerRoot(owner, runProjectId);
+    if (!existsSync(root)) return [];
+    this.assertExistingChainSafe(root, this.root);
+    const visit = (directory: string, prefix: string): OwnerFileIdentity[] => {
+      const info = lstatSync(directory);
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new UnsafeObjectPathError(
+          "Owner object tree contains a symlink or non-directory.",
+        );
+      }
+      this.assertOwnedSecure(info, "Owner object directory");
+      const files: OwnerFileIdentity[] = [];
+      for (const name of readdirSync(directory).sort()) {
+        if (directory === root && owner.kind === "project" && name === "runs") {
+          continue;
+        }
+        const path = join(directory, name);
+        const relativePath = prefix ? `${prefix}/${name}` : name;
+        const child = lstatSync(path);
+        if (child.isSymbolicLink()) {
+          throw new UnsafeObjectPathError(
+            "Owner object tree contains a symlink.",
+          );
+        }
+        if (child.isDirectory()) {
+          files.push(...visit(path, relativePath));
+        } else if (child.isFile()) {
+          files.push({
+            relativePath,
+            ...this.inspectManagedPath(path),
+          });
+        } else {
+          throw new UnsafeObjectPathError(
+            "Owner object tree contains a special file.",
+          );
+        }
+      }
+      return files;
+    };
+    return visit(root, "");
+  }
+
+  listProjectRunDirectories(projectId: string): string[] {
+    const projectRoot = this.ownerRoot({ kind: "project", id: projectId });
+    const runsRoot = join(projectRoot, "runs");
+    if (!existsSync(runsRoot)) return [];
+    this.assertExistingChainSafe(runsRoot, this.root);
+    const rootInfo = lstatSync(runsRoot);
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+      throw new UnsafeObjectPathError("Project run root is unsafe.");
+    }
+    this.assertOwnedSecure(rootInfo, "Project run root");
+    return readdirSync(runsRoot).sort().map((name) => {
+      this.assertId(name, "run directory id");
+      const path = join(runsRoot, name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new UnsafeObjectPathError(
+          "Project run root contains an unsafe entry.",
+        );
+      }
+      this.assertOwnedSecure(info, "Run object directory");
+      return name;
+    });
   }
 
   read(input: OwnerPath): Buffer {
@@ -132,8 +226,31 @@ export class ProductObjectStore {
   readWithInspection(input: OwnerPath): InspectedFile | null {
     const path = this.resolveOwnerPath(input);
     if (!existsSync(path)) return null;
-    const bytes = this.readManagedFile(path);
-    return { bytes, sizeBytes: bytes.byteLength, sha256: sha256(bytes) };
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = fstatSync(fd);
+      this.assertOwnedManagedFile(before, "Managed file");
+      const bytes = readFileSync(fd);
+      const after = fstatSync(fd);
+      this.assertOwnedManagedFile(after, "Managed file");
+      if (before.dev !== after.dev || before.ino !== after.ino
+        || before.nlink !== after.nlink || before.size !== after.size
+        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+        || after.size !== bytes.byteLength) {
+        throw new UnsafeObjectPathError("Managed file changed while being inspected.");
+      }
+      return {
+        bytes,
+        device: String(after.dev),
+        inode: String(after.ino),
+        linkCount: 1,
+        type: "file",
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      };
+    } finally {
+      closeSync(fd);
+    }
   }
 
   /**
@@ -224,6 +341,7 @@ export class ProductObjectStore {
     this.ensureDirectory(directory);
     this.ensureDirectory(join(directory, "next"));
     this.ensureDirectory(join(directory, "backup"));
+    this.ensureDirectory(join(directory, "removed"));
     return directory;
   }
 
@@ -285,6 +403,91 @@ export class ProductObjectStore {
     this.assertManagedRegularFile(target, "Exact deletion target");
     unlinkSync(target);
     this.syncDirectory(dirname(target));
+  }
+
+  stageExactRemoval(
+    input: OwnerPath,
+    expected: FileIdentity,
+    stagingPath: string,
+  ): void {
+    const target = this.resolveOwnerPath(input);
+    const destination = resolve(stagingPath);
+    this.assertManagedFilePath(destination);
+    if (existsSync(destination)) {
+      throw new UnsafeObjectPathError("Removal staging target already exists.");
+    }
+    const sourceFd = openSync(
+      target,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    try {
+      const before = fstatSync(sourceFd);
+      this.assertOwnedManagedFile(before, "Removal target");
+      const bytes = readFileSync(sourceFd);
+      const after = fstatSync(sourceFd);
+      this.assertOwnedManagedFile(after, "Removal target");
+      const observed: FileIdentity = {
+        device: String(after.dev),
+        inode: String(after.ino),
+        linkCount: 1,
+        type: "file",
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      };
+      if (before.dev !== after.dev || before.ino !== after.ino
+        || before.nlink !== after.nlink || before.size !== after.size
+        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+        || after.size !== bytes.byteLength
+        || !sameInspection(observed, expected)) {
+        throw new UnsafeObjectPathError(
+          "Removal target identity changed before staging.",
+        );
+      }
+      this.ensureDirectory(dirname(destination));
+      this.safeRename(target, destination, false);
+      const heldAfterRename = fstatSync(sourceFd);
+      const staged = this.inspectManagedPath(destination);
+      if (String(heldAfterRename.dev) !== expected.device
+        || String(heldAfterRename.ino) !== expected.inode
+        || heldAfterRename.nlink !== expected.linkCount
+        || heldAfterRename.size !== expected.sizeBytes
+        || !sameInspection(staged, expected)) {
+        throw new UnsafeObjectPathError(
+          "Removal target identity changed while staging.",
+        );
+      }
+    } finally {
+      closeSync(sourceFd);
+    }
+  }
+
+  restoreExactRemoval(
+    input: OwnerPath,
+    expected: FileIdentity,
+    stagingPath: string,
+  ): void {
+    const target = this.resolveOwnerPath(input);
+    const source = resolve(stagingPath);
+    this.assertManagedFilePath(source);
+    if (existsSync(target)) {
+      const observed = this.inspectIdentity(input);
+      if (!observed || !sameInspection(observed, expected)) {
+        throw new UnsafeObjectPathError("Removal rollback target changed.");
+      }
+      if (existsSync(source)) {
+        throw new UnsafeObjectPathError("Removal rollback found duplicate file identities.");
+      }
+      return;
+    }
+    if (!existsSync(source)) {
+      throw new UnsafeObjectPathError("Removal rollback bytes are missing.");
+    }
+    const staged = this.inspectManagedPath(source);
+    if (!sameInspection(staged, expected)) {
+      throw new UnsafeObjectPathError("Removal rollback identity changed.");
+    }
+    this.ensureDirectory(dirname(target));
+    this.safeRename(source, target, false);
   }
 
   removeTransactionDirectory(transactionId: string): void {
@@ -481,6 +684,35 @@ export class ProductObjectStore {
     try { this.assertOwnedManagedFile(fstatSync(fd), label); } finally { closeSync(fd); }
   }
 
+  private inspectManagedPath(path: string): FileIdentity {
+    const target = resolve(path);
+    this.assertManagedFilePath(target);
+    const fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = fstatSync(fd);
+      this.assertOwnedManagedFile(before, "Managed file");
+      const bytes = readFileSync(fd);
+      const after = fstatSync(fd);
+      this.assertOwnedManagedFile(after, "Managed file");
+      if (before.dev !== after.dev || before.ino !== after.ino
+        || before.nlink !== after.nlink || before.size !== after.size
+        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+        || after.size !== bytes.byteLength) {
+        throw new UnsafeObjectPathError("Managed file changed while being inspected.");
+      }
+      return {
+        device: String(after.dev),
+        inode: String(after.ino),
+        linkCount: 1,
+        type: "file",
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      };
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   private assertOwnedManagedFile(info: ReturnType<typeof fstatSync>, label: string): void {
     if (!info.isFile() || info.nlink !== 1) throw new UnsafeObjectPathError(`${label} is not a singly linked regular file.`);
     this.assertOwnedSecure(info, label);
@@ -529,3 +761,11 @@ export class ProductObjectStore {
     return allowEqual && path === boundary || path.startsWith(`${boundary}${sep}`);
   }
 }
+
+const sameInspection = (left: FileIdentity, right: FileIdentity): boolean =>
+  left.device === right.device
+  && left.inode === right.inode
+  && left.linkCount === right.linkCount
+  && left.type === right.type
+  && left.sizeBytes === right.sizeBytes
+  && left.sha256 === right.sha256;

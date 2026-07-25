@@ -96,6 +96,18 @@ export class AgentMcpServer {
 
   revokeAll(): void { this.#grants.clear(); }
 
+  hasActiveConversation(conversationIds: ReadonlySet<string>): boolean {
+    const now = this.#now();
+    for (const [capability, grant] of this.#grants) {
+      if (grant.expiresAt <= now) {
+        this.#grants.delete(capability);
+        continue;
+      }
+      if (conversationIds.has(grant.conversationId)) return true;
+    }
+    return false;
+  }
+
   async handle(capability: string | undefined, request: RpcRequest): Promise<RpcResponse | undefined> {
     const id = request.id ?? null;
     if (request.jsonrpc !== "2.0" || typeof request.method !== "string") return rpcError(id, -32600, "Invalid JSON-RPC request.");

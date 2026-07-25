@@ -1643,6 +1643,13 @@ different manifest digest or bytes fails with `preinstalled_manifest_conflict`;
 it is never overwritten. A future manifest version produces new stable IDs and
 must not mutate Projects copied from an earlier version.
 
+After the installation record reaches `ready`, that record is provenance rather
+than a lifecycle lock. Ordinary user Model rename and Project/Experiment
+archive or trash survive restart. Replay still verifies the manifest identity,
+the fixed-copy Project snapshot bytes, and the execution contract. Permanent
+deletion of a manifest-bound Model, Project, or baseline Experiment is blocked
+until a separately designed manifest-retirement operation exists.
+
 The installer runs the ordinary technical checker, creates the Project through
 `createProjectFromModel`, and creates one named synthetic single-seed baseline
 experiment. No API type, UI route, Project, run, event, or output schema gains a

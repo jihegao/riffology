@@ -63,7 +63,11 @@ import type {
   NamedManagedResourceKind,
   ObjectFileKind,
   OutputIndexRecord,
+  PermanentDeleteReceipt,
   PermanentDeletePreview,
+  ProductLifecycleAction,
+  ProductLifecycleKind,
+  ProductLifecycleReceipt,
   ProjectRecord,
   ProcessAttemptRecord,
   ResourceOwner,
@@ -87,6 +91,7 @@ import {
   withAtomicBatchSuccessRunContext,
   withAtomicVisualHealthContext,
   withAtomicVisualSuccessRunContext,
+  withPermanentDeleteContext,
   withRunCompletionReconciliationContext,
   type ProductDatabase,
 } from "./product-schema.ts";
@@ -4209,6 +4214,97 @@ export class ProductStoreV2 {
       .filter((row) => visible(row.lifecycleState, options));
   }
 
+  resourceRecentActivity(
+    kind: "model" | "project",
+    id: string,
+  ): {
+    at: string;
+    kind:
+      | "resource_created"
+      | "resource_updated"
+      | "conversation_message"
+      | "technical_check"
+      | "run_started"
+      | "run_terminal";
+  } {
+    assertId(id);
+    const table = kind === "model" ? "models" : "projects";
+    const resource = this.#database.prepare(
+      `SELECT created_at, updated_at FROM ${table} WHERE id = ?`,
+    ).get(id) as { created_at: string; updated_at: string } | undefined;
+    if (!resource) throw new ProductStoreV2Error("Resource does not exist.");
+    const candidates: Array<{
+      at: string;
+      kind:
+        | "resource_created"
+        | "resource_updated"
+        | "conversation_message"
+        | "technical_check"
+        | "run_started"
+        | "run_terminal";
+    }> = [{
+      at: resource.updated_at,
+      kind: resource.updated_at === resource.created_at
+        ? "resource_created"
+        : "resource_updated",
+    }];
+    const ownerColumn = kind === "model" ? "model_id" : "project_id";
+    const message = this.#database.prepare(
+      `SELECT max(m.updated_at) AS at
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.${ownerColumn} = ?`,
+    ).get(id) as { at: string | null };
+    if (message.at) candidates.push({ at: message.at, kind: "conversation_message" });
+    if (kind === "model") {
+      const check = this.#database.prepare(
+        `SELECT max(coalesce(finished_at, started_at)) AS at
+         FROM model_technical_checks WHERE model_id = ?`,
+      ).get(id) as { at: string | null };
+      if (check.at) candidates.push({ at: check.at, kind: "technical_check" });
+    } else {
+      const run = this.#database.prepare(
+        `SELECT status, started_at, finished_at, updated_at
+         FROM runs WHERE project_id = ?
+         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      ).get(id) as {
+        status: RunStatus;
+        started_at: string | null;
+        finished_at: string | null;
+        updated_at: string;
+      } | undefined;
+      if (run) {
+        const terminal = ["succeeded", "failed", "cancelled", "timed_out", "trashed"]
+          .includes(run.status);
+        candidates.push({
+          at: terminal
+            ? run.finished_at ?? run.updated_at
+            : run.started_at ?? run.updated_at,
+          kind: terminal ? "run_terminal" : "run_started",
+        });
+      }
+    }
+    return candidates.sort((left, right) =>
+      compareStrings(right.at, left.at)
+      || compareStrings(left.kind, right.kind))[0]!;
+  }
+
+  projectLastRun(projectId: string): {
+    id: string;
+    status: RunStatus;
+    updatedAt: string;
+  } | null {
+    assertId(projectId);
+    const row = this.#database.prepare(
+      `SELECT id, status, updated_at FROM runs
+       WHERE project_id = ? ORDER BY updated_at DESC, id ASC LIMIT 1`,
+    ).get(projectId) as {
+      id: string;
+      status: RunStatus;
+      updated_at: string;
+    } | undefined;
+    return row ? { id: row.id, status: row.status, updatedAt: row.updated_at } : null;
+  }
+
   getProject(id: string): ProjectRecord {
     assertId(id);
     return this.#project(id);
@@ -6267,8 +6363,18 @@ export class ProductStoreV2 {
       if (kind === "model") {
         addRows("model_technical_checks", this.#database.prepare("SELECT * FROM model_technical_checks WHERE model_id = ? ORDER BY id").all(id) as any[]);
         for (const project of this.#database.prepare("SELECT id FROM projects WHERE source_model_id = ? ORDER BY id").all(id) as Array<{ id: string }>) blockers.push({ kind: "project_lineage", id: project.id });
+        for (const manifest of this.#database.prepare(
+          "SELECT manifest_id FROM preinstalled_manifest_installations WHERE model_id = ? ORDER BY manifest_id",
+        ).all(id) as Array<{ manifest_id: string }>) {
+          blockers.push({ kind: "preinstalled_manifest", id: manifest.manifest_id });
+        }
       } else {
         exclusions.push({ kind: "model", id: row.source_model_id, reason: "source lineage outside project closure" });
+        for (const manifest of this.#database.prepare(
+          "SELECT manifest_id FROM preinstalled_manifest_installations WHERE project_id = ? ORDER BY manifest_id",
+        ).all(id) as Array<{ manifest_id: string }>) {
+          blockers.push({ kind: "preinstalled_manifest", id: manifest.manifest_id });
+        }
         const experiments = this.#database.prepare("SELECT * FROM experiment_configurations WHERE project_id = ? ORDER BY id").all(id) as any[];
         addRows("experiment_configurations", experiments);
         addRows("experiment_command_receipts",
@@ -6289,6 +6395,11 @@ export class ProductStoreV2 {
     } else if (kind === "experiment") {
       const runs = this.#database.prepare("SELECT id FROM runs WHERE experiment_configuration_id = ? ORDER BY id").all(id) as Array<{ id: string }>;
       blockers.push(...runs.map((run) => ({ kind: "run", id: run.id })));
+      for (const manifest of this.#database.prepare(
+        "SELECT manifest_id FROM preinstalled_manifest_installations WHERE experiment_configuration_id = ? ORDER BY manifest_id",
+      ).all(id) as Array<{ manifest_id: string }>) {
+        blockers.push({ kind: "preinstalled_manifest", id: manifest.manifest_id });
+      }
       addRows("experiment_command_receipts",
         this.#database.prepare("SELECT * FROM experiment_command_receipts WHERE experiment_id = ? ORDER BY command_id").all(id) as any[],
         (receipt) => ({ command_id: receipt.command_id }));
@@ -6322,10 +6433,94 @@ export class ProductStoreV2 {
     }
 
     const uniqueFiles = [...new Map(fileRows.map((file) => [file.id, file])).values()].sort(compareObjectRows);
+    const closureOwners: Array<{
+      owner: ResourceOwner;
+      runProjectId?: string;
+    }> = [];
+    if (kind === "model") {
+      closureOwners.push({ owner: { kind: "model", id } });
+    } else if (kind === "project") {
+      closureOwners.push({ owner: { kind: "project", id } });
+    } else if (kind === "conversation") {
+      closureOwners.push({ owner: { kind: "conversation", id } });
+    } else if (kind === "run") {
+      const run = this.#database.prepare(
+        "SELECT project_id FROM runs WHERE id = ?",
+      ).get(id) as { project_id: string };
+      closureOwners.push({
+        owner: { kind: "run", id },
+        runProjectId: run.project_id,
+      });
+    }
+    for (const conversation of records
+      .filter((record) => record.table === "conversations")) {
+      closureOwners.push({
+        owner: { kind: "conversation", id: String(conversation.key.id) },
+      });
+    }
+    for (const run of records.filter((record) => record.table === "runs")) {
+      const runId = String(run.key.id);
+      const binding = this.#database.prepare(
+        "SELECT project_id FROM runs WHERE id = ?",
+      ).get(runId) as { project_id: string };
+      closureOwners.push({
+        owner: { kind: "run", id: runId },
+        runProjectId: binding.project_id,
+      });
+    }
+    const uniqueOwners = [...new Map(closureOwners.map((entry) => [
+      `${entry.owner.kind}:${entry.owner.id}:${entry.runProjectId ?? ""}`,
+      entry,
+    ])).values()];
+    for (const entry of uniqueOwners) {
+      const expected = uniqueFiles.filter((file) => {
+        const path = ownerPath(file);
+        return path.owner.kind === entry.owner.kind
+          && path.owner.id === entry.owner.id
+          && path.runProjectId === entry.runProjectId;
+      }).map((file) => ({
+        relativePath: file.relative_path,
+        sizeBytes: file.size_bytes,
+        sha256: file.sha256,
+      })).sort((left, right) => compareStrings(left.relativePath, right.relativePath));
+      const actual = this.#objects.listOwnerFiles(
+        entry.owner,
+        entry.runProjectId,
+      ).map((file) => ({
+        relativePath: file.relativePath,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+      }));
+      if (canonicalDigest(actual) !== canonicalDigest(expected)) {
+        throw new ProductStoreV2Error(
+          "Permanent-delete closure contains unindexed or drifted files.",
+        );
+      }
+    }
+    if (kind === "project") {
+      const expectedRunIds = records.filter((record) => record.table === "runs")
+        .map((record) => String(record.key.id)).sort(compareStrings);
+      const expectedRunIdSet = new Set(expectedRunIds);
+      if (this.#objects.listProjectRunDirectories(id)
+        .some((runId) => !expectedRunIdSet.has(runId))) {
+        throw new ProductStoreV2Error(
+          "Permanent-delete closure contains an unindexed run directory.",
+        );
+      }
+    }
     addRows("object_files", uniqueFiles);
     const includedFileIds = new Set(uniqueFiles.map((file) => file.id));
+    const includedVisualAuditIds = new Set(records
+      .filter((record) => record.table === "visual_agent_audit_facts")
+      .map((record) => String(record.key.id)));
     for (let index = blockers.length - 1; index >= 0; index -= 1) {
-      if (blockers[index]!.kind === "adopted_attachment" && includedFileIds.has(blockers[index]!.id)) blockers.splice(index, 1);
+      const blocker = blockers[index]!;
+      if (blocker.kind === "adopted_attachment"
+        && includedFileIds.has(blocker.id)
+        || blocker.kind === "visual_run_audit"
+        && includedVisualAuditIds.has(blocker.id)) {
+        blockers.splice(index, 1);
+      }
     }
     for (let index = exclusions.length - 1; index >= 0; index -= 1) {
       if (exclusions[index]!.kind === "adopted_attachment" && includedFileIds.has(exclusions[index]!.id)) exclusions.splice(index, 1);
@@ -6345,6 +6540,369 @@ export class ProductStoreV2 {
     return { ...payload, previewToken: canonicalDigest(payload), stateToken: canonicalDigest({ target, stateRows, files, blockers, exclusions }) };
   }
 
+  resourceRecordDigest(kind: ProductLifecycleKind, id: string): string {
+    assertId(id);
+    return canonicalDigest(this.#resourceDigestPreimage(kind, id));
+  }
+
+  executeLifecycleCommand(input: {
+    commandId: string;
+    action: ProductLifecycleAction;
+    kind: ProductLifecycleKind;
+    id: string;
+    expectedRecordDigest: string;
+    name?: string;
+    committedAt: IsoTimestamp;
+  }): ProductLifecycleReceipt {
+    assertId(input.commandId);
+    assertId(input.id);
+    assertIsoTimestamp(input.committedAt, "Lifecycle command timestamp");
+    if (!/^[0-9a-f]{64}$/u.test(input.expectedRecordDigest)) {
+      throw new ProductStoreV2Error("Lifecycle record digest is invalid.");
+    }
+    if (input.action === "rename") {
+      if (typeof input.name !== "string" || !input.name.trim()) {
+        throw new ProductStoreV2Error("Lifecycle rename requires a name.");
+      }
+    } else if (input.name !== undefined) {
+      throw new ProductStoreV2Error("Only rename accepts a name.");
+    }
+    const intentDigest = canonicalDigest({
+      action: input.action,
+      kind: input.kind,
+      id: input.id,
+      expectedRecordDigest: input.expectedRecordDigest,
+      ...(input.name === undefined ? {} : { name: input.name }),
+    });
+    const replay = this.#lifecycleReceipt(
+      input.commandId,
+      input.action,
+      input.kind,
+      input.id,
+      intentDigest,
+    );
+    if (replay) return replay;
+    return this.#withImmediateTransaction(() => {
+      const racedReplay = this.#lifecycleReceipt(
+        input.commandId,
+        input.action,
+        input.kind,
+        input.id,
+        intentDigest,
+      );
+      if (racedReplay) return racedReplay;
+      const previous = this.#resourceDigestPreimage(input.kind, input.id);
+      const previousRecordDigest = canonicalDigest(previous);
+      if (previousRecordDigest !== input.expectedRecordDigest) {
+        throw new ProductStoreV2Error("Lifecycle record changed before the command committed.");
+      }
+      const table = managedTable(input.kind).table;
+      const statements: ProductDatabaseMutationStatement[] = [];
+      if (input.action === "rename") {
+        if (previous.lifecycleState === "trashed") {
+          throw new ProductStoreV2Error("A trashed resource cannot be renamed.");
+        }
+        statements.push({
+          sql: `UPDATE ${table} SET name = ?, updated_at = ? WHERE id = ? AND lifecycle_state = ?`,
+          params: [input.name!, input.committedAt, input.id, previous.lifecycleState],
+          expectedChanges: 1,
+        });
+      } else if (input.action === "archive") {
+        if (previous.lifecycleState !== "active") {
+          throw new ProductStoreV2Error("Only an active resource can be archived.");
+        }
+        statements.push({
+          sql: `UPDATE ${table} SET lifecycle_state = 'archived', archived_at = ?, updated_at = ?
+            WHERE id = ? AND lifecycle_state = 'active'`,
+          params: [input.committedAt, input.committedAt, input.id],
+          expectedChanges: 1,
+        });
+      } else if (input.action === "trash") {
+        if (previous.lifecycleState === "trashed") {
+          throw new ProductStoreV2Error("Resource is already trashed.");
+        }
+        const trashId = `trash_${randomUUID().replaceAll("-", "")}`;
+        const trashColumn = managedTable(input.kind).trashColumn;
+        statements.push(
+          {
+            sql: `UPDATE ${table} SET lifecycle_state = 'trashed', pre_trash_state = ?,
+              trashed_at = ?, updated_at = ? WHERE id = ? AND lifecycle_state = ?`,
+            params: [previous.lifecycleState, input.committedAt, input.committedAt, input.id, previous.lifecycleState],
+            expectedChanges: 1,
+          },
+          {
+            sql: `INSERT INTO trash_entries (id, ${trashColumn}, prior_state, trashed_at)
+              VALUES (?, ?, ?, ?)`,
+            params: [trashId, input.id, previous.lifecycleState, input.committedAt],
+            expectedChanges: 1,
+          },
+        );
+      } else {
+        if (previous.lifecycleState === "active") {
+          throw new ProductStoreV2Error("An active resource does not need restoration.");
+        }
+        if (previous.lifecycleState === "archived") {
+          statements.push({
+            sql: `UPDATE ${table} SET lifecycle_state = 'active', archived_at = NULL,
+              updated_at = ? WHERE id = ? AND lifecycle_state = 'archived'`,
+            params: [input.committedAt, input.id],
+            expectedChanges: 1,
+          });
+        } else {
+          const row = this.#database.prepare(
+            `SELECT pre_trash_state FROM ${table} WHERE id = ? AND lifecycle_state = 'trashed'`,
+          ).get(input.id) as { pre_trash_state: "active" | "archived" | null } | undefined;
+          if (!row?.pre_trash_state) {
+            throw new ProductStoreV2Error("Resource has no restorable prior lifecycle.");
+          }
+          statements.push(
+            {
+              sql: `UPDATE ${table} SET lifecycle_state = ?, pre_trash_state = NULL,
+                trashed_at = NULL, updated_at = ? WHERE id = ? AND lifecycle_state = 'trashed'`,
+              params: [row.pre_trash_state, input.committedAt, input.id],
+              expectedChanges: 1,
+            },
+            {
+              sql: `UPDATE trash_entries SET restored_at = ?
+                WHERE ${managedTable(input.kind).trashColumn} = ? AND restored_at IS NULL`,
+              params: [input.committedAt, input.id],
+              expectedChanges: 1,
+            },
+          );
+        }
+      }
+      this.#executeDatabaseStatements(statements);
+      const current = this.#resourceDigestPreimage(input.kind, input.id);
+      const unsigned = {
+        schemaVersion: 1 as const,
+        commandId: input.commandId,
+        action: input.action,
+        kind: input.kind,
+        id: input.id,
+        previousLifecycleState: previous.lifecycleState,
+        currentLifecycleState: current.lifecycleState,
+        previousRecordDigest,
+        currentRecordDigest: canonicalDigest(current),
+        committedAt: input.committedAt,
+      };
+      const receipt: ProductLifecycleReceipt = Object.freeze({
+        ...unsigned,
+        receiptDigest: canonicalDigest(unsigned),
+      });
+      this.#executeDatabaseStatements([{
+        sql: `INSERT INTO resource_lifecycle_receipts
+          (command_id, action, resource_kind, resource_id, intent_sha256,
+            receipt_json, receipt_sha256, committed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.commandId,
+          input.action,
+          input.kind,
+          input.id,
+          intentDigest,
+          json(receipt),
+          receipt.receiptDigest,
+          input.committedAt,
+        ],
+        expectedChanges: 1,
+      }]);
+      return receipt;
+    });
+  }
+
+  permanentDeleteActivityBlockers(
+    kind: ProductLifecycleKind,
+    id: string,
+  ): Array<{ kind: string; id: string }> {
+    const preview = this.previewPermanentDelete(kind, id);
+    const byTable = new Map<string, string[]>();
+    for (const record of preview.records) {
+      const value = record.key.id ?? record.key.run_id ?? record.key.conversation_id;
+      if (typeof value !== "string") continue;
+      const ids = byTable.get(record.table) ?? [];
+      ids.push(value);
+      byTable.set(record.table, ids);
+    }
+    const blockers: Array<{ kind: string; id: string }> = [];
+    for (const turnId of byTable.get("agent_turns") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT state FROM agent_turns WHERE id = ?",
+      ).get(turnId) as { state: string } | undefined;
+      if (row && ["queued", "running"].includes(row.state)) {
+        blockers.push({ kind: "agent_turn_active", id: turnId });
+      }
+    }
+    for (const sessionId of byTable.get("agent_sessions") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT state FROM agent_sessions WHERE id = ?",
+      ).get(sessionId) as { state: string } | undefined;
+      if (row && ["creating", "available", "rebuilding"].includes(row.state)) {
+        blockers.push({ kind: "agent_session_active", id: sessionId });
+      }
+    }
+    for (const checkId of byTable.get("model_technical_checks") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT state FROM model_technical_checks WHERE id = ?",
+      ).get(checkId) as { state: string } | undefined;
+      if (row?.state === "running") {
+        blockers.push({ kind: "technical_check_active", id: checkId });
+      }
+    }
+    for (const runId of byTable.get("runs") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT status FROM runs WHERE id = ?",
+      ).get(runId) as { status: string } | undefined;
+      if (row && ["queued", "running"].includes(row.status)) {
+        blockers.push({ kind: "run_active", id: runId });
+      }
+    }
+    for (const processId of byTable.get("process_attempts") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT state FROM process_attempts WHERE id = ?",
+      ).get(processId) as { state: string } | undefined;
+      if (row && !["cleanup_complete", "cleanup_unverified"].includes(row.state)) {
+        blockers.push({ kind: "process_active", id: processId });
+      }
+    }
+    for (const recoveryId of byTable.get("run_recovery_actions") ?? []) {
+      const row = this.#database.prepare(
+        "SELECT state FROM run_recovery_actions WHERE id = ?",
+      ).get(recoveryId) as { state: string } | undefined;
+      if (row?.state === "started") {
+        blockers.push({ kind: "recovery_active", id: recoveryId });
+      }
+    }
+    return blockers.sort(compareKindId);
+  }
+
+  permanentDeleteReceipt(
+    commandId: string,
+    kind: ProductLifecycleKind,
+    id: string,
+    canonicalIntentDigest: string,
+  ): PermanentDeleteReceipt | null {
+    assertId(commandId);
+    assertId(id);
+    const row = this.#database.prepare(
+      `SELECT resource_kind, resource_id, canonical_intent_sha256,
+        receipt_json, receipt_sha256 FROM permanent_delete_receipts
+       WHERE command_id = ?`,
+    ).get(commandId) as {
+      resource_kind: string;
+      resource_id: string;
+      canonical_intent_sha256: string;
+      receipt_json: string;
+      receipt_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.resource_kind !== kind || row.resource_id !== id
+      || row.canonical_intent_sha256 !== canonicalIntentDigest) {
+      throw new ProductStoreV2Error(
+        "Permanent-delete command already exists with a different intent.",
+      );
+    }
+    const receipt = JSON.parse(row.receipt_json) as PermanentDeleteReceipt;
+    const { receiptDigest, ...unsigned } = receipt;
+    if (receipt.receiptDigest !== row.receipt_sha256
+      || canonicalDigest(unsigned) !== receipt.receiptDigest
+      || receipt.kind !== kind || receipt.id !== id
+      || receipt.commandId !== commandId
+      || receipt.canonicalIntentDigest !== canonicalIntentDigest) {
+      throw new ProductStoreV2Error("Permanent-delete receipt is corrupt.");
+    }
+    return Object.freeze(receipt);
+  }
+
+  commitPermanentDelete(input: {
+    commandId: string;
+    kind: ProductLifecycleKind;
+    id: string;
+    previewToken: string;
+    stateToken: string;
+    canonicalIntentDigest: string;
+    committedAt: IsoTimestamp;
+  }): PermanentDeleteReceipt {
+    const replay = this.permanentDeleteReceipt(
+      input.commandId,
+      input.kind,
+      input.id,
+      input.canonicalIntentDigest,
+    );
+    if (replay) return replay;
+    const preview = this.previewPermanentDelete(input.kind, input.id);
+    if (preview.previewToken !== input.previewToken
+      || preview.stateToken !== input.stateToken) {
+      throw new ProductStoreV2Error("Permanent-delete preview state changed.");
+    }
+    if (preview.blockingReferences.length > 0) {
+      throw new ProductStoreV2Error("Permanent-delete target has blocking references.");
+    }
+    if (this.#resourceDigestPreimage(input.kind, input.id).lifecycleState !== "trashed") {
+      throw new ProductStoreV2Error("Permanent-delete target must be trashed.");
+    }
+    const activity = this.permanentDeleteActivityBlockers(input.kind, input.id);
+    if (activity.length > 0) {
+      throw new ProductStoreV2Error("Permanent-delete target has active work.");
+    }
+    const unsigned = {
+      schemaVersion: 1 as const,
+      commandId: input.commandId,
+      action: "permanently_delete" as const,
+      kind: input.kind,
+      id: input.id,
+      recordCount: preview.records.length,
+      fileCount: preview.files.length,
+      totalBytes: preview.totalBytes,
+      previewToken: preview.previewToken,
+      stateToken: preview.stateToken,
+      canonicalIntentDigest: input.canonicalIntentDigest,
+      committedAt: input.committedAt,
+    };
+    const receipt: PermanentDeleteReceipt = Object.freeze({
+      ...unsigned,
+      receiptDigest: canonicalDigest(unsigned),
+    });
+    const deleteStatements = permanentDeleteStatements(preview.records);
+    deleteStatements.push({
+      sql: `INSERT INTO permanent_delete_receipts
+        (command_id, resource_kind, resource_id, canonical_intent_sha256,
+          receipt_json, receipt_sha256, committed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [
+        input.commandId,
+        input.kind,
+        input.id,
+        input.canonicalIntentDigest,
+        json(receipt),
+        receipt.receiptDigest,
+        input.committedAt,
+      ],
+      expectedChanges: 1,
+    });
+    const files = preview.records
+      .filter((record) => record.table === "object_files")
+      .map((record) => this.#objectRow(String(record.key.id)))
+      .map((row) => ({
+        operation: "delete" as const,
+        target: ownerPath(row),
+        expectedPriorSha256: row.sha256,
+      }));
+    if (files.length === 0) {
+      withPermanentDeleteContext(this.#database, () =>
+        this.#withImmediateTransaction(() => {
+          this.#database.exec("PRAGMA defer_foreign_keys = ON");
+          this.#executeDatabaseStatements(deleteStatements);
+        }));
+    } else {
+      this.#coordinator.executePermanentDelete({
+        transactionId: stableTransactionId("permanent_delete", input.commandId),
+        files,
+        statements: deleteStatements,
+      });
+    }
+    return receipt;
+  }
+
   #collectRunExecutionClosure(
     runIds: readonly string[],
     addRows: (table: string, rows: any[], key?: (row: any) => Record<string, string | number>) => void,
@@ -6352,6 +6910,11 @@ export class ProductStoreV2 {
   ): void {
     for (const runId of runIds) {
       fileRows.push(...this.#objectRows("owner_run_id = ?", [runId]));
+      addRows("visual_agent_audit_facts",
+        this.#database.prepare("SELECT * FROM visual_agent_audit_facts WHERE run_id = ? ORDER BY id").all(runId) as any[]);
+      addRows("visual_health_receipts",
+        this.#database.prepare("SELECT * FROM visual_health_receipts WHERE run_id = ? ORDER BY process_attempt_id").all(runId) as any[],
+        (receipt) => ({ process_attempt_id: receipt.process_attempt_id }));
       addRows("diagnostic_events",
         this.#database.prepare("SELECT * FROM diagnostic_events WHERE run_id = ? ORDER BY sequence").all(runId) as any[],
         (event) => ({ run_id: event.run_id, sequence: event.sequence }));
@@ -6574,6 +7137,18 @@ export class ProductStoreV2 {
       const turns = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[];
       addRows("agent_turns", turns);
       for (const turn of turns) {
+        for (const audit of this.#database.prepare(
+          `SELECT id, run_id FROM visual_agent_audit_facts
+           WHERE conversation_id = ? AND turn_id = ? ORDER BY id`,
+        ).all(conversationId, turn.id) as Array<{
+          id: string;
+          run_id: string;
+        }>) {
+          blockers.push({
+            kind: "visual_run_audit",
+            id: audit.id,
+          });
+        }
         addRows("skill_uses", this.#database.prepare("SELECT * FROM skill_uses WHERE turn_id = ? ORDER BY id").all(turn.id) as any[]);
         const actions = this.#database.prepare("SELECT * FROM action_records WHERE turn_id = ? ORDER BY id").all(turn.id) as any[];
         addRows("action_records", actions);
@@ -7196,6 +7771,121 @@ export class ProductStoreV2 {
     return response;
   }
 
+  #resourceDigestPreimage(
+    kind: ProductLifecycleKind,
+    id: string,
+  ): Readonly<{
+    kind: ProductLifecycleKind;
+    id: string;
+    name: string;
+    lifecycleState: LifecycleState;
+    createdAt: string;
+    updatedAt: string;
+    details: Readonly<Record<string, unknown>>;
+  }> {
+    if (kind === "model") {
+      const record = this.#model(id);
+      return Object.freeze({
+        kind,
+        id: record.id,
+        name: record.name,
+        lifecycleState: record.lifecycleState,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        details: Object.freeze({
+          technicalStatus: record.technicalStatus,
+          runMode: record.runMode,
+        }),
+      });
+    }
+    if (kind === "project") {
+      const record = this.#project(id);
+      return Object.freeze({
+        kind,
+        id: record.id,
+        name: record.name,
+        lifecycleState: record.lifecycleState,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        details: Object.freeze({
+          sourceModelId: record.sourceModelId,
+          modelSnapshotDigest: record.modelSnapshotDigest,
+        }),
+      });
+    }
+    const row = this.#database.prepare(
+      `SELECT id, model_id, project_id, name, lifecycle_state, provider_id,
+        provider_model_id, provider_locked_at, created_at, updated_at
+       FROM conversations WHERE id = ?`,
+    ).get(id) as {
+      id: string;
+      model_id: string | null;
+      project_id: string | null;
+      name: string;
+      lifecycle_state: LifecycleState;
+      provider_id: string;
+      provider_model_id: string;
+      provider_locked_at: string | null;
+      created_at: string;
+      updated_at: string;
+    } | undefined;
+    if (!row || Boolean(row.model_id) === Boolean(row.project_id)) {
+      throw new ProductStoreV2Error("Conversation does not exist.");
+    }
+    return Object.freeze({
+      kind,
+      id: row.id,
+      name: row.name,
+      lifecycleState: row.lifecycle_state,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      details: Object.freeze({
+        ownerKind: row.model_id ? "model" : "project",
+        ownerId: row.model_id ?? row.project_id!,
+        providerId: row.provider_id,
+        providerModelId: row.provider_model_id,
+        providerLocked: row.provider_locked_at !== null,
+      }),
+    });
+  }
+
+  #lifecycleReceipt(
+    commandId: string,
+    action: ProductLifecycleAction,
+    kind: ProductLifecycleKind,
+    id: string,
+    intentDigest: string,
+  ): ProductLifecycleReceipt | null {
+    const row = this.#database.prepare(
+      `SELECT action, resource_kind, resource_id, intent_sha256,
+        receipt_json, receipt_sha256 FROM resource_lifecycle_receipts
+       WHERE command_id = ?`,
+    ).get(commandId) as {
+      action: string;
+      resource_kind: string;
+      resource_id: string;
+      intent_sha256: string;
+      receipt_json: string;
+      receipt_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.action !== action || row.resource_kind !== kind
+      || row.resource_id !== id || row.intent_sha256 !== intentDigest) {
+      throw new ProductStoreV2Error(
+        "Lifecycle command already exists with a different intent.",
+      );
+    }
+    const receipt = JSON.parse(row.receipt_json) as ProductLifecycleReceipt;
+    const { receiptDigest, ...unsigned } = receipt;
+    if (receipt.receiptDigest !== row.receipt_sha256
+      || canonicalDigest(unsigned) !== receipt.receiptDigest
+      || receipt.commandId !== commandId || receipt.action !== action
+      || receipt.kind !== kind || receipt.id !== id) {
+      throw new ProductStoreV2Error("Lifecycle command receipt is corrupt.");
+    }
+    return Object.freeze(receipt);
+  }
+
   #assertMutableExecutionContract(kind: ManagedResourceKind, id: string): void {
     if (kind !== "experiment" && kind !== "run") return;
     const table = kind === "experiment" ? "experiment_configurations" : "runs";
@@ -7487,7 +8177,19 @@ export class ProductStoreV2 {
       LEFT JOIN runs r ON r.id = f.owner_run_id WHERE ${where} ORDER BY f.id`).all(...params) as ObjectRow[];
   }
 
-  #assertOpen(): void { if (this.#closed) throw new ProductStoreV2Error("Product store is closed."); }
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new ProductStoreV2Error("Product store is closed.");
+    }
+    try {
+      this.#coordinator.assertUsable();
+    } catch (error) {
+      throw new ProductStoreV2Error(
+        "Product store requires mutation recovery before further use.",
+        { cause: error },
+      );
+    }
+  }
 
   #preinstalledManifestInstallation(
     manifestId: string,
@@ -7744,6 +8446,76 @@ const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: 
     case "experiment": return { table: "experiment_configurations", trashColumn: "experiment_configuration_id" };
     case "run": return { table: "runs", trashColumn: "run_id" };
   }
+};
+
+const PERMANENT_DELETE_TABLE_PRIORITY = Object.freeze([
+  "visual_agent_audit_facts",
+  "message_attachments",
+  "temporary_document_adoptions",
+  "skill_uses",
+  "action_records",
+  "agent_turns",
+  "conversation_summaries",
+  "agent_sessions",
+  "temporary_documents",
+  "run_completion_cards",
+  "messages",
+  "attachments",
+  "visual_health_receipts",
+  "run_command_receipts",
+  "run_commands",
+  "diagnostic_event_files",
+  "diagnostic_events",
+  "diagnostic_event_sets",
+  "output_indexes",
+  "process_attempts",
+  "process_launch_manifests",
+  "run_recovery_actions",
+  "run_scratch_leases",
+  "run_attempts",
+  "object_files",
+  "trash_entries",
+  "model_technical_checks",
+  "experiment_command_receipts",
+  "runs",
+  "experiment_configurations",
+  "conversations",
+  "projects",
+  "models",
+] as const);
+
+const permanentDeleteStatements = (
+  records: PermanentDeletePreview["records"],
+): ProductDatabaseMutationStatement[] => {
+  const priority = new Map<string, number>(
+    PERMANENT_DELETE_TABLE_PRIORITY.map((table, index) => [table, index]),
+  );
+  const ordered = [...records].sort((left, right) => {
+    const leftPriority = priority.get(left.table);
+    const rightPriority = priority.get(right.table);
+    if (leftPriority === undefined || rightPriority === undefined) {
+      throw new ProductStoreV2Error(
+        "Permanent-delete closure contains an unsupported record table.",
+      );
+    }
+    return leftPriority - rightPriority
+      || compareStrings(canonicalDigest(left), canonicalDigest(right));
+  });
+  return ordered.map((record) => {
+    const columns = Object.keys(record.key).sort();
+    if (columns.length < 1
+      || columns.some((column) => !/^[a-z][a-z0-9_]*$/u.test(column))) {
+      throw new ProductStoreV2Error(
+        "Permanent-delete closure contains an unsupported record identity.",
+      );
+    }
+    return {
+      sql: `DELETE FROM ${record.table} WHERE ${columns
+        .map((column) => `${column} = ?`).join(" AND ")}`,
+      params: columns.map((column) => record.key[column]!),
+      expectedChanges: 1,
+    };
+  });
 };
 
 const compareObjectRows = (left: ObjectRow, right: ObjectRow): number => compareStrings(left.relative_path, right.relative_path) || compareStrings(left.id, right.id);

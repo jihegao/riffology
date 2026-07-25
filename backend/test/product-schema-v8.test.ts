@@ -564,7 +564,25 @@ test("schema v8 migrates a clean v7 database, installs private health evidence, 
           'process_requires_launch_receipt_v6',
           'run_success_atomic_context_v4',
           'output_v4_run_contract_insert',
-          'run_output_object_atomic_success_v4'
+          'run_output_object_atomic_success_v4',
+          'experiment_legacy_delete_v4',
+          'experiment_receipt_delete_v4',
+          'run_legacy_delete_v4',
+          'output_legacy_delete_v4',
+          'run_receipt_delete_v4',
+          'run_command_terminal_delete_v5',
+          'run_attempt_delete_v5',
+          'process_attempt_delete_v5',
+          'scratch_lease_delete_v6',
+          'launch_manifest_delete_v6',
+          'recovery_action_delete_v6',
+          'platform_card_delete_v7',
+          'run_completion_card_delete_v7',
+          'visual_health_receipt_delete_v8',
+          'visual_agent_audit_immutable_delete_v10',
+          'diagnostic_event_sets_immutable_delete_v12',
+          'diagnostic_event_files_immutable_delete_v12',
+          'diagnostic_events_immutable_delete_v12'
         )
       ORDER BY name`
     ).all() as Array<{ name: string; sql: string }>;

@@ -40,13 +40,21 @@ class AcceptanceOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   async abort(): Promise<void> {}
 }
 
-const post = (url: string, body: unknown) => fetch(url, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify(body),
-});
+const productSessions = new Map<string, BrowserMutationSession>();
 
-test("A3-2d1 output authority is unavailable on the legacy listener", async (t) => {
+const productSession = async (url: string): Promise<BrowserMutationSession> => {
+  const origin = new URL(url).origin;
+  const cached = productSessions.get(origin);
+  if (cached) return cached;
+  return await bootstrapAppMutationSession(origin);
+};
+
+const post = async (url: string, body: unknown) => {
+  const origin = new URL(url).origin;
+  return await browserPost(origin, await productSession(url), url, body);
+};
+
+test("Product API authority is unavailable on the legacy listener", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "riff-a3-2d1-legacy-denial-"));
   const legacyRoot = join(base, "legacy");
   await mkdir(legacyRoot, { recursive: true, mode: 0o700 });
@@ -69,14 +77,17 @@ test("A3-2d1 output authority is unavailable on the legacy listener", async (t) 
     `http://127.0.0.1:${address.port}/api/projects/project_denied/runs/run_denied/outputs`,
   );
   assert.equal(response.status, 403);
-  assert.equal((await response.json() as any).error.code, "output_access_denied");
+  assert.equal((await response.json() as any).error.code, "browser_session_denied");
 });
 
-const patch = (url: string, body: unknown) => fetch(url, {
-  method: "PATCH",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify(body),
-});
+const patch = async (url: string, body: unknown) => {
+  const origin = new URL(url).origin;
+  return await fetch(url, {
+    method: "PATCH",
+    headers: browserMutationHeaders(origin, await productSession(url)),
+    body: JSON.stringify(body),
+  });
+};
 
 const start = async (base: string) => {
   const legacyRoot = join(base, "legacy");
@@ -110,15 +121,21 @@ const browserOutputHeaders = (cookie: string) => ({
 const bootstrapAppSession = async (baseUrl: string): Promise<string> => {
   const response = await fetch(`${baseUrl}/api/browser-session/bootstrap`, {
     method: "POST",
+    body: "{}",
     headers: {
+      "content-type": "application/json",
       origin: baseUrl,
       "sec-fetch-site": "same-origin",
-      "content-length": "0",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
     },
   });
   assert.equal(response.status, 201, await response.clone().text());
   const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
   assert.ok(cookie);
+  const body = await response.json() as any;
+  assert.match(body.csrfToken, /^[A-Za-z0-9_-]{43}$/u);
+  productSessions.set(baseUrl, { cookie, csrfToken: body.csrfToken });
   return cookie;
 };
 
@@ -132,10 +149,13 @@ const bootstrapAppMutationSession = async (
 ): Promise<BrowserMutationSession> => {
   const response = await fetch(`${baseUrl}/api/browser-session/bootstrap`, {
     method: "POST",
+    body: "{}",
     headers: {
+      "content-type": "application/json",
       origin: baseUrl,
       "sec-fetch-site": "same-origin",
-      "content-length": "0",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
     },
   });
   assert.equal(response.status, 201, await response.clone().text());
@@ -143,7 +163,9 @@ const bootstrapAppMutationSession = async (
   assert.ok(cookie);
   const body = await response.json() as any;
   assert.match(body.csrfToken, /^[A-Za-z0-9_-]{43}$/u);
-  return { cookie, csrfToken: body.csrfToken };
+  const session = { cookie, csrfToken: body.csrfToken };
+  productSessions.set(baseUrl, session);
+  return session;
 };
 
 const browserMutationHeaders = (
@@ -203,7 +225,10 @@ const waitForRun = async (
   status: "running" | "succeeded" | "failed" | "cancelled",
 ): Promise<any> => {
   for (let attempt = 0; attempt < 600; attempt += 1) {
-    const response = await fetch(`${baseUrl}/api/projects/${projectId}/runs/${runId}`);
+    const session = await productSession(baseUrl);
+    const response = await fetch(`${baseUrl}/api/projects/${projectId}/runs/${runId}`, {
+      headers: browserOutputHeaders(session.cookie),
+    });
     assert.equal(response.status, 200, await response.clone().text());
     const run = await response.json() as any;
     if (run.status === status) return run;
@@ -216,7 +241,10 @@ const waitForRun = async (
 };
 
 const listMessages = async (baseUrl: string, conversationId: string): Promise<any[]> => {
-  const response = await fetch(`${baseUrl}/api/conversations/${conversationId}/messages`);
+  const session = await productSession(baseUrl);
+  const response = await fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, {
+    headers: browserOutputHeaders(session.cookie),
+  });
   assert.equal(response.status, 200, await response.clone().text());
   return ((await response.json()) as any).messages;
 };
@@ -595,7 +623,11 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
       terminalClosureDigest: succeededAfterRestart.terminalClosureDigest,
     },
   };
-  const unauthenticatedTrash = await post(trashUrl, trashRequest);
+  const unauthenticatedTrash = await fetch(trashUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(trashRequest),
+  });
   assert.equal(unauthenticatedTrash.status, 403);
   assert.equal(
     unauthenticatedTrash.headers.get("cache-control"),
@@ -607,7 +639,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   );
   assert.equal(
     (await unauthenticatedTrash.json() as any).error.code,
-    "run_control_denied",
+    "browser_session_denied",
   );
   const staleCsrfTrash = await fetch(trashUrl, {
     method: "POST",
@@ -713,6 +745,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
 
   const trashedRunResponse = await fetch(
     `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}`,
+    { headers: browserOutputHeaders((await productSession(baseUrl)).cookie) },
   );
   assert.equal(trashedRunResponse.status, 200);
   const trashedRun = await trashedRunResponse.json() as any;
@@ -820,7 +853,9 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   assert.equal(historicalRestoreReplay.status, 200);
   assert.deepEqual(await historicalRestoreReplay.json(), restoreReceipt);
   assert.equal(
-    (await fetch(`${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}`)
+    (await fetch(`${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}`, {
+      headers: browserOutputHeaders(mutationSession.cookie),
+    })
       .then((response) => response.json()) as any).status,
     "trashed",
   );
@@ -1023,16 +1058,18 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   assert.equal(cancelStart.status, "queued");
   const queuedTargetResponse = await fetch(
     `${baseUrl}/api/projects/${project.id}/runs/${cancelStart.runId}`,
+    { headers: browserOutputHeaders(mutationSession.cookie) },
   );
   assert.equal(queuedTargetResponse.status, 200, await queuedTargetResponse.clone().text());
   assert.equal(((await queuedTargetResponse.json()) as any).status, "queued");
 
   const cancelUrl =
     `${baseUrl}/api/projects/${project.id}/runs/${cancelStart.runId}/cancel`;
-  const unauthenticatedCancel = await post(
-    cancelUrl,
-    { commandId: "cancel-a3-1-api-queued" },
-  );
+  const unauthenticatedCancel = await fetch(cancelUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: "cancel-a3-1-api-queued" }),
+  });
   assert.equal(unauthenticatedCancel.status, 403);
   const cancelResponse = await browserPost(
     baseUrl,
@@ -1443,6 +1480,7 @@ events = (
   assert.equal(typeof freshCursorPage.nextCursor, "string");
   const directRunResponse = await fetch(
     `${baseUrl}/api/projects/${project.id}/runs/${run.runId}`,
+    { headers: directControlReadHeaders },
   );
   assert.equal(directRunResponse.status, 200);
   const directRun = await directRunResponse.json() as any;
