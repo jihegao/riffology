@@ -160,7 +160,7 @@ At the A3-1 batch-only boundary, visual starts without
 `capability_not_available`. Published A3-2a2c admits eligible visual starts
 through the existing Project-run route. If `completionConversationId` is
 present, that field-specific gate still fails with HTTP `422`
-`visual_completion_not_supported`. The A3-2d2 review candidate admits declared
+`visual_completion_not_supported`. A3-2d2, merged through PR #44, admits declared
 batch `domainEvents` only after strict NDJSON validation and atomic Store
 publication; malformed or over-limit files fail the run without partial event
 rows.
@@ -579,18 +579,19 @@ The remaining claims begin only in the later gates:
   P0/P1 merge blocker. The preceding c2 result is not c3 or c4 evidence.
 - **A3-2d outputs/events/direct controls:** d1 output list/download was merged
   through PR #43 and rechecks same-run ownership, safe name, path, size,
-  digest, MIME, range, and limits. The d2 review candidate proves declared
+  digest, MIME, range, and limits. The merged d2 boundary proves declared
   diagnostic NDJSON ingestion is atomic and enforces schema,
   structure, depth, string, count, and byte bounds; pagination uses tamper-
-  evident opaque cursors bound to run and normalized filters. Direct cancel,
-  download, trash, and restore remain usable with OpenCode unavailable and
-  reject cross-owner, cross-run, nonterminal, stale, tampered, and restart
-  cases. List/download/event reads require the current single-user app session,
+  evident opaque cursors bound to run and normalized filters. The merged d3
+  boundary proves direct cancel/download/trash/restore with OpenCode unavailable,
+  including cross-owner, cross-run, nonterminal, stale, tampered, and restart
+  rejection. List/download/event reads require the current single-user app session,
   exact Host/Fetch Metadata, and Project/run/output ownership tuple and emit
   private no-store responses; mutations additionally require
   exact Origin and CSRF. IDs are not bearer credentials. Commands
-  bind idempotency and expected revision/closure digest, with exact trash
-  confirmation. Download tests use one no-follow open descriptor, verify the
+  bind idempotency; cancel retains its exact `{commandId}` body, while
+  trash/restore compare `expectedLifecycleDigest` and trash binds exact
+  terminal-closure confirmation. Download tests use one no-follow open descriptor, verify the
   complete digest before any bytes, emit attachment/nosniff/no-store policy,
   support only one normalized range, and bound concurrency/rate.
   Current d2 cursor tests cover Project/run/contract/event-set/lifecycle-generation/direction/
@@ -606,8 +607,18 @@ The remaining claims begin only in the later gates:
   publication. Diagnostic-event prompt-injection cases prove URL-, instruction-,
   and tool-call-shaped content remains safely rendered, separately bounded
   untrusted context and cannot authorize an action. Project trash invalidates
-  event reads/cursors and restore does not revive an old cursor; direct run
-  trash/restore and active-download revocation remain pending A3-2d controls.
+  event reads/cursors and restore does not revive an old cursor. The current d3
+  review candidate covers all four terminal statuses, nonterminal/stale/
+  changed-intent rejection, exact receipt replay across restart, browser
+  mutation admission, trashed output fencing, and a real paused-download race
+  in which trash closes the dedicated output socket before Store commit.
+  It also proves direct run trash/restore invalidates old event cursors. The
+  PR #45 merge gate is 552 backend total/551 passed/zero failed/one optional
+  OpenCode smoke skipped, web 104/104, network entry 1/1, successful build,
+  and 24-file docs check. Final independent security review reports no P0/P1.
+  A combined route-level frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent
+  revocation matrix remains a d4 evidence task rather than a d3 implementation
+  claim.
   The legacy `/events` route remains separate from generic
   `/diagnostic-events` and is excluded from this evidence.
 

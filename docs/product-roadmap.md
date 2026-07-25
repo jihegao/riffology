@@ -60,8 +60,10 @@
 > and no caller-controlled target or browser authority. A3-2c3 interaction was
 > merged through PR #41. A3-2c4 live-CDP/real-Chromium security closeout was
 > merged through PR #42. A3-2d1 output list/download was merged through PR #43.
-> A3-2d2 diagnostic event ingestion and opaque cursor reads are a review-branch
-> candidate.
+> A3-2d2 diagnostic event ingestion and opaque cursor reads were merged
+> through PR #44. A3-2d3 direct controls were merged through PR #45; its
+> 552-test backend gate, web/network/build/docs gates and final independent
+> security review are green with no P0/P1 blocker.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

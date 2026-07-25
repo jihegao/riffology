@@ -13,6 +13,8 @@ import {
   type DiagnosticEventReadBinding,
   type FrozenRunCancelReceipt,
   type FrozenRunStartReceipt,
+  type RunLifecycleBinding,
+  type RunLifecycleCommandReceipt,
   type RunLimitsV1,
 } from "./product-store-v2.ts";
 import type { VerifiedObjectRead } from "./object-store.ts";
@@ -111,6 +113,9 @@ export type ProjectRunDto = {
   cancelRequestedAt: string | null;
   terminalCode: string | null;
   completionCardDisposition: string | null;
+  terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out" | null;
+  terminalClosureDigest: string | null;
+  lifecycleDigest: string | null;
   outputs: ProjectOutputDto[];
 };
 
@@ -253,7 +258,13 @@ export class AgentWorkspaceService {
         conversations: this.store.listConversations({ kind: "project", id }),
         experimentConfigurations: this.store.listExperimentConfigurations(id).map(publicExperimentConfiguration),
         runs: this.store.listRuns(id).map((run) =>
-          publicRun(run, run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [])),
+          publicRun(
+            run,
+            run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [],
+            run.contractVersion === 4
+              ? this.store.currentRunLifecycleBinding(id, run.id)
+              : undefined,
+          )),
       };
     } catch (error) { throw storeApiError(error); }
   }
@@ -262,8 +273,14 @@ export class AgentWorkspaceService {
     const projectId = boundedId(projectIdInput);
     const runId = boundedId(runIdInput);
     try {
-      const run = this.store.getRun(projectId, runId);
-      return publicRun(run, run.status === "succeeded" ? this.store.listRunOutputs(run.id) : []);
+      const run = this.store.getRun(projectId, runId, { includeTrashed: true });
+      return publicRun(
+        run,
+        run.status === "succeeded" ? this.store.listRunOutputs(run.id) : [],
+        run.contractVersion === 4
+          ? this.store.currentRunLifecycleBinding(projectId, runId)
+          : undefined,
+      );
     } catch (error) { throw storeApiError(error); }
   }
 
@@ -473,6 +490,80 @@ export class AgentWorkspaceService {
       this.#onRunQueued?.(runId, true);
       return receipt;
     } catch (error) { throw storeApiError(error); }
+  }
+
+  trashRun(input: {
+    projectId: string;
+    runId: string;
+    commandId: string;
+    expectedLifecycleDigest: string;
+    confirmation: {
+      action: "trash_run";
+      projectId: string;
+      runId: string;
+      terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out";
+      terminalClosureDigest: string;
+    };
+    beforeCommit?: () => void;
+  }): RunLifecycleCommandReceipt {
+    const projectId = boundedId(input.projectId);
+    const runId = boundedId(input.runId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const expectedLifecycleDigest = boundedDigest(
+      input.expectedLifecycleDigest,
+      "expectedLifecycleDigest",
+    );
+    const confirmation = {
+      action: input.confirmation.action,
+      projectId: boundedId(input.confirmation.projectId),
+      runId: boundedId(input.confirmation.runId),
+      terminalStatus: input.confirmation.terminalStatus,
+      terminalClosureDigest: boundedDigest(
+        input.confirmation.terminalClosureDigest,
+        "terminalClosureDigest",
+      ),
+    } as const;
+    try {
+      return this.store.trashRun({
+        projectId,
+        runId,
+        commandId,
+        expectedLifecycleDigest,
+        confirmation,
+        committedAt: this.#now(),
+        ...(input.beforeCommit ? { beforeCommit: input.beforeCommit } : {}),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  restoreRun(input: {
+    projectId: string;
+    runId: string;
+    commandId: string;
+    expectedLifecycleDigest: string;
+    beforeCommit?: () => void;
+  }): RunLifecycleCommandReceipt {
+    const projectId = boundedId(input.projectId);
+    const runId = boundedId(input.runId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const expectedLifecycleDigest = boundedDigest(
+      input.expectedLifecycleDigest,
+      "expectedLifecycleDigest",
+    );
+    try {
+      return this.store.restoreRun({
+        projectId,
+        runId,
+        commandId,
+        expectedLifecycleDigest,
+        committedAt: this.#now(),
+        ...(input.beforeCommit ? { beforeCommit: input.beforeCommit } : {}),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
   }
 
   createExperimentConfiguration(input: { projectId: string; commandId: string; name: string; configuration: Record<string, unknown> }): ExperimentConfigurationDto {
@@ -904,7 +995,11 @@ const publicOutputAccess = (
   createdAt: record.createdAt,
 });
 
-const publicRun = (record: RunRecord, outputs: OutputIndexRecord[]): ProjectRunDto => ({
+const publicRun = (
+  record: RunRecord,
+  outputs: OutputIndexRecord[],
+  lifecycle?: RunLifecycleBinding,
+): ProjectRunDto => ({
   id: record.id,
   projectId: record.projectId,
   experimentConfigurationId: record.experimentConfigurationId,
@@ -925,6 +1020,9 @@ const publicRun = (record: RunRecord, outputs: OutputIndexRecord[]): ProjectRunD
   cancelRequestedAt: record.contractVersion === 4 ? record.cancelRequestedAt : null,
   terminalCode: record.contractVersion === 4 ? record.terminalCode : null,
   completionCardDisposition: record.contractVersion === 4 ? record.completionCardDisposition : null,
+  terminalStatus: lifecycle?.terminalStatus ?? null,
+  terminalClosureDigest: lifecycle?.terminalClosureDigest ?? null,
+  lifecycleDigest: lifecycle?.lifecycleDigest ?? null,
   outputs: outputs.map(publicOutput),
 });
 
@@ -1025,7 +1123,10 @@ const storeApiError = (error: unknown): ApiError => {
   if (/^project_snapshot_corrupt:/u.test(error.message)) return new ApiError(409, "project_snapshot_corrupt", "The copied Project snapshot failed its integrity check.");
   if (/^stale_configuration:/u.test(error.message)) return new ApiError(409, "stale_configuration", "The experiment configuration changed after it was observed.");
   if (/^stale_record:/u.test(error.message)) return new ApiError(409, "stale_record", "The experiment record changed after it was observed.");
+  if (/^run_not_terminal:/u.test(error.message)) return new ApiError(409, "run_not_terminal", "Only a terminal run can be moved to trash.");
+  if (/^state_conflict:/u.test(error.message)) return new ApiError(409, "state_conflict", "The run lifecycle changed after it was observed.");
   if (/command already exists with a different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with different experiment intent.");
+  if (/lifecycle command.*different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with a different run-control intent.");
   if (/Agent turn request key was reused with different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That requestKey was already used with different turn intent.");
   if (/reused|already|different|changed|locked|unexpected number|not active and technically executable/u.test(error.message)) return new ApiError(409, "state_conflict", "The request conflicts with current durable state.");
   if (/invalid|required|must|cannot|outside/u.test(error.message)) return new ApiError(422, "invalid_request", "The request violates the Agent workspace contract.");

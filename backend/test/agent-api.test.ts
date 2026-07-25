@@ -972,14 +972,13 @@ target.write_text(
     `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
     { commandId: "command_public_cancel_unknown", signal: "SIGKILL" },
   );
-  assert.equal(rejectedCancelAuthority.status, 422);
-  assert.equal((await rejectedCancelAuthority.json() as any).error.code, "unknown_field");
-  const publicCancelResponse = await post(
-    `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
-    { commandId: "command_public_terminal_cancel" },
-  );
-  assert.equal(publicCancelResponse.status, 200);
-  const publicCancel = await publicCancelResponse.json() as any;
+  assert.equal(rejectedCancelAuthority.status, 403);
+  assert.equal((await rejectedCancelAuthority.json() as any).error.code, "run_control_denied");
+  const publicCancel = app.a2!.service.cancelRun({
+    projectId: outputProject.id,
+    runId: publicStart.runId,
+    commandId: "command_public_terminal_cancel",
+  });
   assert.deepEqual(publicCancel, {
     schemaVersion: 1,
     commandId: "command_public_terminal_cancel",
@@ -992,20 +991,21 @@ target.write_text(
     createdAt: publicCancel.createdAt,
   });
   assert.deepEqual(requestedCancellationRunIds, [publicStart.runId]);
-  const publicCancelRetry = await post(
-    `${baseUrl}/api/projects/${outputProject.id}/runs/${publicStart.runId}/cancel`,
-    { commandId: "command_public_terminal_cancel" },
-  );
-  assert.equal(publicCancelRetry.status, 200);
-  assert.deepEqual(await publicCancelRetry.json(), publicCancel);
+  const publicCancelRetry = app.a2!.service.cancelRun({
+    projectId: outputProject.id,
+    runId: publicStart.runId,
+    commandId: "command_public_terminal_cancel",
+  });
+  assert.deepEqual(publicCancelRetry, publicCancel);
   assert.deepEqual(requestedCancellationRunIds, [publicStart.runId, publicStart.runId]);
   const outputWorkspace = await (await fetch(`${baseUrl}/api/projects/${outputProject.id}/workspace`)).json() as any;
   const projectedRunWithOutput = outputWorkspace.runs.find((run: any) => run.id === publicStart.runId);
   assert.deepEqual(Object.keys(projectedRunWithOutput).sort(), [
     "cancelRequestedAt", "completionCardDisposition", "contractVersion", "createdAt",
-    "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "outputs",
-    "projectId", "readOnly", "requestedSampleCount", "runKind", "startedAt", "status",
-    "terminalCode", "updatedAt",
+    "experimentConfigurationId", "finishedAt", "id", "legacyDigest", "lifecycleDigest",
+    "outputs", "projectId", "readOnly", "requestedSampleCount", "runKind",
+    "startedAt", "status", "terminalClosureDigest", "terminalCode",
+    "terminalStatus", "updatedAt",
   ]);
   assert.deepEqual(Object.keys(projectedRunWithOutput.outputs[0]).sort(), [
     "contractVersion", "createdAt", "declaredRole", "id", "legacyDigest", "logicalName",

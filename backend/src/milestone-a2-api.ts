@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
+import { parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 import type { ConversationOwner } from "./agent-domain.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import {
@@ -11,21 +12,29 @@ import {
 export class MilestoneA2Api {
   readonly service: AgentWorkspaceService;
   readonly #authorizeProductRead?: (request: IncomingMessage) => void;
+  readonly #authorizeProductMutation?: (request: IncomingMessage) => void;
+  readonly #revokeRunAccess?: (runId: string) => void;
   readonly #diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
   #activeOutputDownloads = 0;
   readonly #activeOutputDownloadsByRun = new Map<string, number>();
   readonly #outputDownloadStarts: number[] = [];
   readonly #outputDownloadStartsByRun = new Map<string, number[]>();
+  readonly #outputDownloadRevokersByRun = new Map<string, Set<() => void>>();
+  readonly #outputDownloadsRevokedRuns = new Set<string>();
 
   constructor(
     service: AgentWorkspaceService,
     options: Readonly<{
       authorizeProductRead?: (request: IncomingMessage) => void;
+      authorizeProductMutation?: (request: IncomingMessage) => void;
+      revokeRunAccess?: (runId: string) => void;
       diagnosticEventCursorCodec?: DiagnosticEventCursorCodec;
     }> = {},
   ) {
     this.service = service;
     this.#authorizeProductRead = options.authorizeProductRead;
+    this.#authorizeProductMutation = options.authorizeProductMutation;
+    this.#revokeRunAccess = options.revokeRunAccess;
     this.#diagnosticEventCursorCodec = options.diagnosticEventCursorCodec;
   }
 
@@ -118,12 +127,88 @@ export class MilestoneA2Api {
         return true;
       }
       if (request.method === "POST" && parts.length === 6 && parts[5] === "cancel") {
-        const body = await strictJsonBody(request, ["commandId"]);
-        json(response, 200, this.service.cancelRun({
+        this.#authorizeRunMutation(request, url);
+        const body = await strictJsonBody(request, ["commandId"], [], 4_096, true);
+        privateJson(response, 200, this.service.cancelRun({
           projectId,
           runId: parts[4],
           commandId: requiredString(body.commandId, "commandId"),
         }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6 && parts[5] === "trash") {
+        this.#authorizeRunMutation(request, url);
+        if (!this.#revokeRunAccess) {
+          throw new ApiError(
+            503,
+            "run_control_unavailable",
+            "Run revocation is unavailable.",
+          );
+        }
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "expectedLifecycleDigest", "confirmation"],
+          [],
+          4_096,
+          true,
+        );
+        const runId = parts[4];
+        const confirmation = trashRunConfirmation(body.confirmation);
+        let downloadsRevoked = false;
+        try {
+          const result = this.service.trashRun({
+            projectId,
+            runId,
+            commandId: requiredString(body.commandId, "commandId"),
+            expectedLifecycleDigest: requiredString(
+              body.expectedLifecycleDigest,
+              "expectedLifecycleDigest",
+            ),
+            confirmation,
+            beforeCommit: () => {
+              this.#revokeOutputDownloads(runId);
+              downloadsRevoked = true;
+              this.#revokeRunAccess!(runId);
+            },
+          });
+          privateJson(response, 200, result);
+        } catch (error) {
+          if (downloadsRevoked) {
+            try {
+              if (this.service.getRun(projectId, runId).status !== "trashed") {
+                this.#allowOutputDownloads(runId);
+              }
+            } catch {
+              // Keep the fail-closed fence unless durable non-trashed state is confirmed.
+            }
+          }
+          throw error;
+        }
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6 && parts[5] === "restore") {
+        this.#authorizeRunMutation(request, url);
+        const body = await strictJsonBody(
+          request,
+          ["commandId", "expectedLifecycleDigest"],
+          [],
+          4_096,
+          true,
+        );
+        const runId = parts[4];
+        const result = this.service.restoreRun({
+          projectId,
+          runId,
+          commandId: requiredString(body.commandId, "commandId"),
+          expectedLifecycleDigest: requiredString(
+            body.expectedLifecycleDigest,
+            "expectedLifecycleDigest",
+          ),
+        });
+        if (this.service.getRun(projectId, runId).status !== "trashed") {
+          this.#allowOutputDownloads(runId);
+        }
+        privateJson(response, 200, result);
         return true;
       }
     }
@@ -259,6 +344,49 @@ export class MilestoneA2Api {
     } catch {
       throw new ApiError(403, "output_access_denied",
         "The output is unavailable outside the browser app session.");
+    }
+  }
+
+  #authorizeRunMutation(request: IncomingMessage, url: URL): void {
+    if (url.search !== "") {
+      throw new ApiError(
+        422,
+        "invalid_run_control_request",
+        "Run controls do not accept query parameters.",
+      );
+    }
+    const contentLength = exactRunControlRawHeader(request, "content-length");
+    if (exactRunControlRawHeader(request, "transfer-encoding") !== undefined
+      || contentLength === undefined
+      || !/^(?:0|[1-9]\d{0,4})$/u.test(contentLength)) {
+      throw new ApiError(
+        422,
+        "invalid_run_control_request",
+        "Run controls require one bounded request body.",
+      );
+    }
+    if (exactRunControlRawHeader(request, "content-type") !== "application/json") {
+      throw new ApiError(
+        415,
+        "unsupported_media_type",
+        "Run controls require exact application/json.",
+      );
+    }
+    if (!this.#authorizeProductMutation) {
+      throw new ApiError(
+        403,
+        "run_control_denied",
+        "The run control is unavailable outside the current browser app session.",
+      );
+    }
+    try {
+      this.#authorizeProductMutation(request);
+    } catch {
+      throw new ApiError(
+        403,
+        "run_control_denied",
+        "The run control is unavailable outside the current browser app session.",
+      );
     }
   }
 
@@ -450,6 +578,13 @@ export class MilestoneA2Api {
     runId: string,
     outputId: string,
   ): void {
+    if (this.#outputDownloadsRevokedRuns.has(runId)) {
+      throw new ApiError(
+        409,
+        "output_not_available",
+        "Outputs are unavailable while the run is revoked or trashed.",
+      );
+    }
     const now = Date.now();
     const cutoff = now - 1_000;
     while (this.#outputDownloadStarts[0] !== undefined
@@ -486,6 +621,8 @@ export class MilestoneA2Api {
     let streamTimer: ReturnType<typeof setTimeout> | undefined;
     let opened: ReturnType<AgentWorkspaceService["openRunOutputDownload"]> | undefined;
     let handedOff = false;
+    const outputSocket = response.socket;
+    let revoke = (): void => {};
     const release = (): void => {
       if (!slotHeld) return;
       slotHeld = false;
@@ -496,9 +633,27 @@ export class MilestoneA2Api {
       const remaining = (this.#activeOutputDownloadsByRun.get(runId) ?? 1) - 1;
       if (remaining > 0) this.#activeOutputDownloadsByRun.set(runId, remaining);
       else this.#activeOutputDownloadsByRun.delete(runId);
+      const revokers = this.#outputDownloadRevokersByRun.get(runId);
+      revokers?.delete(revoke);
+      if (revokers?.size === 0) this.#outputDownloadRevokersByRun.delete(runId);
     };
+    revoke = (): void => {
+      response.destroy();
+      outputSocket?.destroy();
+      release();
+    };
+    const revokers = this.#outputDownloadRevokersByRun.get(runId) ?? new Set();
+    revokers.add(revoke);
+    this.#outputDownloadRevokersByRun.set(runId, revokers);
     try {
       opened = this.service.openRunOutputDownload(projectId, runId, outputId);
+      if (this.#outputDownloadsRevokedRuns.has(runId)) {
+        throw new ApiError(
+          409,
+          "output_not_available",
+          "Outputs are unavailable while the run is revoked or trashed.",
+        );
+      }
       let range: Readonly<{ start: number; end: number }> | undefined;
       try {
         range = outputRange(exactRawHeader(request, "range"), opened.read.sizeBytes);
@@ -512,6 +667,7 @@ export class MilestoneA2Api {
       const headers: Record<string, string> = {
         "accept-ranges": "bytes",
         "cache-control": "private, no-store",
+        connection: "close",
         "content-disposition": `attachment; filename="${downloadFilename(opened.output.id, opened.output.mediaType)}"`,
         "content-length": String(length),
         "content-security-policy": "sandbox",
@@ -532,10 +688,10 @@ export class MilestoneA2Api {
         response.destroy();
       };
       stream.once("error", onError);
-      response.once("close", release);
-      response.once("finish", release);
+      outputSocket?.once("close", release);
       streamTimer = setTimeout(() => {
         response.destroy();
+        outputSocket?.destroy();
         release();
       }, 30_000);
       streamTimer.unref?.();
@@ -545,6 +701,17 @@ export class MilestoneA2Api {
     } finally {
       if (!handedOff) release();
     }
+  }
+
+  #revokeOutputDownloads(runId: string): void {
+    this.#outputDownloadsRevokedRuns.add(runId);
+    const revokers = [...(this.#outputDownloadRevokersByRun.get(runId) ?? [])];
+    for (const revoke of revokers) revoke();
+    this.#outputDownloadRevokersByRun.delete(runId);
+  }
+
+  #allowOutputDownloads(runId: string): void {
+    this.#outputDownloadsRevokedRuns.delete(runId);
   }
 }
 
@@ -574,6 +741,18 @@ const exactEventRawHeader = (
   } catch {
     throw new ApiError(422, "invalid_event_request",
       "The diagnostic event request contains a duplicate header.");
+  }
+};
+
+const exactRunControlRawHeader = (
+  request: IncomingMessage,
+  name: string,
+): string | undefined => {
+  try {
+    return exactRawHeader(request, name);
+  } catch {
+    throw new ApiError(422, "invalid_run_control_request",
+      "The run control request contains a duplicate header.");
   }
 };
 
@@ -646,7 +825,13 @@ const ownerFromRoute = (kind: string, id: string): ConversationOwner => {
   return { kind, id };
 };
 
-const strictJsonBody = async (request: IncomingMessage, allowed: string[], optional: string[] = [], maximumBytes = 128_000): Promise<Record<string, unknown>> => {
+const strictJsonBody = async (
+  request: IncomingMessage,
+  allowed: string[],
+  optional: string[] = [],
+  maximumBytes = 128_000,
+  rejectDuplicateKeys = false,
+): Promise<Record<string, unknown>> => {
   const contentType = String(request.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
   if (contentType !== "application/json") throw new ApiError(415, "unsupported_media_type", "Use application/json.");
   const chunks: Buffer[] = [];
@@ -658,7 +843,10 @@ const strictJsonBody = async (request: IncomingMessage, allowed: string[], optio
     chunks.push(bytes);
   }
   let value: unknown;
-  try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  try {
+    const text = Buffer.concat(chunks).toString("utf8");
+    value = rejectDuplicateKeys ? parseCanonicalJsonV2(text) : JSON.parse(text);
+  }
   catch { throw new ApiError(422, "invalid_json", "The request body must be valid JSON."); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_request", "The request body must be an object.");
   const object = value as Record<string, unknown>;
@@ -670,6 +858,44 @@ const strictJsonBody = async (request: IncomingMessage, allowed: string[], optio
 const requiredString = (value: unknown, name: string): string => {
   if (typeof value !== "string") throw new ApiError(422, "invalid_request", `${name} must be text.`);
   return value;
+};
+
+const trashRunConfirmation = (value: unknown): {
+  action: "trash_run";
+  projectId: string;
+  runId: string;
+  terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out";
+  terminalClosureDigest: string;
+} => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "invalid_request", "The trash confirmation is invalid.");
+  }
+  const confirmation = value as Record<string, unknown>;
+  if (Object.keys(confirmation).sort().join("\n")
+      !== [
+        "action",
+        "projectId",
+        "runId",
+        "terminalClosureDigest",
+        "terminalStatus",
+      ].join("\n")
+    || confirmation.action !== "trash_run"
+    || !["succeeded", "failed", "cancelled", "timed_out"].includes(
+      String(confirmation.terminalStatus),
+    )) {
+    throw new ApiError(422, "invalid_request", "The trash confirmation is invalid.");
+  }
+  return {
+    action: "trash_run",
+    projectId: requiredString(confirmation.projectId, "confirmation.projectId"),
+    runId: requiredString(confirmation.runId, "confirmation.runId"),
+    terminalStatus: confirmation.terminalStatus as
+      "succeeded" | "failed" | "cancelled" | "timed_out",
+    terminalClosureDigest: requiredString(
+      confirmation.terminalClosureDigest,
+      "confirmation.terminalClosureDigest",
+    ),
+  };
 };
 
 const visualInteractionConfirmation = (value: unknown): Record<string, unknown> => {

@@ -261,6 +261,19 @@ export class BrowserFrameCapability {
     }
   }
 
+  /**
+   * Authorizes a state-changing Product API request from the current browser
+   * app session. Resource ownership and mutation preconditions remain the
+   * responsibility of the Product service.
+   */
+  authorizeAppMutation(request: BrowserRequestAdmission): void {
+    if (exactSingle(request.fetchMode) !== "cors"
+      || exactSingle(request.fetchDest) !== "empty") {
+      throw denied(403, "browser_session_denied");
+    }
+    this.#requireAppSession(request);
+  }
+
   async issueFrameSession(
     request: BrowserRequestAdmission,
     identity: { projectId: string; runId: string },

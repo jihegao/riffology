@@ -131,6 +131,9 @@ type ProjectRunDto = {
   cancelRequestedAt: string | null;
   terminalCode: string | null;
   completionCardDisposition: string | null;
+  terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out" | null;
+  terminalClosureDigest: string | null;
+  lifecycleDigest: string | null;
   outputs: ProjectOutputDto[];
 };
 
@@ -154,7 +157,8 @@ type ProjectOutputDto = {
 
 Non-succeeded run projections return `outputs: []`. A succeeded run exposes
 only atomically published indexes whose bytes, size, and SHA-256 were rechecked;
-there is not yet a public list/download endpoint in A3-1b.
+the current A3-2d1 list/download endpoint adds authenticated same-run access
+without changing this A3-1b projection.
 
 The A3-1c-a cancellation request is exact:
 
@@ -194,6 +198,61 @@ the exact same-run committed `run.cancel.v1` payload, intent digest, outcome,
 payload digest, and timestamps; raw unbound or mismatched cancellation state is
 rejected.
 
+### A3-2d3 direct run controls (merged through PR #45)
+
+The existing cancel request remains deliberately exact and unchanged:
+
+```ts
+type CancelProjectRunRequest = { commandId: string };
+```
+
+`POST /api/projects/{projectId}/runs/{runId}/cancel`, `.../trash`, and
+`.../restore` all require the current browser
+app authority: the exact app `Host` and `Origin`, same-origin Fetch Metadata
+(`Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: cors`,
+`Sec-Fetch-Dest: empty`), the current HttpOnly app cookie, matching CSRF token,
+and exact `application/json` request framing. Browser-side bearer
+`Authorization` is not an alternative. The legacy listener rejects these
+direct controls. This is a browser-app admission boundary, not a multi-user
+principal claim.
+
+The two new candidate request shapes are exact:
+
+```ts
+type TrashProjectRunRequest = {
+  commandId: string;
+  expectedLifecycleDigest: string;
+  confirmation: {
+    action: "trash_run";
+    projectId: string;
+    runId: string;
+    terminalStatus: "succeeded" | "failed" | "cancelled" | "timed_out";
+    terminalClosureDigest: string;
+  };
+};
+
+type RestoreProjectRunRequest = {
+  commandId: string;
+  expectedLifecycleDigest: string;
+};
+```
+
+They produce durable, exact-replay receipts named `run.trash.v1` and
+`run.restore.v1`; reuse with changed intent fails with
+`idempotency_conflict`. `terminalClosureDigest` commits immutable terminal
+evidence and does not change. `lifecycleDigest` commits current lifecycle
+state and complete ordered trash history, so it changes on every successful
+trash or restore. Trash is allowed only from a terminal v4 run and restore
+returns that run only to its exact prior terminal status; both reject stale or
+cross-run/project bindings.
+
+Before the Store commit for a new trash command, the implementation revokes active
+output-download streams and current visual frame/WebSocket plus
+Visual-Agent/Playwright authority for the run. Restore restores durable
+visibility only: it never revives an old frame/WebSocket capability, cursor,
+confirmation, or download authority. These direct controls do not call or
+depend on OpenCode.
+
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
 canned Agent response. Model mutation is limited to typed current-Model tools;
@@ -223,7 +282,7 @@ output bytes, and scratch/Project integrity. CPU time, resident memory, and
 model-spawned process-count limits are not accepted as supported limits.
 Published A3-2a2c enforces `startupTimeMs` for admitted visual work. Visual
 starts that supply `completionConversationId` fail with HTTP `422` and
-`visual_completion_not_supported`. The A3-2d2 candidate enforces frozen
+`visual_completion_not_supported`. A3-2d2, merged through PR #44, enforces frozen
 `maxEventCount` and `maxEventBytes` for declared diagnostic NDJSON; undeclared,
 invalid, or over-limit event files fail before terminal success publication.
 
@@ -374,9 +433,9 @@ current routes or acceptance evidence:
    closeout are published.
 10. **A3-2d generic outputs/events/direct controls — in progress:** d1
     same-run output list/download was merged through PR #43. d2 bounded
-    declared diagnostic-event ingestion and opaque cursor reads are a review
-    candidate. Direct trash/restore and complete Agent-independent controls
-    remain pending.
+    declared diagnostic-event ingestion and opaque cursor reads were merged
+    through PR #44. Direct trash/restore and complete Agent-independent
+    controls were merged through PR #45.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
 input envelope as batch through `--riff-input`, an assigned
@@ -660,16 +719,16 @@ Two independent final reviews reported no P0/P1 blocker before PR #42 merged.
 
 A3-2d follows the existing committed output index. A3-2d1 was merged through
 PR #43 and implements same-run list/download with path/size/digest
-revalidation. The A3-2d2 review candidate adds declared diagnostic NDJSON
+revalidation. The merged A3-2d2 boundary adds declared diagnostic NDJSON
 ingestion with strict UTF-8/LF, structural/schema/count/byte limits, schema-v12
 atomic event-set publication, and authenticated opaque cursors bound to the
 Project/run/contract/event-set/lifecycle digest, persistent trash history,
 normalized filters, and
-limit. Direct trash/restore acceptance remains later A3-2d work. Cancel already
+limit. Direct trash/restore acceptance was merged through PR #45. Cancel already
 exists. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
-A3-3 diagnostic-event acceptance begins only after A3-2d2 is published.
+A3-3 diagnostic-event acceptance is unblocked by the published A3-2d2 boundary.
 
-The A3-2d2 candidate route is:
+The current A3-2d2 route is:
 
 ```text
 GET /api/projects/:projectId/runs/:runId/diagnostic-events
@@ -697,9 +756,12 @@ session and Host, same-origin Fetch Metadata, and the exact
 Project/run/output ownership tuple; they emit private no-store responses. This
 is local Product tuple authorization, not a multi-user principal claim. The d1
 browser client must use same-origin `fetch` (`cors`/`empty` Fetch Metadata);
-top-level or anchor navigation is not accepted by this route. Mutation routes
-additionally require exact Origin, CSRF, JSON non-simple content type, command
-idempotency, and expected run revision or terminal closure digest.
+top-level or anchor navigation is not accepted by this route. Direct
+cancel/trash/restore routes additionally require exact Origin, CSRF, JSON
+non-simple content type, and command idempotency. Cancel retains its published
+`{commandId}` body; trash and restore additionally compare the exact
+`expectedLifecycleDigest`, and trash binds explicit terminal confirmation to
+`terminalClosureDigest`.
 Project/run/output IDs are not bearer credentials. Output download is
 attachment-only and verifies the complete digest before sending bytes from the
 same no-follow open descriptor. Diagnostic event content is untrusted model
@@ -713,9 +775,11 @@ first-start convergence remain review gaps and are not current claims. The key
 is absent from SQLite, DTOs, errors, logs, and child environments; ordinary
 backup/export exclusion also remains unverified and is not claimed. Missing or
 corrupt key state fails closed rather than silently regenerating once event
-sets exist. Project trash denies event reads and changes the lifecycle binding,
-so restore does not revive an old cursor. Direct run trash/restore and active
-download revocation remain pending.
+sets exist. Run trash denies event reads and changes the lifecycle binding, so
+restore does not revive an old cursor. The A3-2d3 implementation also
+revokes active downloads before its Store commit. Its full backend/web/network/
+build/docs gates pass and final independent security review has no P0/P1
+finding.
 
 ---
 

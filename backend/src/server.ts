@@ -468,6 +468,21 @@ export class BackendApp {
             }
             frames.authorizeAppRead(browserAdmission(request, address));
           },
+          authorizeProductMutation: (request) => {
+            if (this.#listenerMode !== "browser") {
+              throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+            }
+            const frames = this.#browserFrames;
+            const address = this.#browserNetwork?.app;
+            if (!frames || !address) {
+              throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+            }
+            frames.authorizeAppMutation(browserAdmission(request, address));
+          },
+          revokeRunAccess: (runId) => {
+            this.#browserFrames?.revokeRun(runId);
+            visualAuthority.revokeRun(runId);
+          },
           diagnosticEventCursorCodec,
         },
       );
@@ -904,8 +919,35 @@ export class BackendApp {
       throw new ApiError(404, "not_found", "No matching local demo route exists.");
     } catch (error) {
       const apiError = asApiError(error);
-      if (!response.headersSent) { const correlationId = randomUUID(); const error = { code: apiError.code, message: apiError.message, correlation_id: correlationId, ...(apiError.details ? { details: apiError.details } : {}) }; const gate3 = isGate3Route(request.method ?? "", requestUrl.pathname); (gate3 ? canonicalJson : json)(response, apiError.status, gate3 ? { schema_id: "riff://evidence-studio/error/v1", schema_version: 1, canonical_json_version: "riff-canonical-json-v2", accepted: false, error } : { accepted: false, error }); }
-      else response.end();
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
+      const correlationId = randomUUID();
+      const publicError = {
+        code: apiError.code,
+        message: apiError.message,
+        correlation_id: correlationId,
+        ...(apiError.details ? { details: apiError.details } : {}),
+      };
+      const gate3 = isGate3Route(request.method ?? "", requestUrl.pathname);
+      const runControl = request.method === "POST"
+        && /^\/api\/projects\/[^/]+\/runs\/[^/]+\/(?:cancel|trash|restore)$/u
+          .test(requestUrl.pathname);
+      const write = gate3 ? canonicalJson : runControl ? privateApiJson : json;
+      write(
+        response,
+        apiError.status,
+        gate3
+          ? {
+            schema_id: "riff://evidence-studio/error/v1",
+            schema_version: 1,
+            canonical_json_version: "riff-canonical-json-v2",
+            accepted: false,
+            error: publicError,
+          }
+          : { accepted: false, error: publicError },
+      );
     }
   }
 
@@ -1239,6 +1281,21 @@ const json = (response: ServerResponse, status: number, payload: unknown): void 
   response.end(JSON.stringify(payload));
 };
 
+const privateApiJson = (
+  response: ServerResponse,
+  status: number,
+  payload: unknown,
+): void => {
+  const bytes = Buffer.from(JSON.stringify(payload));
+  response.writeHead(status, {
+    "cache-control": "private, no-store",
+    "content-length": bytes.byteLength,
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(bytes);
+};
+
 const browserVisualHostPage = (
   response: ServerResponse,
   method: string | undefined,
@@ -1412,7 +1469,7 @@ const browserAdmission = (
   const host = rawBrowserHeader(request, "host");
   return {
     method: request.method ?? "",
-    host: typeof host === "string" ? host : host === undefined ? address.authority : undefined,
+    host: typeof host === "string" ? host : undefined,
     origin: rawBrowserHeader(request, "origin"),
     fetchSite: rawBrowserHeader(request, "sec-fetch-site"),
     fetchMode: rawBrowserHeader(request, "sec-fetch-mode"),
