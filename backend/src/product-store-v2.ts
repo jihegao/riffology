@@ -452,6 +452,23 @@ export type VisualProcessIdentity = RunAttemptIdentity & Readonly<{
   scratchId: string;
 }>;
 
+export type HealthyVisualFrameTarget = Readonly<{
+  projectId: string;
+  runId: string;
+  attemptId: string;
+  attemptGeneration: number;
+  dispatcherGeneration: string;
+  attemptExpiresAt: IsoTimestamp;
+  processAttemptId: string;
+  pid: number;
+  processStartToken: string;
+  processGroupId: number;
+  loopbackHost: "127.0.0.1";
+  loopbackPort: number;
+  healthPath: string;
+  healthyAt: IsoTimestamp;
+}>;
+
 export type ProcessIdentity =
   | (BatchProcessIdentity & Readonly<{ processKind: "batch" }>)
   | VisualProcessIdentity;
@@ -3396,6 +3413,193 @@ export class ProductStoreV2 {
       throw new ProductStoreV2Error("Run does not exist.");
     }
     return run;
+  }
+
+  /**
+   * Backend-private resolver for the frame proxy. This deliberately reconstructs
+   * one exact live identity from authoritative rows instead of projecting the
+   * broader dispatcher-recovery surface.
+   */
+  currentHealthyVisualFrameTarget(
+    projectId: string,
+    runId: string,
+    options: Readonly<{ now?: IsoTimestamp }> = {},
+  ): HealthyVisualFrameTarget {
+    this.#assertOpen();
+    assertId(projectId);
+    assertId(runId);
+    const unavailable = (cause?: unknown): ProductStoreV2Error =>
+      new ProductStoreV2Error(
+        "visual_frame_unavailable: no current healthy visual frame target exists.",
+        cause === undefined ? undefined : { cause },
+      );
+    try {
+      const runRow = this.#database.prepare(`SELECT r.*, p.lifecycle_state AS project_lifecycle_state
+        FROM runs r
+        JOIN projects p ON p.id = r.project_id
+        WHERE r.id = ? AND r.project_id = ?`
+      ).get(runId, projectId) as any;
+      if (!runRow
+        || runRow.project_lifecycle_state !== "active"
+        || runRow.contract_version !== 4
+        || runRow.run_kind !== "visual"
+        || runRow.status !== "running"
+        || runRow.cancel_requested_at !== null
+        || runRow.finished_at !== null
+        || runRow.terminal_code !== null
+        || runRow.terminal_diagnostics_json !== null
+        || runRow.resource_overview_json !== null) {
+        throw unavailable();
+      }
+      const run = runRecord(runRow);
+      if (run.contractVersion !== 4 || run.runKind !== "visual") throw unavailable();
+      assertRunLimits(run.limits);
+      if (canonicalDigest(run.limits) !== run.limitsDigest) throw unavailable();
+
+      const attemptRows = this.#database.prepare(
+        "SELECT * FROM run_attempts WHERE run_id = ? ORDER BY attempt_generation DESC, id",
+      ).all(runId) as any[];
+      const nonterminalAttempts = attemptRows.filter((row) =>
+        ["claimed", "starting", "running"].includes(row.state));
+      if (attemptRows.length < 1
+        || nonterminalAttempts.length !== 1
+        || attemptRows[0]!.id !== nonterminalAttempts[0]!.id
+        || attemptRows[0]!.state !== "running"
+        || attemptRows[0]!.finished_at !== null) {
+        throw unavailable();
+      }
+      const attempt = runAttemptRecord(attemptRows[0]);
+      const dispatcher = this.#database.prepare(
+        "SELECT generation FROM dispatcher_state WHERE singleton = 1",
+      ).get() as { generation: string } | undefined;
+      if (!dispatcher || dispatcher.generation !== attempt.dispatcherGeneration) throw unavailable();
+
+      const now = options.now ?? new Date().toISOString();
+      assertIsoTimestamp(now, "Visual frame resolver timestamp");
+      const nowMs = Date.parse(now);
+      assertIsoTimestamp(attempt.claimedAt, "Visual run attempt claimed timestamp");
+      assertIsoTimestamp(attempt.heartbeatAt, "Visual run attempt heartbeat timestamp");
+      assertIsoTimestamp(attempt.leaseExpiresAt, "Visual run attempt lease timestamp");
+      if (Date.parse(attempt.heartbeatAt) > nowMs || Date.parse(attempt.leaseExpiresAt) <= nowMs) {
+        throw unavailable();
+      }
+      const claimedAtMs = Date.parse(attempt.claimedAt);
+      const expiresAtMs = claimedAtMs + run.limits.wallTimeMs;
+      if (!Number.isSafeInteger(expiresAtMs)) throw unavailable();
+      if (nowMs >= expiresAtMs) throw unavailable();
+      const attemptExpiresAt = new Date(expiresAtMs).toISOString();
+
+      const processRows = this.#database.prepare(`SELECT
+          p.*, s.id AS scratch_id, s.sample_index AS scratch_sample_index,
+          s.sample_id AS scratch_sample_id, s.relative_path,
+          s.owner_uid, s.device, s.inode, s.state AS scratch_state,
+          s.registered_at AS scratch_registered_at,
+          m.id AS manifest_id, m.state AS manifest_state, m.manifest_json,
+          m.manifest_sha256, m.launch_receipt_json, m.launch_receipt_sha256,
+          h.process_attempt_id AS health_process_attempt_id,
+          h.run_id AS health_run_id, h.run_attempt_id AS health_run_attempt_id,
+          h.launch_manifest_id AS health_launch_manifest_id,
+          h.pid AS health_pid, h.process_start_token AS health_process_start_token,
+          h.process_group_id AS health_process_group_id,
+          h.loopback_port AS health_loopback_port, h.health_path AS health_path,
+          h.healthy_at AS health_healthy_at, h.receipt_json AS health_receipt_json,
+          h.receipt_sha256 AS health_receipt_sha256, h.created_at AS health_created_at
+        FROM process_attempts p
+        LEFT JOIN process_launch_manifests m ON m.process_attempt_id = p.id
+        LEFT JOIN run_scratch_leases s ON s.id = m.scratch_lease_id
+        LEFT JOIN visual_health_receipts h ON h.process_attempt_id = p.id
+        WHERE p.run_attempt_id = ?
+        ORDER BY p.id`
+      ).all(attempt.id) as any[];
+      if (processRows.length !== 1) throw unavailable();
+      const process = processRows[0]!;
+      if (process.process_kind !== "visual"
+        || process.state !== "running"
+        || process.launch_gate_state !== "released"
+        || process.sample_index !== null
+        || process.sample_id !== null
+        || process.health_at === null
+        || process.exited_at !== null
+        || process.exit_code !== null
+        || process.exit_signal !== null
+        || process.cleanup_receipt_sha256 !== null
+        || !Number.isSafeInteger(process.loopback_port)
+        || !process.scratch_id || !process.manifest_id
+        || !process.manifest_sha256 || !process.launch_receipt_json
+        || !process.launch_receipt_sha256
+        || process.health_process_attempt_id === null) {
+        throw unavailable();
+      }
+      assertIsoTimestamp(process.heartbeat_at, "Visual process heartbeat timestamp");
+      const processHeartbeatMs = Date.parse(process.heartbeat_at);
+      const attemptHeartbeatMs = Date.parse(attempt.heartbeatAt);
+      const leaseWindowMs = Date.parse(attempt.leaseExpiresAt) - attemptHeartbeatMs;
+      if (!Number.isSafeInteger(leaseWindowMs) || leaseWindowMs < 1
+        || processHeartbeatMs > attemptHeartbeatMs
+        || nowMs - processHeartbeatMs >= leaseWindowMs) {
+        throw unavailable();
+      }
+      const launch = assertStoredVisualProcessLaunchEvidence(process, attempt);
+      const identity: VisualProcessIdentity = {
+        runId,
+        attemptId: attempt.id,
+        attemptGeneration: attempt.attemptGeneration,
+        dispatcherGeneration: attempt.dispatcherGeneration,
+        processKind: "visual",
+        processAttemptId: process.id,
+        pid: process.pid,
+        processStartToken: process.process_start_token,
+        processGroupId: process.process_group_id,
+        loopbackPort: process.loopback_port,
+        scratchId: process.scratch_id,
+      };
+      const healthReceipt = visualHealthReceiptRecord({
+        process_attempt_id: process.health_process_attempt_id,
+        run_id: process.health_run_id,
+        run_attempt_id: process.health_run_attempt_id,
+        launch_manifest_id: process.health_launch_manifest_id,
+        pid: process.health_pid,
+        process_start_token: process.health_process_start_token,
+        process_group_id: process.health_process_group_id,
+        loopback_port: process.health_loopback_port,
+        health_path: process.health_path,
+        healthy_at: process.health_healthy_at,
+        receipt_json: process.health_receipt_json,
+        receipt_sha256: process.health_receipt_sha256,
+        created_at: process.health_created_at,
+      });
+      assertVisualHealthReceiptMatches(healthReceipt, {
+        ...identity,
+        healthyAt: process.health_at,
+      });
+      if (healthReceipt.launchManifestId !== process.manifest_id
+        || healthReceipt.healthPath !== launch.healthPath
+        || healthReceipt.receipt.launchManifestId !== process.manifest_id
+        || healthReceipt.receipt.launchManifestDigest !== process.manifest_sha256
+        || healthReceipt.receipt.healthPath !== launch.healthPath) {
+        throw unavailable();
+      }
+      return Object.freeze({
+        projectId,
+        runId,
+        attemptId: attempt.id,
+        attemptGeneration: attempt.attemptGeneration,
+        dispatcherGeneration: attempt.dispatcherGeneration,
+        attemptExpiresAt,
+        processAttemptId: process.id,
+        pid: process.pid,
+        processStartToken: process.process_start_token,
+        processGroupId: process.process_group_id,
+        loopbackHost: "127.0.0.1",
+        loopbackPort: process.loopback_port,
+        healthPath: launch.healthPath,
+        healthyAt: healthReceipt.healthyAt,
+      });
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error
+        && error.message.startsWith("visual_frame_unavailable:")) throw error;
+      throw unavailable(error);
+    }
   }
 
   listRunAttempts(runId: string): RunAttemptRecord[] {

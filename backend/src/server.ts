@@ -17,7 +17,7 @@ import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
-import { ProductStoreV2 } from "./product-store-v2.ts";
+import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
 import {
   GenericVisualSupervisor,
@@ -38,6 +38,14 @@ import {
   networkJson,
   type BrowserNetworkAddress,
 } from "./browser-network-topology.ts";
+import {
+  BrowserFrameCapability,
+  BrowserFrameCapabilityError,
+  type BrowserFrameTarget,
+  type BrowserFrameTargetResolver,
+  type BrowserRequestAdmission,
+} from "./browser-frame-capability.ts";
+import { inspectVisualListenerAsync } from "./visual-listener-inspector.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -79,7 +87,123 @@ export type BackendOptions = {
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
   legacyCloseDrainTimeoutMs?: number;
+  browserFrameTargetResolver?: BrowserFrameTargetResolver;
 };
+
+export type BrowserFrameListenerInspector = (
+  target: HealthyVisualFrameTarget,
+) => Promise<boolean>;
+
+export const createProductBrowserFrameTargetResolver = (
+  store: Pick<ProductStoreV2, "currentHealthyVisualFrameTarget">,
+  inspect: BrowserFrameListenerInspector = async (target) => {
+    try {
+      await inspectVisualListenerAsync({
+        runId: target.runId,
+        processAttemptId: target.processAttemptId,
+        pid: target.pid,
+        processStartToken: target.processStartToken,
+        processGroupId: target.processGroupId,
+        assignedPort: target.loopbackPort,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  inspectionDeadlineMs = 5_000,
+): BrowserFrameTargetResolver => {
+  if (!Number.isSafeInteger(inspectionDeadlineMs)
+    || inspectionDeadlineMs < 1 || inspectionDeadlineMs > 5_000) {
+    throw new Error("Browser frame inspection deadline must be between 1 and 5000 milliseconds.");
+  }
+  const current = (projectId: string, runId: string): HealthyVisualFrameTarget | null => {
+    try {
+      return store.currentHealthyVisualFrameTarget(projectId, runId);
+    } catch {
+      return null;
+    }
+  };
+  let inspectionQueue: Promise<void> = Promise.resolve();
+  let pendingInspections = 0;
+  return Object.freeze({
+    resolve: async (projectId: string, runId: string): Promise<BrowserFrameTarget | null> => {
+      const target = current(projectId, runId);
+      if (!target) return null;
+      return Object.freeze({
+        projectId: target.projectId,
+        runId: target.runId,
+        attemptGeneration: target.attemptGeneration,
+        port: target.loopbackPort,
+        expiresAtMs: Date.parse(target.attemptExpiresAt),
+      });
+    },
+    inspect: async (expected: BrowserFrameTarget): Promise<boolean> => {
+      if (pendingInspections >= 16) return false;
+      pendingInspections += 1;
+      const prior = inspectionQueue;
+      let cancelled = false;
+      const task = prior.then(async (): Promise<boolean> => {
+        if (cancelled) return false;
+        const target = current(expected.projectId, expected.runId);
+        if (!target || !matchesBrowserFrameTarget(target, expected)) return false;
+        if (!await inspect(target) || cancelled) return false;
+        const after = current(expected.projectId, expected.runId);
+        return Boolean(after
+          && matchesBrowserFrameTarget(after, expected)
+          && sameHealthyVisualFrameTarget(after, target));
+      });
+      inspectionQueue = task.then(() => undefined, () => undefined);
+      void task.then(
+        () => { pendingInspections -= 1; },
+        () => { pendingInspections -= 1; },
+      );
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          task.catch(() => false),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => {
+              cancelled = true;
+              resolve(false);
+            }, inspectionDeadlineMs);
+          }),
+        ]);
+      } catch {
+        return false;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+  });
+};
+
+const matchesBrowserFrameTarget = (
+  target: HealthyVisualFrameTarget,
+  expected: BrowserFrameTarget,
+): boolean => target.projectId === expected.projectId
+  && target.runId === expected.runId
+  && target.attemptGeneration === expected.attemptGeneration
+  && target.loopbackPort === expected.port
+  && Date.parse(target.attemptExpiresAt) === expected.expiresAtMs;
+
+const sameHealthyVisualFrameTarget = (
+  left: HealthyVisualFrameTarget,
+  right: HealthyVisualFrameTarget,
+): boolean => left.projectId === right.projectId
+  && left.runId === right.runId
+  && left.attemptId === right.attemptId
+  && left.attemptGeneration === right.attemptGeneration
+  && left.dispatcherGeneration === right.dispatcherGeneration
+  && left.attemptExpiresAt === right.attemptExpiresAt
+  && left.processAttemptId === right.processAttemptId
+  && left.pid === right.pid
+  && left.processStartToken === right.processStartToken
+  && left.processGroupId === right.processGroupId
+  && left.loopbackHost === right.loopbackHost
+  && left.loopbackPort === right.loopbackPort
+  && left.healthPath === right.healthPath
+  && left.healthyAt === right.healthyAt;
 
 export class BackendApp {
   readonly store: ProjectStore;
@@ -97,6 +221,7 @@ export class BackendApp {
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #server?: Server;
   #browserNetwork?: BrowserNetworkTopology;
+  #browserFrames?: BrowserFrameCapability;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
@@ -224,18 +349,30 @@ export class BackendApp {
         return { app: this.#browserNetwork.app, broker: this.#browserNetwork.broker };
       }
       if (this.#listenerMode !== "idle") throw new Error("A backend listener is already active or closed.");
-      const network = await BrowserNetworkTopology.start({
-        appPort,
-        brokerPort,
-        appHandler: (request, response) => this.#handle(request, response),
-        brokerHandler: (_request, response) => networkJson(response, 404, {
-          accepted: false,
-          error: {
-            code: "broker_route_denied",
-            message: "No live visual frame route matches this request.",
+      let network: BrowserNetworkTopology;
+      try {
+        network = await BrowserNetworkTopology.start({
+          appPort,
+          brokerPort,
+          beforeReady: ({ app, broker }) => {
+            this.#browserFrames = new BrowserFrameCapability({
+              appOrigin: app.origin,
+              brokerOrigin: broker.origin,
+              targets: this.options.browserFrameTargetResolver ?? this.#productBrowserFrameTargets(),
+            });
           },
-        }),
-      });
+          appHandler: async (request, response, address) => {
+            if (await this.#handleBrowserFramePlatform(request, response, address)) return;
+            await this.#handle(request, response);
+          },
+          brokerHandler: (request, response, address) =>
+            this.#handleBrowserFrameBroker(request, response, address),
+        });
+      } catch (error) {
+        this.#browserFrames?.clear();
+        this.#browserFrames = undefined;
+        throw error;
+      }
       this.#browserNetwork = network;
       this.#listenerMode = "browser";
       return { app: network.app, broker: network.broker };
@@ -251,6 +388,8 @@ export class BackendApp {
         this.#server = undefined;
       }
       if (this.#browserNetwork) {
+        this.#browserFrames?.clear();
+        this.#browserFrames = undefined;
         await this.#browserNetwork.close();
         this.#browserNetwork = undefined;
       }
@@ -276,6 +415,168 @@ export class BackendApp {
     } finally {
       release();
     }
+  }
+
+  #productBrowserFrameTargets(): BrowserFrameTargetResolver {
+    const store = this.productStore;
+    if (!store) {
+      return Object.freeze({
+        resolve: async () => null,
+        inspect: async () => false,
+      });
+    }
+    return createProductBrowserFrameTargetResolver(store);
+  }
+
+  async #handleBrowserFramePlatform(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): Promise<boolean> {
+    const url = new URL(request.url ?? "/", address.origin);
+    const bootstrap = url.pathname === "/api/browser-session/bootstrap";
+    const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
+    if (!bootstrap && !match) return false;
+    try {
+      if (request.method === "OPTIONS") {
+        this.#browserFramePreflight(request, response, address);
+        return true;
+      }
+      exactEmptyBrowserBody(request, "browser_session_denied");
+      if (url.search !== "") throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+      const frames = this.#browserFrames;
+      if (!frames) throw new BrowserFrameCapabilityError(503, "browser_session_denied");
+      const admission = browserAdmission(request, address);
+      const cors = browserCorsHeaders(address.origin);
+      if (bootstrap) {
+        const result = frames.bootstrap(admission);
+        networkJsonWithHeaders(response, 201, {
+          schemaVersion: 1,
+          generation: result.generation,
+          csrfToken: result.csrfToken,
+          expiresAt: new Date(result.expiresAtMs).toISOString(),
+        }, { ...cors, "set-cookie": result.setCookie });
+        return true;
+      }
+      const result = await frames.issueFrameSession(admission, {
+        projectId: decodeBrowserPathId(match![1]!),
+        runId: decodeBrowserPathId(match![2]!),
+      });
+      networkJsonWithHeaders(response, 201, {
+        schemaVersion: 1,
+        frameUrl: result.frameUrl,
+        expiresAt: new Date(result.expiresAtMs).toISOString(),
+      }, cors);
+      return true;
+    } catch (error) {
+      const origin = rawBrowserHeader(request, "origin");
+      this.#browserFrameError(response, error, origin === address.origin ? address.origin : undefined);
+      return true;
+    }
+  }
+
+  async #handleBrowserFrameBroker(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): Promise<void> {
+    const url = new URL(request.url ?? "/", address.origin);
+    const frames = this.#browserFrames;
+    if (!frames) {
+      this.#browserFrameError(response, new BrowserFrameCapabilityError(503, "visual_frame_unavailable"));
+      return;
+    }
+    try {
+      if (url.pathname.startsWith("/frame/redeem/")) {
+        exactEmptyBrowserBody(request, "visual_frame_nonce_invalid");
+        if (url.search !== "") throw new BrowserFrameCapabilityError(404, "visual_frame_nonce_invalid");
+        const result = await frames.redeem({
+          ...browserAdmission(request, address),
+          path: url.pathname,
+        });
+        response.writeHead(303, {
+          "cache-control": "no-store",
+          "content-length": "0",
+          location: result.location,
+          "referrer-policy": "no-referrer",
+          "set-cookie": result.setCookie,
+          "x-content-type-options": "nosniff",
+        });
+        response.end();
+        return;
+      }
+      if (url.pathname.startsWith("/frame/c/")) {
+        exactEmptyBrowserBody(request, "visual_frame_proxy_limit_exceeded");
+        const result = await frames.proxy({
+          method: request.method ?? "",
+          host: address.authority,
+          origin: rawBrowserHeader(request, "origin"),
+          cookie: rawBrowserHeader(request, "cookie"),
+          path: `${url.pathname}${url.search}`,
+          headers: browserProxyHeaders(request),
+        });
+        response.writeHead(result.status, result.headers as Record<string, string>);
+        response.end(Buffer.from(result.body));
+        return;
+      }
+      networkJson(response, 404, {
+        accepted: false,
+        error: {
+          code: "broker_route_denied",
+          message: "No live visual frame route matches this request.",
+        },
+      });
+    } catch (error) {
+      this.#browserFrameError(response, error);
+    }
+  }
+
+  #browserFramePreflight(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): void {
+    const origin = rawBrowserHeader(request, "origin");
+    const fetchSite = rawBrowserHeader(request, "sec-fetch-site");
+    const requestedMethod = rawBrowserHeader(request, "access-control-request-method");
+    const requestedHeaders = rawBrowserHeader(request, "access-control-request-headers");
+    const normalizedHeaders = typeof requestedHeaders === "string"
+      ? requestedHeaders.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)
+      : [];
+    if (origin !== address.origin
+      || fetchSite !== "same-origin"
+      || requestedMethod !== "POST"
+      || Array.isArray(requestedHeaders)
+      || normalizedHeaders.some((name) => name !== "content-type" && name !== "x-riff-csrf")
+      || rawBrowserHeader(request, "authorization") !== undefined) {
+      throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+    }
+    response.writeHead(204, {
+      ...browserCorsHeaders(address.origin),
+      "access-control-allow-headers": "Content-Type, X-Riff-CSRF",
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-max-age": "300",
+      "content-length": "0",
+    });
+    response.end();
+  }
+
+  #browserFrameError(response: ServerResponse, error: unknown, corsOrigin?: string): void {
+    const denied = error instanceof BrowserFrameCapabilityError
+      ? error
+      : new BrowserFrameCapabilityError(502, "visual_frame_proxy_failed");
+    const body = {
+      accepted: false,
+      error: {
+        code: denied.code,
+        message: "The browser frame request was denied.",
+      },
+    };
+    if (corsOrigin) {
+      networkJsonWithHeaders(response, denied.status, body, browserCorsHeaders(corsOrigin));
+      return;
+    }
+    networkJson(response, denied.status, body);
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -635,6 +936,94 @@ const json = (response: ServerResponse, status: number, payload: unknown): void 
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
 };
+
+const networkJsonWithHeaders = (
+  response: ServerResponse,
+  status: number,
+  payload: Record<string, unknown>,
+  headers: Record<string, string>,
+): void => {
+  const bytes = Buffer.from(JSON.stringify(payload));
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength,
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    ...headers,
+  });
+  response.end(bytes);
+};
+
+const browserCorsHeaders = (origin: string): Record<string, string> => ({
+  "access-control-allow-credentials": "true",
+  "access-control-allow-origin": origin,
+  vary: "Origin",
+});
+
+const rawBrowserHeader = (
+  request: IncomingMessage,
+  expectedName: string,
+): string | readonly string[] | undefined => {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === expectedName) {
+      values.push(request.rawHeaders[index + 1] ?? "");
+    }
+  }
+  return values.length === 0 ? undefined : values.length === 1 ? values[0] : Object.freeze(values);
+};
+
+const browserAdmission = (
+  request: IncomingMessage,
+  address: BrowserNetworkAddress,
+): BrowserRequestAdmission => {
+  const host = rawBrowserHeader(request, "host");
+  return {
+    method: request.method ?? "",
+    host: typeof host === "string" ? host : host === undefined ? address.authority : undefined,
+    origin: rawBrowserHeader(request, "origin"),
+    fetchSite: rawBrowserHeader(request, "sec-fetch-site"),
+    cookie: rawBrowserHeader(request, "cookie"),
+    csrf: rawBrowserHeader(request, "x-riff-csrf"),
+    authorization: rawBrowserHeader(request, "authorization"),
+  };
+};
+
+const exactEmptyBrowserBody = (
+  request: IncomingMessage,
+  code:
+    | "browser_session_denied"
+    | "visual_frame_nonce_invalid"
+    | "visual_frame_proxy_limit_exceeded",
+): void => {
+  const contentLength = rawBrowserHeader(request, "content-length");
+  if (rawBrowserHeader(request, "transfer-encoding") !== undefined
+    || Array.isArray(contentLength)
+    || contentLength !== undefined && contentLength !== "0") {
+    const status = code === "visual_frame_proxy_limit_exceeded" ? 502 : code === "visual_frame_nonce_invalid" ? 404 : 403;
+    throw new BrowserFrameCapabilityError(status, code);
+  }
+};
+
+const decodeBrowserPathId = (value: string): string => {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0")) throw new Error("invalid path id");
+    return decoded;
+  } catch {
+    throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+  }
+};
+
+const browserProxyHeaders = (
+  request: IncomingMessage,
+): Readonly<Record<string, string | readonly string[] | undefined>> => Object.freeze({
+  accept: rawBrowserHeader(request, "accept"),
+  "accept-language": rawBrowserHeader(request, "accept-language"),
+  "if-none-match": rawBrowserHeader(request, "if-none-match"),
+  "if-modified-since": rawBrowserHeader(request, "if-modified-since"),
+  range: rawBrowserHeader(request, "range"),
+});
 
 const canonicalJson = (response: ServerResponse, status: number, payload: unknown): void => {
   const bytes = canonicalJsonV2(payload);

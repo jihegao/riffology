@@ -384,7 +384,7 @@ The remaining claims begin only in the later gates:
   `421` `platform_host_denied` for a wrong Host, HTTP `404`
   `broker_route_denied`, and a successful Vite `/api` proxy POST whose
   `changeOrigin` Host passes the exact app guard.
-- **A3-2b2 frame bootstrap and HTTP proxy — pending:** the same-origin local
+- **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** the same-origin local
   bootstrap, isolated-broker HttpOnly one-use frame session,
   Origin/CORS rules, and exact CSP/HTTP forwarding. Platform app
   and broker exact-bind `::1` on different server-owned ports and use
@@ -393,13 +393,19 @@ The remaining claims begin only in the later gates:
   exact cookie attributes and that platform cookies are never forwarded to
   the child host.
 
-  Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, and wrong
-  Fetch-Site; its app cookie is host-only with `Path=/api/`. A new bootstrap
+  Bootstrap rejects missing, `null`, wrong Origin, wrong Host/port, the Vite
+  origin, and wrong Fetch-Site; its app cookie is host-only with `Path=/api/`,
+  and its server session, `Max-Age`, and `Expires` all use 15 minutes. Origin
+  and Fetch-Site are browser-CSRF defenses, not local-client identity. Bootstrap
+  and frame-session accept `POST` plus preflight `OPTIONS`, expose exact-app-only
+  credentialed CORS for `POST, OPTIONS` and
+  `Content-Type, X-Riff-CSRF`, and return HTTP `201`. A new bootstrap
   generation invalidates older frame capabilities. Frame-session requires exact
   cookie, CSRF, Origin, and Fetch-Site. First nonce navigation succeeds without
   Origin only at the exact broker Host/path, only once, and no later than 60
   seconds after issue. Tests redeem within 60 seconds, reject after expiry, and
   prove restart or a new browser generation invalidates the nonce immediately.
+  Redemption returns HTTP `303` with a relative nonce-free `Location`.
   Expired nonce values never appear in logs, headers, DTOs, or SQLite. SQLite
   contains no cookie, frame URL, or browser capability; child-port assertions
   allow only the schema-defined private process-attempt, launch, and health
@@ -408,13 +414,57 @@ The remaining claims begin only in the later gates:
   without Origin requires the broker cookie; HTTP with Origin requires exact
   broker Origin. Frame registry assertions cover browser-session generation,
   Project, run, attempt generation, and expiry. Tests do not treat port
-  separation or Cookie `Path` as Cookie authorization. The broker cookie expires at
-  `min(attempt expiry, 15 minutes)`. App and broker cookies may omit `Secure` on
-  current HTTP, but HTTPS fixtures require it.
+  separation or Cookie `Path` as Cookie authorization. The broker cookie expires
+  at `min(attempt claimedAt + frozen wallTimeMs, issue time + 15 minutes)`.
+  App and broker cookies may omit `Secure` on current HTTP, but HTTPS fixtures
+  require it.
+
+  Without changing execution-description v2, the minted capability base
+  forwards normalized suffixes for `GET` and `HEAD` only. Query is allowed
+  while normalized path plus query is at most 4,096 bytes; request bodies are
+  denied. A multi-resource HTTP integration proves relative HTML, CSS, script,
+  image, and JSON references stay beneath the minted base; root-absolute
+  application routes remain denied and are not rewritten. Tests prove the child receives only `Accept`, `Accept-Language`,
+  `If-None-Match`, `If-Modified-Since`, and `Range`, plus exact child `Host` and
+  forced `Accept-Encoding: identity`. Responses expose only `Content-Type`,
+  `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`, `Last-Modified`,
+  and `Cache-Control`; tests prove `Set-Cookie`, `Location`, `Refresh`,
+  authentication, CORS, credentials, nonce/capability, and hop-by-hop headers
+  are absent.
+  Broker responses override child cache policy with `private, no-store`;
+  component and HTTP tests prove rotated/revoked routes are rejected rather
+  than reused, while real browser cache behavior remains an A3-2b4 gate.
+  Secret scans cover broker-generated DTOs, routes, transport headers, errors,
+  and logs. They do not claim arbitrary model-authored response bytes can hide
+  a listener already known by that child; literal payload scanning is not an
+  authorization boundary. A3-2b treats operator-provided active frame content
+  as trusted browser code under the local deployment threat model; it does not
+  claim a runtime code-review gate. Adversarial active-payload
+  isolation needs a trusted data-only wrapper or browser-inaccessible transport
+  and is not claimed by b2/b4 iframe sandbox tests.
+
+  Every child `3xx` is rejected without following. Tests cover 32,768-byte
+  request/response header ceilings, 8 MiB response body, 5,000 millisecond
+  deadline, and eight concurrent HTTP requests per capability. They also cover
+  expired dispatcher leases, stale process heartbeats, authority replacement
+  during an in-flight exchange, asynchronous serialized OS inspection, and
+  bounded inspection admission with a 5,000 millisecond overall deadline. Exact stable
+  errors are `browser_method_denied` (`405`),
+  `browser_session_denied` (`403`), `visual_frame_unavailable` (`409`),
+  `visual_frame_nonce_invalid` (`404`), `visual_frame_session_denied` (`403`),
+  `visual_frame_proxy_denied` (`404` or `405`),
+  `visual_frame_proxy_redirect_denied` (`502`),
+  `visual_frame_proxy_limit_exceeded` (`502`),
+  `visual_frame_proxy_timeout` (`504`), and
+  `visual_frame_proxy_failed` (`502`).
 
   Every broker document must emit exact CSP
-  `frame-ancestors http://[::1]:<exact-app-port>` with no wildcard and must not
-  emit `X-Frame-Options: SAMEORIGIN`.
+  `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+  form-action 'none'; frame-src 'none'; frame-ancestors
+  http://[::1]:<exact-app-port>` with no wildcard and must not emit
+  `X-Frame-Options`. Exact app-origin host-page and real-browser evidence remain
+  A3-2b4.
 - **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
   path/subprotocol enforcement, frame-size, connection-count, and idle-time
   limits; strict broker Origin rejection for missing, `null`, app, child, and

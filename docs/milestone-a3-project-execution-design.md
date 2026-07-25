@@ -71,8 +71,9 @@ this pair; the existing Vite UI remains a separate development proxy surface,
 not the future frame-capability app.
 The published A3-2a2c slice exposes neither the child port nor browser access.
 Visual completion remains HTTP `422` `visual_completion_not_supported`;
-A3-2b2 frame bootstrap/HTTP proxy, A3-2b3 WebSocket/revocation/secrecy,
-A3-2b4 browser and security closeout, and A3-2c remain pending.
+A3-2b2 frame bootstrap/HTTP proxy is under implementation.
+A3-2b3 WebSocket/revocation/secrecy, A3-2b4 browser and security closeout, and
+A3-2c remain pending.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -1008,12 +1009,21 @@ healthy attempt. The same exact-IPv4/no-other-listener invariant is monitored
 while healthy and checked again before termination and cleanup.
 
 After health, the access broker exposes only a server-minted route scoped to
-`{projectId, runId, attemptGeneration}`. The browser never receives the child
-port. The proxy allows the exact healthy attempt, bounded HTTP, and only the
+`{projectId, runId, attemptGeneration}`. Backend and broker metadata never
+serialize the child port to the browser. Model-authored response bytes are not
+treated as a port-confidentiality boundary because the child already knows its
+own listener. Active frame HTML/JavaScript is operator-provided, trusted browser
+code under the local deployment threat model, not runtime-reviewed content;
+arbitrary adversarial active payload requires a trusted
+data-only wrapper or browser-inaccessible transport and is outside this
+surface. The proxy allows the exact healthy attempt, bounded HTTP, and only the
 WebSocket path/subprotocol/limits frozen by execution-description v2. It strips
 credentials and set-cookie headers, rejects arbitrary URLs, and applies a
 restrictive Content Security Policy. The frame has no ambient top navigation,
 popup, parent-origin, or unrestricted download capability.
+Visual applications are capability-base compatible and use relative document,
+CSS, script, and fetch references; root-absolute application routes are not
+rewritten or authorized.
 
 Stage 3 first establishes a local browser-session capability through
 `POST /api/browser-session/bootstrap` on the platform app origin
@@ -1022,25 +1032,32 @@ loopback `::1`, on different server-owned ports, and reject any other listener
 address or `Host:port`. The bootstrap sets a random host-only HttpOnly,
 SameSite=Strict cookie with no `Domain`, `Path=/api/`, and returns a separate
 in-memory CSRF token. On current HTTP the cookie may omit `Secure`; under
-future HTTPS it must set `Secure`.
+future HTTPS it must set `Secure`. The server-side browser session lifetime is
+15 minutes, and cookie `Max-Age` and `Expires` encode that same lifetime.
 This is a single-local-user browser capability, not login, identity, multi-user
 authorization, or reuse of the legacy path/default-session mechanism. It is
 rotated on backend restart. The endpoint rejects a missing, `null`, or wrong
 exact app `Origin`, a wrong app `Host:port`, or any
 `Sec-Fetch-Site` other than `same-origin`. A successful new bootstrap increments
 the browser-session generation and revokes every older frame/WS capability
-before returning.
+before returning HTTP `201`. These Origin and Fetch-Site checks mitigate browser
+CSRF; they do not authenticate an arbitrary local native client. The Vite
+development origin is not the exact app origin and is rejected.
 
 The browser then calls
 `POST /api/projects/{projectId}/runs/{runId}/visual-frame-session` with that
 exact app cookie, matching `X-Riff-CSRF`, exact app `Origin`, and
 `Sec-Fetch-Site: same-origin`. A wrong value in any field fails. Agent/tool
-credentials cannot call either endpoint. The response contains one `frameUrl`
+credentials cannot call either endpoint. Bootstrap and frame-session support
+only `POST` and preflight `OPTIONS`; CORS permits only the exact app origin with
+credentials, methods `POST, OPTIONS`, and headers
+`Content-Type, X-Riff-CSRF`. Both successful POSTs return HTTP `201`. The
+response contains one `frameUrl`
 on `http://[::1]:<broker-port>` with a random single-use nonce. The in-memory
 registry binds it to
 `{browserSessionGeneration, projectId, runId, attemptGeneration, expiry}` with
-expiry no later than 60 seconds after issuance, and owns the capability's live
-socket set.
+expiry no later than 60 seconds after issuance or the attempt expiry, whichever
+comes first, and owns the capability's live socket set.
 
 The app and broker are different origins because their server-owned ports
 differ, but remain same-site on host `::1`, so `SameSite=Strict` can be sent in
@@ -1051,11 +1068,13 @@ platform cookies are never sent to the child.
 
 The first nonce-bearing iframe navigation normally has no `Origin`. It is
 authorized only by exact broker `Host:port`, exact nonce path, atomic one-use
-nonce consumption, live registry binding, and expiry. It redirects to a
-nonce-free broker path while setting a broker HttpOnly, SameSite=Strict,
+nonce consumption, live registry binding, and expiry. It returns HTTP `303`
+with a relative nonce-free `Location` while setting a broker HttpOnly,
+SameSite=Strict,
 host-only cookie with no `Domain`, a random broker-only name independent of the
-app cookie, and the exact broker path. The cookie expires no later than the
-minimum of attempt expiry and 15 minutes. On current HTTP it may omit `Secure`;
+app cookie, and the exact broker path. The cookie expires at
+`min(attempt claimedAt + frozen wallTimeMs, issue time + 15 minutes)`. On
+current HTTP it may omit `Secure`;
 under future HTTPS it must set `Secure`. After redirect, every request requires
 that exact named cookie plus the live attempt/registry binding. The app never
 interprets or accepts the broker cookie; the broker ignores every other cookie.
@@ -1064,11 +1083,39 @@ origin; it still omits top-navigation, popup, parent-origin, and unrestricted
 download permissions. Browser same-origin policy, rather than an opaque origin,
 prevents parent DOM access.
 
+`riff-visual-v1` keeps its current execution-description v2 schema. Frame HTTP
+is a server-owned surface rather than a new declaration: beneath the
+nonce-free minted capability base, only `GET` and `HEAD` are forwarded to the
+same normalized suffix on the exact healthy child. Query is allowed, but the
+complete normalized path plus query is at most 4,096 bytes, and no request body
+is accepted. The child request forwards only `Accept`, `Accept-Language`,
+`If-None-Match`, `If-Modified-Since`, and `Range`; the broker sets exact child
+`Host` and `Accept-Encoding: identity`. The child response exposes only
+`Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`,
+`Last-Modified`, and `Cache-Control`. Cookies, authorization/proxy
+authorization, `Set-Cookie`, `Location`, `Refresh`, authentication challenge,
+CORS, capability/nonce, and hop-by-hop headers are never forwarded.
+
+The proxy follows no redirect and rejects every child `3xx`. Request and
+response headers are each limited to 32,768 bytes, response bodies to 8 MiB,
+the complete child exchange to 5,000 milliseconds, and one capability to eight
+concurrent HTTP requests. Stable results are `browser_method_denied` (`405`),
+`browser_session_denied` (`403`), `visual_frame_unavailable` (`409`),
+`visual_frame_nonce_invalid` (`404`), `visual_frame_session_denied` (`403`),
+`visual_frame_proxy_denied` (`404` or `405`),
+`visual_frame_proxy_redirect_denied` (`502`),
+`visual_frame_proxy_limit_exceeded` (`502`),
+`visual_frame_proxy_timeout` (`504`), and
+`visual_frame_proxy_failed` (`502`).
+
 Every broker document response emits CSP
-`frame-ancestors http://[::1]:<exact-app-port>` with no wildcard or alternate
-app origin. It must not emit `X-Frame-Options: SAMEORIGIN`, which would block
-the authorized cross-port frame. Broker documents/assets emit no permissive
-CORS header. Fetches require the
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+form-action 'none'; frame-src 'none'; frame-ancestors
+http://[::1]:<exact-app-port>` with no wildcard or alternate app origin. It
+must not emit any `X-Frame-Options`, which could block the authorized
+cross-port frame. Broker documents/assets emit no permissive CORS header.
+Fetches require the
 broker cookie and live binding. When an HTTP `Origin` header is present it must
 equal the exact broker origin; a normal navigation or subresource request
 without `Origin` is allowed only with the cookie. WebSocket upgrade always
@@ -1375,7 +1422,7 @@ Output indexes never resolve outside the owning Project/run object root.
    production entrypoint exact-binds the platform technical origin and an empty
    broker to separate IPv6-loopback ports, enforces exact Host, serializes
    start/close, and preserves the child IPv4-only listener boundary.
-10. **A3-2b2 frame bootstrap and HTTP proxy — pending:** scoped broker/frame
+10. **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** scoped broker/frame
    capability, exact broker path, browser-session generation, bootstrap/CSRF/
    nonce/cookie/Origin rules, HTTP forwarding, and exact CSP.
 11. **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket

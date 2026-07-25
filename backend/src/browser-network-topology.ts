@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 
 export const BROWSER_LOOPBACK_HOST = "::1" as const;
 
@@ -24,6 +24,10 @@ export type BrowserNetworkTopologyOptions = {
   closeDrainTimeoutMs?: number;
   appHandler: BrowserNetworkHandler;
   brokerHandler: BrowserNetworkHandler;
+  beforeReady?: (addresses: Readonly<{
+    app: BrowserNetworkAddress;
+    broker: BrowserNetworkAddress;
+  }>) => void | Promise<void>;
 };
 
 export class BrowserNetworkTopologyError extends Error {
@@ -96,6 +100,7 @@ export class BrowserNetworkTopology {
           "The platform app and visual broker resolved to the same port.",
         );
       }
+      await options.beforeReady?.(Object.freeze({ app: appAddress, broker: brokerAddress }));
       gate.ready = true;
       return new BrowserNetworkTopology(
         appServer,
@@ -145,19 +150,44 @@ const createExactServer = (
   address: () => BrowserNetworkAddress | undefined,
   handler: BrowserNetworkHandler,
   gate: RequestGate,
-): Server => createServer((request, response) => {
-  const current = address();
-  if (!current || !gate.ready || gate.closing) return networkError(response, 503, `${role}_listener_unavailable`);
-  if (request.headers.host !== current.authority) {
-    return networkError(response, 421, role === "platform" ? "platform_host_denied" : "broker_host_denied");
-  }
-  const operation = Promise.resolve().then(() => handler(request, response, current)).then(() => undefined).catch(() => {
-    if (!response.headersSent) networkError(response, 500, `${role}_request_failed`);
-    else response.end();
+): Server => {
+  const server = createServer({ maxHeaderSize: 32 * 1_024 }, (request, response) => {
+    const current = address();
+    if (!current || !gate.ready || gate.closing) return networkError(response, 503, `${role}_listener_unavailable`);
+    if (request.headers.host !== current.authority) {
+      return networkError(response, 421, role === "platform" ? "platform_host_denied" : "broker_host_denied");
+    }
+    const operation = Promise.resolve().then(() => handler(request, response, current)).then(() => undefined).catch(() => {
+      if (!response.headersSent) networkError(response, 500, `${role}_request_failed`);
+      else response.end();
+    });
+    gate.inFlight.add(operation);
+    void operation.then(() => gate.inFlight.delete(operation));
   });
-  gate.inFlight.add(operation);
-  void operation.then(() => gate.inFlight.delete(operation));
-});
+  server.on("clientError", (error: NodeJS.ErrnoException, socket: Socket) => {
+    if (!socket.writable) return socket.destroy();
+    const overflow = error.code === "HPE_HEADER_OVERFLOW";
+    const status = overflow && role === "broker" ? 502 : 400;
+    const code = overflow && role === "broker"
+      ? "visual_frame_proxy_limit_exceeded"
+      : `${role}_request_failed`;
+    const body = Buffer.from(JSON.stringify({
+      accepted: false,
+      error: { code, message: "The browser network request was denied." },
+    }));
+    socket.end([
+      `HTTP/1.1 ${status} ${status === 502 ? "Bad Gateway" : "Bad Request"}`,
+      "Connection: close",
+      "Content-Type: application/json; charset=utf-8",
+      `Content-Length: ${body.byteLength}`,
+      "Cache-Control: no-store",
+      "X-Content-Type-Options: nosniff",
+      "",
+      body.toString("utf8"),
+    ].join("\r\n"));
+  });
+  return server;
+};
 
 const listenExact = async (
   server: Server,
