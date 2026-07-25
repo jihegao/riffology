@@ -3,15 +3,16 @@
 - Status: active
 - Role: normative contract
 - Scope: implemented Stage 2 and Stage 3 HTTP/API boundaries plus retained legacy API history
-- Source of truth: merged server/Store implementation and the Milestone A product contract
+- Source of truth: merged server/Store implementation and the Riff MVP PRD
 - Last reviewed: 2026-07-25
 
 ## Milestone A2 authority and current A3 execution
 
-The current authority is the
-[`Milestone A product contract`](milestone-a-product-contract.md) and
-[`Milestone A2 design`](milestone-a2-agent-workspace-design.md), not the legacy
-Gate API retained below. `ProductStoreV2` through schema migration v9, execution
+The current product authority is the
+[`Riff MVP PRD`](product-requirements.md). The
+[`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
+implemented Agent/API boundary; the legacy Gate API retained below does not.
+`ProductStoreV2` through schema migration v9, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or

@@ -81,8 +81,9 @@ Current entrypoints such as `README.md`, `docs/README.md`,
 `docs/backend-api.md`, `docs/test-plan.md`, and `docs/ui-workflow.md` may require
 cutover edits. Gate design documents are historical evidence and should be
 labelled historical or archived rather than silently rewritten as current
-truth. `docs/milestone-a-product-contract.md` remains authoritative and is not
-an obsolete-state candidate.
+truth. `docs/product-requirements.md` is the current authority and is not an
+obsolete-state candidate. The former Milestone A contract is a compatibility
+redirect and is likewise not an obsolete-state candidate.
 
 ## Stage 1 protected state: deletion forbidden
 
