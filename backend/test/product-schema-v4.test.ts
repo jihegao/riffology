@@ -221,12 +221,7 @@ test("a failed v4 migration rolls back columns, tables, legacy markers, and vers
       { version: 4, sql: `${PRODUCT_SCHEMA_V4_SQL}\nINSERT INTO missing_v4_table VALUES (1);` },
       { version: 5, sql: PRODUCT_SCHEMA_V5_SQL },
       { version: 6, sql: PRODUCT_SCHEMA_V6_SQL },
-      PRODUCT_SCHEMA_MIGRATIONS[6],
-      PRODUCT_SCHEMA_MIGRATIONS[7],
-      PRODUCT_SCHEMA_MIGRATIONS[8],
-      PRODUCT_SCHEMA_MIGRATIONS[9],
-      PRODUCT_SCHEMA_MIGRATIONS[10],
-      PRODUCT_SCHEMA_MIGRATIONS[11],
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(6),
     ]), /missing_v4_table/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 3);

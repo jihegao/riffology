@@ -601,14 +601,14 @@ The remaining claims begin only in the later gates:
   creates the final key path with `O_EXCL`; atomic publication and concurrent
   first-start convergence, along with backup/export exclusion, remain review
   gaps and are not current claims. Event reads are bounded by the frozen
-  16 MB/10,000-event limits, but a dedicated read rate/concurrency gate remains
+  64 MB/50,000-event limits, but a dedicated read rate/concurrency gate remains
   a P2 follow-up. Strict NDJSON tests cover UTF-8/LF, duplicate
   keys, depth/count/string limits, time/type/schema rules, and atomic event-set
   publication. Diagnostic-event prompt-injection cases prove URL-, instruction-,
   and tool-call-shaped content remains safely rendered, separately bounded
   untrusted context and cannot authorize an action. Project trash invalidates
-  event reads/cursors and restore does not revive an old cursor. The current d3
-  review candidate covers all four terminal statuses, nonterminal/stale/
+  event reads/cursors and restore does not revive an old cursor. The merged d3
+  boundary covers all four terminal statuses, nonterminal/stale/
   changed-intent rejection, exact receipt replay across restart, browser
   mutation admission, trashed output fencing, and a real paused-download race
   in which trash closes the dedicated output socket before Store commit.
@@ -616,7 +616,7 @@ The remaining claims begin only in the later gates:
   PR #45 merge gate is 552 backend total/551 passed/zero failed/one optional
   OpenCode smoke skipped, web 104/104, network entry 1/1, successful build,
   and 24-file docs check. Final independent security review reports no P0/P1.
-  The A3-2d4 review candidate in Draft PR #46 now covers the combined route-level
+  A3-2d4 merged through PR #46 and covers the combined route-level
   frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent revocation matrix.
   A focused Node route test and a real Chromium flow fault-inject the lifecycle
   service while calling the production trash/restore API and revocation wiring.
@@ -625,7 +625,7 @@ The remaining claims begin only in the later gates:
   Visual-Agent capability, and that restore revives none of the old authority.
   Durable Store mutation/receipt evidence remains owned by the published d3
   tests. The focused backend combination passes 65/65 and the complete
-  dedicated broker Chromium matrix passes 6/6. The full candidate gate is
+  dedicated broker Chromium matrix passes 6/6. The full merge gate is
   553 backend total/552 passed/zero failed/one optional OpenCode smoke skipped,
   web 104/104, network entry 1/1, full Chromium 15/15, successful production
   build, and a 24-file docs check. Independent security review reports
@@ -634,10 +634,20 @@ The remaining claims begin only in the later gates:
   The legacy `/events` route remains separate from generic
   `/diagnostic-events` and is excluded from this evidence.
 
-Installer tests in A3-3 must pin and verify the execution-v2 scaffold and wind
-manifest IDs, versions, and concrete digests, including same-ID conflicts and
-mandatory re-scaffolding for unproven v1 Models. A3-3 cannot claim ordinary
-wind diagnostic events until A3-2d is published.
+A3-3 installer tests pin the execution-v2 adapter plus all 14 manifest entries,
+IDs, version, exact bytes, and concrete digests. They cover idempotent replay,
+fixed-copy isolation, five interruption/restart windows, the real ordinary
+technical checker, and a production-startup generic Project run. The exact
+seed-2 baseline is byte-identical across two runs, produces 1,096 daily KPI
+rows and 38,730 bounded diagnostic events, and remains readable after backend
+restart. Schema-v13 tests cover migration, rollback, and immutable installation
+authority. Same-ID/different-manifest conflicts fail closed. These are A3-3
+backend acceptance facts, not final browser evidence or a scientific
+calibration/equivalence claim.
+The final A3-3 gate is backend 570 total/569 passed/zero failed/one optional
+OpenCode smoke skipped, web 104/104, network entry 1/1, Chromium 15/15,
+reviewed wind 38/38, a successful production build, and a 25-file docs check.
+Independent review reports P0/P1=0.
 
 Mocks cover fault branches only. A3-1b batch acceptance uses a real generic
 subprocess. Visual acceptance still requires a real local visual process, and

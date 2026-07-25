@@ -74,6 +74,7 @@ test("schema v12 migration failure rolls back tables and both version markers", 
         version: 12,
         sql: `${PRODUCT_SCHEMA_V12_SQL}\nSELECT * FROM missing_v12_guard;`,
       },
+      PRODUCT_SCHEMA_MIGRATIONS[12]!,
     ];
     assert.throws(
       () => initializeProductSchema(database, broken),

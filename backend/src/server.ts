@@ -29,6 +29,11 @@ import { AgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import { DiagnosticEventCursorCodec } from "./diagnostic-event-cursor.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
+import { ModelTechnicalChecker } from "./model-technical-checker.ts";
+import {
+  PreinstalledWindInstaller,
+  type PreinstalledWindInstallerPort,
+} from "./preinstalled-wind-installer.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 import { VisualAgentObserver } from "./visual-agent-observer.ts";
@@ -187,6 +192,9 @@ export type BackendOptions = {
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
   a3DiagnosticEventCursorSecret?: Uint8Array;
+  a3InstallPreinstalledWind?: boolean;
+  a3PreinstalledWindRepositoryRoot?: string;
+  a3PreinstalledWindInstaller?: PreinstalledWindInstallerPort;
   legacyCloseDrainTimeoutMs?: number;
   browserFrameTargetResolver?: BrowserFrameTargetResolver;
 };
@@ -368,6 +376,7 @@ export class BackendApp {
   readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
   readonly #agentTurnRuntime?: AgentTurnRuntime;
+  readonly #preinstalledWindInstaller?: PreinstalledWindInstallerPort;
   private readonly options: BackendOptions;
   readonly #openCodeEvents: OpenCodeEventBridge;
   readonly #mcpCapabilities = new Map<string, string>();
@@ -413,6 +422,19 @@ export class BackendApp {
       let approvedPythonExecutable: string | undefined;
       const pythonExecutable = (): string =>
         approvedPythonExecutable ??= configuredBatchPythonExecutable(options.a3PythonExecutable);
+      if (options.a3PreinstalledWindInstaller) {
+        this.#preinstalledWindInstaller = options.a3PreinstalledWindInstaller;
+      } else if (options.a3InstallPreinstalledWind) {
+        this.#preinstalledWindInstaller = new PreinstalledWindInstaller({
+          store: this.productStore,
+          repositoryRoot: options.a3PreinstalledWindRepositoryRoot
+            ?? resolve(import.meta.dirname, "../.."),
+          technicalChecker: options.a2TechnicalChecker
+            ?? new ModelTechnicalChecker({
+              pythonExecutable: pythonExecutable(),
+            }),
+        });
+      }
       const batchSupervisor = options.a3BatchSupervisor ?? new GenericBatchSupervisor({
         pythonExecutable: pythonExecutable(),
         scratchRoot,
@@ -492,6 +514,7 @@ export class BackendApp {
   async initialize(): Promise<ProjectState> {
     await this.gate3.recover();
     this.gate2.start();
+    await this.#preinstalledWindInstaller?.install();
     await this.productRunDispatcher?.start();
     this.#readiness = await this.options.openCode.initialize();
     if (this.#readiness.status === "ready" && this.options.openCode.subscribeEvents) {

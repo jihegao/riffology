@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { HttpMesaAdapter, UnavailableMesaAdapter } from "./mesa-adapter.ts";
@@ -19,6 +19,8 @@ const app = new BackendApp({
   a2ProductRoot: process.env.RIFF_PRODUCT_ROOT ?? join(root, "milestone-a-product"),
   ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
   a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+  a3InstallPreinstalledWind: true,
+  a3PreinstalledWindRepositoryRoot: resolve(import.meta.dirname, "../.."),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
   mcpUrl: process.env.RIFF_MCP_URL ?? `http://localhost:${port}/mcp`,

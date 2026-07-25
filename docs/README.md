@@ -70,7 +70,7 @@ implementation authority.
 | --- | --- |
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
-| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, and direct controls are merged. A3-2d4 cross-authority revocation is under review in Draft PR #46; ordinary wind import remains. |
+| **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, and A3-2d4 revocation are merged. A3-3 ordinary wind import is implemented on the current review branch; final Stage 3 integration remains. |
 | **4 — shared product shell** | Pending Stage 3. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
@@ -84,19 +84,26 @@ boundary merged through PR #45 and Stage 3 remains in progress. The d3 merge gat
 552 backend total/551 passed/zero failed/one optional smoke skipped, web
 104/104, network entry 1/1, successful production build and docs check, with
 no P0/P1 finding in final independent security review.
-The A3-2d4 review candidate in Draft PR #46 adds one fault-injected production
+Merged PR #46 adds one fault-injected production
 API/revocation-wiring backend matrix and one real Chromium flow. They prove
 that run trash revokes an unredeemed nonce, a redeemed frame, an open
 WebSocket, and Visual-Agent authority, while restore does not revive any old
 capability. Its focused gates pass 65/65 and 6/6.
-The full candidate gate is 553 backend total/552 passed/zero failed/one
+The full merge gate is 553 backend total/552 passed/zero failed/one
 optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
 15/15, successful production build, and a 24-file docs check. Independent
 security review reports P0/P1=0.
 
-A3-3 diagnostic-event acceptance is unblocked by the published A3-2d2 generic
-event-ingestion boundary, but remains sequenced after d4; legacy wind/Gate
-event routes are not substitute evidence.
+A3-3 uses the published generic A3-2d2 event boundary. Schema v13 records the
+immutable manifest installation; the reviewed source bytes enter ProductStoreV2
+as an ordinary executable Model, fixed-copy Project, and named synthetic
+single-seed Experiment. A real generic run produces 1,096 daily rows, 38,730
+events, two indexed outputs, and restart-stable reads. There is no wind route,
+DTO field, fabricated conversation, analysis, or recommendation.
+The final A3-3 review gate is backend 570 total/569 passed/zero failed/one
+optional OpenCode smoke skipped, web 104/104, network entry 1/1, Chromium
+15/15, reviewed wind 38/38, a successful production build, and a 25-file docs
+check. Independent review reports P0/P1=0.
 
 ## Active product and stage documents
 

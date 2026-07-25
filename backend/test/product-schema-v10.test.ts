@@ -275,7 +275,7 @@ test("schema v11 migration failure rolls back version markers and its unique ind
     const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 10), {
       version: 11,
       sql: `${PRODUCT_SCHEMA_V11_SQL}\nSELECT * FROM missing_v11_guard;`,
-    }, PRODUCT_SCHEMA_MIGRATIONS[11]!];
+    }, ...PRODUCT_SCHEMA_MIGRATIONS.slice(11)];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v11_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 10);
@@ -293,7 +293,7 @@ test("schema v10 migration failure rolls back version markers and the new table"
     const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 9), {
       version: 10,
       sql: `${PRODUCT_SCHEMA_V10_SQL}\nSELECT * FROM missing_v10_guard;`,
-    }, PRODUCT_SCHEMA_MIGRATIONS[10]!, PRODUCT_SCHEMA_MIGRATIONS[11]!];
+    }, ...PRODUCT_SCHEMA_MIGRATIONS.slice(10)];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v10_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 9);

@@ -1,10 +1,12 @@
 # Mesa execution service
 
-This loopback-only FastAPI service now contains the reviewed Gate 1
-`wind-turbine-maintenance` model and its artifact-producing worker. Gate 1 is a
-direct Mesa-service integration: the existing backend and browser continue to
-use the legacy queue route until their later gates. Nothing here is a staffing
-recommendation or a calibrated real-wind-farm result.
+This loopback-only FastAPI service contains the reviewed Gate 1
+`wind-turbine-maintenance` model and its artifact-producing worker. A3-3 now
+pins the reviewed mechanism and assets into a versioned backend manifest and
+installs them as an ordinary Model, fixed-copy Project, and Experiment. The
+historical `/v1` flow below remains direct Mesa-service evidence; it is not the
+current Product API. No wind-specific backend/browser route was added. Nothing
+here is a staffing recommendation or a calibrated real-wind-farm result.
 
 See [`../docs/mesa-service.md`](../docs/mesa-service.md),
 [`../docs/gate-1-wind-turbine-model-design.md`](../docs/gate-1-wind-turbine-model-design.md),
@@ -59,6 +61,12 @@ request, metadata, and log diagnostics.
 `summary.json` retains the single-seed non-claim boundary and reports
 annualized operating revenue, maintenance expense, and their difference as a
 source-traceability profit diagnostic, not as an optimization claim.
+
+The A3-3 generic `riff-batch-v1` adapter publishes `summary.json`,
+`daily-kpis.csv`, and `domain-events.ndjson`. With the exact baseline below it
+produces 1,096 daily rows and 38,730 events within the server-owned 50,000-event
+/ 64 MB generic limit; ordinary Project-run and restart tests verify the
+indexed outputs and paged events.
 
 Run and independently verify the exact 100-turbine, 3-crew, 1095-day,
 365-day-warm-up, seed-2 baseline:

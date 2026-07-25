@@ -81,6 +81,7 @@ import {
   type OwnerPath,
   type VerifiedObjectRead,
 } from "./object-store.ts";
+import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 import {
   openProductDatabase,
   withAtomicBatchSuccessRunContext,
@@ -168,6 +169,18 @@ export type TechnicalCheckRecord = {
   startedAt: IsoTimestamp;
   finishedAt: IsoTimestamp | null;
 };
+
+export type PreinstalledManifestInstallationRecord = Readonly<{
+  manifestId: string;
+  manifestVersion: number;
+  manifestDigest: string;
+  modelId: string;
+  projectId: string;
+  experimentConfigurationId: string;
+  state: "model_created" | "ready";
+  claimedAt: string;
+  readyAt: string | null;
+}>;
 
 export type BindAgentSessionInput = {
   id: string;
@@ -840,6 +853,146 @@ export class ProductStoreV2 {
     }))];
     this.#coordinator.execute({ transactionId: stableTransactionId("create_model", input.id), files: files.map(({ target, bytes }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: null })), statements });
     return this.#model(input.id);
+  }
+
+  claimPreinstalledManifestInstallation(input: Readonly<{
+    manifestId: string;
+    manifestVersion: number;
+    manifestDigest: string;
+    modelId: string;
+    projectId: string;
+    experimentConfigurationId: string;
+    claimedAt: IsoTimestamp;
+  }>): PreinstalledManifestInstallationRecord {
+    this.#assertOpen();
+    if (
+      typeof input.manifestId !== "string"
+      || input.manifestId.length < 3
+      || input.manifestId.length > 200
+      || !Number.isSafeInteger(input.manifestVersion)
+      || input.manifestVersion < 1
+    ) {
+      throw new ProductStoreV2Error(
+        "preinstalled_manifest_conflict: manifest identity is invalid.",
+      );
+    }
+    assertDigest(input.manifestDigest, "Preinstalled manifest digest");
+    assertId(input.modelId);
+    assertId(input.projectId);
+    assertId(input.experimentConfigurationId);
+    const existing = this.#preinstalledManifestInstallation(
+      input.manifestId,
+      input.manifestVersion,
+    );
+    if (existing) {
+      if (
+        existing.manifestDigest !== input.manifestDigest
+        || existing.modelId !== input.modelId
+        || existing.projectId !== input.projectId
+        || existing.experimentConfigurationId
+          !== input.experimentConfigurationId
+        || existing.claimedAt !== input.claimedAt
+      ) {
+        throw new ProductStoreV2Error(
+          "preinstalled_manifest_conflict: manifest version was already claimed with different identity.",
+        );
+      }
+      return existing;
+    }
+    try {
+      this.#databaseMutation([
+        {
+          sql: `INSERT INTO preinstalled_manifest_installations
+            (manifest_id, manifest_version, manifest_sha256, model_id,
+              project_id, experiment_configuration_id, state, claimed_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'model_created', ?)`,
+          params: [
+            input.manifestId,
+            input.manifestVersion,
+            input.manifestDigest,
+            input.modelId,
+            input.projectId,
+            input.experimentConfigurationId,
+            input.claimedAt,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+    } catch (error) {
+      throw new ProductStoreV2Error(
+        "preinstalled_manifest_conflict: manifest claim could not be persisted.",
+        { cause: error },
+      );
+    }
+    return this.#preinstalledManifestInstallation(
+      input.manifestId,
+      input.manifestVersion,
+    )!;
+  }
+
+  markPreinstalledManifestInstallationReady(input: Readonly<{
+    manifestId: string;
+    manifestVersion: number;
+    manifestDigest: string;
+    readyAt: IsoTimestamp;
+  }>): PreinstalledManifestInstallationRecord {
+    this.#assertOpen();
+    const current = this.#preinstalledManifestInstallation(
+      input.manifestId,
+      input.manifestVersion,
+    );
+    if (!current || current.manifestDigest !== input.manifestDigest) {
+      throw new ProductStoreV2Error(
+        "preinstalled_manifest_conflict: manifest claim is missing or different.",
+      );
+    }
+    if (current.state === "ready") return current;
+    try {
+      this.#databaseMutation([
+        {
+          sql: `UPDATE preinstalled_manifest_installations
+            SET state = 'ready', ready_at = ?
+            WHERE manifest_id = ? AND manifest_version = ?
+              AND manifest_sha256 = ? AND state = 'model_created'
+              AND ready_at IS NULL`,
+          params: [
+            input.readyAt,
+            input.manifestId,
+            input.manifestVersion,
+            input.manifestDigest,
+          ],
+          expectedChanges: 1,
+        },
+      ]);
+    } catch (error) {
+      throw new ProductStoreV2Error(
+        "preinstalled_manifest_conflict: manifest installation could not be finalized.",
+        { cause: error },
+      );
+    }
+    return this.#preinstalledManifestInstallation(
+      input.manifestId,
+      input.manifestVersion,
+    )!;
+  }
+
+  getPreinstalledManifestInstallation(
+    manifestId: string,
+    manifestVersion: number,
+  ): PreinstalledManifestInstallationRecord | null {
+    this.#assertOpen();
+    return this.#preinstalledManifestInstallation(manifestId, manifestVersion);
+  }
+
+  /** Backend-only integrity check for one durable fixed-copy Project snapshot. */
+  verifyFrozenProjectSnapshot(projectId: string): string {
+    this.#assertOpen();
+    assertId(projectId);
+    const project = this.#database.prepare(
+      "SELECT * FROM projects WHERE id = ?",
+    ).get(projectId);
+    if (!project) throw new ProductStoreV2Error("Project does not exist.");
+    return this.#verifyFrozenProject(project);
   }
 
   createProjectFromModel(input: CreateProjectFromModelInput): ProjectRecord {
@@ -3447,7 +3600,9 @@ export class ProductStoreV2 {
         occurredAt: event.occurredAt,
         payload: event.payload,
       })));
-      if (events.length < 1 || events.length > 10_000
+      if (
+        events.length < 1
+        || events.length > PRODUCT_DIAGNOSTIC_EVENT_LIMITS.maxEventCount
         || expectedFileEventSetDigest !== file.fileEventSetDigest) {
         throw new ProductStoreV2Error(
           "run_event_invalid: a diagnostic event file semantic digest is invalid.",
@@ -5815,7 +5970,7 @@ export class ProductStoreV2 {
         limits: {
           maxEventCount: limits.maxEventCount,
           maxEventBytes: Math.min(
-            16_000_000,
+            PRODUCT_DIAGNOSTIC_EVENT_LIMITS.maxEventBytes,
             limits.maxOutputBytes,
             limits.maxEventBytes,
           ),
@@ -7333,6 +7488,28 @@ export class ProductStoreV2 {
   }
 
   #assertOpen(): void { if (this.#closed) throw new ProductStoreV2Error("Product store is closed."); }
+
+  #preinstalledManifestInstallation(
+    manifestId: string,
+    manifestVersion: number,
+  ): PreinstalledManifestInstallationRecord | null {
+    const row = this.#database.prepare(
+      `SELECT * FROM preinstalled_manifest_installations
+       WHERE manifest_id = ? AND manifest_version = ?`,
+    ).get(manifestId, manifestVersion) as any;
+    if (!row) return null;
+    return Object.freeze({
+      manifestId: row.manifest_id,
+      manifestVersion: row.manifest_version,
+      manifestDigest: row.manifest_sha256,
+      modelId: row.model_id,
+      projectId: row.project_id,
+      experimentConfigurationId: row.experiment_configuration_id,
+      state: row.state,
+      claimedAt: row.claimed_at,
+      readyAt: row.ready_at,
+    });
+  }
 }
 
 const objectInsert = (input: {

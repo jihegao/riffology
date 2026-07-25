@@ -35,6 +35,7 @@ import type {
 import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
 import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentOperation } from "./agent-visual-authority.ts";
+import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -1050,8 +1051,7 @@ const SERVER_RUN_LIMITS: RunLimitsV1 = Object.freeze({
   maxStderrBytes: 1_000_000,
   maxOutputFiles: 256,
   maxOutputBytes: 64_000_000,
-  maxEventCount: 10_000,
-  maxEventBytes: 16_000_000,
+  ...PRODUCT_DIAGNOSTIC_EVENT_LIMITS,
   maxSamples: 1_000,
   maxConcurrency: 4,
 });

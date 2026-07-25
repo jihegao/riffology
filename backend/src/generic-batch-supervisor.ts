@@ -42,6 +42,7 @@ import {
   type DiagnosticEventPayloadSchema,
   type ParsedDiagnosticEventSet,
 } from "./diagnostic-events.ts";
+import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 
 export type FrozenBatchSample = Readonly<{
   sampleIndex: number;
@@ -1337,7 +1338,7 @@ const validateOutputCandidates = (input: {
         limits: {
           maxEventCount: input.remainingEventCount,
           maxEventBytes: Math.min(
-            16_000_000,
+            PRODUCT_DIAGNOSTIC_EVENT_LIMITS.maxEventBytes,
             input.remainingBytes,
             input.remainingEventBytes,
           ),
@@ -1408,8 +1409,11 @@ export const consumeBatchDiagnosticEventFileCandidate = (
   }
   const parsed = parseDiagnosticEventNdjson(captured.bytes, {
     limits: {
-      maxEventCount: 10_000,
-      maxEventBytes: Math.min(16_000_000, candidate.sizeBytes),
+      maxEventCount: PRODUCT_DIAGNOSTIC_EVENT_LIMITS.maxEventCount,
+      maxEventBytes: Math.min(
+        PRODUCT_DIAGNOSTIC_EVENT_LIMITS.maxEventBytes,
+        candidate.sizeBytes,
+      ),
     },
     payloadSchema: candidate.payloadSchema,
   });

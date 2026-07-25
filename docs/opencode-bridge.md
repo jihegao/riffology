@@ -58,8 +58,10 @@ This avoids treating OpenCode's caller-supplied replacement ID semantics as a
 new turn. Any failed prompt aborts and retires that opaque external session
 before a later turn rebuilds from durable Riff context, so late upstream
 messages cannot be associated with the next turn. Prior provider-failure
-evidence still verifies explicit read-only behavior. Project execution/wind
-migration belongs to #14; the final shared shell belongs to #15.
+evidence still verifies explicit read-only behavior. A3-3 installs the wind
+case through ordinary Model/Project execution contracts and adds no wind-only
+conversation, tool, or OpenCode authority. Final Stage 3 browser integration
+still belongs to #14; the shared shell belongs to #15.
 
 ---
 

@@ -165,7 +165,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v12 and expose Agent and execution records", () => {
+test("schema migrations advance sequentially from v1 through v13 and expose Agent and execution records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
@@ -185,7 +185,7 @@ test("schema migrations advance sequentially from v1 through v12 and expose Agen
   }
 });
 
-test("ordered v2 through v12 migration locks legacy providers and preserves execution migration atomicity", () => {
+test("ordered v2 through v13 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);
@@ -345,16 +345,7 @@ test("schema version drift and failed migrations fail closed with transactional 
     assert.throws(() => initializeProductSchema(failed, [
       PRODUCT_SCHEMA_MIGRATIONS[0],
       { version: 2, sql: "CREATE TABLE migration_sentinel (id INTEGER); INSERT INTO missing_table VALUES (1);" },
-      PRODUCT_SCHEMA_MIGRATIONS[2],
-      PRODUCT_SCHEMA_MIGRATIONS[3],
-      PRODUCT_SCHEMA_MIGRATIONS[4],
-      PRODUCT_SCHEMA_MIGRATIONS[5],
-      PRODUCT_SCHEMA_MIGRATIONS[6],
-      PRODUCT_SCHEMA_MIGRATIONS[7],
-      PRODUCT_SCHEMA_MIGRATIONS[8],
-      PRODUCT_SCHEMA_MIGRATIONS[9],
-      PRODUCT_SCHEMA_MIGRATIONS[10],
-      PRODUCT_SCHEMA_MIGRATIONS[11],
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(2),
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);
