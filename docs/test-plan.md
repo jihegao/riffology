@@ -582,8 +582,8 @@ The remaining claims begin only in the later gates:
   digest, MIME, range, and limits. The merged d2 boundary proves declared
   diagnostic NDJSON ingestion is atomic and enforces schema,
   structure, depth, string, count, and byte bounds; pagination uses tamper-
-  evident opaque cursors bound to run and normalized filters. The d3 candidate
-  must prove direct cancel/download/trash/restore with OpenCode unavailable,
+  evident opaque cursors bound to run and normalized filters. The merged d3
+  boundary proves direct cancel/download/trash/restore with OpenCode unavailable,
   including cross-owner, cross-run, nonterminal, stale, tampered, and restart
   rejection. List/download/event reads require the current single-user app session,
   exact Host/Fetch Metadata, and Project/run/output ownership tuple and emit
@@ -613,7 +613,7 @@ The remaining claims begin only in the later gates:
   mutation admission, trashed output fencing, and a real paused-download race
   in which trash closes the dedicated output socket before Store commit.
   It also proves direct run trash/restore invalidates old event cursors. The
-  candidate gate is 552 backend total/551 passed/zero failed/one optional
+  PR #45 merge gate is 552 backend total/551 passed/zero failed/one optional
   OpenCode smoke skipped, web 104/104, network entry 1/1, successful build,
   and 24-file docs check. Final independent security review reports no P0/P1.
   A combined route-level frame-nonce/redeemed-frame/open-WebSocket/Visual-Agent

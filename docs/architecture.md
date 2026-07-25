@@ -100,10 +100,10 @@ in the same SQLite transaction as terminal batch state, or records
 agreement and fails closed on drift. Agent turns cannot own platform cards;
 bounded Agent context serializes only their five allowlisted fields.
 A3-2a2 visual supervision and A3-2b scoped browser access are published.
-A3-2c, A3-2d1, and A3-2d2 are published. A3-2d3 direct controls are a
-fully tested review candidate, while A3-2d4 and A3-3 ordinary wind import
-remain later Stage 3 slices. Wind diagnostic-event acceptance is now unblocked
-by the published A3-2d2 boundary.
+A3-2c and A3-2d1 through A3-2d3 are published; A3-2d3 direct controls were
+merged through PR #45. A3-2d4 and A3-3 ordinary wind import remain later
+Stage 3 slices. Wind diagnostic-event acceptance is now unblocked by the
+published A3-2d2 boundary.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

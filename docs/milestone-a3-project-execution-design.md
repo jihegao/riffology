@@ -89,8 +89,8 @@ browser target. A3-2c3's one-use typed interaction was merged through PR #41
 and A3-2c4's live-CDP/real-Chromium security closeout through PR #42. A3-2d1
 output list/download was merged through PR #43. A3-2d2 strict diagnostic-event
 ingestion, schema-v12 atomic publication, and opaque cursor reads were merged
-through PR #44; A3-2d3 direct controls are the active candidate.
-The d3 candidate gate reports 552 backend total with 551 passed, zero failed,
+through PR #44; A3-2d3 direct controls were merged through PR #45.
+The d3 merge gate reports 552 backend total with 551 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build and docs check succeed, and final
 independent security review reports no P0/P1 merge blocker.
@@ -950,10 +950,9 @@ Project APIs and records `not_requested`.
 
 This section is the A3-2d contract. A3-2d1 output list/download was merged
 through PR #43. A3-2d2 was merged through PR #44 and implements declared
-diagnostic-event ingestion and opaque cursor reads. Store trash primitives
-already exist, but the complete Agent-independent direct-control surface is the
-active A3-2d3 candidate and is not yet published. Legacy wind/Gate event and
-download routes are not A3-2d evidence.
+diagnostic-event ingestion and opaque cursor reads. The complete
+Agent-independent A3-2d3 direct-control surface was merged through PR #45.
+Legacy wind/Gate event and download routes are not A3-2d evidence.
 
 Output listing returns only `id`, `runId`, sample index/ID, logical name,
 declared role/type, media type, byte size, SHA-256, and created time. Download
@@ -967,7 +966,7 @@ tuple; this is not a multi-user principal claim, and an ID is never a bearer
 credential. List and event-read responses are private,
 `no-store`. Mutation routes additionally require exact Origin, CSRF, JSON
 non-simple content type, command ID, and current browser-app admission. Cancel
-retains its published exact `{commandId}` body. The A3-2d3 candidate adds an
+retains its published exact `{commandId}` body. A3-2d3 adds an
 `expectedLifecycleDigest` only to trash/restore, and trash requires explicit
 confirmation bound to `terminalClosureDigest`. Command retry is idempotent;
 changed intent fails.
@@ -1040,7 +1039,7 @@ authority for completion links before committing the recoverable state.
 Restore returns only the original immutable terminal outputs/events and never
 revives an old capability, cursor, confirmation, or download.
 
-For the A3-2d3 review candidate, all direct run controls
+For the merged A3-2d3 boundary, all direct run controls
 (`POST .../cancel`, `.../trash`, `.../restore`) admit only the current browser
 app: exact app `Host` and `Origin`, `Sec-Fetch-Site: same-origin`,
 `Sec-Fetch-Mode: cors`, `Sec-Fetch-Dest: empty`, current HttpOnly app cookie,
@@ -1070,7 +1069,7 @@ type RestoreProjectRunRequest = {
 };
 ```
 
-The candidate persists exact-replay `run.trash.v1` and `run.restore.v1`
+The implementation persists exact-replay `run.trash.v1` and `run.restore.v1`
 receipts. A `terminalClosureDigest` binds immutable terminal evidence and never
 changes; `lifecycleDigest` binds current status plus full ordered trash history
 and changes on each successful trash/restore. Only terminal v4 runs can be
@@ -1078,7 +1077,7 @@ trashed, and restore returns exactly to the prior terminal status. The
 pre-commit revocation covers active output downloads plus current visual
 frame/WebSocket and Visual-Agent/Playwright authority; restore restores durable
 visibility only and never recreates an old capability, cursor, or download
-authority. This is still a review candidate, not merged acceptance evidence.
+authority.
 
 ## Visual execution and scoped WebSocket access
 
@@ -1529,9 +1528,9 @@ WS     /frame/c/:routeId/<declared-websocket-path>                 # current A3-
 GET    /api/projects/:projectId/runs/:runId/outputs                # current A3-2d1
 GET|HEAD /api/projects/:projectId/runs/:runId/outputs/:outputId/download # current A3-2d1
 GET    /api/projects/:projectId/runs/:runId/diagnostic-events      # current A3-2d2
-POST   /api/projects/:projectId/runs/:runId/cancel                 # current route; d3 browser admission candidate
-POST   /api/projects/:projectId/runs/:runId/trash                  # A3-2d3 review candidate
-POST   /api/projects/:projectId/runs/:runId/restore                # A3-2d3 review candidate
+POST   /api/projects/:projectId/runs/:runId/cancel                 # current A3-2d3 browser admission
+POST   /api/projects/:projectId/runs/:runId/trash                  # current A3-2d3
+POST   /api/projects/:projectId/runs/:runId/restore                # current A3-2d3
 ```
 
 The legacy Gate runtime currently occupies the same textual
@@ -1758,7 +1757,7 @@ Output indexes never resolve outside the owning Project/run object root.
    through PR #43. D2's bounded declared diagnostic-event ingestion,
    schema-v12 atomic publication, and opaque run/filter-bound cursors were
    merged through PR #44. Agent-independent cancel/download/trash/restore
-   acceptance is the active A3-2d3 candidate. Cancel is
+   acceptance was merged through PR #45. Cancel is
    already current and download was merged in d1; the later controls slice adds
    trash/restore routes and proves the complete direct-control set without OpenCode. A3-3
    cannot declare wind diagnostic events until this slice is published.

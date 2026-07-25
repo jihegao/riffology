@@ -80,7 +80,7 @@ one-use typed interaction was merged through PR #41 and A3-2c4's live-CDP and
 real-Chromium security closeout through PR #42. A3-2d1 output list/download was
 merged through PR #43. A3-2d2 diagnostic event ingestion and opaque cursor
 reads were merged through PR #44; A3-2d3 direct controls are the active
-candidate and Stage 3 remains in progress. The d3 candidate gate is
+boundary merged through PR #45 and Stage 3 remains in progress. The d3 merge gate is
 552 backend total/551 passed/zero failed/one optional smoke skipped, web
 104/104, network entry 1/1, successful production build and docs check, with
 no P0/P1 finding in final independent security review.

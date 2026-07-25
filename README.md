@@ -82,12 +82,12 @@ script, cookie, nonce, port, capability, or legacy-CDP control. A3-2c3 was
 merged through PR #41 and A3-2c4 through PR #42. A3-2d1's same-run output
 list/download boundary was merged through PR #43. A3-2d2's strict diagnostic
 NDJSON ingestion, schema-v12 atomic publication, and authenticated opaque
-cursor read surface were merged through PR #44; direct controls are the active
-A3-2d3 candidate. Its review gate reports 552 backend tests with 551 passed,
+cursor read surface were merged through PR #44; A3-2d3 direct controls were
+merged through PR #45. Its merge gate reports 552 backend tests with 551 passed,
 zero failed, and one optional installed-OpenCode smoke skipped; web passes
 104/104, the network-entry integration passes 1/1, the production build and
 24-file docs check succeed, and final independent security review reports no
-P0/P1 merge blocker. The candidate is not published until its PR merges.
+P0/P1 merge blocker.
 A3-3 diagnostic-event acceptance depends on A3-2d; legacy wind/Gate event
 routes cannot satisfy that dependency.
 Live process rows created under schema v5 lack the v6 scratch/launch evidence

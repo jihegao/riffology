@@ -61,7 +61,7 @@
 > merged through PR #41. A3-2c4 live-CDP/real-Chromium security closeout was
 > merged through PR #42. A3-2d1 output list/download was merged through PR #43.
 > A3-2d2 diagnostic event ingestion and opaque cursor reads were merged
-> through PR #44. A3-2d3 direct controls are the active candidate; its
+> through PR #44. A3-2d3 direct controls were merged through PR #45; its
 > 552-test backend gate, web/network/build/docs gates and final independent
 > security review are green with no P0/P1 blocker.
 

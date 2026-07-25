@@ -198,7 +198,7 @@ the exact same-run committed `run.cancel.v1` payload, intent digest, outcome,
 payload digest, and timestamps; raw unbound or mismatched cancellation state is
 rejected.
 
-### A3-2d3 direct run controls (review candidate)
+### A3-2d3 direct run controls (merged through PR #45)
 
 The existing cancel request remains deliberately exact and unchanged:
 
@@ -206,8 +206,8 @@ The existing cancel request remains deliberately exact and unchanged:
 type CancelProjectRunRequest = { commandId: string };
 ```
 
-`POST /api/projects/{projectId}/runs/{runId}/cancel`, the candidate
-`.../trash`, and the candidate `.../restore` all require the current browser
+`POST /api/projects/{projectId}/runs/{runId}/cancel`, `.../trash`, and
+`.../restore` all require the current browser
 app authority: the exact app `Host` and `Origin`, same-origin Fetch Metadata
 (`Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: cors`,
 `Sec-Fetch-Dest: empty`), the current HttpOnly app cookie, matching CSRF token,
@@ -246,13 +246,12 @@ trash or restore. Trash is allowed only from a terminal v4 run and restore
 returns that run only to its exact prior terminal status; both reject stale or
 cross-run/project bindings.
 
-Before the Store commit for a new trash command, the candidate revokes active
+Before the Store commit for a new trash command, the implementation revokes active
 output-download streams and current visual frame/WebSocket plus
 Visual-Agent/Playwright authority for the run. Restore restores durable
 visibility only: it never revives an old frame/WebSocket capability, cursor,
 confirmation, or download authority. These direct controls do not call or
-depend on OpenCode. This remains a review candidate, not a merged acceptance
-claim.
+depend on OpenCode.
 
 Opaque OpenCode sessions and MCP capabilities stay backend-only.
 Provider/OpenCode unavailability returns explicit read-only state and never a
@@ -436,7 +435,7 @@ current routes or acceptance evidence:
     same-run output list/download was merged through PR #43. d2 bounded
     declared diagnostic-event ingestion and opaque cursor reads were merged
     through PR #44. Direct trash/restore and complete Agent-independent
-    controls are the active d3 candidate.
+    controls were merged through PR #45.
 
 For A3-2a2 an accepted visual child receives the same canonical single-sample
 input envelope as batch through `--riff-input`, an assigned
@@ -725,7 +724,7 @@ ingestion with strict UTF-8/LF, structural/schema/count/byte limits, schema-v12
 atomic event-set publication, and authenticated opaque cursors bound to the
 Project/run/contract/event-set/lifecycle digest, persistent trash history,
 normalized filters, and
-limit. Direct trash/restore acceptance is the A3-2d3 candidate. Cancel already
+limit. Direct trash/restore acceptance was merged through PR #45. Cancel already
 exists. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
 A3-3 diagnostic-event acceptance is unblocked by the published A3-2d2 boundary.
 
@@ -777,10 +776,10 @@ is absent from SQLite, DTOs, errors, logs, and child environments; ordinary
 backup/export exclusion also remains unverified and is not claimed. Missing or
 corrupt key state fails closed rather than silently regenerating once event
 sets exist. Run trash denies event reads and changes the lifecycle binding, so
-restore does not revive an old cursor. The A3-2d3 implementation candidate also
+restore does not revive an old cursor. The A3-2d3 implementation also
 revokes active downloads before its Store commit. Its full backend/web/network/
 build/docs gates pass and final independent security review has no P0/P1
-finding; it is still not a merged acceptance claim until its PR is published.
+finding.
 
 ---
 
