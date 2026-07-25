@@ -26,7 +26,7 @@ restricted macOS Model process, digest-bound technical checks, and the narrow
 HTTP/API acceptance surface. API integration and the real-provider two-turn
 browser closure are complete; the live evidence is described under Verification.
 
-Stage 3 / #14 is in progress. The Project foundation and A3-1a frozen-planning
+Stage 3 / #14 is implemented and accepted. The Project foundation and A3-1a frozen-planning
 slice implemented fixed-copy Projects, execution contract v4, the closed canonical
 input-schema profile, deterministic experiment/sample planning, digest
 compare-and-set, immutable command receipts, and execution-description-v2
@@ -69,10 +69,14 @@ still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
 broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
 A3-2d1 output access, A3-2d2 diagnostic events, A3-2d3 direct controls, and
 A3-2d4 cross-authority revocation were merged through PRs #43, #44, #45, and
-#46. A3-3 now installs the reviewed wind mechanism as one ordinary Model, one
+#46. A3-3, merged through PR #47, installs the reviewed wind mechanism as one ordinary Model, one
 fixed-copy example Project, and one synthetic single-seed Experiment through a
 versioned manifest and schema-v13 installation record. It adds no wind-specific
-route or DTO. Final Stage 3 integration remains pending.
+route or DTO. Final Integration adds an isolated real-Chromium Product
+acceptance flow: the browser creates a fixed-copy Project, creates and edits an
+Experiment, completes a real ordinary batch, pages diagnostic events, downloads
+an indexed output, restarts the backend on the same ports, establishes fresh
+browser authority, and verifies durable Project/Run/event/output reads.
 Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
@@ -103,14 +107,14 @@ full Chromium 15/15, the 38-test reviewed wind suite, production build, and the
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
 than being automatically cleaned.
-These published slices and the A3-3 implementation are not final Stage 3
-browser acceptance.
+The Integration browser gate is intentionally an API/session acceptance surface,
+not the Stage 4 Home or shared-shell UX.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
-Stage 3 does not authorize their deletion. Remaining Project execution and wind
-import belong to #14; the final Models/Projects home and shared two-pane shell
-belong to #15.
+Stage 3 does not authorize their deletion. The final Models/Projects home,
+shared two-pane shell, full multi-conversation story, and precise legacy
+retirement belong to #15.
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
@@ -281,7 +285,12 @@ optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
 evidence covers schema-v13 migration/rollback, manifest byte/digest pinning,
 five restart windows, a real technical check, deterministic baseline
 (1,096 daily rows and 38,730 events), a real generic Product run, and restart
-recovery. Final Stage 3 integration remains pending.
+recovery. The final Stage 3 Product Chromium gate passes 1/1 with Project copy,
+Experiment create/edit, real batch completion, cursor paging, indexed download,
+same-port backend restart, fresh browser-session bootstrap, durable reads, and
+zero console errors. Run it with `cd web && npm run test:e2e:a3`; the output
+bytes are fetched through the guarded same-origin API, verified against their
+indexed digest, and saved through a Chromium download.
 
 Focused Milestone A2 verification:
 

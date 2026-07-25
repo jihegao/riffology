@@ -466,8 +466,8 @@ MVP 在本地 macOS 运行：
 | --- | --- | --- |
 | **1 — 数据基础** | SQLite/对象目录、ownership、原子 mutation/recovery、lifecycle、固定副本 Project primitive。 | 已实现并合并。 |
 | **2 — Agent 与 Model 工作区** | 持久 Conversations、OpenCode session/context、skills/scoped tools、documents/attachments、通用 Model workspace、technical checks。 | 已实现、合并，并完成真实 provider 两轮验收。 |
-| **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 进行中。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、A3-2d1 generic output list/download、A3-2d2 generic diagnostic events、A3-2d3 direct controls 与 A3-2d4 跨 authority 撤销矩阵已合并；普通风机已在当前评审分支作为普通 Model、固定副本 Project 和实验实现，最终 Stage 3 浏览器集成仍未完成。 |
-| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 等待 Stage 3 完成。 |
+| **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 已实现并验收。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、通用 output/download/events/direct controls、跨 authority 撤销、普通风机 Model/Project/Experiment 导入，以及创建 Project、编辑 Experiment、真实运行、下载与重启恢复的窄 Product Chromium 场景均完成。 |
+| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 在 Issue #14 合并、关闭并同步后开始。 |
 
 详细切片状态记录在
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)、
