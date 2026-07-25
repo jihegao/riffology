@@ -21,7 +21,7 @@ const app = new BackendApp({
   a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
-  mcpUrl: process.env.RIFF_MCP_URL ?? `http://[::1]:${port}/mcp`,
+  mcpUrl: process.env.RIFF_MCP_URL ?? `http://localhost:${port}/mcp`,
   ...(process.env.RIFF_CDP_URL ? { projector: new PlaywrightCdpProjector(process.env.RIFF_CDP_URL) } : {}),
   promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
 });

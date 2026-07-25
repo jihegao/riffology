@@ -368,9 +368,10 @@ The remaining claims begin only in the later gates:
 
 - **A3-2b1 network topology — merged and published through PR #33:** focused Node tests start the
   real `BackendApp` app listener plus empty broker on separate server-owned
-  `::1` ports. They prove canonical bracketed origins, distinct ports, Host
-  rejection for localhost/IPv4/missing-port/expanded-IPv6/other-port values,
-  IPv4 connection refusal, collision/invalid-port failure, handler-error
+  `::1` ports. They prove CSP-compatible exact localhost authorities, distinct
+  ports, Host rejection for literal-IPv6/IPv4/missing-port/expanded-IPv6/
+  other-port values, IPv4 same-port denial reservation, collision/invalid-port
+  failure, handler-error
   redaction, serialized start/close, drain, and idempotent close. The existing
   visual-listener suite separately preserves the child's
   exact `127.0.0.1` boundary. This slice does not claim a frame route, proxy,
@@ -388,7 +389,8 @@ The remaining claims begin only in the later gates:
   bootstrap, isolated-broker HttpOnly one-use frame session,
   Origin/CORS rules, and exact CSP/HTTP forwarding. Platform app
   and broker exact-bind `::1` on different server-owned ports and use
-  `http://[::1]:<port>` URLs; the untrusted child remains IPv4
+  `http://localhost:<port>` browser authorities; the sockets remain exact-bound
+  to IPv6 loopback `::1`, while the untrusted child remains IPv4
   `127.0.0.1:<assigned-port>`. Component and HTTP integration tests prove
   exact cookie attributes and that platform cookies are never forwarded to
   the child host.
@@ -433,7 +435,7 @@ The remaining claims begin only in the later gates:
   are absent.
   Broker responses override child cache policy with `private, no-store`;
   component and HTTP tests prove rotated/revoked routes are rejected rather
-  than reused, while real browser cache behavior remains an A3-2b4 gate.
+  than reused; A3-2b4 adds the real-browser no-store and revocation proof.
   Secret scans cover broker-generated DTOs, routes, transport headers, errors,
   and logs. They do not claim arbitrary model-authored response bytes can hide
   a listener already known by that child; literal payload scanning is not an
@@ -460,13 +462,13 @@ The remaining claims begin only in the later gates:
 
   Every broker document must emit exact CSP
   `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
-  font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+  font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none';
   form-action 'none'; frame-src 'none'; frame-ancestors
-  http://[::1]:<exact-app-port>` with no wildcard and must not emit
-  `X-Frame-Options`. Exact app-origin host-page and real-browser evidence remain
-  A3-2b4.
-- **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
-  integrated, under review:** exact path/subprotocol forwarding, fixed-child
+  http://localhost:<exact-app-port>` with no wildcard and must not emit
+  `X-Frame-Options`. A3-2b4 provides the exact app-origin host page and
+  real-browser evidence.
+- **A3-2b3 WebSocket, revocation, and secrecy — merged and published through
+  PR #36 at `bb54b2a`:** exact path/subprotocol forwarding, fixed-child
   peer reinspection, assembled-message and per-direction queue limits,
   attempt-global pending/active connection limits across minted routes,
   bounded child handshake, idle/absolute expiry, and socket-first
@@ -478,10 +480,9 @@ The remaining claims begin only in the later gates:
   shutdown. Sentinel and SHA-256 scans cover bounded broker errors, fixed-child
   headers, the real ProductStore SQLite file, captured backend console output,
   and unrelated public DTOs. These observable/persisted scans do not claim
-  arbitrary process heap bytes. This status records local implementation and
-  review evidence only; it does not claim publication or merge. The current
-  focused frame/network/WebSocket regression combination passes `32/32`; the
-  current serial official backend gate reports 464 total with 463 passed, zero failed, and
+  arbitrary process heap bytes. Its publication
+  focused frame/network/WebSocket regression combination passed `32/32`; its
+  serial official backend publication gate reported 464 total with 463 passed, zero failed, and
   one optional installed-OpenCode smoke skipped. Web remains 104/104, its
   network-entry integration passes 1/1, and the production build succeeds.
   Stable pre-upgrade distinctions include parser-level
@@ -490,13 +491,21 @@ The remaining claims begin only in the later gates:
   `405/visual_websocket_protocol_denied`, broker authority
   `403/visual_frame_session_denied`, and offered-subprotocol/policy
   `403/visual_websocket_protocol_denied`.
-- **A3-2b4 browser and security closeout — pending:** run the complete real-
-  browser negative matrix for cookie delivery, HttpOnly denial, parent-DOM
-  isolation, nonce replay/expiry/restart, CSP embedding, and live WebSocket
-  revocation. The exact app must embed the frame while another `::1` port, a
-  different app, the IPv4 child, and a foreign top-level page cannot. Then run
-  focused/full suites, obtain an independent security review, and synchronize
-  all implementation records.
+- **A3-2b4 browser and security closeout — implemented and Chromium-verified,
+  publication review pending:** `cd web && npm run test:e2e:a3-2b` passes 5/5
+  on Playwright-managed Chromium. It proves real cookie-jar HttpOnly/SameSite delivery,
+  one-use nonce redirect/replay denial, relative resources, child credential
+  stripping, no-store reload, `worker-src 'none'` Service Worker denial,
+  exact-app CSP embedding, hostile same-site/IPv4 embedding denial, SOP and
+  sandbox denial, native WebSocket Origin/cookie/subprotocol/text/binary
+  behavior, page-observed generation close `1008` followed by reconnect
+  denial, nonce expiry, and route invalidation after backend restart. Raw
+  fragmentation/backpressure/limit evidence remains owned by b3.
+  The complete Chromium suite passes 8/8. The focused broker/frame/WebSocket
+  regression passes 58/58. The current backend gate reports 466 total with 465
+  passed, zero failed, and one optional installed-OpenCode smoke skipped; web
+  passes 104/104, network entry 1/1, and the production build succeeds.
+  This does not claim Firefox/WebKit, remote deployment, or HTTPS acceptance.
 - **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
   explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
   script, upload, clipboard, and expired-capability rejection. Its internal

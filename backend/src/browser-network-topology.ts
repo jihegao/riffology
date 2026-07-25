@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 
 export const BROWSER_LOOPBACK_HOST = "::1" as const;
+export const BROWSER_AUTHORITY_HOST = "localhost" as const;
 
 export type BrowserNetworkRole = "platform" | "broker";
 
@@ -64,6 +65,8 @@ export class BrowserNetworkTopology {
   readonly broker: BrowserNetworkAddress;
   readonly #appServer: Server;
   readonly #brokerServer: Server;
+  readonly #appIpv4Guard: Server;
+  readonly #brokerIpv4Guard: Server;
   readonly #gate: RequestGate;
   readonly #closeDrainTimeoutMs: number;
   #closed = false;
@@ -71,6 +74,8 @@ export class BrowserNetworkTopology {
   private constructor(
     appServer: Server,
     brokerServer: Server,
+    appIpv4Guard: Server,
+    brokerIpv4Guard: Server,
     app: BrowserNetworkAddress,
     broker: BrowserNetworkAddress,
     gate: RequestGate,
@@ -78,6 +83,8 @@ export class BrowserNetworkTopology {
   ) {
     this.#appServer = appServer;
     this.#brokerServer = brokerServer;
+    this.#appIpv4Guard = appIpv4Guard;
+    this.#brokerIpv4Guard = brokerIpv4Guard;
     this.app = app;
     this.broker = broker;
     this.#gate = gate;
@@ -111,6 +118,8 @@ export class BrowserNetworkTopology {
       options.brokerUpgradeHandler,
       gate,
     );
+    let appIpv4Guard: Server | undefined;
+    let brokerIpv4Guard: Server | undefined;
     try {
       appAddress = await listenExact(appServer, appPort, "platform_listener_unavailable");
       brokerAddress = await listenExact(brokerServer, brokerPort, "broker_listener_unavailable");
@@ -120,11 +129,15 @@ export class BrowserNetworkTopology {
           "The platform app and visual broker resolved to the same port.",
         );
       }
+      appIpv4Guard = await listenIpv4Guard(appAddress.port, "platform_listener_unavailable");
+      brokerIpv4Guard = await listenIpv4Guard(brokerAddress.port, "broker_listener_unavailable");
       await options.beforeReady?.(Object.freeze({ app: appAddress, broker: brokerAddress }));
       gate.ready = true;
       return new BrowserNetworkTopology(
         appServer,
         brokerServer,
+        appIpv4Guard,
+        brokerIpv4Guard,
         appAddress,
         brokerAddress,
         gate,
@@ -132,7 +145,18 @@ export class BrowserNetworkTopology {
       );
     } catch (error) {
       gate.closing = true;
-      await Promise.allSettled([closeServer(appServer), closeServer(brokerServer)]);
+      const partialServers = [
+        appServer,
+        brokerServer,
+        ...(appIpv4Guard ? [appIpv4Guard] : []),
+        ...(brokerIpv4Guard ? [brokerIpv4Guard] : []),
+      ];
+      const closing = partialServers.map((server) => closeServer(server));
+      for (const server of partialServers) {
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      }
+      await Promise.allSettled(closing);
       throw error;
     }
   }
@@ -144,17 +168,23 @@ export class BrowserNetworkTopology {
     this.#gate.ready = false;
     this.#appServer.closeIdleConnections?.();
     this.#brokerServer.closeIdleConnections?.();
+    this.#appIpv4Guard.closeIdleConnections?.();
+    this.#brokerIpv4Guard.closeIdleConnections?.();
     for (const socket of this.#gate.upgradedSockets) socket.destroy();
     this.#gate.upgradedSockets.clear();
     const closing = [
       closeServer(this.#brokerServer),
       closeServer(this.#appServer),
+      closeServer(this.#brokerIpv4Guard),
+      closeServer(this.#appIpv4Guard),
     ];
     await boundedDrain([...this.#gate.inFlight], this.#closeDrainTimeoutMs);
     this.#appServer.closeIdleConnections?.();
     this.#brokerServer.closeIdleConnections?.();
     this.#appServer.closeAllConnections?.();
     this.#brokerServer.closeAllConnections?.();
+    this.#appIpv4Guard.closeAllConnections?.();
+    this.#brokerIpv4Guard.closeAllConnections?.();
     const results = await Promise.allSettled(closing);
     const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (rejected) throw rejected.reason;
@@ -166,6 +196,30 @@ type RequestGate = {
   closing: boolean;
   inFlight: Set<Promise<void>>;
   upgradedSockets: Set<Duplex>;
+};
+
+const listenIpv4Guard = async (
+  port: number,
+  failureCode: "platform_listener_unavailable" | "broker_listener_unavailable",
+): Promise<Server> => {
+  const server = createServer((_request, response) => {
+    networkError(response, 421, "ipv4_authority_denied");
+  });
+  server.on("upgrade", (_request, socket) => rejectUpgrade(socket, 421, "ipv4_authority_denied"));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ host: "127.0.0.1", port }, resolve);
+    });
+    return server;
+  } catch (error) {
+    await closeServer(server);
+    throw new BrowserNetworkTopologyError(
+      failureCode,
+      "The IPv4 same-port denial reservation is unavailable.",
+      { cause: error },
+    );
+  }
 };
 
 const createExactServer = (
@@ -319,8 +373,8 @@ const listenExact = async (
   return Object.freeze({
     host: BROWSER_LOOPBACK_HOST,
     port: boundPort,
-    authority: `[${BROWSER_LOOPBACK_HOST}]:${boundPort}`,
-    origin: `http://[${BROWSER_LOOPBACK_HOST}]:${boundPort}`,
+    authority: `${BROWSER_AUTHORITY_HOST}:${boundPort}`,
+    origin: `http://${BROWSER_AUTHORITY_HOST}:${boundPort}`,
   });
 };
 

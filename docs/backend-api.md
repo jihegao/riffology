@@ -334,7 +334,8 @@ target contracts, not current routes or acceptance evidence:
 5. **A3-2b1 browser network topology — merged and published through PR #33:**
    the isolated
    `BackendApp` entrypoint exact-binds platform app and empty broker servers to
-   distinct server-owned `::1` ports, derives canonical bracketed origins, and
+   distinct server-owned `::1` ports, derives CSP-compatible exact
+   `localhost:<port>` browser authorities, and
    rejects non-canonical Host counterexamples before invoking either handler.
    Startup and close are serialized and partial listener pairs do not admit
    requests. Route-specific Origin/Fetch-Site checks are supplied by A3-2b2.
@@ -342,23 +343,31 @@ target contracts, not current routes or acceptance evidence:
    PR #35:** browser bootstrap, CSRF, cookies, one-time nonce redemption,
    visual frame sessions, isolated broker HTTP forwarding, and exact CSP use
    the A3-2b1 topology.
-7. **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
-   integrated, under review:** exact path/subprotocol forwarding, fixed-child
+7. **A3-2b3 WebSocket, revocation, and secrecy — merged and published through
+   PR #36 at `bb54b2a`:** exact path/subprotocol forwarding, fixed-child
    inspection, assembled-message/queue/connection/handshake/idle limits,
    socket-first generation/lifecycle revocation, redirect/non-`101` denial, and
    observable response/header/log/DTO/SQLite sentinel scans are implemented.
-   The focused regression gate passes 32/32 and the serial official backend
-   gate reports 464 total with 463 passed, zero failed, and one optional smoke skipped. This
-   is review status, not a merge or publication claim.
+   Its publication gate reported 464 total with 463 passed, zero failed, and
+   one optional smoke skipped.
    Parser-level malformed HTTP is `400/broker_request_failed`; parsed HTTP with
    malformed or duplicate WebSocket handshake structure is
    `400/visual_websocket_protocol_denied`; non-GET is
    `405/visual_websocket_protocol_denied`; missing broker authority is
    `403/visual_frame_session_denied`; offered-subprotocol/policy denial is
    `403/visual_websocket_protocol_denied`.
-8. **A3-2b4 browser and security closeout — pending:** run the real-browser
-   negative matrix, complete focused/full suites, obtain an independent
-   security review, and synchronize implementation records.
+8. **A3-2b4 browser and security closeout — implemented and Chromium-verified,
+   publication review pending:** the production exact-app host page, browser
+   cookie jar/HttpOnly/SameSite behavior, nonce redirect/replay, relative
+   resources, CSP/SOP/sandbox hostile embedding, native WebSocket
+   Origin/cookie/subprotocol, Service Worker denial, no-store reload, and
+   generation close-`1008`/reconnect denial, expiry, and backend-restart
+   invalidation pass the dedicated 5/5 Chromium
+   matrix; the complete Chromium suite passes 8/8. The current backend gate
+   reports 466 total with 465 passed, zero failed, and one optional
+   installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
+   and the production build succeeds. This is not Firefox/WebKit or
+   remote/HTTPS acceptance.
 9. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
    observation and explicit one-turn interaction authority.
 
@@ -440,14 +449,32 @@ cleanup/heartbeat limit codes. Same-process shutdown is
 `failed/dispatcher_shutdown`; restart reconciliation is
 `failed/runtime_interrupted`; cancel-first is `cancelled/run_cancelled`.
 
+The exact app serves
+`GET|HEAD /browser/projects/{projectId}/runs/{runId}/visual`. The fixed
+no-store page performs bootstrap and frame-session issue from the exact app
+origin, retains CSRF and `frameUrl` only in closure memory, verifies the exact
+broker origin, and embeds one
+`sandbox="allow-scripts allow-same-origin"` iframe. Its nonce-based CSP allows
+connections only to self, framing only from the exact broker, and ancestors
+only from self. `GET` admits only a top-level browser navigation:
+`Sec-Fetch-Site` must be `none` or `same-origin`, `Sec-Fetch-Mode` must be
+`navigate`, and `Sec-Fetch-Dest` must be `document`. This prevents another
+local same-site page from using a cross-origin top-level navigation as a
+bootstrap-generation revocation primitive. `HEAD` is side-effect free and
+does not bootstrap.
+
 For A3-2b, platform app and visual broker both exact-bind IPv6 loopback `::1`
 on different server-owned ports, with URLs
-`http://[::1]:<app-port>` and `http://[::1]:<broker-port>`. Each accepts only
+`http://localhost:<app-port>` and `http://localhost:<broker-port>`, while both
+listeners exact-bind IPv6 loopback `::1`. Each accepts only
 its configured `Host:port`; the broker also requires the exact route path.
 Different ports create separate origins for DOM access while the shared host
 remains same-site for `SameSite=Strict`. App and broker cookies still cross
 ports and are not isolated from each other. The actual host separation is that
-platform `::1` cookies are not sent to the untrusted child at `127.0.0.1`.
+platform `localhost` cookies are not sent to the untrusted child at
+`127.0.0.1`. While the topology is live, same-numbered IPv4 denial
+reservations hold both platform ports on `127.0.0.1`, so a child-side listener
+cannot take over either `localhost` authority through IPv4 resolution.
 
 The app cookie is random, host-only, HttpOnly, SameSite=Strict, has no `Domain`,
 and uses `Path=/api/`. It may omit `Secure` on current HTTP and must set it
@@ -526,9 +553,9 @@ Real-browser evidence proves the iframe sends the cookie, JavaScript cannot
 read it, and cross-origin DOM access fails. Every broker document replaces
 child framing policy with CSP
 `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
-font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none';
 form-action 'none'; frame-src 'none'; frame-ancestors
-http://[::1]:<exact-app-port>`, with no wildcard, and sends no
+http://localhost:<exact-app-port>`, with no wildcard, and sends no
 `X-Frame-Options`. Only the exact app may embed it. App,
 broker, and child headers/logs are scanned for all cookie, nonce, including
 expired nonce values, capability, URL, and child-port secrets; those values are

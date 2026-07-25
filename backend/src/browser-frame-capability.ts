@@ -18,6 +18,7 @@ export const BROKER_DOCUMENT_CSP = [
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self'",
+  "worker-src 'none'",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
@@ -763,9 +764,9 @@ const denied = (
 const exactLoopbackOrigin = (value: string): URL => {
   const url = new URL(value);
   if ((url.protocol !== "http:" && url.protocol !== "https:")
-    || url.hostname !== "[::1]" || url.pathname !== "/" || url.search || url.hash
+    || url.hostname !== "localhost" || url.pathname !== "/" || url.search || url.hash
     || !url.port || url.username || url.password) {
-    throw new Error("Browser origins must be exact bracketed IPv6 loopback origins with explicit ports.");
+    throw new Error("Browser origins must use the exact localhost authority with explicit ports.");
   }
   return url;
 };

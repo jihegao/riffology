@@ -18,7 +18,7 @@ import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodePrompt, OpenCodeReadiness } from "../src/opencode-adapter.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
-test("platform app and broker exact-bind distinct IPv6 loopback origins", async (t) => {
+test("platform app and broker exact-bind distinct IPv6 loopback sockets with localhost authorities", async (t) => {
   const topology = await BrowserNetworkTopology.start({
     appHandler: (_request, response, address) => networkJson(response, 200, {
       role: "platform",
@@ -34,17 +34,30 @@ test("platform app and broker exact-bind distinct IPv6 loopback origins", async 
   assert.equal(topology.app.host, BROWSER_LOOPBACK_HOST);
   assert.equal(topology.broker.host, BROWSER_LOOPBACK_HOST);
   assert.notEqual(topology.app.port, topology.broker.port);
-  assert.equal(topology.app.origin, `http://[::1]:${topology.app.port}`);
-  assert.equal(topology.broker.origin, `http://[::1]:${topology.broker.port}`);
+  assert.equal(topology.app.origin, `http://localhost:${topology.app.port}`);
+  assert.equal(topology.broker.origin, `http://localhost:${topology.broker.port}`);
   assert.equal(Object.isFrozen(topology.app), true);
   assert.equal(Object.isFrozen(topology.broker), true);
+  const ipv4App = await rawAt("127.0.0.1", 4, topology.app, {
+    method: "GET",
+    path: "/health",
+  });
+  assert.equal(ipv4App.status, 421);
+  assert.equal(ipv4App.body.error.code, "ipv4_authority_denied");
+  const ipv4Broker = await rawAt("127.0.0.1", 4, topology.broker, {
+    method: "GET",
+    path: "/",
+  });
+  assert.equal(ipv4Broker.status, 421);
+  assert.equal(ipv4Broker.body.error.code, "ipv4_authority_denied");
+
+  const takeover = createServer();
   await assert.rejects(
-    rawAt("127.0.0.1", 4, topology.app, { method: "GET", path: "/health" }),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === "ECONNREFUSED",
-  );
-  await assert.rejects(
-    rawAt("127.0.0.1", 4, topology.broker, { method: "GET", path: "/" }),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === "ECONNREFUSED",
+    new Promise<void>((resolve, reject) => {
+      takeover.once("error", reject);
+      takeover.listen({ host: "127.0.0.1", port: topology.broker.port }, resolve);
+    }),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "EADDRINUSE",
   );
 
   const app = await raw(topology.app, { method: "GET", path: "/health" });
@@ -71,10 +84,11 @@ test("Host guards fail before either application handler", async (t) => {
   t.after(() => topology.close());
 
   for (const host of [
-    `localhost:${topology.app.port}`,
+    `[::1]:${topology.app.port}`,
     `127.0.0.1:${topology.app.port}`,
     `[::1]`,
-    `[::1]:${topology.broker.port}`,
+    "localhost",
+    `localhost:${topology.broker.port}`,
     `[0:0:0:0:0:0:0:1]:${topology.app.port}`,
   ]) {
     const denied = await raw(topology.app, { method: "GET", path: "/", host });
@@ -92,7 +106,7 @@ test("Host guards fail before either application handler", async (t) => {
   const brokerHost = await raw(topology.broker, {
     method: "GET",
     path: "/frame",
-    host: `[::1]:${topology.app.port}`,
+    host: `localhost:${topology.app.port}`,
   });
   assert.equal(brokerHost.status, 421);
   assert.equal(brokerHost.body.error.code, "broker_host_denied");
@@ -155,10 +169,20 @@ test("beforeReady completes before either listener admits requests and rolls bac
   await topology.close();
 
   let rejectedAddress: BrowserNetworkAddress | undefined;
+  let rejectedGuardClosed: Promise<void> | undefined;
   await assert.rejects(
     BrowserNetworkTopology.start({
-      beforeReady: ({ app }) => {
+      beforeReady: async ({ app }) => {
         rejectedAddress = app;
+        const guardSocket = connect({ host: "127.0.0.1", port: app.port });
+        await new Promise<void>((resolve, reject) => {
+          guardSocket.once("connect", resolve);
+          guardSocket.once("error", reject);
+        });
+        rejectedGuardClosed = new Promise<void>((resolve) => {
+          guardSocket.once("close", resolve);
+        });
+        guardSocket.write("GET / HTTP/1.1\r\n");
         throw new Error("configuration rejected");
       },
       appHandler: (_request, response) => networkJson(response, 204, {}),
@@ -167,8 +191,14 @@ test("beforeReady completes before either listener admits requests and rolls bac
     /configuration rejected/u,
   );
   assert.ok(rejectedAddress);
+  assert.ok(rejectedGuardClosed);
+  await rejectedGuardClosed;
   await assert.rejects(
     rawAt(BROWSER_LOOPBACK_HOST, 6, rejectedAddress, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+  await assert.rejects(
+    rawAt("127.0.0.1", 4, rejectedAddress, { method: "GET", path: "/" }),
     closedConnection,
   );
 });
@@ -367,6 +397,37 @@ test("close stops admission, drains an in-flight handler, and releases both port
   );
   await assert.rejects(
     rawAt(BROWSER_LOOPBACK_HOST, 6, topology.broker, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+});
+
+test("close bounds incomplete IPv4 denial-guard requests and releases both authorities", async () => {
+  const topology = await BrowserNetworkTopology.start({
+    closeDrainTimeoutMs: 10,
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 404, {}),
+  });
+  const guardSocket = connect({
+    host: "127.0.0.1",
+    port: topology.app.port,
+  });
+  await new Promise<void>((resolve, reject) => {
+    guardSocket.once("connect", resolve);
+    guardSocket.once("error", reject);
+  });
+  guardSocket.write("GET / HTTP/1.1\r\n");
+  const guardClosed = new Promise<void>((resolve) => {
+    guardSocket.once("close", resolve);
+  });
+
+  await topology.close();
+  await guardClosed;
+  await assert.rejects(
+    rawAt(BROWSER_LOOPBACK_HOST, 6, topology.app, { method: "GET", path: "/" }),
+    closedConnection,
+  );
+  await assert.rejects(
+    rawAt("127.0.0.1", 4, topology.app, { method: "GET", path: "/" }),
     closedConnection,
   );
 });

@@ -1,6 +1,6 @@
 # ADR 0001: Isolated browser network topology
 
-- Status: Proposed — A3-2b implementation gate
+- Status: Accepted and Chromium-verified — A3-2b
 - Role: active design
 - Scope: A3-2b platform app, visual broker, and visual child endpoints
 - Source of truth: active A3 design and backend API contract
@@ -23,8 +23,10 @@ the iframe.
 ## Decision
 
 - The platform app and visual broker exact-bind IPv6 loopback `::1` on different
-  server-owned ports and expose `http://[::1]:<app-port>` and
-  `http://[::1]:<broker-port>`.
+  server-owned ports and expose the exact browser authorities
+  `http://localhost:<app-port>` and `http://localhost:<broker-port>`.
+  Literal IPv6 authorities are not used in browser URLs because Chromium
+  rejects them as CSP host sources.
 - Both reject every other listener address and every incorrect configured
   `Host:port`. The broker additionally requires the exact server-minted route
   path.
@@ -42,10 +44,13 @@ the iframe.
 
 - The different app and broker ports create different origins and therefore
   same-origin-policy DOM isolation.
-- App and broker remain same-site on host `::1`; their cookies can cross ports,
+- App and broker remain same-site on host `localhost`; their cookies can cross ports,
   so port separation and Cookie `Path` are not authorization boundaries.
-- The effective host boundary is between platform cookies on `::1` and the
-  child on `127.0.0.1`: platform cookies are never sent to the child.
+- The effective host boundary is between platform cookies on `localhost` and
+  the child on `127.0.0.1`: platform cookies are never sent to the child.
+  Same numeric ports are held by IPv4 denial reservations while the topology
+  is live, preventing a child-side `127.0.0.1` takeover of a localhost
+  authority.
 - The child port and health evidence remain backend-only and cannot restore
   browser access after restart.
 - Exact visual recovery continues to persist the child port only in its

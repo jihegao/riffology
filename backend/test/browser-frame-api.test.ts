@@ -16,6 +16,105 @@ import { BackendApp, createProductBrowserFrameTargetResolver } from "../src/serv
 import type { HealthyVisualFrameTarget } from "../src/product-store-v2.ts";
 import type { MesaModel, MesaResults, MesaRun } from "../src/types.ts";
 
+test("production exact-app visual host is a fixed no-store self-only page", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-visual-host-"));
+  const app = new BackendApp({
+    mesa: new FrameFakeMesa(),
+    openCode: new FrameFakeOpenCode(),
+    workspaceRoot: workspace,
+    browserFrameTargetResolver: {
+      resolve: async () => null,
+      inspect: async () => false,
+    },
+  });
+  await app.initialize();
+  const network = await app.listenBrowserNetwork();
+  t.after(async () => {
+    await app.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const path = "/browser/projects/project_alpha/runs/run_alpha/visual";
+  const navigationHeaders = {
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+  };
+  const page = await raw(network.app, "GET", path, navigationHeaders);
+  assert.equal(page.status, 200);
+  assert.equal(page.headers["cache-control"], "no-store");
+  assert.equal(page.headers["content-type"], "text/html; charset=utf-8");
+  assert.equal(page.headers["referrer-policy"], "no-referrer");
+  assert.equal(page.headers["x-content-type-options"], "nosniff");
+  assert.equal(page.headers["access-control-allow-origin"], undefined);
+  assert.equal(page.headers["set-cookie"], undefined);
+  assert.match(
+    String(page.headers["content-security-policy"]),
+    new RegExp(
+      `^default-src 'none'; script-src 'nonce-([a-f0-9]{32})'; connect-src 'self'; frame-src ${
+        network.broker.origin.replaceAll("[", "\\[").replaceAll("]", "\\]")
+      }; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'$`,
+      "u",
+    ),
+  );
+  const cspNonce = /script-src 'nonce-([^']+)'/u.exec(
+    String(page.headers["content-security-policy"]),
+  )?.[1];
+  assert.ok(cspNonce);
+  assert.match(page.text, new RegExp(`<script nonce="${cspNonce}">`, "u"));
+  const inlineScript = /<script nonce="[^"]+">([\s\S]+)<\/script>/u.exec(page.text)?.[1];
+  assert.ok(inlineScript);
+  assert.doesNotThrow(() => new Function(inlineScript));
+  assert.match(page.text, /id="visual-host" data-status="loading" data-stage="bootstrap"/u);
+  assert.match(
+    page.text,
+    /id="visual-frame"[^>]+sandbox="allow-scripts allow-same-origin"[^>]+referrerpolicy="no-referrer"/u,
+  );
+  assert.match(page.text, /credentials: "same-origin"/u);
+  assert.match(page.text, /new URL\(issued\.frameUrl\)\.origin !== brokerOrigin/u);
+  assert.match(page.text, /host\.dataset\.status = "loaded"/u);
+  assert.match(page.text, /host\.dataset\.stage = "navigation-complete"/u);
+  assert.match(page.text, /host\.dataset\.errorCode = code/u);
+  assert.doesNotMatch(page.text, /localStorage|sessionStorage|indexedDB/u);
+  assert.doesNotMatch(page.text, /project_alpha|run_alpha/u);
+
+  const head = await raw(network.app, "HEAD", path);
+  assert.equal(head.status, 200);
+  assert.equal(head.text, "");
+  assert.equal(head.headers["content-length"], page.headers["content-length"]);
+  assert.equal(head.headers["content-security-policy"] === page.headers["content-security-policy"], false);
+  assert.match(String(head.headers["content-security-policy"]), /frame-ancestors 'self'$/u);
+
+  const wrongMethod = await raw(network.app, "POST", path);
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.json.error.code, "browser_method_denied");
+
+  const query = await raw(network.app, "GET", `${path}?frameUrl=must-not-be-accepted`, navigationHeaders);
+  assert.equal(query.status, 404);
+  assert.equal(query.json.error.code, "browser_session_denied");
+
+  const invalidId = await raw(
+    network.app,
+    "GET",
+    "/browser/projects/%2Fescape/runs/run_alpha/visual",
+    navigationHeaders,
+  );
+  assert.equal(invalidId.status, 403);
+  assert.equal(invalidId.json.error.code, "browser_session_denied");
+
+  for (const headers of [
+    {},
+    { ...navigationHeaders, "sec-fetch-site": "same-site" },
+    { ...navigationHeaders, "sec-fetch-site": "cross-site" },
+    { ...navigationHeaders, "sec-fetch-mode": "cors" },
+    { ...navigationHeaders, "sec-fetch-dest": "iframe" },
+  ]) {
+    const confusedDeputy = await raw(network.app, "GET", path, headers);
+    assert.equal(confusedDeputy.status, 403);
+    assert.equal(confusedDeputy.json.error.code, "browser_session_denied");
+  }
+});
+
 test("BackendApp completes the one-use frame HTTP flow without leaking browser credentials", async (t) => {
   let childHeaders: IncomingHttpHeaders | undefined;
   const child = createServer((incoming, response) => {
@@ -128,7 +227,7 @@ test("BackendApp completes the one-use frame HTTP flow without leaking browser c
   assert.equal(proxied.headers["access-control-allow-origin"], undefined);
   assert.equal(
     proxied.headers["content-security-policy"],
-    `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors ${network.app.origin}`,
+    `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors ${network.app.origin}`,
   );
   assert.equal(childHeaders?.host, `127.0.0.1:${target.port}`);
   assert.equal(childHeaders?.cookie, undefined);

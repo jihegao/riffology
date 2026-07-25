@@ -287,6 +287,7 @@ export class BackendApp {
   #browserNetwork?: BrowserNetworkTopology;
   #browserFrames?: BrowserFrameCapability;
   #browserWebSockets?: BrowserWebSocketBridge;
+  #browserBrokerOrigin?: string;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
@@ -421,6 +422,7 @@ export class BackendApp {
           appPort,
           brokerPort,
           beforeReady: ({ app, broker }) => {
+            this.#browserBrokerOrigin = broker.origin;
             this.#browserFrames = new BrowserFrameCapability({
               appOrigin: app.origin,
               brokerOrigin: broker.origin,
@@ -441,6 +443,7 @@ export class BackendApp {
         this.#browserFrames?.clear();
         this.#browserFrames = undefined;
         this.#browserWebSockets = undefined;
+        this.#browserBrokerOrigin = undefined;
         throw error;
       }
       this.#browserNetwork = network;
@@ -461,6 +464,7 @@ export class BackendApp {
         this.#browserFrames?.clear();
         this.#browserFrames = undefined;
         this.#browserWebSockets = undefined;
+        this.#browserBrokerOrigin = undefined;
         await this.#browserNetwork.close();
         this.#browserNetwork = undefined;
       }
@@ -505,10 +509,31 @@ export class BackendApp {
     address: BrowserNetworkAddress,
   ): Promise<boolean> {
     const url = new URL(request.url ?? "/", address.origin);
+    const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
     const bootstrap = url.pathname === "/api/browser-session/bootstrap";
     const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
-    if (!bootstrap && !match) return false;
+    if (!hostPage && !bootstrap && !match) return false;
     try {
+      if (hostPage) {
+        if (url.search !== "") throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        decodeBrowserPathId(hostPage[1]!);
+        decodeBrowserPathId(hostPage[2]!);
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          throw new BrowserFrameCapabilityError(405, "browser_method_denied");
+        }
+        if (request.method === "GET") {
+          const fetchSite = rawBrowserHeader(request, "sec-fetch-site");
+          if ((fetchSite !== "none" && fetchSite !== "same-origin")
+            || rawBrowserHeader(request, "sec-fetch-mode") !== "navigate"
+            || rawBrowserHeader(request, "sec-fetch-dest") !== "document") {
+            throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+          }
+        }
+        const brokerOrigin = this.#browserBrokerOrigin;
+        if (!brokerOrigin) throw new BrowserFrameCapabilityError(503, "browser_session_denied");
+        browserVisualHostPage(response, request.method, brokerOrigin);
+        return true;
+      }
       if (request.method === "OPTIONS") {
         this.#browserFramePreflight(request, response, address);
         return true;
@@ -1059,6 +1084,117 @@ const asConversationOpenCode = (value: OpenCodeAdapter): OpenCodeConversationPor
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
+};
+
+const browserVisualHostPage = (
+  response: ServerResponse,
+  method: string | undefined,
+  brokerOrigin: string,
+): void => {
+  const nonce = randomUUID().replaceAll("-", "");
+  const source = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riff visual run</title>
+</head>
+<body>
+<main id="visual-host" data-status="loading" data-stage="bootstrap">
+<p id="visual-status" role="status" aria-live="polite">Preparing the visual run.</p>
+<iframe id="visual-frame" title="Project visual run" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" hidden></iframe>
+</main>
+<script nonce="${nonce}">
+(() => {
+  "use strict";
+  const host = document.getElementById("visual-host");
+  const status = document.getElementById("visual-status");
+  const frame = document.getElementById("visual-frame");
+  const brokerOrigin = ${JSON.stringify(brokerOrigin)};
+  const route = /^\\/browser\\/projects\\/([^/]+)\\/runs\\/([^/]+)\\/visual$/.exec(location.pathname);
+  const fail = (code) => {
+    host.dataset.status = "error";
+    host.dataset.stage = "error";
+    host.dataset.errorCode = code;
+    status.textContent = "The visual run is unavailable.";
+  };
+  const responseCode = async (response, fallback) => {
+    try {
+      const body = await response.json();
+      return typeof body?.error?.code === "string" ? body.error.code : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  const start = async () => {
+    if (!route) throw new Error("visual_host_route_invalid");
+    const projectId = decodeURIComponent(route[1]);
+    const runId = decodeURIComponent(route[2]);
+    host.dataset.stage = "bootstrap";
+    const bootstrapResponse = await fetch("/api/browser-session/bootstrap", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { accept: "application/json" }
+    });
+    if (!bootstrapResponse.ok) {
+      throw new Error(await responseCode(bootstrapResponse, "browser_session_denied"));
+    }
+    const bootstrap = await bootstrapResponse.json();
+    if (typeof bootstrap.csrfToken !== "string" || !Number.isSafeInteger(bootstrap.generation)) {
+      throw new Error("browser_session_denied");
+    }
+    host.dataset.browserGeneration = String(bootstrap.generation);
+    host.dataset.stage = "frame-session";
+    const issueResponse = await fetch(
+      "/api/projects/" + encodeURIComponent(projectId) + "/runs/" + encodeURIComponent(runId) + "/visual-frame-session",
+      {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          accept: "application/json",
+          "x-riff-csrf": bootstrap.csrfToken
+        }
+      }
+    );
+    if (!issueResponse.ok) {
+      throw new Error(await responseCode(issueResponse, "visual_frame_unavailable"));
+    }
+    const issued = await issueResponse.json();
+    if (typeof issued.frameUrl !== "string" || new URL(issued.frameUrl).origin !== brokerOrigin) {
+      throw new Error("visual_frame_unavailable");
+    }
+    frame.addEventListener("load", () => {
+      host.dataset.status = "loaded";
+      host.dataset.stage = "navigation-complete";
+      status.textContent = "Visual frame navigation completed.";
+    }, { once: true });
+    frame.src = issued.frameUrl;
+    frame.hidden = false;
+    host.dataset.status = "frame-issued";
+    host.dataset.stage = "navigation";
+    status.textContent = "Loading the visual run.";
+  };
+  void start().catch((error) => fail(
+    error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
+      ? error.message
+      : "visual_frame_unavailable"
+  ));
+})();
+</script>
+</body>
+</html>`;
+  const bytes = Buffer.from(source);
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-length": bytes.byteLength,
+    "content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-src ${brokerOrigin}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
+    "content-type": "text/html; charset=utf-8",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(method === "HEAD" ? undefined : bytes);
 };
 
 const networkJsonWithHeaders = (

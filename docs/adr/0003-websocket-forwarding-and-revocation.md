@@ -1,6 +1,6 @@
 # ADR 0003: WebSocket forwarding, revocation, and secrecy
 
-- Status: Accepted for implementation — A3-2b3 contract
+- Status: Implemented and Chromium-verified — A3-2b3/A3-2b4
 - Role: active design
 - Scope: A3-2b broker WebSocket admission, forwarding limits, lifecycle,
   revocation, and secret handling
@@ -24,7 +24,7 @@ credentials, and stale capabilities must not survive lifecycle changes.
 
 - Forwarding is denied unless the run-frozen `webSocket` object exists. The
   browser URL is exactly
-  `ws://[::1]:<broker-port>/frame/c/<route-id><declared-absolute-path>`.
+  `ws://localhost:<broker-port>/frame/c/<route-id><declared-absolute-path>`.
   The route ID comes only from the redeemed frame capability. Query,
   fragment, percent-equivalent path spelling, repeated slash, traversal, a
   root-absolute broker path, and every other suffix are denied without dialing

@@ -526,7 +526,7 @@ const exactTarget = (candidate: BrowserFrameTarget, expected: BrowserFrameTarget
     === JSON.stringify(expected.webSocket?.subprotocols);
 
 const webSocketUrl = (address: BrowserNetworkAddress, path: string): string =>
-  `ws://[${address.host}]:${address.port}${path}`;
+  `ws://localhost:${address.port}${path}`;
 
 const upgradeHeaders = (
   address: BrowserNetworkAddress,
