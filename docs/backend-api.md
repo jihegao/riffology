@@ -12,7 +12,7 @@ The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
 implemented Agent/API boundary; the legacy Gate API retained below does not.
-`ProductStoreV2` through schema migration v9, execution
+`ProductStoreV2` through schema migration v13, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -253,7 +253,7 @@ visibility only: it never revives an old frame/WebSocket capability, cursor,
 confirmation, or download authority. These direct controls do not call or
 depend on OpenCode.
 
-The A3-2d4 review candidate adds no route or runtime behavior. Its
+The A3-2d4 closeout merged through PR #46 and adds no route or runtime behavior. Its
 fault-injected route-level matrix uses the production `.../trash` and
 `.../restore` API/revocation wiring to prove that the pre-commit callback
 invalidates both an unredeemed frame nonce and an already redeemed frame route,
@@ -737,7 +737,13 @@ Project/run/contract/event-set/lifecycle digest, persistent trash history,
 normalized filters, and
 limit. Direct trash/restore acceptance was merged through PR #45. Cancel already
 exists. Legacy wind/Gate event and download endpoints are not A3-2d evidence.
-A3-3 diagnostic-event acceptance is unblocked by the published A3-2d2 boundary.
+A3-3 installs the reviewed wind mechanism through the existing generic Model,
+Project, technical-check, experiment, run, output, and diagnostic-event
+contracts. It adds no `/api/wind` route and no wind-specific browser DTO.
+The server-owned A3-3 baseline requires the generic bounded diagnostic ceiling
+of 50,000 events / 64,000,000 bytes (64 MB) and publishes 38,730 events plus 1,096 daily KPI rows.
+Schema v13 stores one immutable manifest-installation record and startup
+finishes or verifies that installation before the run dispatcher accepts work.
 
 The current A3-2d2 route is:
 

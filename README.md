@@ -67,10 +67,12 @@ supervisor into the shared dispatcher, admits eligible visual work through the
 existing Project-run API, and preserves child-port secrecy. Visual completion
 still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
 broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
-A3-2d1 output access, A3-2d2 diagnostic events, and A3-2d3 direct controls
-were merged through PRs #43, #44, and #45. A3-2d4 is the current
-cross-authority revocation review candidate in Draft PR #46; A3-3 ordinary wind
-import remains a pending #14 slice.
+A3-2d1 output access, A3-2d2 diagnostic events, A3-2d3 direct controls, and
+A3-2d4 cross-authority revocation were merged through PRs #43, #44, #45, and
+#46. A3-3 now installs the reviewed wind mechanism as one ordinary Model, one
+fixed-copy example Project, and one synthetic single-seed Experiment through a
+versioned manifest and schema-v13 installation record. It adds no wind-specific
+route or DTO. Final Stage 3 integration remains pending.
 Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
@@ -90,13 +92,19 @@ zero failed, and one optional installed-OpenCode smoke skipped; web passes
 104/104, the network-entry integration passes 1/1, the production build and
 24-file docs check succeed, and final independent security review reports no
 P0/P1 merge blocker.
-A3-3 diagnostic-event acceptance depends on A3-2d; legacy wind/Gate event
-routes cannot satisfy that dependency.
+A3-3 uses the published generic A3-2d event boundary. Its real ordinary
+Project run publishes two indexed outputs and 38,730 bounded diagnostic events,
+then survives backend restart; legacy wind/Gate event routes are not evidence
+for that claim.
+Its final review gate is 570 backend tests with 569 passed, zero failed, and
+one optional OpenCode smoke skipped; web passes 104/104, network entry 1/1,
+full Chromium 15/15, the 38-test reviewed wind suite, production build, and the
+25-file docs check. Independent review reports P0/P1=0.
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
 than being automatically cleaned.
-These published visual/browser slices and the A3-2d4 review candidate are not
-completion evidence for Stage 3, wind import, or final browser acceptance.
+These published slices and the A3-3 implementation are not final Stage 3
+browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
@@ -265,12 +273,15 @@ through PR #37: the dedicated Chromium browser security
 matrix passes 5/5 and the complete Chromium suite passes 8/8. The current
 backend gate reports 466 total with 465 passed, zero failed, and one optional
 installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
-the production build succeeds. The A3-2d4 review candidate adds a 65/65 focused
+the production build succeeds. A3-2d4, merged through PR #46, adds a 65/65 focused
 backend revocation gate and extends the dedicated broker Chromium matrix to
-6/6. Its full candidate gate is 553 backend total/552 passed/zero failed/one
+6/6. Its full merge gate is 553 backend total/552 passed/zero failed/one
 optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
-15/15, successful production build, and a 24-file docs check. A3-3 wind import
-and final Stage 3 integration remain pending.
+15/15, successful production build, and a 24-file docs check. A3-3 focused
+evidence covers schema-v13 migration/rollback, manifest byte/digest pinning,
+five restart windows, a real technical check, deterministic baseline
+(1,096 daily rows and 38,730 events), a real generic Product run, and restart
+recovery. Final Stage 3 integration remains pending.
 
 Focused Milestone A2 verification:
 

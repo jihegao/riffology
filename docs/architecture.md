@@ -7,7 +7,7 @@ The current product authority is the
 [`Stage 1 data design`](milestone-a1-data-foundation-design.md) and
 [`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md)
 refine its implemented storage and Agent boundaries.
-`ProductStoreV2` over SQLite schema migration v7, execution contract v4, and
+`ProductStoreV2` over SQLite schema migration v13, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
@@ -101,12 +101,19 @@ agreement and fails closed on drift. Agent turns cannot own platform cards;
 bounded Agent context serializes only their five allowlisted fields.
 A3-2a2 visual supervision and A3-2b scoped browser access are published.
 A3-2c and A3-2d1 through A3-2d3 are published; A3-2d3 direct controls were
-merged through PR #45. The A3-2d4 review candidate fault-injects the lifecycle
+merged through PR #45. A3-2d4 was merged through PR #46 and fault-injects the lifecycle
 service while exercising the production trash-route revocation wiring across
 pending frame nonces, redeemed frame routes, open WebSockets, and Visual-Agent
 capabilities; restore does not revive old authority. A3-3 ordinary wind import
-remains the later Stage 3 implementation slice. Wind diagnostic-event
-acceptance is now unblocked by the published A3-2d2 boundary.
+is implemented on the current review branch without a wind-specific route,
+DTO, or runtime branch. Startup verifies a versioned 14-file manifest, creates
+one ordinary Model, runs the ordinary technical checker, then creates one
+fixed-copy Project and one single-seed Experiment before dispatcher activation.
+Schema v13 makes the manifest installation durable and immutable and raises the
+generic diagnostic ceiling to 50,000 events / 64,000,000 bytes (64 MB). The fixed seed-2 baseline
+publishes 1,096 daily KPI rows and 38,730 events through the generic A3-2d
+output/event contracts and survives backend restart. This is implementation
+evidence for A3-3, not final Stage 3 browser acceptance.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

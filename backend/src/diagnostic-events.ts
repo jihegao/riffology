@@ -5,6 +5,7 @@ import {
   validateInputSchema,
   type JsonObject,
 } from "./experiment-planner.ts";
+import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 
 /**
  * The parser deliberately knows nothing about a Run, a filesystem path, or a
@@ -59,8 +60,7 @@ export class DiagnosticEventParseError extends Error {
 }
 
 export const DEFAULT_DIAGNOSTIC_EVENT_PARSE_LIMITS: DiagnosticEventParseLimits = Object.freeze({
-  maxEventCount: 10_000,
-  maxEventBytes: 16_000_000,
+  ...PRODUCT_DIAGNOSTIC_EVENT_LIMITS,
   maxRecordBytes: 1_048_576,
   maxDepth: 32,
   maxObjectKeys: 128,

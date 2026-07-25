@@ -61,7 +61,7 @@ export class ModelTechnicalCheckService {
   start(modelId: string, commandId: string): Promise<TechnicalCheckDto> {
     const checkedModelId = boundedId(modelId);
     const checkedCommandId = boundedKey(commandId);
-    const id = stableCheckId(checkedModelId, checkedCommandId);
+    const id = technicalCheckId(checkedModelId, checkedCommandId);
     try { return Promise.resolve(publicCheck(this.store.getTechnicalCheck(checkedModelId, id))); }
     catch (error) { if (!(error instanceof ProductStoreV2Error) || !/does not exist/u.test(error.message)) throw storeError(error); }
     const existing = this.#pending.get(id);
@@ -126,7 +126,10 @@ const resolveInside = (root: string, relativePath: string): string => {
   if (!target.startsWith(`${root}/`)) throw new ApiError(500, "invalid_model_workspace", "A stored Model file path escaped its workspace.");
   return target;
 };
-const stableCheckId = (modelId: string, commandId: string): string => `technical_check_${createHash("sha256").update(`${modelId}\u0000${commandId}`).digest("hex").slice(0, 32)}`;
+export const technicalCheckId = (
+  modelId: string,
+  commandId: string,
+): string => `technical_check_${createHash("sha256").update(`${modelId}\u0000${commandId}`).digest("hex").slice(0, 32)}`;
 const boundedId = (value: string): string => { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value)) throw new ApiError(422, "invalid_id", "A resource ID is invalid."); return value; };
 const boundedKey = (value: string): string => { if (typeof value !== "string" || !value.trim() || value.length > 300 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ApiError(422, "invalid_request", "commandId is invalid."); return value; };
 const storedResult = (result: ModelTechnicalCheckResult): Record<string, unknown> => ({ aggregate: result.aggregate, capturedWorkspaceDigest: result.capturedWorkspaceDigest, executionDescriptionDigest: result.executionDescriptionDigest, dependencyDescriptionDigest: result.dependencyDescriptionDigest, environmentKey: result.environmentKey, checks: result.checks, log: result.log });

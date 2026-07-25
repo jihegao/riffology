@@ -599,10 +599,7 @@ test("schema v8 migration failure rolls back its table, trigger replacement, and
     const broken = [
       ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 7),
       { version: 8, sql: `${PRODUCT_SCHEMA_V8_SQL}\nSELECT * FROM missing_v8_guard;` },
-      PRODUCT_SCHEMA_MIGRATIONS[8],
-      PRODUCT_SCHEMA_MIGRATIONS[9],
-      PRODUCT_SCHEMA_MIGRATIONS[10],
-      PRODUCT_SCHEMA_MIGRATIONS[11],
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(8),
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v8_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);

@@ -94,13 +94,13 @@ The d3 merge gate reports 552 backend total with 551 passed, zero failed,
 and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build and docs check succeed, and final
 independent security review reports no P0/P1 merge blocker.
-The A3-2d4 review candidate in Draft PR #46 adds no new runtime contract. Its
+The A3-2d4 closeout merged through PR #46 at merge commit `660c9a7`. It adds no new runtime contract. Its
 fault-injected production API/revocation-wiring matrix proves that the pre-commit callback
 invalidates an unredeemed frame nonce, a redeemed frame route, an open
 WebSocket, and a minted Visual-Agent capability, and that restore cannot revive
 old authority. Durable Store mutation/receipt evidence remains the published
 A3-2d3 boundary. The focused backend combination passes 65/65 and the complete
-dedicated broker Chromium matrix passes 6/6. The full candidate gate is
+dedicated broker Chromium matrix passes 6/6. The full merge gate is
 553 backend total/552 passed/zero failed/one optional OpenCode smoke skipped,
 web 104/104, network entry 1/1, full Chromium 15/15, successful production
 build, and a 24-file docs check. Independent security review reports P0/P1=0;
@@ -114,8 +114,29 @@ The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
 succeeds.
-Ordinary wind import remains A3-3. The A3-2d4 candidate and the remaining
-target slices are not Stage 3 completion evidence.
+A3-3 ordinary wind import is implemented on the current review branch. It uses
+one immutable schema-v13 installation manifest, an ordinary technical check,
+one fixed-copy Project, and one single-seed baseline Experiment; it adds no
+wind-specific route, DTO, or dispatcher branch. The 14-file manifest pins
+source commit `10df6f742e37c661160d331b89a76c5542c80ab8` and digest
+`05775ff9d24d5dc4670544693bafff1f3615bdaa3a5db1901b2d6136eb448bf0`.
+Its stable Model, Project, and baseline Experiment IDs are respectively
+`preinstalled_model_0f768eee91e248ef310e26aecbc53263`,
+`example_project_0f768eee91e248ef310e26aecbc53263`, and
+`example_experiment_7f9ae4eb64540f876b99c0364593f3ce`.
+The exact baseline yields 1,096 daily rows and 38,730 diagnostic events through
+the generic contracts. A3-3 and the remaining integration slice are not Stage
+3 completion evidence.
+Non-blocking follow-ups remain explicit: recovery technical-check attempts
+currently use the fixed manifest clock, and diagnostic parsing retains the
+bounded raw buffer plus parsed object tree without a four-lane peak-memory
+stress claim. Schema-v13 rollback is schema-snapshot checked, while direct raw
+SQL trigger-behavior matrices remain additional hardening rather than A3-3
+merge evidence.
+The final A3-3 review gate is backend 570 total/569 passed/zero failed/one
+optional OpenCode smoke skipped, web 104/104, network entry 1/1, Chromium
+15/15, reviewed wind 38/38, a successful production build, and a 25-file docs
+check. Independent correctness/security review reports P0/P1=0.
 
 This document is subordinate to the
 [Riff MVP PRD](product-requirements.md), builds on the
@@ -221,7 +242,7 @@ intentionally narrow:
   `visual_completion_not_supported`; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema migration v12 while the current execution
+The product database is schema migration v13 while the current execution
 contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
@@ -673,7 +694,7 @@ A3-1b freezes these current server defaults: `wallTimeMs: 300000`,
 `startupTimeMs: 30000`, `terminationGraceMs: 5000`,
 `maxStdoutBytes: 1000000`, `maxStderrBytes: 1000000`,
 `maxOutputFiles: 256`, `maxOutputBytes: 64000000`,
-`maxEventCount: 10000`, `maxEventBytes: 16000000`,
+`maxEventCount: 50000`, `maxEventBytes: 64000000`,
 `maxSamples: 1000`, and `maxConcurrency: 4`. They are backend authority and
 cannot be overridden by the public start request.
 
@@ -1023,7 +1044,7 @@ keys, invalid Unicode, unsafe numbers, external schema references, and
 noncanonical object/array depth, key count, item count, string length, event
 type vocabulary, or UTC `occurredAt` range fail before terminal publication.
 Ingestion and the immutable terminal event-set digest/count commit atomically.
-Each read revalidates at most the frozen 16 MB/10,000-event set; a dedicated
+Each read revalidates at most the frozen 64 MB/50,000-event set; a dedicated
 event-read rate/concurrency gate remains a P2 follow-up and is not claimed by
 the d2 candidate.
 
@@ -1772,13 +1793,16 @@ Output indexes never resolve outside the owning Project/run object root.
    acceptance was merged through PR #45. Cancel is
    already current and download was merged in d1; d3 adds trash/restore routes
    and proves the complete direct-control set without OpenCode.
-15. **A3-2d4 cross-authority revocation — Draft PR #46 review candidate:** one
+15. **A3-2d4 cross-authority revocation — merged through PR #46:** one
    fault-injected production API/revocation-wiring flow revokes an unredeemed
    nonce, redeemed frame, open WebSocket, and Visual-Agent capability; restore
    cannot revive them. Focused backend passes 65/65 and dedicated broker
    Chromium passes 6/6.
-16. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
-   and experiment, baseline equivalence, and non-claim labels.
+16. **A3-3 wind import — implemented on the current review branch:** schema-v13
+   immutable versioned manifest, ordinary technical check, fixed-copy example
+   Project and single-seed Experiment, exact deterministic baseline evidence,
+   and explicit non-claim labels. The installation uses ordinary platform
+   contracts and has no wind-specific route, DTO, or dispatcher branch.
 17. **Integration — pending:** complete the Stage 3 browser flow, cross-slice
    verification and narrow browser evidence, then PR merge, Issue #14 closure,
    and local `main` synchronization.
@@ -1825,8 +1849,9 @@ optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; web is 104/104 and the production build succeeds. Visual
 completion remains HTTP `422`
 `visual_completion_not_supported`; A3-2b broker/frame/WebSocket/browser,
-A3-2c Playwright, and A3-2d1 through A3-2d3 are published. A3-2d4 is under
-review, while A3-3 wind import remains pending.
+A3-2c Playwright and A3-2d1 through A3-2d4 are published. A3-3 wind import is
+implemented on the current review branch; final Stage 3 integration remains
+pending.
 
 The matrix below remains the complete Stage 3 exit target; a row is not marked
 implemented merely because part of it is exercised by A3-1b:

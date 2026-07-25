@@ -204,9 +204,7 @@ test("schema v9 migration failure restores v8 triggers and both version markers"
         version: 9,
         sql: `${PRODUCT_SCHEMA_V9_SQL}\nSELECT * FROM missing_v9_guard;`,
       },
-      PRODUCT_SCHEMA_MIGRATIONS[9],
-      PRODUCT_SCHEMA_MIGRATIONS[10],
-      PRODUCT_SCHEMA_MIGRATIONS[11],
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(9),
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v9_guard/u);
     assert.equal(

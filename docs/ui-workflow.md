@@ -30,10 +30,12 @@ and technical-check behavior remain backend integration evidence. A mock
 conversation, screenshot, or healthy port alone is insufficient.
 
 The legacy queue/wind UI still coexists and remains runnable history. Stage 2
-does not delete it or treat its fixed tabs as the generic workspace. Project
-experiments/execution and wind import are #14; the final Models/Projects home,
-shared two-pane shell, responsive layout, and polished dynamic right pane are
-#15.
+does not delete it or treat its fixed tabs as the generic workspace. A3-3
+installs wind as an ordinary Model, fixed-copy Project, and Experiment and
+exercises the generic backend run/output/event contracts; it adds no wind tab,
+route, or browser DTO. The final narrow Stage 3 browser integration remains
+#14. The Models/Projects home, shared two-pane shell, responsive layout, and
+polished dynamic right pane are #15.
 
 ---
 

@@ -36,7 +36,7 @@
 > A3-2a2 real visual lifecycle and the A3-2b isolated broker/frame/WebSocket
 > boundary are now published. A3-2c scoped Playwright and A3-2d1 through
 > A3-2d3 generic output/event/direct-control work are merged; A3-2d4
-> cross-authority revocation is the current review candidate.
+> cross-authority revocation merged through PR #46.
 > A3-2a1 remains schema/Store/recovery plus
 > negative admission only, hardening the existing v4 port/health shape and
 > rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
@@ -48,9 +48,11 @@
 > same-site and SOP isolates DOM origins, while the untrusted child remains on
 > IPv4 `127.0.0.1` and receives no platform cookie. One-use capability,
 > ≤60-second nonce, generation, Origin, Host, registry, and exact-app
-> `frame-ancestors` checks remain authority. A3-2d4 now supplies the combined
-> trash-route nonce/frame/WebSocket/Visual-Agent revocation evidence; A3-3
-> remains the ordinary wind import. This is not completion evidence
+> `frame-ancestors` checks remain authority. A3-2d4 supplies the combined
+> trash-route nonce/frame/WebSocket/Visual-Agent revocation evidence. A3-3 is
+> implemented on the current review branch as an immutable 14-file manifest,
+> ordinary Model technical check, fixed-copy Project, and baseline Experiment,
+> with no wind-specific route or DTO. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation

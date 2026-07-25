@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 12 as const;
+export const PRODUCT_SCHEMA_VERSION = 13 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;

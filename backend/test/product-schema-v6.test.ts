@@ -188,12 +188,7 @@ test("schema v6 migration failure rolls back every recovery table and version ma
     const broken = [
       ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 5),
       { version: 6, sql: `${PRODUCT_SCHEMA_V6_SQL}\nSELECT * FROM missing_v6_guard;` },
-      PRODUCT_SCHEMA_MIGRATIONS[6]!,
-      PRODUCT_SCHEMA_MIGRATIONS[7]!,
-      PRODUCT_SCHEMA_MIGRATIONS[8]!,
-      PRODUCT_SCHEMA_MIGRATIONS[9]!,
-      PRODUCT_SCHEMA_MIGRATIONS[10]!,
-      PRODUCT_SCHEMA_MIGRATIONS[11]!,
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(6),
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v6_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
