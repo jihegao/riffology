@@ -428,6 +428,15 @@ process/lease, download, frame, WebSocket, and tool/Visual-Agent capability. It
 does not implicitly cancel or revoke them; commit uses the relevant writer and
 authority-issuance fences and rechecks quiescence before deleting any byte.
 
+A4-2 adds no backend route. Its browser client first calls the exact bootstrap,
+keeps the CSRF token only in memory, and then consumes `GET /api/home`,
+`GET /api/providers`, the existing Model/Project creation routes, each owner
+workspace route, and `GET /api/objects/{model|project}/:id/conversations`.
+The trusted local Vite development proxy rewrites only backend Host/Origin to
+the exact app authority; browser Fetch Metadata and the HttpOnly cookie pass
+through unchanged. The production authority remains the backend app origin,
+not the development port.
+
 Recovery failure never opens a partial Product API. The only admitted
 recovery-mode routes are the exact-app static shell, browser bootstrap, health,
 and `GET /api/recovery-status` with the closed path-free

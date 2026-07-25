@@ -13,7 +13,14 @@ export default defineConfig({
       "/api": {
         target: `http://[::1]:${platformAppPort}`,
         changeOrigin: false,
-        headers: { Host: `localhost:${platformAppPort}` }
+        // The browser talks to this local Vite reverse proxy, while the Product
+        // admission authority is intentionally bound to the backend app origin.
+        // Rewrite only these trusted development-proxy headers; browser Fetch
+        // metadata and the HttpOnly session cookie still pass through unchanged.
+        headers: {
+          Host: `localhost:${platformAppPort}`,
+          Origin: `http://localhost:${platformAppPort}`
+        }
       }
     }
   },

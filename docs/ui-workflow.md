@@ -40,22 +40,34 @@ downloads output, and verifies recovery after backend restart. The
 Models/Projects home, shared two-pane shell, responsive layout,
 multi-conversation story, and polished dynamic right pane remain #15.
 
-## A4-0 target shared shell (design only)
+## A4-2 Home and shared-shell foundation
 
-The target UI contract is defined by
+The governing UI contract is defined by
 [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
-A4-0 changes no rendered page. A4-2 will replace the Legacy/Evidence product
-entry with one router: Home at `/`, and the same two-pane shell at
-`/models/:modelId` or `/projects/:projectId`. A subordinate
+A4-2 now makes Product Home the default Vite entry with one router: Home at
+`/`, and the same two-pane shell at `/models/:modelId` or
+`/projects/:projectId`. A subordinate
 `?conversation=` selection changes the persistent left pane without remounting
 or discarding the right-pane owner workspace.
 
 Home has separate Models and Projects collections plus New Model and New
-Project. The right pane selects only server-declared, bounded Markdown, code,
+Project. It uses the closed A4-1 Home and provider DTOs, creates a Model from
+only name/provider/model, creates a Project from only name/executable Model,
+and disables creation honestly when the required server option is unavailable.
+The shell lists only durable Conversation summaries returned by the backend.
+Messages and Conversation lifecycle remain A4-3; no assistant response is
+fabricated. The right pane currently renders a truthful owner summary and
+explicit A4-4 boundary. A4-4 will select only server-declared, bounded Markdown, code,
 table, JSON, chart/diagram, or restricted Model-page renderers. At narrow width
-and 200% zoom, a labelled pane selector retains the same owner state. Desktop,
-narrow, keyboard, focus, landmark, status-announcement, and accessible fallback
-evidence remains pending until its owning A4 slices merge.
+and equivalent 200% layout, a labelled pane selector retains the same owner
+state. A dedicated real-Chromium A4-2 scenario covers desktop, narrow,
+keyboard pane switching, horizontal fit, real bootstrap/cookie/CSRF, and zero
+console errors. The continuous A4-6 matrix and every final trace row remain
+pending.
+
+Deprecated `?mode=legacy` and `?mode=evidence` entries remain isolated for
+regression only. They are not linked from Product Home and are removed only by
+the identity- and manifest-proven A4-5 retirement.
 
 Untrusted content is rendered from data ASTs into fixed elements with raw HTML
 disabled. Active/remote URLs and inline HTML/SVG are rejected, active

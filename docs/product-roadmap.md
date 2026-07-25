@@ -60,9 +60,11 @@
 > A4-0 establishes a documentation-only design gate in
 > [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md).
 > It fixes slice ownership and PRD/API/UI/test traceability but changes no
-> runtime behavior. A4-1 now implements the Product API/lifecycle/deletion
-> boundary; A4-2 through A4-6 remain pending. Only A4-6 may claim the complete
-> MVP or close #15.
+> runtime behavior. A4-1 implements the Product API/lifecycle/deletion
+> boundary. A4-2 is implemented on branch as the default Home, one
+> Model/Project router, and the responsive shared-shell foundation; A4-3
+> through A4-6 remain pending. Only A4-6 may claim the complete MVP or close
+> #15.
 
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with

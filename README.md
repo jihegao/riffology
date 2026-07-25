@@ -6,7 +6,8 @@
 - Source of truth: Riff MVP PRD and merged implementation
 - Last reviewed: 2026-07-25
 
-本地双栏演示：左侧为由 OpenCode 驱动的建模对话与文件上传，右侧为 Mesa 仿真工作台。
+本地 Product 入口：Home 分列 Models 与 Projects；对象页左侧保留
+Conversation 上下文，右侧承载当前 Model 或 Project 工作区。
 
 > **MVP target:** the single product requirements authority is
 > [`docs/product-requirements.md`](docs/product-requirements.md).
@@ -128,6 +129,18 @@ fails closed on reference, byte/index, process, download, frame/WebSocket,
 Agent/tool, generation, token, or closure drift and preserves fixed-copy
 lineage. A4-2 through A4-6 remain pending; no Stage 4 UI or complete-MVP claim
 is made here.
+
+A4-2 is now implemented on its narrow branch. The default Vite entry is Home
+at `/`, with independent Models and Projects collections plus New Model and
+New Project forms. `/models/:id` and `/projects/:id` use one responsive
+two-pane Product shell; `?conversation=` changes only the persistent left
+selection and does not remount the right owner workspace. The UI bootstraps
+the real browser session, consumes only the closed A4-1 DTOs, reports provider
+unavailability honestly, and keeps the Model/Project workspace content
+explicitly bounded to A4-4. Deprecated `?mode=legacy` and `?mode=evidence`
+compatibility entries remain only until the manifest-proven A4-5 retirement.
+A4-3 through A4-6 remain pending, all final trace rows remain pending, and
+Issue #15 stays open.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and

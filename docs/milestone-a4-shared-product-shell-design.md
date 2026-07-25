@@ -1,7 +1,7 @@
 # Milestone A4 shared product shell design
 
-- Status: active; A4-0 design gate complete, A4-1 Product API implemented,
-  A4-2 through A4-6 pending
+- Status: active; A4-0 and A4-1 merged, A4-2 Home/shared shell implemented on
+  branch, A4-3 through A4-6 pending
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -22,8 +22,10 @@ Stage 4 began only after all hard prerequisites were verified:
 - the only unrelated untracked entry, `.DS_Store`, remained untouched.
 
 A4-0 was documentation only. A4-1 now implements the bounded Product
-API/lifecycle/deletion slice described below without changing startup path,
-renderer, router, or UI. A4-2 through A4-6 remain pending. Only A4-6 may claim
+API/lifecycle/deletion slice described below. A4-2 implements the default Home,
+one Model/Project router, subordinate Conversation selection, and the shared
+responsive shell without changing the backend startup path or adding the
+A4-3/A4-4 pane behavior. A4-3 through A4-6 remain pending. Only A4-6 may claim
 the complete MVP browser story or close Issue #15.
 
 ## 2. Product invariants and non-goals
@@ -77,8 +79,8 @@ full applicable gates, merge, and synchronize local and remote state.
 ## 4. Target browser routes and Home DTO
 
 The collection, lifecycle, deletion, and browser-admission contracts in this
-section are implemented by A4-1. Product router and visible Home contracts
-remain A4-2 targets.
+section are implemented by A4-1. The Product router and visible Home contracts
+are implemented on the A4-2 branch.
 
 ### 4.1 Product router
 
@@ -819,3 +821,63 @@ final review after all findings were fixed and re-reviewed:
 
 This review accepts only the A4-1 Product API implementation. It does not
 accept any visible Stage 4 workflow or the complete MVP.
+
+### A4-2 implementation record
+
+A4-2 implements the bounded visible Product foundation:
+
+- Product Home is the default Vite route at `/`, with independent Models and
+  Projects sections, resource links, New Model, and New Project;
+- New Model asks only for name plus a discovered provider/model, while New
+  Project asks only for name plus an executable Model returned by Home;
+- provider or executable-Model unavailability disables only the affected
+  creation path and shows an honest read-only explanation;
+- `/models/:id` and `/projects/:id` use the same shared shell and owner-state
+  component;
+- `?conversation=` changes only subordinate left-pane selection. A missing or
+  cross-owner selection produces a bounded visible error and never changes or
+  remounts the right owner workspace;
+- Model workspaces combine the existing Model workspace projection with the
+  owner Conversation collection; Project workspaces consume their existing
+  combined projection; and
+- desktop shows both landmarks, while narrow/equivalent-200%-layout uses a
+  labelled keyboard-operable pane selector with no horizontal page overflow.
+
+The browser client performs the exact Product bootstrap, retains CSRF only in
+memory, and sends the current session cookie through the same-origin Vite
+proxy. The proxy rewrites only the trusted local development Host/Origin to the
+backend app authority. It does not synthesize browser Fetch Metadata or expose
+the HttpOnly cookie.
+
+Deprecated `?mode=legacy` and `?mode=evidence` compatibility paths remain
+isolated and unlinked so their browser/security regressions continue until
+A4-5 has manifest-proven authority to remove them. They are not Product
+navigation or Stage 4 product types.
+
+The A4-2 right pane intentionally renders only a truthful owner/status summary
+and the A4-4 boundary. Messages, attachments, documents, Conversation
+lifecycle/provider locking, renderer content, Experiment/Run controls, startup
+cutover, recovery UI, retirement, and the continuous A4-6 matrix remain
+pending. All 69 final trace rows remain `pending`, and Issue #15 remains open.
+
+Focused evidence currently includes 10/10 Product component/client/router
+tests, the complete Web component suite at 112/112, network entry 1/1, the
+dedicated A4-2 real-Chromium scenario 1/1, Visual-Agent Chromium 6/6, and the
+retained Chromium compatibility/security matrix at 15/15. Backend 583 total /
+582 passed / zero failed / one optional installed-OpenCode smoke skipped also
+passes. Production build, 27-document governance check, and `git diff --check`
+also pass.
+
+Three independent read-only reviewers who did not implement A4-2 completed
+final review after the reported P1 findings were fixed and re-reviewed:
+
+| Review | Final result |
+| --- | --- |
+| Product/architecture | P0=0, P1=0, P2=1 |
+| Accessibility/interaction | P0=0, P1=0, P2=0 |
+| Test/documentation consistency | P0=0, P1=0, P2=0 |
+
+The remaining Product/architecture P2 records that A4-2 uses an explicitly
+labelled equivalent-200%-layout CSS viewport rather than actual browser zoom.
+Actual 200% zoom remains part of the A4-6 continuous exit matrix; this
+non-blocking limitation is not an A4-2 completion claim.

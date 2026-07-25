@@ -12,8 +12,11 @@ The
 defines the target Home, router, shell state, renderer registry, lifecycle,
 browser-admission, recovery, and cutover architecture. A4-0 was the
 documentation-only design gate. A4-1 implements the Product API, Store
-lifecycle/delete, and browser-admission portion without changing startup,
-router, or visible UI; A4-2 through A4-6 remain pending.
+lifecycle/delete, and browser-admission portion. A4-2 now consumes that
+boundary on its narrow branch for the default Home, Model/Project routes, one
+responsive two-pane shell, and subordinate Conversation URL state. Startup
+cutover, full Conversation behavior, renderers/execution, and final acceptance
+remain A4-3 through A4-6 work.
 `ProductStoreV2` over SQLite schema migration v14, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
@@ -138,10 +141,14 @@ Home collections
   -> ProductStoreV2 lifecycle, mutation, deletion, and recovery authority
 ```
 
-The Home/router/shell portion of this diagram remains target architecture.
-A4-1 implements the common API/admission/lifecycle/delete boundary; A4-2
-through A4-4 own the visible shell, and A4-5 owns startup cutover and
-manifest-proven retirement.
+The Home/router/shared-state portion of this diagram is implemented by A4-2 on
+branch. It uses `/`, `/models/:id`, `/projects/:id`, and subordinate
+`?conversation=` state; changing only the Conversation query preserves the
+mounted right owner workspace. Model and Project workspace data remains a
+truthful bounded summary until A4-4 installs the renderer/execution registry.
+A4-1 implements the common API/admission/lifecycle/delete boundary; A4-3 owns
+the full left pane, A4-4 owns dynamic right content, and A4-5 owns startup
+cutover and manifest-proven retirement.
 If Product recovery fails closed, A4-5 permits only the exact-app static shell,
 browser bootstrap, health, and one closed path-free recovery-status DTO; all
 resource reads, writes, dispatch, Agent, frame, and WebSocket routes remain
