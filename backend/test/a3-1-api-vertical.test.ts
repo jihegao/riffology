@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -45,6 +45,32 @@ const post = (url: string, body: unknown) => fetch(url, {
   body: JSON.stringify(body),
 });
 
+test("A3-2d1 output authority is unavailable on the legacy listener", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a3-2d1-legacy-denial-"));
+  const legacyRoot = join(base, "legacy");
+  await mkdir(legacyRoot, { recursive: true, mode: 0o700 });
+  const openCode = new AcceptanceOpenCode();
+  const app = new BackendApp({
+    mesa: new UnavailableMesaAdapter(),
+    openCode,
+    a2OpenCode: openCode,
+    a2ProductRoot: join(base, "product"),
+    workspaceRoot: legacyRoot,
+    defaultSessionId: "a3-2d1-legacy-denial",
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(base, { recursive: true, force: true });
+  });
+  await app.initialize();
+  const address = await app.listen();
+  const response = await fetch(
+    `http://127.0.0.1:${address.port}/api/projects/project_denied/runs/run_denied/outputs`,
+  );
+  assert.equal(response.status, 403);
+  assert.equal((await response.json() as any).error.code, "output_access_denied");
+});
+
 const patch = (url: string, body: unknown) => fetch(url, {
   method: "PATCH",
   headers: { "content-type": "application/json" },
@@ -64,8 +90,30 @@ const start = async (base: string) => {
     defaultSessionId: "a3-1-api-acceptance",
   });
   await app.initialize();
-  const address = await app.listen();
-  return { app, baseUrl: `http://127.0.0.1:${address.port}` };
+  const network = await app.listenBrowserNetwork();
+  return { app, baseUrl: network.app.origin };
+};
+
+const browserOutputHeaders = (cookie: string) => ({
+  cookie,
+  "sec-fetch-site": "same-origin",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-dest": "empty",
+});
+
+const bootstrapAppSession = async (baseUrl: string): Promise<string> => {
+  const response = await fetch(`${baseUrl}/api/browser-session/bootstrap`, {
+    method: "POST",
+    headers: {
+      origin: baseUrl,
+      "sec-fetch-site": "same-origin",
+      "content-length": "0",
+    },
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.ok(cookie);
+  return cookie;
 };
 
 const waitForRun = async (
@@ -282,6 +330,146 @@ target.write_text(json.dumps({
     outputIds: [succeeded.outputs[0].id],
   });
 
+  const unauthenticatedOutputs = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs`,
+  );
+  assert.equal(unauthenticatedOutputs.status, 403);
+  const appCookie = await bootstrapAppSession(baseUrl);
+  const outputHeaders = browserOutputHeaders(appCookie);
+  const outputListResponse = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs`,
+    { headers: outputHeaders },
+  );
+  assert.equal(outputListResponse.status, 200, await outputListResponse.clone().text());
+  assert.equal(outputListResponse.headers.get("cache-control"), "private, no-store");
+  const outputList = await outputListResponse.json() as any;
+  assert.deepEqual(outputList.outputs, [{
+    id: succeeded.outputs[0].id,
+    runId: runStart.runId,
+    sampleIndex: 0,
+    sampleId: succeeded.outputs[0].sampleId,
+    logicalName: "result",
+    declaredRole: "data",
+    outputType: succeeded.outputs[0].outputType,
+    mediaType: "application/json",
+    sizeBytes: succeeded.outputs[0].sizeBytes,
+    sha256: succeeded.outputs[0].sha256,
+    createdAt: succeeded.outputs[0].createdAt,
+  }]);
+  assert.equal(JSON.stringify(outputList).includes("relativePath"), false);
+  assert.equal(JSON.stringify(outputList).includes("objectFileId"), false);
+  const downloadUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs/${succeeded.outputs[0].id}/download`;
+  const fullDownload = await fetch(downloadUrl, { headers: outputHeaders });
+  assert.equal(fullDownload.status, 200, await fullDownload.clone().text());
+  assert.equal(fullDownload.headers.get("cache-control"), "private, no-store");
+  assert.equal(fullDownload.headers.get("content-type"), "application/json");
+  assert.equal(fullDownload.headers.get("x-content-type-options"), "nosniff");
+  assert.match(fullDownload.headers.get("content-disposition") ?? "",
+    /^attachment; filename="output_[A-Za-z0-9_-]+\.json"$/u);
+  assert.equal(fullDownload.headers.get("etag"),
+    `"sha256-${succeeded.outputs[0].sha256}"`);
+  const fullBytes = Buffer.from(await fullDownload.arrayBuffer());
+  assert.equal(fullBytes.byteLength, succeeded.outputs[0].sizeBytes);
+  assert.equal(JSON.parse(fullBytes.toString("utf8")).value, 2);
+
+  const rangeDownload = await fetch(downloadUrl, {
+    headers: { ...outputHeaders, range: "bytes=0-9" },
+  });
+  assert.equal(rangeDownload.status, 206, await rangeDownload.clone().text());
+  assert.equal(rangeDownload.headers.get("content-range"),
+    `bytes 0-9/${succeeded.outputs[0].sizeBytes}`);
+  assert.equal((await rangeDownload.arrayBuffer()).byteLength, 10);
+  const headDownload = await fetch(downloadUrl, {
+    method: "HEAD",
+    headers: { ...outputHeaders, range: "bytes=0-0" },
+  });
+  assert.equal(headDownload.status, 206);
+  assert.equal(headDownload.headers.get("content-length"), "1");
+  assert.equal((await headDownload.arrayBuffer()).byteLength, 0);
+  const invalidRange = await fetch(downloadUrl, {
+    headers: { ...outputHeaders, range: "bytes=0-1,3-4" },
+  });
+  assert.equal(invalidRange.status, 416);
+  assert.equal(invalidRange.headers.get("content-range"),
+    `bytes */${succeeded.outputs[0].sizeBytes}`);
+  const internalOutput = current.productStore!.listRunOutputs(runStart.runId)[0]!;
+  const committedOutputPath = join(
+    base,
+    "product",
+    "objects",
+    "projects",
+    project.id,
+    "runs",
+    runStart.runId,
+    internalOutput.file.relativePath,
+  );
+  const drifted = Buffer.from(fullBytes);
+  drifted[0] = drifted[0] === 0x7b ? 0x5b : 0x7b;
+  await writeFile(committedOutputPath, drifted);
+  const integrityFailure = await fetch(downloadUrl, { headers: outputHeaders });
+  assert.equal(integrityFailure.status, 500);
+  const integrityError = await integrityFailure.json() as any;
+  assert.equal(integrityError.error.code, "output_integrity_failed");
+  assert.equal(JSON.stringify(integrityError).includes(committedOutputPath), false);
+  assert.equal(JSON.stringify(integrityError).includes(succeeded.outputs[0].sha256), false);
+  await writeFile(committedOutputPath, fullBytes);
+  const crossRun = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/run_other_scope/outputs/${succeeded.outputs[0].id}/download`,
+    { headers: outputHeaders },
+  );
+  assert.equal(crossRun.status, 404);
+  const wrongSession = await fetch(downloadUrl, {
+    headers: { ...outputHeaders, cookie: "riff_app=wrong-session" },
+  });
+  assert.equal(wrongSession.status, 403);
+  const missingFetchMetadata = await fetch(downloadUrl, {
+    headers: { cookie: appCookie },
+  });
+  assert.equal(missingFetchMetadata.status, 403);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const allowed = await fetch(downloadUrl, {
+      headers: { ...outputHeaders, range: "bytes=0-0" },
+    });
+    assert.equal(allowed.status, 206);
+    await allowed.arrayBuffer();
+  }
+  const rateLimited = await fetch(downloadUrl, {
+    headers: { ...outputHeaders, range: "bytes=0-0" },
+  });
+  assert.equal(rateLimited.status, 429);
+  assert.equal(rateLimited.headers.get("retry-after"), "1");
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  const afterRateWindow = await fetch(downloadUrl, {
+    headers: { ...outputHeaders, range: "bytes=0-0" },
+  });
+  assert.equal(afterRateWindow.status, 206);
+  await afterRateWindow.arrayBuffer();
+  current.productStore!.trashResource(
+    "project",
+    project.id,
+    "2026-07-25T01:00:00.000Z",
+  );
+  const trashedProjectOutputList = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs`,
+    { headers: outputHeaders },
+  );
+  assert.equal(trashedProjectOutputList.status, 404);
+  assert.equal(
+    (await trashedProjectOutputList.json() as any).error.code,
+    "output_not_found",
+  );
+  current.productStore!.restoreResource(
+    "project",
+    project.id,
+    "2026-07-25T01:00:01.000Z",
+  );
+  const restoredProjectOutputList = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${runStart.runId}/outputs`,
+    { headers: outputHeaders },
+  );
+  assert.equal(restoredProjectOutputList.status, 200);
+
   await current.close();
   current = undefined;
   started = await start(base);
@@ -295,6 +483,13 @@ target.write_text(json.dumps({
     "succeeded",
   );
   assert.deepEqual(succeededAfterRestart, succeeded);
+  const restartedCookie = await bootstrapAppSession(baseUrl);
+  const restartedDownload = await fetch(downloadUrl.replace(
+    /^http:\/\/localhost:\d+/u,
+    baseUrl,
+  ), { headers: browserOutputHeaders(restartedCookie) });
+  assert.equal(restartedDownload.status, 200, await restartedDownload.clone().text());
+  assert.deepEqual(Buffer.from(await restartedDownload.arrayBuffer()), fullBytes);
   const messagesAfterRestart = await listMessages(baseUrl, conversation.id);
   assert.deepEqual(messagesAfterRestart, successMessages);
   assert.equal(messagesAfterRestart.filter((message) =>

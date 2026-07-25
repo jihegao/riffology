@@ -5,7 +5,21 @@ import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 
 export class MilestoneA2Api {
   readonly service: AgentWorkspaceService;
-  constructor(service: AgentWorkspaceService) { this.service = service; }
+  readonly #authorizeProductRead?: (request: IncomingMessage) => void;
+  #activeOutputDownloads = 0;
+  readonly #activeOutputDownloadsByRun = new Map<string, number>();
+  readonly #outputDownloadStarts: number[] = [];
+  readonly #outputDownloadStartsByRun = new Map<string, number[]>();
+
+  constructor(
+    service: AgentWorkspaceService,
+    options: Readonly<{
+      authorizeProductRead?: (request: IncomingMessage) => void;
+    }> = {},
+  ) {
+    this.service = service;
+    this.#authorizeProductRead = options.authorizeProductRead;
+  }
 
   async handle(request: IncomingMessage, response: ServerResponse, url: URL, parts: string[]): Promise<boolean> {
     if (request.method === "POST" && url.pathname === "/a2/mcp") {
@@ -72,6 +86,17 @@ export class MilestoneA2Api {
       }
       if (request.method === "GET" && parts.length === 5) {
         json(response, 200, this.service.getRun(projectId, parts[4]));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 6 && parts[5] === "outputs") {
+        this.#authorizeOutputRead(request, url);
+        privateJson(response, 200, this.service.listRunOutputs(projectId, parts[4]));
+        return true;
+      }
+      if ((request.method === "GET" || request.method === "HEAD")
+        && parts.length === 8 && parts[5] === "outputs" && parts[7] === "download") {
+        this.#authorizeOutputRead(request, url);
+        this.#downloadOutput(request, response, projectId, parts[4], parts[6]);
         return true;
       }
       if (request.method === "POST" && parts.length === 6 && parts[5] === "cancel") {
@@ -189,7 +214,221 @@ export class MilestoneA2Api {
     }
     return false;
   }
+
+  #authorizeOutputRead(request: IncomingMessage, url: URL): void {
+    if (url.search !== "") {
+      throw new ApiError(422, "invalid_output_request",
+        "Output reads do not accept query parameters.");
+    }
+    const contentLength = exactRawHeader(request, "content-length");
+    if (exactRawHeader(request, "transfer-encoding") !== undefined
+      || contentLength !== undefined && contentLength !== "0") {
+      throw new ApiError(422, "invalid_output_request",
+        "Output reads require an empty request body.");
+    }
+    if (exactRawHeader(request, "if-none-match") !== undefined
+      || exactRawHeader(request, "if-modified-since") !== undefined
+      || exactRawHeader(request, "if-range") !== undefined) {
+      throw new ApiError(422, "invalid_output_request",
+        "Conditional output reads are not supported.");
+    }
+    if (!this.#authorizeProductRead) {
+      throw new ApiError(403, "output_access_denied",
+        "The output is unavailable outside the browser app session.");
+    }
+    try {
+      this.#authorizeProductRead(request);
+    } catch {
+      throw new ApiError(403, "output_access_denied",
+        "The output is unavailable outside the browser app session.");
+    }
+  }
+
+  #downloadOutput(
+    request: IncomingMessage,
+    response: ServerResponse,
+    projectId: string,
+    runId: string,
+    outputId: string,
+  ): void {
+    const now = Date.now();
+    const cutoff = now - 1_000;
+    while (this.#outputDownloadStarts[0] !== undefined
+      && this.#outputDownloadStarts[0] <= cutoff) {
+      this.#outputDownloadStarts.shift();
+    }
+    for (const [key, starts] of this.#outputDownloadStartsByRun) {
+      while (starts[0] !== undefined && starts[0] <= cutoff) starts.shift();
+      if (starts.length === 0) this.#outputDownloadStartsByRun.delete(key);
+    }
+    const runStarts = this.#outputDownloadStartsByRun.get(runId) ?? [];
+    if (this.#outputDownloadStarts.length >= 24 || runStarts.length >= 8
+      || !this.#outputDownloadStartsByRun.has(runId)
+        && this.#outputDownloadStartsByRun.size >= 256) {
+      response.setHeader("retry-after", "1");
+      throw new ApiError(429, "output_download_rate_limited",
+        "Output download requests are temporarily limited.");
+    }
+    this.#outputDownloadStarts.push(now);
+    runStarts.push(now);
+    this.#outputDownloadStartsByRun.set(runId, runStarts);
+    if (this.#activeOutputDownloads >= 4) {
+      throw new ApiError(503, "output_download_busy",
+        "Too many output downloads are active.");
+    }
+    const runDownloads = this.#activeOutputDownloadsByRun.get(runId) ?? 0;
+    if (runDownloads >= 2) {
+      throw new ApiError(503, "output_download_busy",
+        "Too many output downloads are active for this run.");
+    }
+    this.#activeOutputDownloads += 1;
+    this.#activeOutputDownloadsByRun.set(runId, runDownloads + 1);
+    let slotHeld = true;
+    let streamTimer: ReturnType<typeof setTimeout> | undefined;
+    let opened: ReturnType<AgentWorkspaceService["openRunOutputDownload"]> | undefined;
+    let handedOff = false;
+    const release = (): void => {
+      if (!slotHeld) return;
+      slotHeld = false;
+      if (streamTimer) clearTimeout(streamTimer);
+      opened?.read.close();
+      opened = undefined;
+      this.#activeOutputDownloads -= 1;
+      const remaining = (this.#activeOutputDownloadsByRun.get(runId) ?? 1) - 1;
+      if (remaining > 0) this.#activeOutputDownloadsByRun.set(runId, remaining);
+      else this.#activeOutputDownloadsByRun.delete(runId);
+    };
+    try {
+      opened = this.service.openRunOutputDownload(projectId, runId, outputId);
+      let range: Readonly<{ start: number; end: number }> | undefined;
+      try {
+        range = outputRange(exactRawHeader(request, "range"), opened.read.sizeBytes);
+      } catch (error) {
+        response.setHeader("content-range", `bytes */${opened.read.sizeBytes}`);
+        throw error;
+      }
+      const start = range?.start ?? 0;
+      const end = range?.end ?? Math.max(0, opened.read.sizeBytes - 1);
+      const length = range ? end - start + 1 : opened.read.sizeBytes;
+      const headers: Record<string, string> = {
+        "accept-ranges": "bytes",
+        "cache-control": "private, no-store",
+        "content-disposition": `attachment; filename="${downloadFilename(opened.output.id, opened.output.mediaType)}"`,
+        "content-length": String(length),
+        "content-security-policy": "sandbox",
+        "content-type": safeDownloadMediaType(opened.output.mediaType),
+        etag: `"sha256-${opened.output.sha256}"`,
+        "x-content-type-options": "nosniff",
+      };
+      if (range) headers["content-range"] = `bytes ${start}-${end}/${opened.read.sizeBytes}`;
+      if (request.method === "HEAD") {
+        response.writeHead(range ? 206 : 200, headers);
+        response.end();
+        release();
+        return;
+      }
+      const stream = opened.read.stream(range);
+      const onError = (): void => {
+        release();
+        response.destroy();
+      };
+      stream.once("error", onError);
+      response.once("close", release);
+      response.once("finish", release);
+      streamTimer = setTimeout(() => {
+        response.destroy();
+        release();
+      }, 30_000);
+      streamTimer.unref?.();
+      response.writeHead(range ? 206 : 200, headers);
+      handedOff = true;
+      stream.pipe(response);
+    } finally {
+      if (!handedOff) release();
+    }
+  }
 }
+
+const exactRawHeader = (
+  request: IncomingMessage,
+  name: string,
+): string | undefined => {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === name) {
+      values.push(request.rawHeaders[index + 1] ?? "");
+    }
+  }
+  if (values.length > 1) {
+    throw new ApiError(422, "invalid_output_request",
+      "The output request contains a duplicate header.");
+  }
+  return values[0];
+};
+
+const outputRange = (
+  value: string | undefined,
+  size: number,
+): Readonly<{ start: number; end: number }> | undefined => {
+  if (value === undefined) return undefined;
+  if (value.length > 100 || !/^bytes=(?:0|[1-9]\d*)-(?:0|[1-9]\d*)$/u.test(value)) {
+    throw new ApiError(416, "range_not_satisfiable",
+      "The output byte range is not satisfiable.");
+  }
+  const [startText, endText] = value.slice(6).split("-");
+  const start = Number(startText);
+  const end = Number(endText);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+    || start < 0 || end < start || end >= size) {
+    throw new ApiError(416, "range_not_satisfiable",
+      "The output byte range is not satisfiable.");
+  }
+  return Object.freeze({ start, end });
+};
+
+const safeDownloadMediaType = (value: string): string =>
+  new Set([
+    "application/json",
+    "application/x-ndjson",
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "text/csv",
+    "text/plain",
+  ]).has(value.toLowerCase())
+    ? value.toLowerCase()
+    : "application/octet-stream";
+
+const downloadFilename = (outputId: string, mediaType: string): string => {
+  const extension = new Map([
+    ["application/json", "json"],
+    ["application/x-ndjson", "ndjson"],
+    ["application/pdf", "pdf"],
+    ["image/jpeg", "jpg"],
+    ["image/png", "png"],
+    ["text/csv", "csv"],
+    ["text/plain", "txt"],
+  ]).get(mediaType.toLowerCase()) ?? "bin";
+  const safeId = /^[A-Za-z0-9_-]{3,128}$/u.test(outputId)
+    ? outputId
+    : "output";
+  return `${safeId}.${extension}`;
+};
+
+const privateJson = (
+  response: ServerResponse,
+  status: number,
+  payload: unknown,
+): void => {
+  const bytes = Buffer.from(JSON.stringify(payload));
+  response.writeHead(status, {
+    "cache-control": "private, no-store",
+    "content-length": bytes.byteLength,
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(bytes);
+};
 
 const ownerFromRoute = (kind: string, id: string): ConversationOwner => {
   if (kind !== "model" && kind !== "project") throw new ApiError(422, "invalid_owner", "Conversation owner must be model or project.");

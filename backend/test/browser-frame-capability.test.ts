@@ -54,6 +54,48 @@ test("bootstrap requires the exact browser boundary and emits a bounded HTTP coo
   }
 });
 
+test("Product reads require the current exact same-origin app session", () => {
+  const fixture = createFixture();
+  const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
+  const request = {
+    method: "GET",
+    host: APP_HOST,
+    fetchSite: "same-origin",
+    fetchMode: "cors",
+    fetchDest: "empty",
+    cookie: cookiePair(bootstrap.setCookie),
+  };
+  assert.doesNotThrow(() => fixture.capability.authorizeAppRead(request));
+  assert.doesNotThrow(() => fixture.capability.authorizeAppRead({
+    ...request,
+    method: "HEAD",
+    origin: APP_ORIGIN,
+  }));
+  for (const denied of [
+    { ...request, method: "POST" },
+    { ...request, host: BROKER_HOST },
+    { ...request, fetchSite: undefined },
+    { ...request, fetchSite: "same-site" },
+    { ...request, fetchMode: undefined },
+    { ...request, fetchDest: "document" },
+    { ...request, cookie: "riff_app=wrong-token-value-that-is-long-enough" },
+    { ...request, origin: BROKER_ORIGIN },
+    { ...request, authorization: "Bearer agent" },
+  ]) {
+    assert.throws(
+      () => fixture.capability.authorizeAppRead(denied),
+      (error: unknown) => errorCode(
+        denied.method === "POST" ? "browser_method_denied" : "browser_session_denied",
+      )(error),
+    );
+  }
+  fixture.capability.bootstrap(bootstrapRequest());
+  assert.throws(
+    () => fixture.capability.authorizeAppRead(request),
+    errorCode("browser_session_denied"),
+  );
+});
+
 test("HTTPS mode is explicit and adds Secure to both cookie classes", async () => {
   const fixture = createFixture({
     appOrigin: "https://localhost:8787",

@@ -348,19 +348,31 @@ export class BackendApp {
         visualAuthority,
       });
       this.#agentTurnRuntime = turnRuntime;
-      this.a2 = new MilestoneA2Api(new AgentWorkspaceService(
-        this.productStore,
-        a2OpenCode,
-        undefined,
-        options.a2TechnicalChecker,
-        turnRuntime,
-        (capability) => this.#a2McpUrl(capability),
-        (runId, cancellationRequested) => {
-          if (cancellationRequested) this.productRunDispatcher?.requestCancellation(runId);
-          else this.productRunDispatcher?.notify();
+      this.a2 = new MilestoneA2Api(
+        new AgentWorkspaceService(
+          this.productStore,
+          a2OpenCode,
+          undefined,
+          options.a2TechnicalChecker,
+          turnRuntime,
+          (capability) => this.#a2McpUrl(capability),
+          (runId, cancellationRequested) => {
+            if (cancellationRequested) this.productRunDispatcher?.requestCancellation(runId);
+            else this.productRunDispatcher?.notify();
+          },
+          true,
+        ),
+        {
+          authorizeProductRead: (request) => {
+            const frames = this.#browserFrames;
+            const address = this.#browserNetwork?.app;
+            if (this.#listenerMode !== "browser" || !frames || !address) {
+              throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+            }
+            frames.authorizeAppRead(browserAdmission(request, address));
+          },
         },
-        true,
-      ));
+      );
     }
   }
 
@@ -1305,6 +1317,8 @@ const browserAdmission = (
     host: typeof host === "string" ? host : host === undefined ? address.authority : undefined,
     origin: rawBrowserHeader(request, "origin"),
     fetchSite: rawBrowserHeader(request, "sec-fetch-site"),
+    fetchMode: rawBrowserHeader(request, "sec-fetch-mode"),
+    fetchDest: rawBrowserHeader(request, "sec-fetch-dest"),
     cookie: rawBrowserHeader(request, "cookie"),
     csrf: rawBrowserHeader(request, "x-riff-csrf"),
     authorization: rawBrowserHeader(request, "authorization"),

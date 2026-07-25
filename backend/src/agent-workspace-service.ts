@@ -14,6 +14,7 @@ import {
   type FrozenRunStartReceipt,
   type RunLimitsV1,
 } from "./product-store-v2.ts";
+import type { VerifiedObjectRead } from "./object-store.ts";
 import { planExperiment } from "./experiment-planner.ts";
 import {
   assertRunCapabilityV2,
@@ -73,6 +74,16 @@ export type ProjectOutputDto = {
   sha256: string;
   createdAt: string;
 };
+
+export type RunOutputAccessDto = Pick<ProjectOutputDto,
+  "id" | "runId" | "sampleIndex" | "sampleId" | "logicalName"
+  | "declaredRole" | "outputType" | "mediaType" | "sizeBytes" | "sha256"
+  | "createdAt">;
+
+export type RunOutputDownload = Readonly<{
+  output: RunOutputAccessDto;
+  read: VerifiedObjectRead;
+}>;
 
 export type ProjectRunDto = {
   id: string;
@@ -245,6 +256,58 @@ export class AgentWorkspaceService {
       const run = this.store.getRun(projectId, runId);
       return publicRun(run, run.status === "succeeded" ? this.store.listRunOutputs(run.id) : []);
     } catch (error) { throw storeApiError(error); }
+  }
+
+  listRunOutputs(projectIdInput: string, runIdInput: string): {
+    outputs: RunOutputAccessDto[];
+  } {
+    const projectId = boundedId(projectIdInput);
+    const runId = boundedId(runIdInput);
+    try {
+      const project = this.store.getProject(projectId);
+      if (project.lifecycleState === "trashed") {
+        throw new ApiError(404, "output_not_found", "The requested output was not found.");
+      }
+      const run = this.store.getRun(projectId, runId);
+      if (run.contractVersion !== 4 || run.status !== "succeeded") {
+        throw new ApiError(409, "output_not_available",
+          "Outputs are available only for a successful current-contract run.");
+      }
+      const records = this.store.listRunOutputs(runId);
+      if (records.some((record) => record.contractVersion !== 4)) {
+        throw new ApiError(409, "output_not_available",
+          "Outputs are unavailable for this run contract.");
+      }
+      return {
+        outputs: records.map((record) =>
+          publicOutputAccess(record as Extract<OutputIndexRecord, { contractVersion: 4 }>)),
+      };
+    } catch (error) {
+      throw outputApiError(error);
+    }
+  }
+
+  openRunOutputDownload(
+    projectIdInput: string,
+    runIdInput: string,
+    outputIdInput: string,
+  ): RunOutputDownload {
+    const projectId = boundedId(projectIdInput);
+    const runId = boundedId(runIdInput);
+    const outputId = boundedId(outputIdInput);
+    try {
+      const opened = this.store.openRunOutputDownload({
+        projectId,
+        runId,
+        outputId,
+      });
+      return Object.freeze({
+        output: publicOutputAccess(opened.output),
+        read: opened.read,
+      });
+    } catch (error) {
+      throw outputApiError(error);
+    }
   }
 
   startRun(input: {
@@ -773,6 +836,22 @@ const publicOutput = (record: OutputIndexRecord): ProjectOutputDto => ({
   createdAt: record.createdAt,
 });
 
+const publicOutputAccess = (
+  record: Extract<OutputIndexRecord, { contractVersion: 4 }>,
+): RunOutputAccessDto => ({
+  id: record.id,
+  runId: record.runId,
+  sampleIndex: record.sampleIndex,
+  sampleId: record.sampleId,
+  logicalName: record.logicalName,
+  declaredRole: record.declaredRole,
+  outputType: record.outputType,
+  mediaType: record.file.mediaType,
+  sizeBytes: record.file.sizeBytes,
+  sha256: record.file.sha256,
+  createdAt: record.createdAt,
+});
+
 const publicRun = (record: RunRecord, outputs: OutputIndexRecord[]): ProjectRunDto => ({
   id: record.id,
   projectId: record.projectId,
@@ -900,4 +979,19 @@ const storeApiError = (error: unknown): ApiError => {
   if (/reused|already|different|changed|locked|unexpected number|not active and technically executable/u.test(error.message)) return new ApiError(409, "state_conflict", "The request conflicts with current durable state.");
   if (/invalid|required|must|cannot|outside/u.test(error.message)) return new ApiError(422, "invalid_request", "The request violates the Agent workspace contract.");
   return new ApiError(500, "storage_error", "The Agent workspace store rejected the request.");
+};
+
+const outputApiError = (error: unknown): ApiError => {
+  if (error instanceof ApiError) return error;
+  if (error instanceof ProductStoreV2Error) {
+    if (/does not exist/u.test(error.message)) {
+      return new ApiError(404, "output_not_found", "The requested output was not found.");
+    }
+    if (/^output_not_available:/u.test(error.message)) {
+      return new ApiError(409, "output_not_available",
+        "Outputs are available only for a successful current-contract run.");
+    }
+  }
+  return new ApiError(500, "output_integrity_failed",
+    "The output failed its integrity check.");
 };

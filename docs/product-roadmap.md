@@ -35,8 +35,8 @@
 > schema-v8 Store/recovery evidence while public visual starts still rejected;
 > A3-2a2 real visual lifecycle and the A3-2b isolated broker/frame/WebSocket
 > boundary are now published. A3-2c scoped Playwright is in progress: c1
-> authority/audit, c2 bounded read observation, and c3 typed interaction are
-> merged; c4 security closeout remains pending.
+> authority/audit, c2 bounded read observation, c3 typed interaction, and c4
+> security closeout are merged.
 > A3-2a1 remains schema/Store/recovery plus
 > negative admission only, hardening the existing v4 port/health shape and
 > rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
@@ -58,8 +58,9 @@
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with
 > exact process/listener/peer binding, fresh script-disabled browser snapshots,
 > and no caller-controlled target or browser authority. A3-2c3 interaction was
-> merged through PR #41. A3-2c4 live-CDP/real-Chromium security closeout is a
-> candidate on its review branch and remains pending review and merge.
+> merged through PR #41. A3-2c4 live-CDP/real-Chromium security closeout was
+> merged through PR #42. A3-2d1 output list/download is a review-branch
+> candidate.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

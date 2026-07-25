@@ -150,8 +150,8 @@ inspection reuses that same socket, and the response is streamed under fixed
 header/body/deadline limits. DOM, accessibility, and screenshot reads render a
 fresh, script-disabled snapshot with all later HTTP and WebSocket traffic
 blocked. Conversation/session/run/turn drift aborts in-flight work. A3-2c3
-interaction was merged through PR #41. A3-2c4's real live-CDP/Chromium negative
-matrix is a review-branch candidate and remains pending review and merge.
+interaction was merged through PR #41 and A3-2c4's real live-CDP/Chromium
+negative matrix through PR #42.
 
 The two browser arms are deliberately disjoint. A human browser reaches a
 visual page only through the A3-2b app/broker/frame/WebSocket capability. The

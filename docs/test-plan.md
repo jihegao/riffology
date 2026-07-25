@@ -561,12 +561,12 @@ The remaining claims begin only in the later gates:
   zero failed, and one optional installed-OpenCode smoke skipped; web passes
   104/104, network entry 1/1, and the production build succeeds. Three
   independent c3 reviews report no P0/P1 merge blocker.
-  The c4 candidate matrix passes 6/6 in real Chromium. It covers the actual
+  The c4 merge matrix passes 6/6 in real Chromium. It covers the actual
   BackendApp/MCP/runtime/authority/interactor chain with a live-CDP endpoint,
   fresh-profile and ambient frame-secret canaries, side-effect denials, exact
   empty-input dispatch, real persistence-byte and bounded audit/MCP/error/child
-  scans, and legacy-tool zero-dispatch. The c4 security closeout remains
-  pending independent review and merge.
+  scans, and legacy-tool zero-dispatch. Two independent final reviews reported
+  no P0/P1 blocker before PR #42 merged.
   The merged c1 gate reports backend 500 total/499 passed/zero
   failed/one optional installed-OpenCode smoke skipped, web 104/104, network
   entry 1/1, a successful production build, and independent security review
@@ -575,15 +575,17 @@ The remaining claims begin only in the later gates:
   installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
   the production build succeeds. Independent c2 security review reports no
   P0/P1 merge blocker. The preceding c2 result is not c3 or c4 evidence.
-- **A3-2d outputs/events/direct controls:** successful-run output list/download
-  rechecks same-run ownership, safe name, path, size, digest, MIME, range, and
-  limits; declared diagnostic NDJSON ingestion is atomic and enforces schema,
+- **A3-2d outputs/events/direct controls:** the d1 review-branch candidate adds
+  successful-run output list/download and rechecks same-run ownership, safe
+  name, path, size, digest, MIME, range, and limits. Later slices must prove
+  declared diagnostic NDJSON ingestion is atomic and enforces schema,
   structure, depth, string, count, and byte bounds; pagination uses tamper-
   evident opaque cursors bound to run and normalized filters. Direct cancel,
   download, trash, and restore remain usable with OpenCode unavailable and
   reject cross-owner, cross-run, nonterminal, stale, tampered, and restart
-  cases. List/download/event reads require exact app session/owner/Host/Fetch
-  Metadata and emit private no-store responses; mutations additionally require
+  cases. List/download/event reads require the current single-user app session,
+  exact Host/Fetch Metadata, and Project/run/output ownership tuple and emit
+  private no-store responses; mutations additionally require
   exact Origin and CSRF. IDs are not bearer credentials. Commands
   bind idempotency and expected revision/closure digest, with exact trash
   confirmation. Download tests use one no-follow open descriptor, verify the

@@ -133,6 +133,8 @@ export type BrowserRequestAdmission = Readonly<{
   host: string | undefined;
   origin?: string | readonly string[];
   fetchSite?: string | readonly string[];
+  fetchMode?: string | readonly string[];
+  fetchDest?: string | readonly string[];
   cookie?: string | readonly string[];
   csrf?: string | readonly string[];
   authorization?: string | readonly string[];
@@ -231,6 +233,32 @@ export class BrowserFrameCapability {
       generation: session.generation,
       setCookie: serializeCookie("riff_app", cookieValue, "/api/", session.expiresAtMs, now, this.#secureCookies),
     };
+  }
+
+  /**
+   * Authorizes a browser-originated, read-only Product API request. The app
+   * session is proof of a current human browser session, while Project/run
+   * ownership remains bound and checked by the Product service.
+   */
+  authorizeAppRead(request: BrowserRequestAdmission): void {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      throw denied(405, "browser_method_denied");
+    }
+    if (request.host !== this.#appOrigin.host
+      || exactSingle(request.fetchSite) !== "same-origin"
+      || exactSingle(request.fetchMode) !== "cors"
+      || exactSingle(request.fetchDest) !== "empty"
+      || request.authorization !== undefined
+      || request.origin !== undefined && exactSingle(request.origin) !== this.#appOrigin.origin) {
+      throw denied(403, "browser_session_denied");
+    }
+    const session = this.#appSession;
+    const now = exactNow(this.#now());
+    const cookie = exactCookie(request.cookie, "riff_app");
+    if (!session || session.expiresAtMs <= now || !cookie
+      || !safeDigestEqual(session.cookieDigest, digest(cookie))) {
+      throw denied(403, "browser_session_denied");
+    }
   }
 
   async issueFrameSession(
