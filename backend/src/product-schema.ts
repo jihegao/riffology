@@ -2927,6 +2927,16 @@ export const PRODUCT_SCHEMA_V10_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'visual agent audit facts are append-only'); END;
 `;
 
+export const PRODUCT_SCHEMA_V11_SQL = SQL`
+  CREATE UNIQUE INDEX one_visual_interaction_confirmation_mint_v11
+    ON visual_agent_audit_facts(
+      conversation_id,
+      turn_id,
+      action_commitment_sha256
+    )
+    WHERE fact_kind = 'mint' AND operation_kind = 'interact';
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -2938,4 +2948,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 8, sql: PRODUCT_SCHEMA_V8_SQL }),
   Object.freeze({ version: 9, sql: PRODUCT_SCHEMA_V9_SQL }),
   Object.freeze({ version: 10, sql: PRODUCT_SCHEMA_V10_SQL }),
+  Object.freeze({ version: 11, sql: PRODUCT_SCHEMA_V11_SQL }),
 ]);

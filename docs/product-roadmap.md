@@ -57,8 +57,9 @@
 > A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 > (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with
 > exact process/listener/peer binding, fresh script-disabled browser snapshots,
-> and no caller-controlled target or browser authority. A3-2c3 interaction and
-> A3-2c4 live-CDP/complete Chromium security closeout remain pending.
+> and no caller-controlled target or browser authority. A3-2c3 interaction is
+> published in PR #41 and remains pending merge; A3-2c4 live-CDP/complete
+> Chromium security closeout remains pending.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

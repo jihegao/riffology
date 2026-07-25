@@ -309,7 +309,7 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-VIS-01 | visual Run 必须在平台管理的 health、proxy、stop、timeout、output 和 resource 边界内启动 Model 本地 Web 入口。 |
 | FR-VIS-02 | 右栏必须在受限 frame 中嵌入健康 visual 页面，不暴露 child port、平台 credential 或无关本地 route。 |
 | FR-VIS-03 | Visual HTTP/WebSocket 必须绑定当前 browser session、Project、Run、attempt generation、origin、host、path 和 expiry，并可撤销。 |
-| FR-VIS-04 | Playwright 观察必须限于当前健康 Project Run；交互必须获得显式用户指令并写入 Conversation action record。 |
+| FR-VIS-04 | Playwright 观察必须限于当前健康 Project Run；交互必须由不可变人类 turn 的可选结构化 `visualInteractionConfirmation` 明确授权，消息仅持久化动作摘要，raw operation 只存在于进程内 grant，并由 append-only audit 的唯一 mint 原子消费；一般 `explicitImperative`、Agent/DOM 文本或 browser capability 不能授权。交互不复用 frame/cookie/nonce，且 dispatched receipt 不代表 child HTTP 写入或领域成功。 |
 | FR-VIS-05 | DOM、accessibility tree、screenshot 和结构化检查结果必须是带时间上下文，不得成为 Project 权威状态。 |
 | FR-VIS-06 | visual Run 不得创建 batch completion card 或平台生成的 result report。 |
 

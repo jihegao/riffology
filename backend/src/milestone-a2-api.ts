@@ -175,12 +175,13 @@ export class MilestoneA2Api {
         return true;
       }
       if (request.method === "POST" && parts.length === 4 && parts[3] === "turns") {
-        const body = await strictJsonBody(request, ["requestKey", "text", "attachmentIds"], ["attachmentIds"]);
+        const body = await strictJsonBody(request, ["requestKey", "text", "attachmentIds", "visualInteractionConfirmation"], ["attachmentIds", "visualInteractionConfirmation"]);
         const result = await this.service.runTurn({
           conversationId,
           requestKey: requiredString(body.requestKey, "requestKey"),
           text: requiredString(body.text, "text"),
           ...(body.attachmentIds === undefined ? {} : { attachmentIds: stringArray(body.attachmentIds, "attachmentIds") }),
+          ...(body.visualInteractionConfirmation === undefined ? {} : { visualInteractionConfirmation: visualInteractionConfirmation(body.visualInteractionConfirmation) }),
         });
         json(response, result.mode === "live" ? 200 : 503, result);
         return true;
@@ -219,6 +220,24 @@ const strictJsonBody = async (request: IncomingMessage, allowed: string[], optio
 const requiredString = (value: unknown, name: string): string => {
   if (typeof value !== "string") throw new ApiError(422, "invalid_request", `${name} must be text.`);
   return value;
+};
+
+const visualInteractionConfirmation = (value: unknown): Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid.");
+  const action = value as Record<string, unknown>;
+  if (!new Set(["click", "type", "select"]).has(action.kind)
+    || Object.keys(action).some((key) => !["kind", "locator", "value"].includes(key))
+    || (action.kind === "click" ? "value" in action : typeof action.value !== "string")) throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid.");
+  const locator = action.locator;
+  if (!locator || typeof locator !== "object" || Array.isArray(locator)) throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid.");
+  const record = locator as Record<string, unknown>;
+  const valid = record.kind === "role_name"
+    ? Object.keys(record).every((key) => ["kind", "role", "name"].includes(key)) && typeof record.role === "string" && typeof record.name === "string"
+    : record.kind === "label"
+      ? Object.keys(record).every((key) => ["kind", "label"].includes(key)) && typeof record.label === "string"
+      : false;
+  if (!valid) throw new ApiError(422, "invalid_visual_interaction_confirmation", "The visual interaction confirmation is invalid.");
+  return action;
 };
 
 const requiredObject = (value: unknown, name: string): Record<string, unknown> => {

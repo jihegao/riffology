@@ -6,6 +6,12 @@ import type {
   VisualAgentObserver,
   VisualObservationKind,
 } from "./visual-agent-observer.ts";
+import {
+  VisualAgentInteractionError,
+  type VisualAgentInteractor,
+  type VisualInteractionOperation,
+  type VisualInteractionReceipt,
+} from "./visual-agent-interactor.ts";
 
 export type VisualAgentLocator =
   | Readonly<{ kind: "role_name"; role: string; name: string }>
@@ -99,7 +105,7 @@ export type MintVisualAgentCapabilityInput = Readonly<{
   turnId: string;
   externalSessionGeneration: number;
   operation: VisualAgentOperation;
-  intentAuthority: "explicit" | "proposal_only";
+  intentAuthority: "explicit" | "proposal_only" | "visual_interaction_confirmed";
 }>;
 
 declare const consumedVisualAgentCapabilityBrand: unique symbol;
@@ -127,9 +133,11 @@ type Grant = {
 const DEFAULT_TTL_MS = 60_000;
 const DEFAULT_MAX_GRANTS = 1_024;
 const DEFAULT_MAX_ACTIVE_OBSERVATIONS = 4;
+const DEFAULT_MAX_ACTIVE_INTERACTIONS = 1;
 const MAX_TTL_MS = 60_000;
 const MAX_GRANTS = 4_096;
 const MAX_ACTIVE_OBSERVATIONS = 16;
+const MAX_ACTIVE_INTERACTIONS = 4;
 const LIFECYCLE_REVALIDATION_MS = 100;
 
 /**
@@ -143,9 +151,13 @@ export class VisualAgentAuthority {
   readonly #maxGrants: number;
   readonly #epochDigest: string;
   readonly #observer?: Pick<VisualAgentObserver, "observe">;
+  readonly #interactor?: Pick<VisualAgentInteractor, "interact">;
   readonly #maxActiveObservations: number;
+  readonly #maxActiveInteractions: number;
   readonly #activeObservationsByConversation = new Map<string, number>();
+  readonly #activeInteractionsByConversation = new Map<string, number>();
   #activeObservationCount = 0;
+  #activeInteractionCount = 0;
   readonly #grants = new Map<string, Grant>();
   readonly #consumedHandles = new WeakMap<ConsumedVisualAgentCapability, Grant>();
 
@@ -157,7 +169,9 @@ export class VisualAgentAuthority {
       maxGrants?: number;
       epochSecret?: Uint8Array;
       observer?: Pick<VisualAgentObserver, "observe">;
+      interactor?: Pick<VisualAgentInteractor, "interact">;
       maxActiveObservations?: number;
+      maxActiveInteractions?: number;
     }> = {},
   ) {
     this.#store = store;
@@ -173,10 +187,16 @@ export class VisualAgentAuthority {
       MAX_GRANTS,
     );
     this.#observer = options.observer;
+    this.#interactor = options.interactor;
     this.#maxActiveObservations = boundedPositiveInteger(
       options.maxActiveObservations ?? DEFAULT_MAX_ACTIVE_OBSERVATIONS,
       "Visual observation concurrency limit",
       MAX_ACTIVE_OBSERVATIONS,
+    );
+    this.#maxActiveInteractions = boundedPositiveInteger(
+      options.maxActiveInteractions ?? DEFAULT_MAX_ACTIVE_INTERACTIONS,
+      "Visual interaction concurrency limit",
+      MAX_ACTIVE_INTERACTIONS,
     );
     const epochSecret = Buffer.from(options.epochSecret ?? randomBytes(32));
     if (epochSecret.byteLength < 16) throw new Error("Visual capability epoch secret is too short.");
@@ -185,6 +205,10 @@ export class VisualAgentAuthority {
 
   get observationAvailable(): boolean {
     return this.#observer !== undefined;
+  }
+
+  get interactionAvailable(): boolean {
+    return this.#interactor !== undefined;
   }
 
   /**
@@ -272,12 +296,103 @@ export class VisualAgentAuthority {
     }
   }
 
+  /**
+   * The only c3 execution entrance. The confirmed operation and exact process
+   * target remain private to this authority and its fresh-profile interactor.
+   */
+  async interact(input: MintVisualAgentCapabilityInput & Readonly<{
+    operation: VisualInteractionOperation;
+    intentAuthority: "visual_interaction_confirmed";
+  }>): Promise<VisualInteractionReceipt> {
+    if (!this.#interactor) throw denied();
+    this.#acquireInteraction(input.conversationId);
+    let capability: string | undefined;
+    let consumed: ConsumedVisualAgentCapability | undefined;
+    let grant: Grant | undefined;
+    let mayHaveDispatched = false;
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    let lifecycleTimer: ReturnType<typeof setInterval> | undefined;
+    try {
+      capability = this.mint(input);
+      grant = this.#grants.get(capability);
+      if (!grant) throw denied();
+      consumed = this.consume(capability, input.operation);
+      grant = this.#consumedHandles.get(consumed);
+      if (!grant || grant.terminal || isObservation(grant.operation)) throw denied();
+      const controller = new AbortController();
+      grant.activeAbort = controller;
+      const remainingMs = Math.max(1, grant.expiresAtMs - this.#now().getTime());
+      expiryTimer = setTimeout(() => controller.abort(), remainingMs);
+      expiryTimer.unref?.();
+      lifecycleTimer = setInterval(() => {
+        try {
+          if (!grant || grant.terminal) controller.abort();
+          else this.#revalidate(grant);
+        } catch {
+          controller.abort();
+        }
+      }, LIFECYCLE_REVALIDATION_MS);
+      lifecycleTimer.unref?.();
+      const operation = grant.operation as VisualInteractionOperation;
+      const receipt = await this.#interactor.interact({
+        target: Object.freeze({
+          runId: grant.target.runId,
+          processAttemptId: grant.target.processAttemptId,
+          pid: grant.target.pid,
+          processStartToken: grant.target.processStartToken,
+          processGroupId: grant.target.processGroupId,
+          loopbackHost: grant.target.loopbackHost,
+          loopbackPort: grant.target.loopbackPort,
+        }),
+        operation,
+        assertLive: () => {
+          if (!grant || grant.terminal || controller.signal.aborted) throw denied();
+          this.#revalidate(grant);
+        },
+        signal: controller.signal,
+      });
+      mayHaveDispatched = true;
+      if (controller.signal.aborted || grant.terminal) throw denied();
+      this.#revalidate(grant);
+      this.recordOutcome(consumed, {
+        status: "succeeded",
+        code: "interaction_dispatched",
+      });
+      return receipt;
+    } catch (error) {
+      if (error instanceof VisualAgentInteractionError
+        && error.mayHaveDispatched) mayHaveDispatched = true;
+      if (grant && !grant.terminal) {
+        try {
+          this.#terminal(
+            grant,
+            "failure",
+            grant.activeAbort?.signal.aborted || mayHaveDispatched
+              ? "interaction_aborted_or_unknown"
+              : "interaction_failed",
+            this.#now(),
+          );
+        } catch {
+          this.#deleteGrant(grant);
+        }
+      }
+      throw denied();
+    } finally {
+      if (expiryTimer) clearTimeout(expiryTimer);
+      if (lifecycleTimer) clearInterval(lifecycleTimer);
+      if (grant) delete grant.activeAbort;
+      if (consumed) this.#consumedHandles.delete(consumed);
+      this.#releaseInteraction(input.conversationId);
+    }
+  }
+
   mint(input: MintVisualAgentCapabilityInput): string {
     this.#sweepExpired();
     if (this.#grants.size >= this.#maxGrants) throw denied();
-    const operation = normalizeOperation(input.operation);
+    const operation = normalizeVisualAgentOperation(input.operation);
     const operationKind = isObservation(operation) ? "observe" : "interact";
-    if (operationKind === "interact" && input.intentAuthority !== "explicit") throw denied();
+    if (operationKind === "interact"
+      && input.intentAuthority !== "visual_interaction_confirmed") throw denied();
     const now = this.#now();
     assertDate(now);
     let scope: VisualAgentTurnScope;
@@ -300,7 +415,7 @@ export class VisualAgentAuthority {
     const capability = randomBytes(32).toString("base64url");
     const capabilityRefDigest = sha256(capability);
     const processIdentityDigest = digestTarget(target);
-    const commitment = operationCommitment(operation);
+    const commitment = visualAgentOperationCommitment(operation);
     const grant: Grant = {
       capabilityRefDigest,
       scope,
@@ -340,8 +455,8 @@ export class VisualAgentAuthority {
       throw denied();
     }
     try {
-      const requested = normalizeOperation(requestedOperation);
-      const requestedCommitment = operationCommitment(requested);
+      const requested = normalizeVisualAgentOperation(requestedOperation);
+      const requestedCommitment = visualAgentOperationCommitment(requested);
       if (!equalDigest(requestedCommitment.digest, grant.actionCommitmentDigest)
         || now.getTime() >= grant.expiresAtMs
         || !equalDigest(this.#epochDigest, grant.capabilityEpochDigest)) {
@@ -487,11 +602,32 @@ export class VisualAgentAuthority {
       || !conversationId
       || Buffer.byteLength(conversationId, "utf8") > 256
       || this.#activeObservationCount >= this.#maxActiveObservations
+      || (this.#activeInteractionsByConversation.get(conversationId) ?? 0) > 0
       || (this.#activeObservationsByConversation.get(conversationId) ?? 0) >= 1) {
       throw denied();
     }
     this.#activeObservationCount += 1;
     this.#activeObservationsByConversation.set(conversationId, 1);
+  }
+
+  #acquireInteraction(conversationId: string): void {
+    if (typeof conversationId !== "string"
+      || !conversationId
+      || Buffer.byteLength(conversationId, "utf8") > 256
+      || this.#activeInteractionCount >= this.#maxActiveInteractions
+      || (this.#activeObservationsByConversation.get(conversationId) ?? 0) > 0
+      || (this.#activeInteractionsByConversation.get(conversationId) ?? 0) >= 1) {
+      throw denied();
+    }
+    this.#activeInteractionCount += 1;
+    this.#activeInteractionsByConversation.set(conversationId, 1);
+  }
+
+  #releaseInteraction(conversationId: string): void {
+    if ((this.#activeInteractionsByConversation.get(conversationId) ?? 0) > 0) {
+      this.#activeInteractionsByConversation.delete(conversationId);
+      this.#activeInteractionCount -= 1;
+    }
   }
 
   #releaseObservation(conversationId: string): void {
@@ -551,7 +687,7 @@ export class VisualAgentAuthorityError extends Error {
 
 const denied = (): VisualAgentAuthorityError => new VisualAgentAuthorityError();
 
-const normalizeOperation = (operation: VisualAgentOperation): VisualAgentOperation => {
+export const normalizeVisualAgentOperation = (operation: VisualAgentOperation): VisualAgentOperation => {
   if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw denied();
   if (isObservation(operation)) {
     assertExactKeys(operation, ["kind"]);
@@ -603,7 +739,7 @@ const boundedNfc = (value: unknown, maximumBytes: number): string => {
   return normalized;
 };
 
-const operationCommitment = (
+export const visualAgentOperationCommitment = (
   operation: VisualAgentOperation,
 ): Readonly<{ digest: string; valueDigest: string | null }> => {
   const valueDigest = "value" in operation ? sha256(operation.value) : null;

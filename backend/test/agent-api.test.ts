@@ -127,6 +127,88 @@ const createModel = async (baseUrl: string, commandId = "create-model-a") => {
   return response.json() as Promise<any>;
 };
 
+test("A3-2c3 turn API accepts only the closed typed visual-interaction confirmation schema", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a3-c3-api-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "c3-confirmation-model");
+  const turns = `${baseUrl}/api/conversations/${created.conversation.id}/turns`;
+  for (const [requestKey, visualInteractionConfirmation] of [
+    ["click-value", { kind: "click", locator: { kind: "role_name", role: "button", name: "Run" }, value: "extra" }],
+    ["type-missing-value", { kind: "type", locator: { kind: "label", label: "Crew count" } }],
+    ["css-locator", { kind: "click", locator: { kind: "css", selector: "#run" } }],
+    ["scope-override", { kind: "click", locator: { kind: "role_name", role: "button", name: "Run" }, url: "http://attacker.invalid" }],
+  ] as const) {
+    const response = await post(turns, {
+      requestKey,
+      text: "This text alone is not interaction authority.",
+      attachmentIds: [],
+      visualInteractionConfirmation,
+    });
+    assert.equal(response.status, 422, `${requestKey}: ${await response.clone().text()}`);
+    assert.equal((await response.json() as any).error.code, "invalid_visual_interaction_confirmation");
+  }
+  assert.equal(openCode.prompts.length, 0);
+
+  const check = await post(`${baseUrl}/api/models/${created.model.id}/technical-checks`, {
+    commandId: "c3-publish-model",
+  });
+  assert.equal(check.status, 200);
+  const projectResponse = await post(`${baseUrl}/api/projects`, {
+    commandId: "c3-project",
+    name: "C3 Project",
+    modelId: created.model.id,
+  });
+  assert.equal(projectResponse.status, 201);
+  const project = await projectResponse.json() as any;
+  const conversationResponse = await post(
+    `${baseUrl}/api/objects/project/${project.project.id}/conversations`,
+    {
+      commandId: "c3-project-conversation",
+      name: "C3 Conversation",
+      providerId: "provider-a",
+      modelId: "model-a",
+    },
+  );
+  assert.equal(conversationResponse.status, 201);
+  const projectConversationId = (await conversationResponse.json() as any).id;
+  const locatorCanary = "c3-api-locator-canary";
+  const valueCanary = "c3-api-value-canary";
+  const confirmation = {
+    kind: "type",
+    locator: { kind: "label", label: locatorCanary },
+    value: valueCanary,
+  };
+  const valid = await post(
+    `${baseUrl}/api/conversations/${projectConversationId}/turns`,
+    {
+      requestKey: "c3-valid-confirmation",
+      text: "Carry out the separately confirmed visual interaction.",
+      attachmentIds: [],
+      visualInteractionConfirmation: confirmation,
+    },
+  );
+  assert.equal(valid.status, 200, await valid.clone().text());
+  const payload = await valid.json() as any;
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${locatorCanary}|${valueCanary}`, "u"));
+  assert.match(
+    JSON.stringify(payload),
+    /"actionCommitmentDigest":"[0-9a-f]{64}"/u,
+  );
+  const conflict = await post(
+    `${baseUrl}/api/conversations/${projectConversationId}/turns`,
+    {
+      requestKey: "c3-valid-confirmation",
+      text: "Carry out the separately confirmed visual interaction.",
+      attachmentIds: [],
+      visualInteractionConfirmation: { ...confirmation, value: "replacement" },
+    },
+  );
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json() as any).error.code, "idempotency_conflict");
+});
+
 test("A2 providers, atomic Model creation, conversations, live turn, and public secrecy", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "riff-a2-api-"));
   const openCode = new ApiOpenCode();

@@ -20,7 +20,8 @@ export const PROJECT_AGENT_TOOLS = [
 
 export type AgentToolName =
   | (typeof MODEL_AGENT_TOOLS)[number]
-  | (typeof PROJECT_AGENT_TOOLS)[number];
+  | (typeof PROJECT_AGENT_TOOLS)[number]
+  | "riff_interact_current_visual";
 
 export type AgentToolGrant = {
   conversationId: string;
@@ -30,6 +31,7 @@ export type AgentToolGrant = {
   allowedTools: ReadonlySet<AgentToolName>;
   intentAuthority: "explicit" | "proposal_only";
   attachmentIds: ReadonlySet<string>;
+  confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation;
   expiresAt: number;
 };
 
@@ -43,7 +45,8 @@ export const toolsForOwner = (owner: AgentOwner): ReadonlySet<AgentToolName> => 
 
 export const isAgentToolName = (value: string): value is AgentToolName =>
   (MODEL_AGENT_TOOLS as readonly string[]).includes(value)
-  || (PROJECT_AGENT_TOOLS as readonly string[]).includes(value);
+  || (PROJECT_AGENT_TOOLS as readonly string[]).includes(value)
+  || value === "riff_interact_current_visual";
 
 export const assertToolInputCannotOverrideScope = (input: Readonly<Record<string, unknown>>): void => {
   const forbidden = new Set([

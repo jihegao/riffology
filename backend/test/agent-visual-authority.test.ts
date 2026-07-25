@@ -9,6 +9,7 @@ import {
   type VisualAgentTarget,
   type VisualAgentTurnScope,
 } from "../src/agent-visual-authority.ts";
+import { VisualAgentInteractionError } from "../src/visual-agent-interactor.ts";
 
 const NOW = new Date("2026-07-25T17:00:00.000Z");
 const SCOPE: VisualAgentTurnScope = Object.freeze({
@@ -188,6 +189,113 @@ test("visual authority privately resolves and executes one bounded observation",
     "consume",
     "outcome",
   ]);
+});
+
+test("visual authority consumes one confirmed interaction and records bounded dispatched evidence", async () => {
+  const store = new FakeStore();
+  const seen: unknown[] = [];
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    interactor: {
+      async interact(input) {
+        seen.push(input);
+        input.assertLive();
+        return Object.freeze({
+          schemaVersion: 1,
+          kind: input.operation.kind,
+          status: "dispatched",
+          untrusted: true,
+        });
+      },
+    },
+  });
+  assert.equal(registry.interactionAvailable, true);
+  const operation = {
+    kind: "click",
+    locator: { kind: "role_name", role: "button", name: "Run" },
+  } as const;
+  assert.deepEqual(await registry.interact({
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation,
+    intentAuthority: "visual_interaction_confirmed",
+  }), {
+    schemaVersion: 1,
+    kind: "click",
+    status: "dispatched",
+    untrusted: true,
+  });
+  const input = seen[0] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(input).sort(), ["assertLive", "operation", "signal", "target"]);
+  assert.equal(JSON.stringify(input).includes("project_visual"), false);
+  assert.deepEqual(store.facts.map((fact) => fact.factKind), ["mint", "consume", "outcome"]);
+  assert.equal(store.facts.at(-1)?.outcomeCode, "interaction_dispatched");
+});
+
+test("post-primitive interaction failure is terminal and never claimed safe to retry", async () => {
+  const store = new FakeStore();
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    interactor: {
+      async interact() {
+        throw new VisualAgentInteractionError(true);
+      },
+    },
+  });
+  await assert.rejects(registry.interact({
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation: {
+      kind: "click",
+      locator: { kind: "role_name", role: "button", name: "Run" },
+    },
+    intentAuthority: "visual_interaction_confirmed",
+  }), VisualAgentAuthorityError);
+  assert.deepEqual(store.facts.map((fact) => fact.factKind), ["mint", "consume", "failure"]);
+  assert.equal(store.facts.at(-1)?.outcomeCode, "interaction_aborted_or_unknown");
+});
+
+test("run revocation aborts an in-flight interaction and keeps the confirmation consumed", async () => {
+  const store = new FakeStore();
+  let started!: () => void;
+  const didStart = new Promise<void>((resolve) => { started = resolve; });
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    interactor: {
+      async interact({ signal }) {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+        throw new Error("unreachable");
+      },
+    },
+  });
+  const pending = registry.interact({
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation: {
+      kind: "click",
+      locator: { kind: "role_name", role: "button", name: "Run" },
+    },
+    intentAuthority: "visual_interaction_confirmed",
+  });
+  await didStart;
+  registry.revokeRun(TARGET.runId);
+  await assert.rejects(pending, VisualAgentAuthorityError);
+  assert.deepEqual(store.facts.map((fact) => fact.factKind), ["mint", "consume", "failure"]);
+  assert.equal(store.facts.at(-1)?.outcomeCode, "run_revoked");
 });
 
 test("run revocation aborts an in-flight observation before it can return", async () => {
@@ -415,7 +523,7 @@ test("same token synchronous double consume admits exactly one caller", () => {
   assert.deepEqual(store.facts.map((fact) => fact.factKind), ["mint", "consume"]);
 });
 
-test("interaction authority requires explicit intent and binds action, locator, and value digest", async (context) => {
+test("interaction authority requires action-specific human confirmation and binds action, locator, and value digest", async (context) => {
   const base = {
     kind: "type",
     locator: { kind: "role_name", role: "textbox", name: "Crew count" },
@@ -429,6 +537,17 @@ test("interaction authority requires explicit intent and binds action, locator, 
       externalSessionGeneration: SCOPE.externalSessionGeneration,
       operation: base,
       intentAuthority: "proposal_only",
+    }), VisualAgentAuthorityError);
+    assert.equal(store.facts.length, 0);
+  });
+  await context.test("generic explicit imperative is not action-specific confirmation", () => {
+    const store = new FakeStore();
+    assert.throws(() => authority(store).mint({
+      conversationId: SCOPE.conversationId,
+      turnId: SCOPE.turnId,
+      externalSessionGeneration: SCOPE.externalSessionGeneration,
+      operation: base,
+      intentAuthority: "explicit",
     }), VisualAgentAuthorityError);
     assert.equal(store.facts.length, 0);
   });
@@ -447,7 +566,7 @@ test("interaction authority requires explicit intent and binds action, locator, 
       turnId: SCOPE.turnId,
       externalSessionGeneration: SCOPE.externalSessionGeneration,
       operation,
-      intentAuthority: "explicit",
+      intentAuthority: "visual_interaction_confirmed",
     });
     const consumed = registry.consume(capability, operation);
     registry.recordOutcome(consumed, {
@@ -473,7 +592,7 @@ test("interaction authority requires explicit intent and binds action, locator, 
         turnId: SCOPE.turnId,
         externalSessionGeneration: SCOPE.externalSessionGeneration,
         operation: base,
-        intentAuthority: "explicit",
+        intentAuthority: "visual_interaction_confirmed",
       });
       assert.throws(
         () => registry.consume(capability, substituted as VisualAgentOperation),

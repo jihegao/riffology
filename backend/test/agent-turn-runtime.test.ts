@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
-import type { VisualAgentAuthority } from "../src/agent-visual-authority.ts";
+import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
 import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 
@@ -170,6 +170,61 @@ test("intent classifier is conservative for questions and conditionals", () => {
   assert.equal(explicitImperative("Could you update the model?"), false);
   assert.equal(explicitImperative("如果修改模型会怎样"), false);
   assert.equal(explicitImperative("Explain the model"), false);
+});
+
+test("only a digest-marked Project human turn exposes one empty-schema visual interaction", async (t) => {
+  const calls: unknown[] = [];
+  const visualAuthority = {
+    observationAvailable: false,
+    interactionAvailable: true,
+    async interact(input: unknown) {
+      calls.push(input);
+      await Promise.resolve();
+      return { schemaVersion: 1, kind: "type", status: "dispatched", untrusted: true };
+    },
+    revokeTurn() {}, revokeAll() {},
+  } as unknown as VisualAgentAuthority;
+  const { store, runtime } = setup(t, true, visualAuthority);
+  const operation = normalizeVisualAgentOperation({ kind: "type", locator: { kind: "label", label: "secret-locator-canary" }, value: "secret-value-canary" });
+  const commitment = visualAgentOperationCommitment(operation);
+  const marker = { schemaVersion: 1 as const, actionKind: "type" as const, locatorKind: "label" as const,
+    actionCommitmentDigest: commitment.digest, valueDigest: commitment.valueDigest };
+  store.startAgentTurn({ turnId: "turn_project_interact", userMessageId: "message_project_interact", conversationId: "conversation_project", requestKey: "project-interact", text: "Discuss only", visualInteractionMarker: marker, createdAt: NOW });
+  store.bindAgentSession({ id: "session_project_interact", conversationId: "conversation_project", expectedGeneration: 0, state: "available", externalSessionRef: "opaque-project-interact", at: NOW });
+  const prepared = await runtime.prepare({ conversationId: "conversation_project", turnId: "turn_project_interact", text: "Discuss only", attachmentIds: [], confirmedVisualInteraction: operation });
+  t.after(() => prepared.release());
+  const listed = await runtime.handle(prepared.capability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tool = ((listed?.result as any).tools as any[]).find((item) => item.name === "riff_interact_current_visual");
+  assert.deepEqual(tool?.inputSchema, { type: "object", properties: {}, additionalProperties: false });
+  const stored = JSON.stringify(store.listConversationMessages("conversation_project"));
+  assert.equal(stored.includes("secret-locator-canary"), false);
+  assert.equal(stored.includes("secret-value-canary"), false);
+  const injected = await runtime.handle(prepared.capability, call("riff_interact_current_visual", { value: "replacement" }));
+  assert.equal((injected?.result as any).isError, true);
+  assert.equal(calls.length, 0);
+  const [accepted, concurrentReplay] = await Promise.all([
+    runtime.handle(prepared.capability, call("riff_interact_current_visual")),
+    runtime.handle(prepared.capability, call("riff_interact_current_visual")),
+  ]);
+  assert.equal((accepted?.result as any).isError, undefined, JSON.stringify(accepted));
+  assert.equal((concurrentReplay?.result as any).isError, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    conversationId: "conversation_project", turnId: "turn_project_interact", externalSessionGeneration: 1,
+    operation, intentAuthority: "visual_interaction_confirmed",
+  });
+  const replay = await runtime.handle(prepared.capability, call("riff_interact_current_visual"));
+  assert.equal((replay?.result as any).isError, true);
+  assert.equal(calls.length, 1);
+  assert.throws(() => store.startAgentTurn({ turnId: "turn_project_interact", userMessageId: "message_project_interact", conversationId: "conversation_project", requestKey: "project-interact", text: "Discuss only", visualInteractionMarker: { ...marker, actionCommitmentDigest: "f".repeat(64) }, createdAt: NOW }), /request key was reused/u);
+
+  store.startAgentTurn({ turnId: "turn_model_interact", userMessageId: "message_model_interact", conversationId: "conversation_model", requestKey: "model-interact", text: "Do it", visualInteractionMarker: marker, createdAt: NOW });
+  store.bindAgentSession({ id: "session_model_interact", conversationId: "conversation_model", expectedGeneration: 0, state: "available", externalSessionRef: "opaque-model-interact", at: NOW });
+  const model = await runtime.prepare({ conversationId: "conversation_model", turnId: "turn_model_interact", text: "Do it", attachmentIds: [], confirmedVisualInteraction: operation });
+  t.after(() => model.release());
+  const modelListed = await runtime.handle(model.capability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const modelNames = ((modelListed?.result as any).tools as any[]).map((item) => item.name);
+  assert.equal(modelNames.includes("riff_interact_current_visual"), false);
 });
 
 function setup(

@@ -192,6 +192,7 @@ test("schema v6 migration failure rolls back every recovery table and version ma
       PRODUCT_SCHEMA_MIGRATIONS[7]!,
       PRODUCT_SCHEMA_MIGRATIONS[8]!,
       PRODUCT_SCHEMA_MIGRATIONS[9]!,
+      PRODUCT_SCHEMA_MIGRATIONS[10]!,
     ];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v6_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);

@@ -165,7 +165,7 @@ test("fresh product storage initializes with durable SQLite policy and survives 
   }
 });
 
-test("schema migrations advance sequentially from v1 through v10 and expose Agent and execution records", () => {
+test("schema migrations advance sequentially from v1 through v11 and expose Agent and execution records", () => {
   const database = new DatabaseSync(":memory:");
   try {
     database.exec(PRODUCT_SCHEMA_SQL);
@@ -184,7 +184,7 @@ test("schema migrations advance sequentially from v1 through v10 and expose Agen
   }
 });
 
-test("ordered v2 through v10 migration locks legacy providers and preserves execution migration atomicity", () => {
+test("ordered v2 through v11 migration locks legacy providers and preserves execution migration atomicity", () => {
   const legacy = new DatabaseSync(":memory:");
   try {
     legacy.exec(PRODUCT_SCHEMA_SQL);
@@ -352,6 +352,7 @@ test("schema version drift and failed migrations fail closed with transactional 
       PRODUCT_SCHEMA_MIGRATIONS[7],
       PRODUCT_SCHEMA_MIGRATIONS[8],
       PRODUCT_SCHEMA_MIGRATIONS[9],
+      PRODUCT_SCHEMA_MIGRATIONS[10],
     ]), /missing_table/u);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_schema'").get()), false);
     assert.equal(Boolean(failed.prepare("SELECT 1 FROM sqlite_master WHERE name = 'migration_sentinel'").get()), false);

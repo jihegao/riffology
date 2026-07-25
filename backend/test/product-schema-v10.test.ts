@@ -7,6 +7,7 @@ import {
   initializeProductSchema,
   PRODUCT_SCHEMA_MIGRATIONS,
   PRODUCT_SCHEMA_V10_SQL,
+  PRODUCT_SCHEMA_V11_SQL,
 } from "../src/product-schema.ts";
 
 const DIGEST_A = "a".repeat(64);
@@ -103,14 +104,14 @@ const insertBoundVisualAuthorityFixture = (database: DatabaseSync): {
   };
 };
 
-test("schema v10 migrates v9 without backfill and passes quick_check", () => {
+test("current schema migrates v9 through the v10 audit foundation without backfill and passes quick_check", () => {
   const database = new DatabaseSync(":memory:");
   try {
     installVersion(database, 9);
     initializeProductSchema(database);
 
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
-    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 10);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 11);
     assert.equal((database.prepare("SELECT count(*) AS count FROM visual_agent_audit_facts").get() as { count: number }).count, 0);
     for (const trigger of [
       "visual_agent_audit_binding_v10",
@@ -234,6 +235,56 @@ test("schema v10 production binding trigger rejects mismatched authority tuples 
   }
 });
 
+test("schema v11 durably admits only one interaction mint per turn and action commitment", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    installVersion(database, 10);
+    initializeProductSchema(database);
+    const { insertAudit } = insertBoundVisualAuthorityFixture(database);
+    insertAudit({ id: "mint_confirmation_once", capability: DIGEST_A, fact: "mint" });
+    assert.throws(
+      () => insertAudit({
+        id: "mint_confirmation_replay",
+        capability: "e".repeat(64),
+        fact: "mint",
+      }),
+      /UNIQUE constraint failed/u,
+    );
+    insertAudit({
+      id: "mint_distinct_confirmation",
+      capability: "f".repeat(64),
+      fact: "mint",
+      commitment: GENERATION,
+    });
+    assert.equal(
+      (database.prepare(`SELECT count(*) AS count
+        FROM visual_agent_audit_facts
+        WHERE fact_kind = 'mint' AND operation_kind = 'interact'`).get() as { count: number }).count,
+      2,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("schema v11 migration failure rolls back version markers and its unique index", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    installVersion(database, 10);
+    const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 10), {
+      version: 11,
+      sql: `${PRODUCT_SCHEMA_V11_SQL}\nSELECT * FROM missing_v11_guard;`,
+    }];
+    assert.throws(() => initializeProductSchema(database, broken), /missing_v11_guard/u);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 10);
+    assert.equal(Boolean(database.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type = 'index' AND name = 'one_visual_interaction_confirmation_mint_v11'`).get()), false);
+  } finally {
+    database.close();
+  }
+});
+
 test("schema v10 migration failure rolls back version markers and the new table", () => {
   const database = new DatabaseSync(":memory:");
   try {
@@ -241,7 +292,7 @@ test("schema v10 migration failure rolls back version markers and the new table"
     const broken = [...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 9), {
       version: 10,
       sql: `${PRODUCT_SCHEMA_V10_SQL}\nSELECT * FROM missing_v10_guard;`,
-    }];
+    }, PRODUCT_SCHEMA_MIGRATIONS[10]!];
     assert.throws(() => initializeProductSchema(database, broken), /missing_v10_guard/u);
     assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.equal((database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number }).version, 9);

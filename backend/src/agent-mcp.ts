@@ -40,6 +40,10 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     },
     ["kind"],
   ),
+  riff_interact_current_visual: definition(
+    "Perform the single exact visual interaction explicitly confirmed by the human in this turn.",
+    {},
+  ),
 };
 
 export class AgentMcpServer {
@@ -62,6 +66,7 @@ export class AgentMcpServer {
     allowedTools: ReadonlySet<AgentToolName>;
     intentAuthority?: "explicit" | "proposal_only";
     attachmentIds?: ReadonlySet<string>;
+    confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation;
   }): string {
     if (!input.conversationId || !input.owner.id || !input.turnId || !Number.isSafeInteger(input.externalSessionGeneration) || input.externalSessionGeneration < 1) {
       throw new AgentToolPermissionError("Agent capability scope is invalid.");
@@ -179,6 +184,7 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_transition_temporary_document: ["documentId", "transition"],
     riff_adopt_attachment: ["attachmentId", "purpose", "logicalName"],
     riff_observe_current_visual: ["kind"],
+    riff_interact_current_visual: [],
   };
   if (Object.keys(input).some((key) => !allowed[name].includes(key))) throw new AgentToolPermissionError("Agent tool input includes an unsupported field.");
   const text = (key: string, maximum: number): void => {

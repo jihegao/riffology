@@ -509,7 +509,12 @@ The remaining claims begin only in the later gates:
 - **A3-2c Playwright:** current-Project/current-healthy-attempt observation,
   explicit one-turn interaction, bounded audit, and cross-Project/run/URL,
   script, upload, clipboard, and expired-capability rejection. Its internal
-  capability never reuses the user's frame URL, app cookie, broker cookie, or
+  c3 interaction is enabled only by the turn API's optional structured
+  `visualInteractionConfirmation`; immutable messages retain only its digest
+  marker, and generic `explicitImperative`, Agent text, or page content fail
+  authorization. The single MCP tool is `riff_interact_current_visual({})`;
+  action, locator, value, and target substitution through tool input fail.
+  Its capability never reuses the user's frame URL, app cookie, broker cookie, or
   ambient legacy CDP projector. Tests bind immutable audit metadata to the
   originating conversation/turn/Project/run/attempt, prove restart/turn-end/
   replay revocation, and accept interaction locators only by accessibility
@@ -523,7 +528,11 @@ The remaining claims begin only in the later gates:
   input-or-selection-value substitution, atomic consume-before-side-effect,
   failure consumption, concurrent double-use, retry, timeout, browser crash,
   and structural inability to attach the legacy CDP profile. A3-2c4 must prove
-  the live-CDP negative. `drive_workbench_ui` remains absent from the
+  the live-CDP negative. c3 uses a fresh profile and private exact-peer
+  GET/HEAD bridge, which must reject peer replacement and must not carry b2
+  frame/cookie/nonce/WebSocket state. Its receipt proves only a bounded
+  untrusted local action dispatch, never child HTTP write or domain success.
+  `drive_workbench_ui` remains absent from the
   Project/A3-2c tool schema and its server dispatch is rejected.
   Audit tests cover mint/consume/outcome/failure/crash gap, secret redaction,
   value-digest rather than raw-value retention, untrusted page-content
@@ -545,7 +554,13 @@ The remaining claims begin only in the later gates:
   header/body/deadline limits, global/per-conversation concurrency, in-flight
   lifecycle abort, untrusted non-instruction context, no-network
   script-disabled snapshots, and Project-only MCP schema. Typed interaction
-  remains A3-2c3; the live-CDP/complete real-Chromium negative matrix and final
+  is the A3-2c3 candidate published in PR #41, including schema-v11 durable
+  one-confirmation/one-mint enforcement and a single absolute bridge deadline.
+  The current c3 candidate gate reports 525 backend tests with 524 passed,
+  zero failed, and one optional installed-OpenCode smoke skipped; web passes
+  104/104, network entry 1/1, and the production build succeeds. Three
+  independent c3 reviews report no P0/P1 merge blocker;
+  the live-CDP/complete real-Chromium negative matrix and final
   security closeout remain A3-2c4.
   The merged c1 gate reports backend 500 total/499 passed/zero
   failed/one optional installed-OpenCode smoke skipped, web 104/104, network
@@ -554,7 +569,7 @@ The remaining claims begin only in the later gates:
   511 backend tests with 510 passed, zero failed, and one optional
   installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
   the production build succeeds. Independent c2 security review reports no
-  P0/P1 merge blocker. This is not c3 or c4 evidence.
+  P0/P1 merge blocker. The preceding c2 result is not c3 or c4 evidence.
 - **A3-2d outputs/events/direct controls:** successful-run output list/download
   rechecks same-run ownership, safe name, path, size, digest, MIME, range, and
   limits; declared diagnostic NDJSON ingestion is atomic and enforces schema,
