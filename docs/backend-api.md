@@ -28,12 +28,15 @@ The implemented Stage 2 and Stage 3 routes are:
 | `GET /api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
 | `POST /api/models/{modelId}/technical-checks` | Start or idempotently return a digest-bound thin technical check using a `commandId`. |
 | `GET /api/models/{modelId}/technical-checks/{checkId}` | Read the bounded check DTO and its `pending`, `published`, or `superseded` publication state. |
-| `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. Provider/model locks with the first accepted user message. |
+| `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. GET accepts exactly one `lifecycle=active|archived|trashed`; provider/model locks with the first accepted user message. |
 | `GET /api/conversations/{conversationId}` | Return the redacted durable conversation and public session state. |
+| `PATCH /api/conversations/{conversationId}/provider-binding` | Before provider lock, bind an exact discovered provider/model with command replay and expected-record-digest validation. |
 | `GET /api/conversations/{conversationId}/messages` | Return the ordered Riff-owned transcript. Each message has `messageKind: "conversation" | "platform_card"`; a platform card is a system-owned terminal run record, not an Agent turn. |
+| `GET /api/conversations/{conversationId}/attachments` | Return verified attachment metadata without object IDs or paths. |
 | `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
+| `GET /api/conversations/{conversationId}/actions` | Return redacted skill/action cards without rationale, intent, affected resources, or raw tool payloads. |
 | `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
-| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return live or structured read-only state, messages, skill uses, and action records. Its optional structured `visualInteractionConfirmation` is the only request-level candidate for A3-2c3 visual interaction authority; ordinary `explicitImperative` is insufficient. |
+| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return HTTP 200 with live or structured durable read-only state, messages, skill uses, and action records. A read-only result contains the accepted user message and no fabricated assistant message. Its optional structured `visualInteractionConfirmation` is the only request-level candidate for A3-2c3 visual interaction authority; ordinary `explicitImperative` is insufficient. |
 | `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
 | `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
@@ -396,7 +399,8 @@ raw rows, paths, or file content. The process-local 32-byte confirmation token
 is single-use, bound to browser generation and the complete preview/count
 tuple, and expires within five minutes. Any attempted consume invalidates it.
 Successful lifecycle and deletion commands persist immutable receipt-first
-replay records in schema v14. Same intent returns the exact receipt after
+replay records in schema v14. Schema v15 adds the same immutable, restart-stable
+receipt discipline for Conversation provider-binding commands. Same intent returns the exact receipt after
 response loss or restart; changed intent fails.
 
 Permanent deletion is coordinated with exact no-follow file identity
@@ -436,6 +440,17 @@ The trusted local Vite development proxy rewrites only backend Host/Origin to
 the exact app authority; browser Fetch Metadata and the HttpOnly cookie pass
 through unchanged. The production authority remains the backend app origin,
 not the development port.
+
+A4-3 exposes the lifecycle-filtered owner Conversation query, provider-binding
+PATCH, attachment list, safe temporary-document cards, and redacted
+skill/action list through that same admission boundary. Attachment names reject
+path syntax and uploads use a closed media-type allowlist. All public
+Conversation projections omit credentials, external OpenCode session
+references, absolute paths, object-file identities, MCP capability URLs,
+rationale, intent, affected resources, and raw tool payloads. Expected provider
+failure is a durable HTTP-200 `mode: "read_only"` result so the browser can
+announce product state without a network-console error; malformed, unauthorized,
+cross-owner, stale, and admission failures remain HTTP errors.
 
 Recovery failure never opens a partial Product API. The only admitted
 recovery-mode routes are the exact-app static shell, browser bootstrap, health,

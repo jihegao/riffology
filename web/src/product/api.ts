@@ -1,9 +1,20 @@
 import type {
+  AgentTurnResult,
+  ConversationAttachment,
+  ConversationBundle,
+  ConversationMessage,
+  ConversationSummary,
   HomeDto,
   ModelCreationDto,
   OwnerKind,
+  ProductLifecycleReceipt,
+  PermanentDeletePreview,
+  PermanentDeleteReceipt,
   ProjectCreationDto,
   ProviderDiscovery,
+  TemporaryDocumentCard,
+  ActionRecord,
+  SkillUse,
   WorkspaceDto,
 } from "./types";
 
@@ -29,6 +40,60 @@ export interface ProductClient {
     modelId: string;
   }>): Promise<ProjectCreationDto>;
   workspace(kind: OwnerKind, id: string): Promise<WorkspaceDto>;
+  conversations(
+    kind: OwnerKind,
+    id: string,
+    lifecycle?: "active" | "archived" | "trashed",
+  ): Promise<readonly ConversationSummary[]>;
+  createConversation(input: Readonly<{
+    commandId: string;
+    kind: OwnerKind;
+    ownerId: string;
+    name: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<ConversationSummary>;
+  conversationBundle(conversationId: string): Promise<ConversationBundle>;
+  changeConversationProvider(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<unknown>;
+  uploadConversationAttachment(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    originalName: string;
+    mediaType: string;
+    base64: string;
+    purpose?: string;
+  }>): Promise<ConversationAttachment>;
+  sendTurn(input: Readonly<{
+    requestKey: string;
+    conversationId: string;
+    text: string;
+    attachmentIds: readonly string[];
+  }>): Promise<AgentTurnResult>;
+  renameConversation(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    name: string;
+  }>): Promise<ProductLifecycleReceipt>;
+  transitionConversation(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    action: "archive" | "restore" | "trash";
+  }>): Promise<ProductLifecycleReceipt>;
+  previewConversationPermanentDelete(
+    conversationId: string,
+  ): Promise<PermanentDeletePreview>;
+  permanentlyDeleteConversation(input: Readonly<{
+    commandId: string;
+    preview: PermanentDeletePreview;
+  }>): Promise<PermanentDeleteReceipt>;
 }
 
 export class ProductApiError extends Error {
@@ -89,15 +154,212 @@ export class HttpProductClient implements ProductClient {
     return normalizeWorkspace(kind, workspace, conversationResult.conversations);
   }
 
+  async conversations(
+    kind: OwnerKind,
+    id: string,
+    lifecycle: "active" | "archived" | "trashed" = "active",
+  ): Promise<readonly ConversationSummary[]> {
+    const result = await this.#request<{ conversations: ConversationSummary[] }>(
+      `/api/objects/${kind}/${encodeURIComponent(id)}/conversations?lifecycle=${lifecycle}`,
+    );
+    return Object.freeze(result.conversations);
+  }
+
+  createConversation(input: Readonly<{
+    commandId: string;
+    kind: OwnerKind;
+    ownerId: string;
+    name: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<ConversationSummary> {
+    return this.#request<ConversationSummary>(
+      `/api/objects/${input.kind}/${encodeURIComponent(input.ownerId)}/conversations`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          name: input.name,
+          providerId: input.providerId,
+          modelId: input.modelId,
+        }),
+      },
+    );
+  }
+
+  async conversationBundle(conversationId: string): Promise<ConversationBundle> {
+    const root = `/api/conversations/${encodeURIComponent(conversationId)}`;
+    const [
+      conversation,
+      messageResult,
+      attachmentResult,
+      documentResult,
+      activity,
+    ] = await Promise.all([
+      this.#request<ConversationSummary>(root),
+      this.#request<{ messages: ConversationMessage[] }>(`${root}/messages`),
+      this.#request<{ attachments: ConversationAttachment[] }>(`${root}/attachments`),
+      this.#request<{ documents: TemporaryDocumentCard[] }>(`${root}/documents`),
+      this.#request<{ skillUses: SkillUse[]; actions: ActionRecord[] }>(`${root}/actions`),
+    ]);
+    return Object.freeze({
+      conversation,
+      messages: Object.freeze(messageResult.messages),
+      attachments: Object.freeze(attachmentResult.attachments),
+      documents: Object.freeze(documentResult.documents),
+      skillUses: Object.freeze(activity.skillUses),
+      actions: Object.freeze(activity.actions),
+    });
+  }
+
+  changeConversationProvider(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<unknown> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/provider-binding`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          expectedRecordDigest: input.expectedRecordDigest,
+          providerId: input.providerId,
+          modelId: input.modelId,
+        }),
+      },
+    );
+  }
+
+  uploadConversationAttachment(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    originalName: string;
+    mediaType: string;
+    base64: string;
+    purpose?: string;
+  }>): Promise<ConversationAttachment> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/attachments`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          originalName: input.originalName,
+          mediaType: input.mediaType,
+          base64: input.base64,
+          ...(input.purpose ? { purpose: input.purpose } : {}),
+        }),
+      },
+    );
+  }
+
+  sendTurn(input: Readonly<{
+    requestKey: string;
+    conversationId: string;
+    text: string;
+    attachmentIds: readonly string[];
+  }>): Promise<AgentTurnResult> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/turns`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          requestKey: input.requestKey,
+          text: input.text,
+          attachmentIds: input.attachmentIds,
+        }),
+      },
+    );
+  }
+
+  renameConversation(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    name: string;
+  }>): Promise<ProductLifecycleReceipt> {
+    return this.#request(
+      `/api/resources/conversation/${encodeURIComponent(input.conversationId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          expectedRecordDigest: input.expectedRecordDigest,
+          name: input.name,
+        }),
+      },
+    );
+  }
+
+  transitionConversation(input: Readonly<{
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    action: "archive" | "restore" | "trash";
+  }>): Promise<ProductLifecycleReceipt> {
+    return this.#request(
+      `/api/resources/conversation/${encodeURIComponent(input.conversationId)}/${input.action}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          expectedRecordDigest: input.expectedRecordDigest,
+        }),
+      },
+    );
+  }
+
+  previewConversationPermanentDelete(
+    conversationId: string,
+  ): Promise<PermanentDeletePreview> {
+    return this.#request(
+      `/api/resources/conversation/${encodeURIComponent(conversationId)}/permanent-delete-preview`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  permanentlyDeleteConversation(input: Readonly<{
+    commandId: string;
+    preview: PermanentDeletePreview;
+  }>): Promise<PermanentDeleteReceipt> {
+    const { preview } = input;
+    return this.#request(
+      `/api/resources/conversation/${encodeURIComponent(preview.target.id)}/permanent-delete`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          previewToken: preview.previewToken,
+          stateToken: preview.stateToken,
+          confirmationToken: preview.confirmationToken,
+          confirmation: {
+            action: "permanently_delete",
+            kind: "conversation",
+            id: preview.target.id,
+            recordCount: preview.recordCount,
+            fileCount: preview.fileCount,
+            totalBytes: preview.totalBytes,
+          },
+        }),
+      },
+    );
+  }
+
   async #request<T>(
     path: string,
-    init: Readonly<{ method?: "POST"; body?: string }> = {},
+    init: Readonly<{
+      method?: "POST" | "PATCH";
+      body?: string;
+    }> = {},
   ): Promise<T> {
     const session = await this.#browserSession();
     const response = await fetch(path, {
       method: init.method ?? "GET",
       credentials: "same-origin",
-      headers: init.method === "POST"
+      headers: init.method
         ? {
           "content-type": "application/json",
           "x-riff-csrf": session.csrfToken,
@@ -123,7 +385,9 @@ export class HttpProductClient implements ProductClient {
   }
 }
 
-const responseJson = async <T>(response: Response): Promise<T> => {
+const responseJson = async <T>(
+  response: Response,
+): Promise<T> => {
   const text = await response.text();
   let body: unknown;
   try {

@@ -261,14 +261,14 @@ const assertCompletionCard = (
   assert.equal(card.status, "complete");
   assert.equal(card.messageKind, "platform_card");
   assert.equal(card.text, "");
-  assert.deepEqual(Object.keys(card.content).sort(), [
+  assert.deepEqual(Object.keys(card.platformCard).sort(), [
     "outputCount",
     "outputIds",
     "runId",
     "sampleCount",
     "status",
   ]);
-  assert.deepEqual(card.content, {
+  assert.deepEqual(card.platformCard, {
     runId: expected.runId,
     status: expected.status,
     sampleCount: 1,
@@ -433,7 +433,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
 
   const successMessages = await listMessages(baseUrl, conversation.id);
   const successCards = successMessages.filter((message) =>
-    message.messageKind === "platform_card" && message.content?.runId === runStart.runId);
+    message.messageKind === "platform_card" && message.platformCard?.runId === runStart.runId);
   assert.equal(successCards.length, 1);
   assertCompletionCard(successCards[0], {
     runId: runStart.runId,
@@ -604,7 +604,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   const messagesAfterRestart = await listMessages(baseUrl, conversation.id);
   assert.deepEqual(messagesAfterRestart, successMessages);
   assert.equal(messagesAfterRestart.filter((message) =>
-    message.messageKind === "platform_card" && message.content?.runId === runStart.runId
+    message.messageKind === "platform_card" && message.platformCard?.runId === runStart.runId
   ).length, 1);
 
   assert.equal(succeededAfterRestart.terminalStatus, "succeeded");
@@ -1110,7 +1110,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
 
   const finalMessages = await listMessages(baseUrl, conversation.id);
   const cancelledCards = finalMessages.filter((message) =>
-    message.messageKind === "platform_card" && message.content?.runId === cancelStart.runId);
+    message.messageKind === "platform_card" && message.platformCard?.runId === cancelStart.runId);
   assert.equal(cancelledCards.length, 1);
   assertCompletionCard(cancelledCards[0], {
     runId: cancelStart.runId,
@@ -1119,10 +1119,10 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   });
   assert.equal(finalMessages.filter((message) => message.messageKind === "platform_card").length, 2);
   assert.equal(finalMessages.filter((message) =>
-    message.messageKind === "platform_card" && message.content?.runId === runStart.runId
+    message.messageKind === "platform_card" && message.platformCard?.runId === runStart.runId
   ).length, 1);
   assert.equal(finalMessages.filter((message) =>
-    message.messageKind === "platform_card" && message.content?.runId === cancelStart.runId
+    message.messageKind === "platform_card" && message.platformCard?.runId === cancelStart.runId
   ).length, 1);
 
   await current.close();
@@ -1142,7 +1142,7 @@ target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "
   assert.deepEqual(finalMessagesAfterRestart, finalMessages);
   for (const expectedRunId of [runStart.runId, cancelStart.runId]) {
     assert.equal(finalMessagesAfterRestart.filter((message) =>
-      message.messageKind === "platform_card" && message.content?.runId === expectedRunId
+      message.messageKind === "platform_card" && message.platformCard?.runId === expectedRunId
     ).length, 1);
   }
 });

@@ -678,9 +678,10 @@ runtime/browser test.
 
 A4-1 adds focused contract, owner-scope, failure, idempotency, restart,
 secrecy, lifecycle/deletion, schema-v14, exact-file-identity, and
-authority-issuance-fence evidence. A4-2 now adds the responsive Home/router/
-shared-shell foundation and its focused browser evidence. A4-3 through A4-5
-must add full Conversation, renderer, Agent, Run, recovery, and exact
+authority-issuance-fence evidence. A4-2 adds the responsive Home/router/
+shared-shell foundation and its focused browser evidence. A4-3 adds persistent
+Conversation, provider-lock, safe-card, lifecycle/deletion, and honest
+read-only evidence. A4-4 through A4-5 must add renderer, Agent, Run, recovery, and exact
 legacy-manifest evidence in their owning slices. A4-6
 alone owns one continuous real-Chromium exit scenario covering Home/four
 entries, creation and opening of a functional generic New Model workspace,
@@ -785,6 +786,40 @@ remains owned by A4-6.
 No A4-3 Conversation messages/actions, A4-4 renderer/execution, A4-5
 cutover/retirement, A4-6 continuous browser exit, Issue closure, or complete
 MVP claim is A4-2 evidence. All 69 final traceability rows remain `pending`.
+
+### A4-3 persistent Conversation evidence
+
+The A4-3 focused backend matrix covers schema-v15 migration/rollback,
+provider-binding replay and changed-intent rejection, lifecycle-filtered
+owner collections, cross-owner exclusion, attachment name/media/owner
+negatives, safe document/activity projection, provider lock, durable
+read-only no-fabrication, and restart projection. Component/client tests cover
+right-pane DOM identity, safe durable cards, read-only composition behavior,
+CSRF on POST and PATCH, and public error handling.
+
+`cd web && npm run test:e2e:a4-3` runs one isolated deterministic Chromium
+scenario against a temporary ProductStoreV2 and ordinary preinstalled wind
+Model. It creates two provider-backed Conversations plus a disposable deletion
+target, changes and locks a provider, uploads and reuses an attachment,
+switches Conversations without right-pane remount, renames/archive/restores,
+executes preview/confirm permanent deletion, verifies a provider failure
+persists no assistant reply, exercises narrow keyboard state, scans browser
+responses for upstream session/absolute-path/raw-payload leakage, and requires
+zero console errors. This deterministic scenario is not the A4-6 real-provider
+acceptance.
+
+The complete A4-3 branch gate records backend 586 total / 585 passed / zero
+failed / one optional installed-OpenCode smoke skipped; Web component/client
+116/116; network entry 1/1; dedicated A4-3 Chromium 1/1; retained A4-2
+Chromium 1/1; retained full Chromium 15/15; and the independent Visual-Agent
+Chromium security matrix 6/6. Production build, the 27-document governance
+check, and `git diff --check` pass. Final independent Product/architecture/
+security, Accessibility/interaction, and Test/documentation reviews each
+report P0=0/P1=0/P2=0 after fixes and re-review.
+
+A4-4 through A4-6, actual 200% browser zoom, the continuous exit matrix,
+Issue closure, and complete-MVP claims remain pending. All 69 final trace rows
+remain `pending`.
 
 ---
 

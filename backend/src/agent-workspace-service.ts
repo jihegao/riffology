@@ -2,7 +2,17 @@ import { createHash } from "node:crypto";
 import { ApiError } from "./errors.ts";
 import type { AgentContextInput } from "./agent-context.ts";
 import { AgentConversationSessionManager, type AgentReadOnlyReason } from "./agent-session-manager.ts";
-import type { AgentTurnDto, ConversationDto, ConversationMessageDto, ConversationOwner } from "./agent-domain.ts";
+import type {
+  AgentTurnDto,
+  ConversationAttachmentDto,
+  ConversationDto,
+  ConversationMessageDto,
+  ConversationOwner,
+  ConversationProviderBindingReceipt,
+  PublicActionRecordDto,
+  PublicSkillUseDto,
+  TemporaryDocumentCardDto,
+} from "./agent-domain.ts";
 import { createGenericModelScaffold } from "./model-workspace.ts";
 import type { OpenCodeConversationPort, OpenCodeProviderModel } from "./opencode-adapter.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
@@ -918,10 +928,18 @@ export class AgentWorkspaceService {
     } catch (error) { throw storeApiError(error); }
   }
 
-  listConversations(owner: ConversationOwner): ConversationDto[] {
+  listConversations(
+    owner: ConversationOwner,
+    lifecycle: "active" | "archived" | "trashed" = "active",
+  ): ConversationDto[] {
     assertOwner(owner);
     this.#assertOwnerExists(owner);
-    try { return this.store.listConversations(owner); }
+    try {
+      return this.store.listConversations(owner, {
+        includeArchived: lifecycle === "archived",
+        includeTrashed: lifecycle === "trashed",
+      }).filter((conversation) => conversation.lifecycleState === lifecycle);
+    }
     catch (error) { throw storeApiError(error); }
   }
 
@@ -946,12 +964,105 @@ export class AgentWorkspaceService {
     catch (error) { throw storeApiError(error); }
   }
 
-  createAttachment(input: { commandId: string; conversationId: string; originalName: string; mediaType: string; bytes: Uint8Array; purpose?: string | null }) {
+  async changeConversationProvider(input: {
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    providerId: string;
+    modelId: string;
+  }): Promise<ConversationProviderBindingReceipt> {
+    const commandId = boundedKey(input.commandId, "commandId");
+    const conversationId = boundedId(input.conversationId);
+    const expectedRecordDigest = boundedDigest(
+      input.expectedRecordDigest,
+      "expectedRecordDigest",
+    );
+    const providerId = boundedProviderPart(input.providerId, "providerId");
+    const providerModelId = boundedProviderPart(input.modelId, "modelId");
+    try {
+      const replay = this.store.conversationProviderBindingReceipt({
+        commandId,
+        conversationId,
+        expectedRecordDigest,
+        providerId,
+        providerModelId,
+      });
+      if (replay) return replay;
+    } catch (error) {
+      throw storeApiError(error);
+    }
+    await this.#requireProviderModel(providerId, providerModelId);
+    try {
+      return this.store.changeConversationProviderCommand({
+        commandId,
+        conversationId,
+        expectedRecordDigest,
+        providerId,
+        providerModelId,
+        committedAt: this.#now(),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  listAttachments(conversationId: string): ConversationAttachmentDto[] {
+    try {
+      return this.store.listConversationAttachments(boundedId(conversationId));
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  listConversationActivity(conversationId: string): Readonly<{
+    skillUses: PublicSkillUseDto[];
+    actions: PublicActionRecordDto[];
+  }> {
+    try {
+      const activity = this.store.listConversationActivity(
+        boundedId(conversationId),
+      );
+      return Object.freeze({
+        skillUses: activity.skillUses.map((skill) => Object.freeze({
+          id: skill.id,
+          skillId: skill.skillId,
+          skillVersion: skill.skillVersion,
+          routingMode: skill.routingMode,
+          loadState: skill.loadState,
+        })),
+        actions: activity.actions.map((action) => Object.freeze({
+          id: action.id,
+          actionKind: action.actionKind,
+          permissionDecision: action.permissionDecision,
+          state: action.state,
+          errorCode: action.errorCode,
+        })),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  createAttachment(input: { commandId: string; conversationId: string; originalName: string; mediaType: string; bytes: Uint8Array; purpose?: string | null }): ConversationAttachmentDto {
     const commandId = boundedKey(input.commandId, "commandId"); const conversationId = boundedId(input.conversationId);
     this.store.getConversation(conversationId);
     if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength < 1 || input.bytes.byteLength > 1_048_576) throw new ApiError(422, "invalid_attachment", "Attachment bytes are empty or too large.");
     const originalName = boundedName(input.originalName, "Attachment name");
+    if (/[\\/:]/u.test(originalName) || originalName === "." || originalName === "..") {
+      throw new ApiError(
+        422,
+        "invalid_attachment",
+        "Attachment name must be a single safe display name.",
+      );
+    }
     const mediaType = boundedProviderPart(input.mediaType, "mediaType");
+    if (!PUBLIC_ATTACHMENT_MEDIA_TYPES.has(mediaType.toLowerCase())) {
+      throw new ApiError(
+        422,
+        "invalid_attachment",
+        "Attachment media type is not supported.",
+      );
+    }
     const purpose = input.purpose == null ? null : boundedPurpose(input.purpose);
     const attachmentId = stableId("attachment", `${conversationId}:${commandId}`);
     const objectFileId = stableId("file", `attachment:${conversationId}:${commandId}`);
@@ -960,7 +1071,8 @@ export class AgentWorkspaceService {
       const digest = createHash("sha256").update(input.bytes).digest("hex");
       if (existing.conversationId !== conversationId || existing.originalName !== originalName || existing.mediaType !== mediaType
         || existing.purpose !== purpose || existing.sha256 !== digest) throw new ApiError(409, "idempotency_conflict", "That commandId was already used with different attachment intent.");
-      return existing;
+      return this.store.listConversationAttachments(conversationId)
+        .find((attachment) => attachment.id === attachmentId)!;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       if (error instanceof ProductStoreV2Error && !/does not exist/u.test(error.message)) throw storeApiError(error);
@@ -968,14 +1080,26 @@ export class AgentWorkspaceService {
     try {
       this.store.createAttachment({ id: attachmentId, objectFileId, conversationId, relativePath: stableId("upload", commandId), originalName,
         mediaType, purpose, bytes: input.bytes, createdAt: this.#now() });
-      return this.store.getConversationAttachment(attachmentId);
+      return this.store.listConversationAttachments(conversationId)
+        .find((attachment) => attachment.id === attachmentId)!;
     } catch (error) { throw storeApiError(error); }
   }
 
-  listTemporaryDocuments(conversationId: string) {
+  listTemporaryDocuments(conversationId: string): TemporaryDocumentCardDto[] {
     const id = boundedId(conversationId);
     this.store.getConversation(id);
-    try { return this.store.listTemporaryDocuments(id); }
+    try {
+      return this.store.listTemporaryDocuments(id).map((document) => Object.freeze({
+        id: document.id,
+        sourceMessageId: document.sourceMessageId,
+        name: document.name,
+        documentState: document.documentState,
+        mediaType: document.mediaType,
+        lifecycleState: document.lifecycleState,
+        createdAt: document.createdAt,
+        updatedAt: document.updatedAt,
+      }));
+    }
     catch (error) { throw storeApiError(error); }
   }
 
@@ -1338,6 +1462,16 @@ const boundedPurpose = (value: string): string => {
   }
   return value.trim();
 };
+const PUBLIC_ATTACHMENT_MEDIA_TYPES = new Set([
+  "application/json",
+  "application/octet-stream",
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "text/csv",
+  "text/markdown",
+  "text/plain",
+]);
 const boundedConfiguration = (value: Record<string, unknown>): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(422, "invalid_request", "Experiment configuration must be an object.");
   const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");

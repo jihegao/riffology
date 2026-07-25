@@ -40,8 +40,10 @@ import type {
   ActionRecordDto,
   AgentTurnDto,
   ContextSnapshot,
+  ConversationAttachmentDto,
   ConversationDto,
   ConversationMessageDto,
+  ConversationProviderBindingReceipt,
   VisualInteractionMarker,
   DurableAgentSessionState,
   ModelFileMutation,
@@ -1084,7 +1086,11 @@ export class ProductStoreV2 {
     this.#assertOpen();
     const column = owner.kind === "model" ? "model_id" : "project_id";
     return (this.#database.prepare(`SELECT c.* FROM conversations c WHERE c.${column} = ? ORDER BY c.updated_at DESC, c.id`).all(owner.id) as any[])
-      .map((row) => conversationDto(row, this.#sessionProjection(row.id)))
+      .map((row) => conversationDto(
+        row,
+        this.#sessionProjection(row.id),
+        this.resourceRecordDigest("conversation", row.id),
+      ))
       .filter((row) => visible(row.lifecycleState, options));
   }
 
@@ -1092,7 +1098,11 @@ export class ProductStoreV2 {
     this.#assertOpen();
     const row = this.#database.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as any;
     if (!row) throw new ProductStoreV2Error("Conversation does not exist.");
-    return conversationDto(row, this.#sessionProjection(id));
+    return conversationDto(
+      row,
+      this.#sessionProjection(id),
+      this.resourceRecordDigest("conversation", id),
+    );
   }
 
   listConversationMessages(conversationId: string): ConversationMessageDto[] {
@@ -1105,6 +1115,128 @@ export class ProductStoreV2 {
     this.#databaseMutation([{ sql: `UPDATE conversations SET provider_id = ?, provider_model_id = ?, updated_at = ?
       WHERE id = ? AND lifecycle_state = 'active' AND provider_locked_at IS NULL`, params: [providerId, providerModelId, updatedAt, conversationId], expectedChanges: 1 }]);
     return this.getConversation(conversationId);
+  }
+
+  conversationProviderBindingReceipt(input: {
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    providerId: string;
+    providerModelId: string;
+  }): ConversationProviderBindingReceipt | null {
+    assertId(input.conversationId);
+    const intentDigest = canonicalDigest({
+      conversationId: input.conversationId,
+      expectedRecordDigest: input.expectedRecordDigest,
+      providerId: input.providerId,
+      providerModelId: input.providerModelId,
+    });
+    const existing = this.#database.prepare(
+      `SELECT conversation_id, intent_sha256, receipt_json, receipt_sha256
+       FROM conversation_provider_binding_receipts WHERE command_id = ?`,
+    ).get(input.commandId) as {
+      conversation_id: string;
+      intent_sha256: string;
+      receipt_json: string;
+      receipt_sha256: string;
+    } | undefined;
+    if (!existing) return null;
+    let receipt: ConversationProviderBindingReceipt;
+    try {
+      receipt = JSON.parse(existing.receipt_json) as ConversationProviderBindingReceipt;
+    } catch {
+      throw new ProductStoreV2Error("Conversation provider-binding receipt is corrupt.");
+    }
+    if (existing.conversation_id !== input.conversationId
+      || existing.intent_sha256 !== intentDigest
+      || canonicalDigest(receipt) !== existing.receipt_sha256
+      || receipt.receiptDigest !== canonicalDigest({
+        schemaVersion: receipt.schemaVersion,
+        commandId: receipt.commandId,
+        conversationId: receipt.conversationId,
+        provider: receipt.provider,
+        previousRecordDigest: receipt.previousRecordDigest,
+        currentRecordDigest: receipt.currentRecordDigest,
+        committedAt: receipt.committedAt,
+      })) {
+      throw new ProductStoreV2Error(
+        "Conversation provider-binding command already exists with a different intent.",
+      );
+    }
+    return Object.freeze(receipt);
+  }
+
+  changeConversationProviderCommand(input: {
+    commandId: string;
+    conversationId: string;
+    expectedRecordDigest: string;
+    providerId: string;
+    providerModelId: string;
+    committedAt: IsoTimestamp;
+  }): ConversationProviderBindingReceipt {
+    assertId(input.conversationId);
+    const intentDigest = canonicalDigest({
+      conversationId: input.conversationId,
+      expectedRecordDigest: input.expectedRecordDigest,
+      providerId: input.providerId,
+      providerModelId: input.providerModelId,
+    });
+    return this.#withImmediateTransaction(() => {
+      const replay = this.conversationProviderBindingReceipt(input);
+      if (replay) return replay;
+      const previous = this.getConversation(input.conversationId);
+      if (previous.recordDigest !== input.expectedRecordDigest) {
+        throw new ProductStoreV2Error("Conversation provider binding changed after it was observed.");
+      }
+      if (previous.lifecycleState !== "active" || previous.provider.locked) {
+        throw new ProductStoreV2Error("Conversation provider binding is locked.");
+      }
+      this.#executeDatabaseStatements([{
+        sql: `UPDATE conversations SET provider_id = ?, provider_model_id = ?, updated_at = ?
+          WHERE id = ? AND lifecycle_state = 'active' AND provider_locked_at IS NULL`,
+        params: [
+          input.providerId,
+          input.providerModelId,
+          input.committedAt,
+          input.conversationId,
+        ],
+        expectedChanges: 1,
+      }]);
+      const current = this.getConversation(input.conversationId);
+      const unsigned = {
+        schemaVersion: 1 as const,
+        commandId: input.commandId,
+        conversationId: input.conversationId,
+        provider: Object.freeze({
+          providerId: input.providerId,
+          modelId: input.providerModelId,
+          locked: false as const,
+        }),
+        previousRecordDigest: previous.recordDigest,
+        currentRecordDigest: current.recordDigest,
+        committedAt: input.committedAt,
+      };
+      const receipt: ConversationProviderBindingReceipt = Object.freeze({
+        ...unsigned,
+        receiptDigest: canonicalDigest(unsigned),
+      });
+      this.#executeDatabaseStatements([{
+        sql: `INSERT INTO conversation_provider_binding_receipts
+          (command_id, conversation_id, intent_sha256, receipt_json,
+            receipt_sha256, committed_at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.commandId,
+          input.conversationId,
+          intentDigest,
+          json(receipt),
+          canonicalDigest(receipt),
+          input.committedAt,
+        ],
+        expectedChanges: 1,
+      }]);
+      return receipt;
+    });
   }
 
   startAgentTurn(input: StartAgentTurnIntent): AgentTurnDto {
@@ -1414,6 +1546,57 @@ export class ProductStoreV2 {
     this.#verifiedMetadata(this.#objectRow(row.object_file_id));
     return { id: row.id, conversationId: row.conversation_id, objectFileId: row.object_file_id, originalName: row.original_name,
       purpose: row.purpose, mediaType: row.media_type, sizeBytes: row.size_bytes, sha256: row.sha256, relativePath: row.relative_path };
+  }
+
+  listConversationAttachments(conversationId: string): ConversationAttachmentDto[] {
+    this.#assertOpen();
+    if (!this.#database.prepare(
+      "SELECT 1 FROM conversations WHERE id = ?",
+    ).get(conversationId)) {
+      throw new ProductStoreV2Error("Conversation does not exist.");
+    }
+    const rows = this.#database.prepare(
+      `SELECT a.id, a.original_name, a.purpose, a.created_at,
+        f.id AS object_file_id, f.media_type, f.size_bytes, f.sha256
+       FROM attachments a
+       JOIN object_files f ON f.id = a.object_file_id
+       WHERE a.conversation_id = ?
+         AND f.owner_conversation_id = a.conversation_id
+         AND f.kind = 'conversation_attachment'
+       ORDER BY a.created_at, a.id`,
+    ).all(conversationId) as any[];
+    return rows.map((row) => {
+      this.#verifiedMetadata(this.#objectRow(row.object_file_id));
+      return Object.freeze({
+        id: row.id,
+        originalName: row.original_name,
+        purpose: row.purpose,
+        mediaType: row.media_type,
+        sizeBytes: row.size_bytes,
+        sha256: row.sha256,
+        createdAt: row.created_at,
+      });
+    });
+  }
+
+  listConversationActivity(conversationId: string): Readonly<{
+    skillUses: SkillUseDto[];
+    actions: ActionRecordDto[];
+  }> {
+    this.#assertOpen();
+    if (!this.#database.prepare(
+      "SELECT 1 FROM conversations WHERE id = ?",
+    ).get(conversationId)) {
+      throw new ProductStoreV2Error("Conversation does not exist.");
+    }
+    const turns = this.#database.prepare(
+      `SELECT id FROM agent_turns
+       WHERE conversation_id = ? ORDER BY created_at, id`,
+    ).all(conversationId) as Array<{ id: string }>;
+    return Object.freeze({
+      skillUses: turns.flatMap((turn) => this.#skillUses(turn.id)),
+      actions: turns.flatMap((turn) => this.#actions(turn.id)),
+    });
   }
 
   readConversationAttachment(id: string, conversationId: string, maximumBytes = 64_000): Buffer {
@@ -7096,7 +7279,34 @@ export class ProductStoreV2 {
 
   #sessionProjection(conversationId: string): "none" | "connecting" | "available" | "lost" | "read_only" {
     const row = this.#database.prepare("SELECT state FROM agent_sessions WHERE conversation_id = ? AND state != 'closed'").get(conversationId) as { state: DurableAgentSessionState } | undefined;
-    if (!row) return "none";
+    if (!row) {
+      const latestTurn = this.#database.prepare(
+        `SELECT state, failure_code, failure_retryable FROM agent_turns
+         WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+      ).get(conversationId) as {
+        state: string;
+        failure_code: string | null;
+        failure_retryable: number | null;
+      } | undefined;
+      const readOnlyFailures = new Set([
+        "opencode_unavailable",
+        "opencode_auth_failed",
+        "provider_unavailable",
+        "model_unavailable",
+        "session_validation_failed",
+        "session_rebuild_failed",
+        "empty_assistant_response",
+        "opencode_mcp_unavailable",
+      ]);
+      if (latestTurn?.state === "failed" && Boolean(latestTurn.failure_retryable)
+        && !readOnlyFailures.has(latestTurn.failure_code ?? "")) return "lost";
+      return latestTurn?.state === "read_only"
+        || latestTurn?.state === "failed"
+          && Boolean(latestTurn.failure_retryable)
+          && readOnlyFailures.has(latestTurn.failure_code ?? "")
+        ? "read_only"
+        : "none";
+    }
     if (row.state === "available") return "available";
     if (row.state === "lost") return "lost";
     return "connecting";
@@ -7131,6 +7341,14 @@ export class ProductStoreV2 {
     files: ObjectRow[], blockers: Array<{ kind: string; id: string }>, exclusions: Array<{ kind: string; id: string; reason: string }>,
   ): void {
     for (const conversationId of conversationIds.sort()) {
+      addRows(
+        "conversation_provider_binding_receipts",
+        this.#database.prepare(
+          `SELECT * FROM conversation_provider_binding_receipts
+           WHERE conversation_id = ? ORDER BY command_id`,
+        ).all(conversationId) as any[],
+        (receipt) => ({ command_id: receipt.command_id }),
+      );
       addRows("messages", this.#database.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY ordinal").all(conversationId) as any[]);
       addRows("conversation_summaries", this.#database.prepare("SELECT * FROM conversation_summaries WHERE conversation_id = ?").all(conversationId) as any[], (item) => ({ conversation_id: item.conversation_id }));
       addRows("agent_sessions", this.#database.prepare("SELECT * FROM agent_sessions WHERE conversation_id = ? ORDER BY generation").all(conversationId) as any[]);
@@ -8254,13 +8472,18 @@ const metadata = (row: ObjectRow): StoredObjectMetadata => ({
   createdAt: row.created_at,
 });
 
-const conversationDto = (row: any, sessionState: ConversationDto["sessionState"]): ConversationDto => ({
+const conversationDto = (
+  row: any,
+  sessionState: ConversationDto["sessionState"],
+  recordDigest: string,
+): ConversationDto => ({
   id: row.id,
   owner: row.model_id ? { kind: "model", id: row.model_id } : { kind: "project", id: row.project_id },
   name: row.name,
   provider: { providerId: row.provider_id, modelId: row.provider_model_id, locked: row.provider_locked_at !== null },
   sessionState,
   lifecycleState: row.lifecycle_state,
+  recordDigest,
   updatedAt: row.updated_at,
 });
 
@@ -8457,6 +8680,7 @@ const PERMANENT_DELETE_TABLE_PRIORITY = Object.freeze([
   "agent_turns",
   "conversation_summaries",
   "agent_sessions",
+  "conversation_provider_binding_receipts",
   "temporary_documents",
   "run_completion_cards",
   "messages",

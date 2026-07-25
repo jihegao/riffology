@@ -3498,6 +3498,36 @@ export const PRODUCT_SCHEMA_V14_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'permanent-delete receipt is immutable'); END;
 `;
 
+export const PRODUCT_SCHEMA_V15_SQL = SQL`
+  CREATE TABLE conversation_provider_binding_receipts (
+    command_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    intent_sha256 TEXT NOT NULL CHECK (
+      length(intent_sha256) = 64
+      AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json)
+      AND json_type(receipt_json, '$') = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64
+      AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    committed_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TRIGGER conversation_provider_binding_receipts_immutable_update_v15
+  BEFORE UPDATE ON conversation_provider_binding_receipts
+  BEGIN SELECT RAISE(ABORT, 'conversation provider-binding receipt is immutable'); END;
+
+  CREATE TRIGGER conversation_provider_binding_receipts_immutable_delete_v15
+  BEFORE DELETE ON conversation_provider_binding_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'conversation provider-binding receipt is immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -3513,4 +3543,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 12, sql: PRODUCT_SCHEMA_V12_SQL }),
   Object.freeze({ version: 13, sql: PRODUCT_SCHEMA_V13_SQL }),
   Object.freeze({ version: 14, sql: PRODUCT_SCHEMA_V14_SQL }),
+  Object.freeze({ version: 15, sql: PRODUCT_SCHEMA_V15_SQL }),
 ]);

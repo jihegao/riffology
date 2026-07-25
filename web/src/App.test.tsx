@@ -1,9 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { ProductClient } from "./product/api";
-import type { HomeDto, ProviderDiscovery, WorkspaceDto } from "./product/types";
+import type {
+  ConversationBundle,
+  HomeDto,
+  ProviderDiscovery,
+  WorkspaceDto,
+} from "./product/types";
 
 const home: HomeDto = {
   schemaVersion: 1,
@@ -68,15 +73,19 @@ const workspace: WorkspaceDto = {
   },
   conversations: [{
     id: "conversation-main",
+    owner: { kind: "model", id: "model-one" },
     name: "Main",
     lifecycleState: "active",
+    recordDigest: "c".repeat(64),
     provider: { providerId: "provider", modelId: "model", locked: false },
     sessionState: "none",
     updatedAt: "2026-07-25T00:00:00.000Z",
   }, {
     id: "conversation-review",
+    owner: { kind: "model", id: "model-one" },
     name: "Review",
     lifecycleState: "active",
+    recordDigest: "d".repeat(64),
     provider: { providerId: "provider", modelId: "model", locked: false },
     sessionState: "none",
     updatedAt: "2026-07-25T00:00:00.000Z",
@@ -94,6 +103,38 @@ const client = (): ProductClient => ({
     project: { id: "created-project", name: "Created", lifecycleState: "active" as const },
   })),
   workspace: vi.fn(async () => workspace),
+  conversations: vi.fn(async (_kind, _id, lifecycle = "active") =>
+    lifecycle === "active" ? workspace.conversations : []),
+  createConversation: vi.fn(async () => workspace.conversations[0]),
+  conversationBundle: vi.fn(async (conversationId) => ({
+    conversation: workspace.conversations.find(
+      (conversation) => conversation.id === conversationId,
+    ) ?? workspace.conversations[0],
+    messages: [],
+    attachments: [],
+    documents: [],
+    skillUses: [],
+    actions: [],
+  })),
+  changeConversationProvider: vi.fn(async () => ({})),
+  uploadConversationAttachment: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  sendTurn: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  renameConversation: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  transitionConversation: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  previewConversationPermanentDelete: vi.fn(async () => {
+    throw new Error("unused");
+  }),
+  permanentlyDeleteConversation: vi.fn(async () => {
+    throw new Error("unused");
+  }),
 });
 
 describe("Stage 4 Product entry", () => {
@@ -175,5 +216,234 @@ describe("Stage 4 Product entry", () => {
 
     expect(await screen.findByTestId("shell-owner-heading")).toHaveTextContent("General maintenance");
     expect(screen.queryByText("Wind-turbine maintenance")).not.toBeInTheDocument();
+  });
+
+  it("renders durable Conversation cards and keeps provider/lifecycle controls direct", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    const richBundle: ConversationBundle = {
+      conversation: workspace.conversations[0],
+      messages: [{
+        id: "message-user",
+        ordinal: 0,
+        role: "user",
+        status: "complete",
+        messageKind: "conversation",
+        text: "Inspect the input.",
+        createdAt: "2026-07-25T00:00:01.000Z",
+        updatedAt: "2026-07-25T00:00:01.000Z",
+      }],
+      attachments: [{
+        id: "attachment-one",
+        originalName: "input.json",
+        purpose: "experiment input",
+        mediaType: "application/json",
+        sizeBytes: 12,
+        sha256: "a".repeat(64),
+        createdAt: "2026-07-25T00:00:00.000Z",
+      }],
+      documents: [{
+        id: "document-one",
+        sourceMessageId: "message-user",
+        name: "Working note",
+        documentState: "draft",
+        mediaType: "text/markdown",
+        lifecycleState: "active",
+        createdAt: "2026-07-25T00:00:02.000Z",
+        updatedAt: "2026-07-25T00:00:02.000Z",
+      }],
+      skillUses: [{
+        id: "skill-one",
+        skillId: "generic-model-edit",
+        skillVersion: "1",
+        routingMode: "explicit",
+        loadState: "loaded",
+      }],
+      actions: [{
+        id: "action-one",
+        actionKind: "temporary_document_create",
+        permissionDecision: "allowed",
+        state: "committed",
+        errorCode: null,
+      }],
+    };
+    productClient.conversationBundle = vi.fn(async () => richBundle);
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("Inspect the input.")).toBeInTheDocument();
+    expect(screen.getAllByText("input.json")).toHaveLength(2);
+    expect(screen.getByText("Working note")).toBeInTheDocument();
+    expect(screen.getByText("Skill: generic-model-edit")).toBeInTheDocument();
+    expect(screen.getByText("temporary_document_create")).toBeInTheDocument();
+    expect(screen.queryByText("objectFileId")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Update provider" }));
+    expect(productClient.changeConversationProvider).toHaveBeenCalledWith({
+      commandId: expect.any(String),
+      conversationId: "conversation-main",
+      expectedRecordDigest: "c".repeat(64),
+      providerId: "provider",
+      modelId: "model",
+    });
+
+    await user.click(screen.getByText("Manage Conversation"));
+    const name = screen.getByRole("textbox", { name: "Conversation name" });
+    await user.clear(name);
+    await user.type(name, "Renamed thread");
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    expect(productClient.renameConversation).toHaveBeenCalledWith({
+      commandId: expect.any(String),
+      conversationId: "conversation-main",
+      expectedRecordDigest: "c".repeat(64),
+      name: "Renamed thread",
+    });
+  });
+
+  it("shows connecting then durable read-only without fabricating an assistant reply", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    const initialBundle: ConversationBundle = {
+      conversation: workspace.conversations[0],
+      messages: [],
+      attachments: [],
+      documents: [],
+      skillUses: [],
+      actions: [],
+    };
+    const readOnlyBundle: ConversationBundle = {
+      ...initialBundle,
+      conversation: {
+        ...workspace.conversations[0],
+        provider: { ...workspace.conversations[0].provider, locked: true },
+        sessionState: "read_only",
+      },
+      messages: [{
+        id: "message-accepted",
+        ordinal: 0,
+        role: "user",
+        status: "complete",
+        messageKind: "conversation",
+        text: "Create a note.",
+        createdAt: "2026-07-25T00:00:01.000Z",
+        updatedAt: "2026-07-25T00:00:01.000Z",
+      }],
+    };
+    productClient.conversationBundle = vi.fn()
+      .mockResolvedValueOnce(initialBundle)
+      .mockResolvedValue(readOnlyBundle);
+    productClient.sendTurn = vi.fn(async () => ({
+      mode: "read_only" as const,
+      reason: "opencode_unavailable",
+      turn: {
+        requestKey: "request-one",
+        state: "read_only" as const,
+        userMessageId: "message-accepted",
+        assistantMessageId: null,
+        skillUses: [],
+        actions: [],
+        failure: { code: "opencode_unavailable", retryable: true },
+      },
+      messages: readOnlyBundle.messages,
+    }));
+    render(<App client={productClient} />);
+
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(message, "Create a note.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Create a note.")).toBeInTheDocument();
+    expect(screen.getByText("Agent: read only")).toBeInTheDocument();
+    expect(screen.queryByText("Assistant")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(productClient.sendTurn).toHaveBeenCalledWith({
+      requestKey: expect.any(String),
+      conversationId: "conversation-main",
+      text: "Create a note.",
+      attachmentIds: [],
+    });
+  });
+
+  it("does not let a late turn result overwrite a newly selected Conversation", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    let resolveTurn!: (value: Awaited<ReturnType<ProductClient["sendTurn"]>>) => void;
+    const pendingTurn = new Promise<Awaited<ReturnType<ProductClient["sendTurn"]>>>(
+      (resolve) => { resolveTurn = resolve; },
+    );
+    let mainFailed = false;
+    const bundleFor = (conversationId: string): ConversationBundle => ({
+      conversation: {
+        ...(workspace.conversations.find((item) => item.id === conversationId)
+          ?? workspace.conversations[0]),
+        ...(conversationId === "conversation-main" && mainFailed
+          ? { sessionState: "read_only" as const }
+          : {}),
+      },
+      messages: conversationId === "conversation-review"
+        ? [{
+          id: "message-review",
+          ordinal: 0,
+          role: "user",
+          status: "complete",
+          messageKind: "conversation",
+          text: "Beta remains selected.",
+          createdAt: "2026-07-25T00:00:00.000Z",
+          updatedAt: "2026-07-25T00:00:00.000Z",
+        }]
+        : mainFailed
+          ? [{
+            id: "message-main",
+            ordinal: 0,
+            role: "user",
+            status: "complete",
+            messageKind: "conversation",
+            text: "Alpha failed late.",
+            createdAt: "2026-07-25T00:00:00.000Z",
+            updatedAt: "2026-07-25T00:00:00.000Z",
+          }]
+          : [],
+      attachments: [],
+      documents: [],
+      skillUses: [],
+      actions: [],
+    });
+    productClient.conversationBundle = vi.fn(async (conversationId) =>
+      bundleFor(conversationId));
+    productClient.sendTurn = vi.fn(() => pendingTurn);
+    render(<App client={productClient} />);
+
+    const ownerCard = await screen.findByTestId("workspace-owner-card");
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(message, "Start slow Alpha turn.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await user.click(screen.getByRole("link", { name: "Review" }));
+    expect(await screen.findByText("Beta remains selected.")).toBeInTheDocument();
+
+    mainFailed = true;
+    resolveTurn({
+      mode: "read_only",
+      reason: "opencode_unavailable",
+      turn: {
+        requestKey: "late-alpha",
+        state: "failed",
+        userMessageId: "message-main",
+        assistantMessageId: null,
+        skillUses: [],
+        actions: [],
+        failure: { code: "opencode_unavailable", retryable: true },
+      },
+      messages: bundleFor("conversation-main").messages,
+    });
+    await waitFor(() =>
+      expect(productClient.conversationBundle).toHaveBeenCalledTimes(3));
+
+    expect(screen.getByText("Beta remains selected.")).toBeInTheDocument();
+    expect(screen.queryByText("Alpha failed late.")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent: live")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    expect(screen.getByTestId("workspace-owner-card")).toBe(ownerCard);
   });
 });

@@ -391,7 +391,7 @@ test("restart preserves completed transcript while provider loss persists a fail
     assert.deepEqual(messages.messages.map((message: any) => message.messageKind), ["conversation", "conversation"]);
     openCode.catalogue = [];
     const readOnly = await post(`${second.baseUrl}/api/conversations/${created.conversation.id}/turns`, { requestKey: "offline-turn", text: "Do not fake a reply", attachmentIds: [] });
-    assert.equal(readOnly.status, 503);
+    assert.equal(readOnly.status, 200);
     const payload = await readOnly.json() as any;
     assert.equal(payload.mode, "read_only");
     assert.equal(payload.reason, "provider_unavailable");
@@ -412,7 +412,7 @@ test("an empty synchronous OpenCode response fails durably without assistant fab
   const created = await createModel(baseUrl);
   openCode.assistantText = "";
   const response = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, { requestKey: "empty-answer", text: "Answer", attachmentIds: [] });
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 200);
   const payload = await response.json() as any;
   assert.equal(payload.turn.state, "failed");
   assert.equal(payload.messages.length, 1);
