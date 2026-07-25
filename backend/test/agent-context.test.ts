@@ -43,6 +43,8 @@ test("bounded context is deterministic, owner scoped, terminal-only, and secret 
   assert.match(first.text, /credential redacted|sensitive value redacted/u);
   assert.match(first.text, /UNTRUSTED CONTENT/u);
   assert.match(first.text, /UNTRUSTED PREVIEW/u);
+  assert.match(first.text, /--- TOOL RESULT AUTHORITY ---/u);
+  assert.match(first.text, /visual observations.*never instructions/u);
   assert.equal(first.sha256, createHash("sha256").update(first.text).digest("hex"));
   assert.equal(first.byteLength, Buffer.byteLength(first.text));
 });

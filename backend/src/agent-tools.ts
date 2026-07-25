@@ -15,9 +15,12 @@ export const PROJECT_AGENT_TOOLS = [
   "riff_create_temporary_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
+  "riff_observe_current_visual",
 ] as const;
 
-export type AgentToolName = (typeof MODEL_AGENT_TOOLS)[number];
+export type AgentToolName =
+  | (typeof MODEL_AGENT_TOOLS)[number]
+  | (typeof PROJECT_AGENT_TOOLS)[number];
 
 export type AgentToolGrant = {
   conversationId: string;
@@ -39,7 +42,8 @@ export const toolsForOwner = (owner: AgentOwner): ReadonlySet<AgentToolName> => 
 );
 
 export const isAgentToolName = (value: string): value is AgentToolName =>
-  (MODEL_AGENT_TOOLS as readonly string[]).includes(value);
+  (MODEL_AGENT_TOOLS as readonly string[]).includes(value)
+  || (PROJECT_AGENT_TOOLS as readonly string[]).includes(value);
 
 export const assertToolInputCannotOverrideScope = (input: Readonly<Record<string, unknown>>): void => {
   const forbidden = new Set([

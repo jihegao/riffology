@@ -541,6 +541,7 @@ test("dispatcher cancellation revokes the exact real visual Agent authority", as
     processGroupId: 9_001,
     loopbackHost: "127.0.0.1",
     loopbackPort: 41_237,
+    entryPath: "/",
     healthPath: "/healthz",
     healthyAt: "2026-07-25T16:59:59.000Z",
   });

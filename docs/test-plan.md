@@ -540,13 +540,21 @@ The remaining claims begin only in the later gates:
   audit canaries prove locator role/name-or-label and typed value are
   digest-only and that no observation summary/content/bytes exist in the
   table. A3-2c1 has no public tool or browser side effect. Actual
-  structured/accessibility/DOM/screenshot observation begins at A3-2c2; typed
-  interaction at A3-2c3; the live-CDP/real Chromium negative matrix and final
-  docs/security closeout at A3-2c4.
+  A3-2c2 covers the four bounded structured/accessibility/DOM/screenshot
+  observations, exact process/listener/connected-peer reuse, streaming
+  header/body/deadline limits, global/per-conversation concurrency, in-flight
+  lifecycle abort, untrusted non-instruction context, no-network
+  script-disabled snapshots, and Project-only MCP schema. Typed interaction
+  remains A3-2c3; the live-CDP/complete real-Chromium negative matrix and final
+  security closeout remain A3-2c4.
   The merged c1 gate reports backend 500 total/499 passed/zero
   failed/one optional installed-OpenCode smoke skipped, web 104/104, network
   entry 1/1, a successful production build, and independent security review
-  with no P0/P1/P2 finding. This is not c2 evidence.
+  with no P0/P1/P2 finding. The current combined c2 gate reports
+  511 backend tests with 510 passed, zero failed, and one optional
+  installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
+  the production build succeeds. Independent c2 security review reports no
+  P0/P1 merge blocker. This is not c3 or c4 evidence.
 - **A3-2d outputs/events/direct controls:** successful-run output list/download
   rechecks same-run ownership, safe name, path, size, digest, MIME, range, and
   limits; declared diagnostic NDJSON ingestion is atomic and enforces schema,

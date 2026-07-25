@@ -30,6 +30,16 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
   riff_adopt_attachment: definition("Copy a current-conversation attachment into its bound object with a purpose.", {
     attachmentId: { type: "string" }, purpose: { type: "string" }, logicalName: { type: "string" },
   }, ["attachmentId", "purpose", "logicalName"]),
+  riff_observe_current_visual: definition(
+    "Read one bounded, untrusted observation from the current Project's sole healthy visual attempt.",
+    {
+      kind: {
+        type: "string",
+        enum: ["structured", "accessibility", "dom_text", "screenshot"],
+      },
+    },
+    ["kind"],
+  ),
 };
 
 export class AgentMcpServer {
@@ -100,6 +110,42 @@ export class AgentMcpServer {
       assertToolInputCannotOverrideScope(input);
       validateInput(name, input);
       const result = await this.#executor.execute(grant, name, input);
+      if (name === "riff_observe_current_visual"
+        && result
+        && typeof result === "object"
+        && !Array.isArray(result)
+        && (result as Record<string, unknown>).kind === "observe_screenshot") {
+        const screenshot = result as Record<string, unknown>;
+        if (screenshot.schemaVersion !== 1
+          || screenshot.untrusted !== true
+          || screenshot.contentType !== "image/png"
+          || typeof screenshot.pngBase64 !== "string"
+          || !validBoundedPngBase64(screenshot.pngBase64)) {
+          throw new Error("Invalid visual screenshot result.");
+        }
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  schemaVersion: 1,
+                  kind: "observe_screenshot",
+                  untrusted: true,
+                  contentType: "image/png",
+                }),
+              },
+              {
+                type: "image",
+                data: screenshot.pngBase64,
+                mimeType: "image/png",
+              },
+            ],
+          },
+        };
+      }
       return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) ?? "null" }] } };
     } catch (error) {
       const message = error instanceof AgentToolPermissionError ? error.message : "The scoped Agent action failed.";
@@ -132,6 +178,7 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_create_temporary_document: ["name", "mediaType", "content"],
     riff_transition_temporary_document: ["documentId", "transition"],
     riff_adopt_attachment: ["attachmentId", "purpose", "logicalName"],
+    riff_observe_current_visual: ["kind"],
   };
   if (Object.keys(input).some((key) => !allowed[name].includes(key))) throw new AgentToolPermissionError("Agent tool input includes an unsupported field.");
   const text = (key: string, maximum: number): void => {
@@ -154,6 +201,24 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     if (!new Set(["adopt", "reject", "supersede"]).has(String(input.transition))) throw new AgentToolPermissionError("Agent document transition is invalid.");
   }
   if (name === "riff_adopt_attachment") { text("attachmentId", 256); text("purpose", 2_000); text("logicalName", 400); }
+  if (name === "riff_observe_current_visual"
+    && !new Set(["structured", "accessibility", "dom_text", "screenshot"]).has(
+      String(input.kind),
+    )) {
+    throw new AgentToolPermissionError("Agent visual observation kind is invalid.");
+  }
 }
 
 const rpcError = (id: string | number | null, code: number, message: string): RpcResponse => ({ jsonrpc: "2.0", id, error: { code, message } });
+
+const validBoundedPngBase64 = (value: string): boolean => {
+  if (value.length > 2_796_208
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    return false;
+  }
+  const bytes = Buffer.from(value, "base64");
+  return bytes.byteLength <= 2 * 1024 * 1024
+    && bytes.subarray(0, 8).equals(Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]));
+};

@@ -141,6 +141,16 @@ run/turn/shutdown/restart revocation, and legacy-CDP isolation. It adds no
 Playwright runner and exposes neither observation nor interaction to OpenCode;
 those begin at A3-2c2 and A3-2c3.
 
+A3-2c2 adds only Project read observation. The MCP input selects one of four
+finite kinds; the server resolves the current healthy attempt and keeps its
+process identity, port, and internal capability private. Each exact root or
+declared structured-path GET is preceded by listener inspection, connected-peer
+inspection reuses that same socket, and the response is streamed under fixed
+header/body/deadline limits. DOM, accessibility, and screenshot reads render a
+fresh, script-disabled snapshot with all later HTTP and WebSocket traffic
+blocked. Conversation/session/run/turn drift aborts in-flight work. Interaction
+and the live-CDP/complete Chromium negative matrix remain A3-2c3/A3-2c4.
+
 Port selection closes a local probe socket before child bind and therefore has
 a bounded TOCTOU window; it is not a strong reservation claim. Health cannot
 commit until the platform proves the exact recorded child/process group owns a

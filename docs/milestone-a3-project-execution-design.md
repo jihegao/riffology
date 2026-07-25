@@ -83,12 +83,13 @@ regression combination passes 32/32; the serial official backend gate reports
 104/104, the network-entry integration passes 1/1, and the production build
 succeeds. A3-2b4 was merged and published through PR #37; its dedicated
 real-browser matrix passes 5/5. A3-2c1's authority/audit and legacy-CDP-
-isolation foundation was merged through PR #38 and exposes no observation/
-interaction tool. A3-2c2 through A3-2c4 and A3-2d remain pending.
-Its published gate reports 500 backend tests with 499 passed, zero failed,
-and one optional installed-OpenCode smoke skipped; web passes 104/104, network
-entry 1/1, the production build succeeds, and independent security review has
-no P0/P1/P2 finding.
+isolation foundation was merged through PR #38. A3-2c2 adds bounded,
+Project-only read observation while exposing no interaction or caller-selected
+browser target. A3-2c3, A3-2c4, and A3-2d remain pending. The current c2 gate
+reports 511 backend tests with 510 passed, zero failed, and one optional
+installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, the
+production build succeeds, and independent security review has no P0/P1 merge
+blocker.
 The complete Chromium suite passes 8/8. The current backend gate reports 466
 total with 465 passed, zero failed, and one optional installed-OpenCode smoke
 skipped; web passes 104/104, network entry 1/1, and the production build
@@ -1330,8 +1331,21 @@ audit retains bound IDs, finite lifecycle/operation/action/locator kinds, and
 SHA-256 commitments only. It does not retain capability/browser secrets,
 locator role/name-or-label, typed value, observation summary/content, DOM, or
 screenshot bytes. There is no Playwright runner/transport and no OpenCode
-observe/interact tool in A3-2c1. The runner and real observation begin at
-A3-2c2; live-CDP isolation evidence remains an A3-2c4 browser gate.
+observe/interact tool in A3-2c1 alone. A3-2c2 adds the read-only runner and
+`riff_observe_current_visual`; interaction remains A3-2c3 and live-CDP
+isolation evidence remains an A3-2c4 browser gate.
+
+The c2 runner resolves the sole healthy target internally and carries the full
+process identity only across private backend boundaries. Before each exact root
+or declared structured-path GET it rechecks the OS listener, then rechecks the
+connected peer and reuses that same inspected socket. Network reads have a
+fixed total deadline plus header, streaming-body, JSON, text, DOM-node, viewport,
+pixel, and screenshot limits; each Playwright step has its own bounded timeout.
+Root HTML becomes a fresh JavaScript-disabled snapshot; all
+subsequent HTTP and WebSocket requests are denied. Results are schema-versioned
+untrusted data, never an instruction, and never persisted in audit content.
+Global and per-conversation concurrency is bounded; turn, session, Project,
+run, process, expiry, or shutdown drift aborts in-flight observation.
 
 The new runner is structurally separate: its capability issuer, browser
 context/profile, page registry, and transport cannot call or attach to the
@@ -1655,9 +1669,9 @@ Output indexes never resolve outside the owning Project/run object root.
    and the production build succeeds. This is a Chromium-only claim.
 13. **A3-2c Playwright authority — in progress:** c1's backend-private
    scope/capability/audit/revocation and legacy-CDP isolation was merged through
-   PR #38. It exposes no observation or interaction tool. c2 read-only
-   observation, c3 one-use typed interaction, and c4 real Chromium/security/
-   docs closeout remain pending.
+   PR #38. c2 adds the bounded Project-only read-observation tool and keeps
+   process/browser authority private. c3 one-use typed interaction and c4
+   live-CDP/complete Chromium security and docs closeout remain pending.
 14. **A3-2d generic outputs/events/direct controls — pending:** exact same-run
    output list/download with byte/digest revalidation, bounded declared
    diagnostic-event ingestion with opaque run/filter-bound cursors, and

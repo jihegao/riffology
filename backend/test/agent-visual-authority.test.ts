@@ -31,6 +31,7 @@ const TARGET: VisualAgentTarget = Object.freeze({
   processGroupId: 9_001,
   loopbackHost: "127.0.0.1",
   loopbackPort: 41_237,
+  entryPath: "/",
   healthPath: "/healthz",
   healthyAt: "2026-07-25T16:59:59.000Z",
 });
@@ -121,6 +122,152 @@ test("visual authority mints, atomically consumes, and records only secret-free 
   assert.equal(store.facts[0]?.actionKind, "accessibility_tree");
   assert.equal(Object.hasOwn(store.facts[2]!, "redactedSummary"), false);
   assert.throws(() => registry.consume(capability, operation), VisualAgentAuthorityError);
+});
+
+test("visual authority privately resolves and executes one bounded observation", async () => {
+  const store = new FakeStore();
+  store.target = Object.freeze({
+    ...TARGET,
+    structuredInspectionPath: "/inspection",
+  });
+  const seen: unknown[] = [];
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    observer: {
+      async observe(input) {
+        seen.push(input);
+        return Object.freeze({
+          schemaVersion: 1,
+          kind: "observe_structured",
+          untrusted: true,
+          contentType: "application/json",
+          value: { status: "ok" },
+        });
+      },
+    },
+  });
+  assert.equal(registry.observationAvailable, true);
+  const result = await registry.observe({
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation: { kind: "observe_structured" },
+    intentAuthority: "proposal_only",
+  });
+  assert.deepEqual(result, {
+    schemaVersion: 1,
+    kind: "observe_structured",
+    untrusted: true,
+    contentType: "application/json",
+    value: { status: "ok" },
+  });
+  const observerInput = seen[0] as Record<string, unknown>;
+  assert.deepEqual(Object.keys(observerInput).sort(), ["kind", "signal", "target"]);
+  assert.deepEqual(observerInput.target, {
+    runId: TARGET.runId,
+    processAttemptId: TARGET.processAttemptId,
+    pid: TARGET.pid,
+    processStartToken: TARGET.processStartToken,
+    processGroupId: TARGET.processGroupId,
+    loopbackHost: "127.0.0.1",
+    loopbackPort: TARGET.loopbackPort,
+    structuredInspectionPath: "/inspection",
+  });
+  for (const forbidden of [
+    "projectId",
+    "attemptId",
+    "healthPath",
+    "capability",
+  ]) {
+    assert.equal(JSON.stringify(observerInput).includes(forbidden), false);
+  }
+  assert.deepEqual(store.facts.map((fact) => fact.factKind), [
+    "mint",
+    "consume",
+    "outcome",
+  ]);
+});
+
+test("run revocation aborts an in-flight observation before it can return", async () => {
+  const store = new FakeStore();
+  let started!: () => void;
+  const didStart = new Promise<void>((resolve) => { started = resolve; });
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    observer: {
+      async observe({ signal }) {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+        throw new Error("unreachable");
+      },
+    },
+  });
+  const pending = registry.observe({
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation: { kind: "observe_dom_text" },
+    intentAuthority: "proposal_only",
+  });
+  await didStart;
+  registry.revokeRun(TARGET.runId);
+  await assert.rejects(pending, VisualAgentAuthorityError);
+  assert.deepEqual(store.facts.map((fact) => fact.factKind), [
+    "mint",
+    "consume",
+    "failure",
+  ]);
+  assert.equal(store.facts.at(-1)?.outcomeCode, "run_revoked");
+});
+
+test("in-flight scope drift aborts observation and per-conversation concurrency fails closed", async () => {
+  const store = new FakeStore();
+  let started!: () => void;
+  const didStart = new Promise<void>((resolve) => { started = resolve; });
+  const registry = new VisualAgentAuthority(store, {
+    now: () => NOW,
+    ttlMs: 30_000,
+    epochSecret: Buffer.alloc(32, 7),
+    observer: {
+      async observe({ signal }) {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+        throw new Error("unreachable");
+      },
+    },
+  });
+  const input = {
+    conversationId: SCOPE.conversationId,
+    turnId: SCOPE.turnId,
+    externalSessionGeneration: SCOPE.externalSessionGeneration,
+    operation: { kind: "observe_accessibility" },
+    intentAuthority: "proposal_only",
+  } as const;
+  const pending = registry.observe(input);
+  await didStart;
+  await assert.rejects(registry.observe(input), VisualAgentAuthorityError);
+  store.scope = Object.freeze({
+    ...SCOPE,
+    externalSessionGeneration: SCOPE.externalSessionGeneration + 1,
+  });
+  await assert.rejects(pending, VisualAgentAuthorityError);
+  assert.equal(
+    store.facts.filter((fact) => fact.factKind === "mint").length,
+    1,
+  );
+  assert.equal(store.facts.at(-1)?.outcomeCode, "observation_aborted");
 });
 
 test("only the exact registry-issued consumed handle can append a terminal fact", () => {

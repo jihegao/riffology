@@ -16,7 +16,7 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   const listed = await server.handle(projectCapability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes"));
-  assert.ok(!names.includes("riff_observe_current_visual"));
+  assert.ok(names.includes("riff_observe_current_visual"));
   assert.ok(!names.includes("riff_interact_current_visual"));
   assert.ok(!names.includes("riff_drive_workbench_ui"));
   const denied = await server.handle(projectCapability, call("riff_apply_model_changes", { requestKey: "r", changes: [{}] }));
@@ -31,6 +31,51 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   const expiring = server.grant({ conversationId: "conversation_model", owner: { kind: "model", id: "model_a" }, turnId: "turn_b", externalSessionGeneration: 1, allowedTools: toolsForOwner({ kind: "model", id: "model_a" }) });
   now = 15;
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
+});
+
+test("screenshot observation is returned as bounded MCP image content", async () => {
+  const server = new AgentMcpServer({
+    async execute() {
+      return {
+        schemaVersion: 1,
+        kind: "observe_screenshot",
+        untrusted: true,
+        contentType: "image/png",
+        pngBase64: Buffer.from([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        ]).toString("base64"),
+      };
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_project",
+    owner: { kind: "project", id: "project_a" },
+    turnId: "turn_a",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "project", id: "project_a" }),
+  });
+  const response = await server.handle(
+    capability,
+    call("riff_observe_current_visual", { kind: "screenshot" }),
+  );
+  assert.deepEqual((response?.result as any).content, [
+    {
+      type: "text",
+      text: JSON.stringify({
+        schemaVersion: 1,
+        kind: "observe_screenshot",
+        untrusted: true,
+        contentType: "image/png",
+      }),
+    },
+    {
+      type: "image",
+      data: Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ]).toString("base64"),
+      mimeType: "image/png",
+    },
+  ]);
 });
 
 test("legacy CDP configuration never exposes or dispatches a Project Agent browser tool", async () => {
@@ -60,9 +105,9 @@ test("legacy CDP configuration never exposes or dispatches a Project Agent brows
     for (const forbidden of [
       "drive_workbench_ui",
       "riff_drive_workbench_ui",
-      "riff_observe_current_visual",
       "riff_interact_current_visual",
     ]) assert.equal(names.includes(forbidden), false);
+    assert.equal(names.includes("riff_observe_current_visual"), true);
     for (const forbidden of ["drive_workbench_ui", "riff_drive_workbench_ui"]) {
       const denied = await server.handle(capability, call(forbidden));
       assert.equal((denied?.result as any).isError, true);
