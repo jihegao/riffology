@@ -170,8 +170,9 @@ product.
 - [`opencode-bridge.md`](opencode-bridge.md): current Stage 2 per-conversation
   OpenCode/session/context contract followed by the legacy Gate contract.
 - [`backend-api.md`](backend-api.md): current Stage 2 plus published A3-1 and
-  A3-2a API/runtime boundary, with A3-2b/A3-2c still pending, followed by the
-  retained legacy Gate project API target.
+  A3-2a API/runtime boundary, the A3-2b1 implementation under review, and the
+  pending A3-2b2/A3-2b3/A3-2c gates, followed by the retained legacy Gate
+  project API target.
 - [`test-plan.md`](test-plan.md): current Stage 2 acceptance, published A3-1 and
-  A3-2a evidence, pending A3-2b/A3-2c/A3-3 gates, and retained legacy Gate test
-  history.
+  A3-2a evidence, A3-2b1 focused evidence, pending
+  A3-2b2/A3-2b3/A3-2c/A3-3 gates, and retained legacy Gate test history.

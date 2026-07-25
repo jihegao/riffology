@@ -61,9 +61,17 @@ final full backend gate of 385 tests with 384 passed, zero failed, and one
 optional installed-OpenCode smoke skipped; the focused 13/13 gate covers the
 review regressions; the real public vertical passed; web passes 104/104 and
 the production build succeeds.
-This slice exposes neither the child port nor browser access. Visual completion
-remains HTTP `422` `visual_completion_not_supported`; A3-2b and A3-2c remain
-pending.
+The A3-2b1 implementation under review adds the isolated browser-network primitive and a
+`BackendApp.listenBrowserNetwork()` integration path. It exact-binds a platform
+app and an empty broker to distinct server-owned `::1` ports, rejects
+non-canonical Host values before either handler, and serializes startup/close
+so partial or stale listener pairs cannot survive. The broker exposes no frame route,
+proxy, cookie, nonce, or WebSocket. The backend production entrypoint now uses
+this pair; the existing Vite UI remains a separate development proxy surface,
+not the future frame-capability app.
+The published A3-2a2c slice exposes neither the child port nor browser access.
+Visual completion remains HTTP `422` `visual_completion_not_supported`;
+A3-2b2/A3-2b3, browser acceptance, and A3-2c remain pending.
 Ordinary wind import remains A3-3. None of the remaining target slices is
 current implementation evidence, so this document does not claim that Stage 3
 is complete.
@@ -77,8 +85,9 @@ authority. It does not define or claim the final Stage 4 shared product shell.
 
 ## Current implementation boundary
 
-The implemented A3-1a/A3-1b/A3-1c-a/A3-1c-b/A3-1c-c/A3-2a1/A3-2a2a/
-A3-2a2b/A3-2a2c boundary is intentionally narrow:
+The published boundary through A3-2a2c remains implemented. The separate
+A3-2b1 implementation under review adds only the browser-network topology; the
+combined boundary is intentionally narrow:
 
 - `POST /api/projects` creates a server-owned fixed copy from an active,
   technically executable Model;
@@ -159,6 +168,10 @@ A3-2a2b/A3-2a2c boundary is intentionally narrow:
 - visual recovery validates exact launch, scratch, process, port, health, and
   cleanup evidence before inspection or signalling and preserves visual
   completion disposition as `not_requested`; and
+- the A3-2b1 browser-network entrypoint exact-binds separate app and
+  broker servers to literal IPv6 loopback, derives canonical bracketed origins
+  from their actual ports, and denies Host counterexamples before application
+  code; and
 - the existing Project-run start route admits an eligible visual experiment
   without adding a parallel API, while a request with
   `completionConversationId` returns HTTP `422`
@@ -1070,7 +1083,10 @@ logs, completion cards, or error text. Only bounded capability-issued/redeemed/
 revoked audit facts without the secret are retained. App, broker, and child
 request/response headers plus logs are scanned for all three parties' cookie,
 nonce, including expired nonce values, capability, URL, and child-port secrets;
-the same values are absent from DTOs and SQLite. Backend restart, expiry,
+the same values are absent from public DTOs. SQLite contains no browser nonce,
+cookie, frame URL, or capability; it retains child ports only in the
+schema-defined private process-attempt, launch, and health evidence required
+for exact recovery. That evidence cannot restore browser access. Backend restart, expiry,
 redemption replay, browser-session generation change, unhealthy attempt, or
 terminal state revokes access. Revocation first closes every registered socket
 and only then removes the registry entry; a fresh bootstrap/session request is
@@ -1354,17 +1370,21 @@ Output indexes never resolve outside the owning Project/run object root.
    regressions; web is 104/104 and its production build succeeds. Visual
    completion remains HTTP `422`
    `visual_completion_not_supported`.
-9. **A3-2b isolated browser access — pending:** scoped broker/frame capability,
-   exact IPv6-loopback app/broker Host/port/path, browser-session generation,
+9. **A3-2b1 network topology — implementation under review:** the backend
+   production entrypoint exact-binds the platform technical origin and an empty
+   broker to separate IPv6-loopback ports, enforces exact Host, serializes
+   start/close, and preserves the child IPv4-only listener boundary.
+10. **A3-2b2/A3-2b3 isolated browser access — pending:** scoped broker/frame
+   capability, exact broker path, browser-session generation,
    bootstrap/CSRF/nonce/cookie/Origin rules, HTTP and WebSocket enforcement,
    socket-first revocation, three-party secret scans, and real-browser
    isolation evidence.
-10. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
+11. **A3-2c Playwright authority — pending:** current-Project/current-healthy-
    attempt observation, explicit one-turn interaction, bounded audit, and
    cross-scope denial.
-11. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
+12. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.
-12. **Integration — pending:** focused/full suites, independent contract/security review,
+13. **Integration — pending:** focused/full suites, independent contract/security review,
    narrow Stage 3 browser evidence, documentation sync, PR merge, Issue #14
    closure, and local `main` synchronization.
 

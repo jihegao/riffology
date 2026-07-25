@@ -366,6 +366,23 @@ port, proxy, frame, WebSocket, Playwright authority, or real-browser acceptance
 row. The HTTP `422` `visual_completion_not_supported` negative gate remains.
 The remaining claims begin only in the later gates:
 
+- **A3-2b1 network topology — implementation under review:** focused Node tests start the
+  real `BackendApp` app listener plus empty broker on separate server-owned
+  `::1` ports. They prove canonical bracketed origins, distinct ports, Host
+  rejection for localhost/IPv4/missing-port/expanded-IPv6/other-port values,
+  IPv4 connection refusal, collision/invalid-port failure, handler-error
+  redaction, serialized start/close, drain, and idempotent close. The existing
+  visual-listener suite separately preserves the child's
+  exact `127.0.0.1` boundary. This slice does not claim a frame route, proxy,
+  cookie, nonce, WebSocket, or browser evidence.
+  The review worktree gate reports focused network/server/listener tests
+  `43/43`; the full backend gate reports 396 total with 395 passed, zero failed,
+  and one optional installed-OpenCode smoke skipped. Web remains `104/104` and
+  its production build succeeds. A production-entrypoint smoke observed the
+  platform app at `http://[::1]:18787`, the empty broker at
+  `http://[::1]:18788`, exact health success, HTTP `421`
+  `platform_host_denied` for a wrong Host, HTTP `404`
+  `broker_route_denied`, and a successful existing Vite `/api` proxy POST.
 - **A3-2b broker/frame/WebSocket:** exact WebSocket path/subprotocol
   enforcement, frame-size, connection-count, and idle-time limits, plus the
   same-origin local bootstrap, isolated-broker HttpOnly one-use frame session,
@@ -384,7 +401,10 @@ The remaining claims begin only in the later gates:
   Origin only at the exact broker Host/path, only once, and no later than 60
   seconds after issue. Tests redeem within 60 seconds, reject after expiry, and
   prove restart or a new browser generation invalidates the nonce immediately.
-  Expired nonce values never appear in logs, headers, DTOs, or SQLite.
+  Expired nonce values never appear in logs, headers, DTOs, or SQLite. SQLite
+  contains no cookie, frame URL, or browser capability; child-port assertions
+  allow only the schema-defined private process-attempt, launch, and health
+  evidence required by exact recovery.
   Post-redirect HTTP
   without Origin requires the broker cookie; HTTP with Origin requires exact
   broker Origin. WS requires exact broker Origin and rejects missing, `null`,

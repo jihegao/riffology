@@ -10,6 +10,7 @@ const root = join(fileURLToPath(new URL("..", import.meta.url)), ".riff-workspac
 mkdirSync(root, { recursive: true, mode: 0o700 });
 const mesa = process.env.MESA_SERVICE_URL ? new HttpMesaAdapter(process.env.MESA_SERVICE_URL) : new UnavailableMesaAdapter();
 const port = Number(process.env.PORT ?? 8787);
+const brokerPort = Number(process.env.RIFF_VISUAL_BROKER_PORT ?? 0);
 const openCode = opencodeFromEnvironment();
 const app = new BackendApp({
   mesa,
@@ -20,14 +21,15 @@ const app = new BackendApp({
   a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
   workspaceRoot: process.env.WORKSPACE_ROOT ?? root,
   defaultSessionId: process.env.RIFF_SESSION_ID ?? "local-demo",
-  mcpUrl: process.env.RIFF_MCP_URL ?? `http://127.0.0.1:${port}/mcp`,
+  mcpUrl: process.env.RIFF_MCP_URL ?? `http://[::1]:${port}/mcp`,
   ...(process.env.RIFF_CDP_URL ? { projector: new PlaywrightCdpProjector(process.env.RIFF_CDP_URL) } : {}),
   promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
 });
 
 await app.initialize();
-const address = await app.listen(port);
-console.log(`Riff demo backend listening at http://${address.host}:${address.port}`);
+const network = await app.listenBrowserNetwork(port, brokerPort);
+console.log(`Riff platform app listening at ${network.app.origin}`);
+console.log(`Riff visual broker listening at ${network.broker.origin}`);
 
 let shutdownStarted = false;
 const shutdown = (signal: "SIGINT" | "SIGTERM"): void => {
