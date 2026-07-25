@@ -467,7 +467,7 @@ MVP 在本地 macOS 运行：
 | **1 — 数据基础** | SQLite/对象目录、ownership、原子 mutation/recovery、lifecycle、固定副本 Project primitive。 | 已实现并合并。 |
 | **2 — Agent 与 Model 工作区** | 持久 Conversations、OpenCode session/context、skills/scoped tools、documents/attachments、通用 Model workspace、technical checks。 | 已实现、合并，并完成真实 provider 两轮验收。 |
 | **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 已实现并验收。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、通用 output/download/events/direct controls、跨 authority 撤销、普通风机 Model/Project/Experiment 导入，以及创建 Project、编辑 Experiment、真实运行、下载与重启恢复的窄 Product Chromium 场景均完成。 |
-| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | Issue #14 前置已满足；A4-0 设计门禁与 A4-1 API 已合并。A4-2 已在窄分支实现默认 Home、Model/Project 共用 router、双栏 shell 及 responsive/keyboard 基础；A4-3 至 A4-6 仍 pending，本文第 15 节没有任何验收项可标记完成。 |
+| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | Issue #14 前置已满足；A4-0 至 A4-2 已合并。A4-3 已作为窄切片实现持久命名 Conversation、provider lock、安全 messages/attachments/documents/actions 投影、生命周期/删除 UI 与无伪回复 read-only 行为；A4-4 至 A4-6 仍 pending，本文第 15 节没有任何验收项可标记完成。 |
 
 详细切片状态记录在
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)、

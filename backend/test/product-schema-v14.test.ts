@@ -24,11 +24,11 @@ test("schema v14 installs durable lifecycle/delete receipts and process-private 
   try {
     installVersion13(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 14);
+    assert.equal(PRODUCT_SCHEMA_VERSION, 15);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      14,
+      PRODUCT_SCHEMA_VERSION,
     );
     for (const table of [
       "resource_lifecycle_receipts",
@@ -76,6 +76,7 @@ test("schema v14 failure atomically restores version 13 tables and delete trigge
         sql: `${PRODUCT_SCHEMA_MIGRATIONS[13]!.sql}
           INSERT INTO missing_v14_rollback_probe DEFAULT VALUES;`,
       },
+      PRODUCT_SCHEMA_MIGRATIONS[14]!,
     ];
     assert.throws(
       () => initializeProductSchema(database, migrations),

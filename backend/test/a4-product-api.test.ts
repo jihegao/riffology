@@ -17,11 +17,18 @@ import { BackendApp } from "../src/server.ts";
 const NOW = "2026-07-25T10:00:00.000Z";
 
 class ProductApiOpenCode implements OpenCodeConversationPort {
+  discoveryError?: Error;
+
   async discoverProviderModels(): Promise<OpenCodeProviderModel[]> {
+    if (this.discoveryError) throw this.discoveryError;
     return [{
       providerId: "provider-a",
       modelId: "model-a",
       qualifiedId: "provider-a/model-a",
+    }, {
+      providerId: "provider-b",
+      modelId: "model-b",
+      qualifiedId: "provider-b/model-b",
     }];
   }
   async initialize(): Promise<OpenCodeReadiness> {
@@ -675,4 +682,407 @@ test("A4-1 browser API exposes closed collections and replays confirmed delete a
   assert.deepEqual(await restartReplay.json(), deleteReceipt);
   assert.equal(app.productStore!.listModels().length, 1);
   assert.equal(app.productStore!.listProjects().length, 1);
+});
+
+test("A4-3 Conversation browser projections bind providers, redact durable cards, and restore lifecycle state", {
+  timeout: 30_000,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "riff-a4-conversation-api-"));
+  const productRoot = join(root, "product");
+  const legacyRoot = join(root, "legacy");
+  await mkdir(legacyRoot, { recursive: true, mode: 0o700 });
+  const openCode = new ProductApiOpenCode();
+  let app: BackendApp | undefined;
+  const createApp = () => new BackendApp({
+    mesa: new ProductApiMesa(),
+    openCode,
+    a2OpenCode: openCode,
+    a2ProductRoot: productRoot,
+    workspaceRoot: legacyRoot,
+    defaultSessionId: "a4-conversation-api",
+    a3PythonExecutable: process.execPath,
+  });
+  t.after(async () => {
+    await app?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  app = createApp();
+  await app.initialize();
+  addFixtureData(app);
+  app.productStore!.createConversation({
+    id: "conversation_a4_binding",
+    owner: { kind: "model", id: "model_a4_api" },
+    name: "Provider binding",
+    providerId: "provider-a",
+    providerModelId: "model-a",
+    createdAt: NOW,
+  });
+  app.productStore!.createConversation({
+    id: "conversation_a4_project",
+    owner: { kind: "project", id: "project_a4_api" },
+    name: "Project thread",
+    providerId: "provider-a",
+    providerModelId: "model-a",
+    createdAt: NOW,
+  });
+  app.productStore!.createConversation({
+    id: "conversation_a4_activity",
+    owner: { kind: "model", id: "model_a4_api" },
+    name: "Activity projection",
+    providerId: "provider-a",
+    providerModelId: "model-a",
+    createdAt: NOW,
+  });
+  app.productStore!.createTemporaryDocument({
+    id: "document_a4_private",
+    conversationId: "conversation_a4_binding",
+    name: "Safe card",
+    documentState: "draft",
+    mediaType: "text/markdown",
+    content: "PRIVATE_DOCUMENT_CONTENT_/Users/private/model.md",
+    createdAt: NOW,
+  });
+  app.productStore!.startAgentTurn({
+    turnId: "turn_a4_activity",
+    userMessageId: "message_a4_activity",
+    conversationId: "conversation_a4_activity",
+    requestKey: "request_a4_activity",
+    text: "Record safe public activity.",
+    createdAt: NOW,
+  });
+  app.productStore!.recordSkillUse({
+    id: "skill_use_a4_private",
+    conversationId: "conversation_a4_activity",
+    turnId: "turn_a4_activity",
+    skillId: "safe-skill",
+    skillVersion: "1",
+    routingMode: "automatic",
+    catalogDigest: "a".repeat(64),
+    instructionDigest: "b".repeat(64),
+    loadState: "loaded",
+    rationale: "PRIVATE_SKILL_RATIONALE",
+    createdAt: NOW,
+  });
+  app.productStore!.recordAction({
+    id: "action_a4_private",
+    conversationId: "conversation_a4_activity",
+    turnId: "turn_a4_activity",
+    actionKind: "inspect",
+    intent: { rawToolPayload: "PRIVATE_RAW_TOOL_PAYLOAD" },
+    permissionDecision: "allowed",
+    state: "authorized",
+    affectedResources: [{ absolutePath: "/Users/private/model.py" }],
+    createdAt: NOW,
+  });
+  app.productStore!.failAgentTurn(
+    "conversation_a4_activity",
+    "request_a4_activity",
+    "fixture_complete",
+    false,
+    NOW,
+  );
+  let network = await app.listenBrowserNetwork();
+  let baseUrl = network.app.origin;
+  let session = await bootstrap(baseUrl);
+
+  const ownerPath = "/api/objects/model/model_a4_api/conversations";
+  const active = await fetch(`${baseUrl}${ownerPath}?lifecycle=active`, {
+    headers: readHeaders(session),
+  });
+  assert.equal(active.status, 200);
+  const activeBody = await active.json() as any;
+  assert.equal(
+    activeBody.conversations.some(
+      (conversation: any) => conversation.id === "conversation_a4_project",
+    ),
+    false,
+  );
+  const initial = activeBody.conversations.find(
+    (conversation: any) => conversation.id === "conversation_a4_binding",
+  );
+  assert.ok(initial);
+  assert.match(initial.recordDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(Object.keys(initial).sort(), [
+    "id",
+    "lifecycleState",
+    "name",
+    "owner",
+    "provider",
+    "recordDigest",
+    "sessionState",
+    "updatedAt",
+  ]);
+
+  for (const query of [
+    "?lifecycle=active&lifecycle=archived",
+    "?lifecycle=unknown",
+    "?unknown=active",
+  ]) {
+    const rejected = await fetch(`${baseUrl}${ownerPath}${query}`, {
+      headers: readHeaders(session),
+    });
+    assert.equal(rejected.status, 422, query);
+  }
+
+  const bindingIntent = {
+    commandId: "command_a4_provider_binding",
+    expectedRecordDigest: initial.recordDigest,
+    providerId: "provider-b",
+    modelId: "model-b",
+  };
+  const bound = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    bindingIntent,
+  );
+  assert.equal(bound.status, 200, await bound.clone().text());
+  const bindingReceipt = await bound.json() as any;
+  assert.equal(bindingReceipt.provider.providerId, "provider-b");
+  assert.match(bindingReceipt.receiptDigest, /^[0-9a-f]{64}$/u);
+  const replay = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    bindingIntent,
+  );
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), bindingReceipt);
+  const changedIntent = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    { ...bindingIntent, providerId: "provider-a", modelId: "model-a" },
+  );
+  assert.equal(changedIntent.status, 409);
+
+  const upload = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/conversations/conversation_a4_binding/attachments",
+    {
+      commandId: "command_a4_attachment",
+      originalName: "input.json",
+      mediaType: "application/json",
+      base64: Buffer.from('{"value":1}').toString("base64"),
+      purpose: "Conversation input",
+    },
+  );
+  assert.equal(upload.status, 201, await upload.clone().text());
+  const attachment = await upload.json() as any;
+  assert.deepEqual(Object.keys(attachment).sort(), [
+    "createdAt",
+    "id",
+    "mediaType",
+    "originalName",
+    "purpose",
+    "sha256",
+    "sizeBytes",
+  ]);
+  const attachments = await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_binding/attachments`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(attachments.status, 200);
+  assert.deepEqual((await attachments.json() as any).attachments, [attachment]);
+  for (const unsafe of [{
+    commandId: "command_a4_attachment_path",
+    originalName: "../private.json",
+    mediaType: "application/json",
+    base64: Buffer.from("{}").toString("base64"),
+  }, {
+    commandId: "command_a4_attachment_media",
+    originalName: "unsafe.html",
+    mediaType: "text/html",
+    base64: Buffer.from("<p>unsafe</p>").toString("base64"),
+  }]) {
+    const rejected = await requestJson(
+      baseUrl,
+      session,
+      "POST",
+      "/api/conversations/conversation_a4_binding/attachments",
+      unsafe,
+    );
+    assert.equal(rejected.status, 422, JSON.stringify(unsafe));
+  }
+  const foreignUpload = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/conversations/conversation_a4_project/attachments",
+    {
+      commandId: "command_a4_foreign_attachment",
+      originalName: "foreign.json",
+      mediaType: "application/json",
+      base64: Buffer.from("{}").toString("base64"),
+    },
+  );
+  assert.equal(foreignUpload.status, 201);
+  const foreignAttachment = await foreignUpload.json() as any;
+  const foreignRejected = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/conversations/conversation_a4_binding/turns",
+    {
+      requestKey: "request_a4_foreign_attachment",
+      text: "Use the foreign attachment.",
+      attachmentIds: [foreignAttachment.id],
+    },
+  );
+  assert.equal(foreignRejected.status, 409);
+  for (const route of ["documents", "actions"]) {
+    const response = await fetch(
+      `${baseUrl}/api/conversations/conversation_a4_binding/${route}`,
+      { headers: readHeaders(session) },
+    );
+    assert.equal(response.status, 200, route);
+    const text = await response.text();
+    assert.doesNotMatch(
+      text,
+      /(?:externalSessionRef|objectFileId|relativePath|capability|\/Users\/)/u,
+    );
+  }
+  const documents = await (await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_binding/documents`,
+    { headers: readHeaders(session) },
+  )).json() as any;
+  assert.equal(documents.documents[0].name, "Safe card");
+  assert.equal(JSON.stringify(documents).includes("PRIVATE_DOCUMENT_CONTENT"), false);
+  const activity = await (await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_activity/actions`,
+    { headers: readHeaders(session) },
+  )).json() as any;
+  assert.deepEqual(Object.keys(activity.skillUses[0]).sort(), [
+    "id", "loadState", "routingMode", "skillId", "skillVersion",
+  ]);
+  assert.deepEqual(Object.keys(activity.actions[0]).sort(), [
+    "actionKind", "errorCode", "id", "permissionDecision", "state",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(activity),
+    /(?:PRIVATE_|rawToolPayload|affectedResources|\/Users\/)/u,
+  );
+
+  const turn = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/conversations/conversation_a4_binding/turns",
+    {
+      requestKey: "request_a4_read_only",
+      text: "Use the attached input.",
+      attachmentIds: [attachment.id],
+    },
+  );
+  assert.equal(turn.status, 200);
+  const turnBody = await turn.json() as any;
+  assert.equal(turnBody.mode, "read_only");
+  assert.deepEqual(
+    turnBody.messages.map((message: any) => message.role),
+    ["user"],
+  );
+  assert.equal(
+    turnBody.messages.some((message: any) => message.role === "assistant"),
+    false,
+  );
+  const locked = await (await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_binding`,
+    { headers: readHeaders(session) },
+  )).json() as any;
+  assert.equal(locked.provider.locked, true);
+  const lockRejected = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    {
+      commandId: "command_a4_provider_after_turn",
+      expectedRecordDigest: locked.recordDigest,
+      providerId: "provider-a",
+      modelId: "model-a",
+    },
+  );
+  assert.equal(lockRejected.status, 409);
+
+  const archived = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/resources/conversation/conversation_a4_binding/archive",
+    {
+      commandId: "command_a4_conversation_archive",
+      expectedRecordDigest: locked.recordDigest,
+    },
+  );
+  assert.equal(archived.status, 200, await archived.clone().text());
+  const archiveReceipt = await archived.json() as any;
+  const archivedList = await fetch(
+    `${baseUrl}${ownerPath}?lifecycle=archived`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(archivedList.status, 200);
+  assert.deepEqual(
+    (await archivedList.json() as any).conversations.map(
+      (conversation: any) => conversation.id,
+    ),
+    ["conversation_a4_binding"],
+  );
+  const restored = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/resources/conversation/conversation_a4_binding/restore",
+    {
+      commandId: "command_a4_conversation_restore",
+      expectedRecordDigest: archiveReceipt.currentRecordDigest,
+    },
+  );
+  assert.equal(restored.status, 200, await restored.clone().text());
+
+  await app.close();
+  app = undefined;
+  app = createApp();
+  await app.initialize();
+  network = await app.listenBrowserNetwork();
+  baseUrl = network.app.origin;
+  session = await bootstrap(baseUrl);
+  openCode.discoveryError = new Error("provider catalogue unavailable");
+  const restartReplay = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    bindingIntent,
+  );
+  assert.equal(restartReplay.status, 200);
+  assert.deepEqual(await restartReplay.json(), bindingReceipt);
+  const restartChangedIntent = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    { ...bindingIntent, providerId: "provider-a", modelId: "model-a" },
+  );
+  assert.equal(restartChangedIntent.status, 409);
+  const unavailableNewCommand = await requestJson(
+    baseUrl,
+    session,
+    "PATCH",
+    "/api/conversations/conversation_a4_binding/provider-binding",
+    { ...bindingIntent, commandId: "command_a4_provider_unavailable" },
+  );
+  assert.equal(unavailableNewCommand.status, 503);
+  const restartDetail = await (await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_binding`,
+    { headers: readHeaders(session) },
+  )).json() as any;
+  assert.equal(restartDetail.provider.locked, true);
+  assert.equal(restartDetail.lifecycleState, "active");
+  assert.equal(restartDetail.sessionState, "read_only");
 });

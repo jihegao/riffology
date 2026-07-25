@@ -1,7 +1,7 @@
 # Milestone A4 shared product shell design
 
-- Status: active; A4-0 and A4-1 merged, A4-2 Home/shared shell implemented on
-  branch, A4-3 through A4-6 pending
+- Status: active; A4-0 through A4-2 merged, A4-3 Conversation pane implemented
+  as a narrow slice, A4-4 through A4-6 pending
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -21,11 +21,12 @@ Stage 4 began only after all hard prerequisites were verified:
 - local `main...origin/main` was `0 0`; and
 - the only unrelated untracked entry, `.DS_Store`, remained untouched.
 
-A4-0 was documentation only. A4-1 now implements the bounded Product
+A4-0 was documentation only. A4-1 implements the bounded Product
 API/lifecycle/deletion slice described below. A4-2 implements the default Home,
 one Model/Project router, subordinate Conversation selection, and the shared
-responsive shell without changing the backend startup path or adding the
-A4-3/A4-4 pane behavior. A4-3 through A4-6 remain pending. Only A4-6 may claim
+responsive shell. A4-3 implements the persistent Conversation pane and its
+closed browser contracts without changing the backend startup path or adding
+the A4-4 right-pane renderers. A4-4 through A4-6 remain pending. Only A4-6 may claim
 the complete MVP browser story or close Issue #15.
 
 ## 2. Product invariants and non-goals
@@ -80,7 +81,7 @@ full applicable gates, merge, and synchronize local and remote state.
 
 The collection, lifecycle, deletion, and browser-admission contracts in this
 section are implemented by A4-1. The Product router and visible Home contracts
-are implemented on the A4-2 branch.
+were implemented by A4-2 and are merged.
 
 ### 4.1 Product router
 
@@ -264,6 +265,13 @@ Conversations for restore; they retain the same owner checks as active reads.
 The UI states are `live`, `connecting`, `lost`, and `read_only`. Provider,
 authentication, reconstruction, or OpenCode failure produces `read_only` or
 `lost`; it never produces a canned assistant reply.
+
+A durable, expected provider failure is a successful Product-state response:
+the turn route returns HTTP 200 with `mode: "read_only"`, a safe reason, the
+persisted user message, and no assistant message. Admission, malformed-request,
+owner, and transport failures remain HTTP errors. This distinction preserves
+zero-console-error browser acceptance without relabelling an expected durable
+state as a network failure.
 
 Messages, attachment metadata, temporary document cards, skill uses, and action
 records are durable Riff projections. The browser never receives provider
@@ -881,3 +889,52 @@ The remaining Product/architecture P2 records that A4-2 uses an explicitly
 labelled equivalent-200%-layout CSS viewport rather than actual browser zoom.
 Actual 200% zoom remains part of the A4-6 continuous exit matrix; this
 non-blocking limitation is not an A4-2 completion claim.
+
+### A4-3 implementation record
+
+A4-3 implements the persistent left Conversation pane and its closed browser
+contracts:
+
+- owner-scoped active, archived, and trashed collections drive creation,
+  selection, rename, archive, restore, trash, and safe permanent deletion;
+- schema v15 records immutable, intent-bound provider/model binding receipts,
+  with exact replay after restart and changed-intent rejection;
+- the provider/model selector is available only before the first accepted user
+  message and then displays the durable locked binding;
+- ordered messages, allowlisted attachments, temporary-document metadata, and
+  redacted skill/action cards survive Conversation switching without remounting
+  the right owner workspace;
+- attachment names and media types are fail-closed, while public DTOs exclude
+  object-file IDs, paths, credentials, OpenCode session references, rationale,
+  intent, affected resources, capability URLs, and raw tool payloads;
+- expected provider failure persists only the user message and returns HTTP 200
+  with `mode: "read_only"` and no assistant message; and
+- permanent deletion is available only from Trash after a distinct preview,
+  blocker display, current token/state validation, and exact typed-name
+  confirmation.
+
+The dedicated Chromium fixture is deterministic acceptance infrastructure, not
+real-provider evidence. It verifies two state-independent Conversations,
+provider change and lock, attachment retention, right-pane DOM identity,
+lifecycle recovery, preview/confirm deletion, read-only no-fabrication,
+narrow keyboard operation, horizontal fit, response secrecy, and zero console
+errors. Real-provider multi-Conversation acceptance remains exclusively A4-6.
+
+The complete implementation gate is backend 586 total / 585 passed / zero
+failed / one optional installed-OpenCode smoke skipped; Web 116/116; network
+entry 1/1; dedicated A4-3 Chromium 1/1; retained A4-2 Chromium 1/1; retained
+full Chromium 15/15; Visual-Agent Chromium security 6/6; production build;
+27-document governance; and clean `git diff --check`.
+
+Three independent read-only reviewers who did not implement A4-3 completed
+final review after all findings were fixed and re-reviewed:
+
+| Review | Final result |
+| --- | --- |
+| Product/architecture/security | P0=0, P1=0, P2=0 |
+| Accessibility/interaction | P0=0, P1=0, P2=0 |
+| Test/documentation consistency | P0=0, P1=0, P2=0 |
+
+A4-4 renderer/Project execution UI, A4-5 startup cutover/recovery/retirement,
+and the continuous A4-6 browser matrix remain pending. All 69 final trace rows
+remain `pending`, and Issue #15 remains open.

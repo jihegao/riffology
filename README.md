@@ -119,18 +119,16 @@ recovery, and precise retirement boundaries. It changes no runtime behavior;
 every A4 implementation row remains pending, and only A4-6 may claim the
 complete MVP or close #15.
 
-A4-1 now implements the shared Product browser-API foundation without changing
-the visible legacy/Evidence entry. Schema v14 adds durable Model/Project/
+A4-1 implements the shared Product browser-API foundation. Schema v14 adds durable Model/Project/
 Conversation lifecycle receipts and permanent-delete receipts. `GET /api/home`,
 the lifecycle-filtered Model/Project collections, generic rename/archive/
 restore/trash commands, and explicit preview/confirm permanent deletion all use
 one exact browser-session Host/Origin/Fetch/CSRF boundary. Permanent deletion
 fails closed on reference, byte/index, process, download, frame/WebSocket,
 Agent/tool, generation, token, or closure drift and preserves fixed-copy
-lineage. A4-2 through A4-6 remain pending; no Stage 4 UI or complete-MVP claim
-is made here.
+lineage.
 
-A4-2 is now implemented on its narrow branch. The default Vite entry is Home
+A4-2 is merged. The default Vite entry is Home
 at `/`, with independent Models and Projects collections plus New Model and
 New Project forms. `/models/:id` and `/projects/:id` use one responsive
 two-pane Product shell; `?conversation=` changes only the persistent left
@@ -139,8 +137,21 @@ the real browser session, consumes only the closed A4-1 DTOs, reports provider
 unavailability honestly, and keeps the Model/Project workspace content
 explicitly bounded to A4-4. Deprecated `?mode=legacy` and `?mode=evidence`
 compatibility entries remain only until the manifest-proven A4-5 retirement.
-A4-3 through A4-6 remain pending, all final trace rows remain pending, and
-Issue #15 stays open.
+
+A4-3 is implemented as a narrow slice. The persistent left pane now owns
+named Conversation creation, selection, rename, archive, restore, trash, and
+preview/confirm permanent deletion. Exact provider/model binding is durable and
+locks after the first accepted user message. Messages, safe attachment metadata,
+temporary-document cards, and redacted skill/action records survive selection
+changes; the right owner workspace remains mounted. Expected provider failure
+returns HTTP 200 with `mode: "read_only"`, persists the user message, creates no
+assistant message, and leaves direct lifecycle controls available. Schema v15
+adds immutable provider-binding command receipts. A4-4 through A4-6 remain
+pending, all final trace rows remain pending, and Issue #15 stays open. Its
+complete gate is backend 586 total/585 passed/zero failed/one optional skip,
+Web 116/116, network 1/1, A4-3 Chromium 1/1, retained Chromium 15/15,
+Visual-Agent Chromium 6/6, production build, documentation governance, and
+three final independent reviews at P0=0/P1=0/P2=0.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and

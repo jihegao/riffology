@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { defaultProductClient, type ProductClient } from "./api";
+import { ConversationPane } from "./ConversationPane";
 import { navigateProduct, readProductRoute, workspaceHref } from "./router";
 import type {
   HomeDto,
@@ -454,17 +455,6 @@ function SharedShell({
       (next === "conversation" ? conversationHeadingRef : workspaceHeadingRef).current?.focus();
     });
   };
-  const selectedConversation = workspace?.conversations.find(
-    (conversation) => conversation.id === route.conversationId,
-  ) ?? workspace?.conversations[0];
-  const invalidConversation = Boolean(
-    workspace
-      && route.conversationId
-      && !workspace.conversations.some(
-        (conversation) => conversation.id === route.conversationId,
-      ),
-  );
-
   return (
     <main id="product-main" className="product-shell" tabIndex={-1}>
       <header className="product-owner-header">
@@ -479,11 +469,6 @@ function SharedShell({
         </span>
       </header>
       {error && <div className="product-alert" role="alert">{error}</div>}
-      {invalidConversation && (
-        <div className="product-alert" role="alert">
-          That Conversation does not belong to this workspace. The current owner was not changed.
-        </div>
-      )}
       <div
         className="product-pane-selector"
         role="group"
@@ -519,30 +504,12 @@ function SharedShell({
             <p className="product-eyebrow">PERSISTENT CONTEXT</p>
             <h2 id="conversation-heading" ref={conversationHeadingRef} tabIndex={-1}>Conversation</h2>
           </div>
-          {workspace && workspace.conversations.length > 0 ? (
-            <nav aria-label="Conversations" className="product-conversation-list">
-              {workspace.conversations.map((conversation) => (
-                <ResourceLink
-                  key={conversation.id}
-                  kind={route.kind}
-                  id={route.id}
-                  conversationId={conversation.id}
-                >
-                  <span aria-current={conversation.id === selectedConversation?.id ? "page" : undefined}>
-                    {conversation.name}
-                  </span>
-                </ResourceLink>
-              ))}
-            </nav>
-          ) : (
-            <p className="product-empty">
-              {workspace ? "No Conversations yet." : "Loading Conversations…"}
-            </p>
-          )}
-          <div className="product-boundary-note">
-            <strong>{selectedConversation?.name ?? "Conversation"}</strong>
-            <p>Messages and Conversation actions arrive in A4-3. No assistant reply is fabricated here.</p>
-          </div>
+          <ConversationPane
+            client={client}
+            ownerKind={route.kind}
+            ownerId={route.id}
+            selectedConversationId={route.conversationId}
+          />
         </aside>
         <section
           ref={workspacePaneRef}

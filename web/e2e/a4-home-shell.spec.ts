@@ -62,7 +62,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await page.setViewportSize({ width: 640, height: 900 });
   const selector = page.getByTestId("pane-selector");
   await expect(selector).toBeVisible();
-  await expect(page.getByRole("button", { name: "Conversation" })).toBeFocused();
+  await expect(selector.getByRole("button", { name: "Conversation" })).toBeFocused();
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeHidden();
   await page.getByRole("button", { name: "Workspace" }).focus();
@@ -70,7 +70,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByTestId("pane-conversation")).toBeHidden();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toBeFocused();
-  await page.getByRole("button", { name: "Conversation" }).focus();
+  await selector.getByRole("button", { name: "Conversation" }).focus();
   await page.keyboard.press("Space");
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeHidden();

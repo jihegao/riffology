@@ -12,8 +12,51 @@ export type ConversationDto = {
   provider: { providerId: string; modelId: string; locked: boolean };
   sessionState: AgentSessionState;
   lifecycleState: LifecycleState;
+  recordDigest: Sha256Digest;
   updatedAt: IsoTimestamp;
 };
+
+export type ConversationProviderBindingReceipt = {
+  schemaVersion: 1;
+  commandId: string;
+  conversationId: ProductId;
+  provider: { providerId: string; modelId: string; locked: false };
+  previousRecordDigest: Sha256Digest;
+  currentRecordDigest: Sha256Digest;
+  committedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
+};
+
+export type ConversationAttachmentDto = {
+  id: ProductId;
+  originalName: string;
+  purpose: string | null;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: Sha256Digest;
+  createdAt: IsoTimestamp;
+};
+
+export type TemporaryDocumentCardDto = {
+  id: ProductId;
+  sourceMessageId: ProductId | null;
+  name: string;
+  documentState: "draft" | "adopted" | "rejected" | "superseded";
+  mediaType: string;
+  lifecycleState: LifecycleState;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+};
+
+export type PublicSkillUseDto = Pick<
+  SkillUseDto,
+  "id" | "skillId" | "skillVersion" | "routingMode" | "loadState"
+>;
+
+export type PublicActionRecordDto = Pick<
+  ActionRecordDto,
+  "id" | "actionKind" | "permissionDecision" | "state" | "errorCode"
+>;
 
 export type ConversationMessageDto = {
   id: ProductId;

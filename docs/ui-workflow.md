@@ -55,8 +55,7 @@ Project. It uses the closed A4-1 Home and provider DTOs, creates a Model from
 only name/provider/model, creates a Project from only name/executable Model,
 and disables creation honestly when the required server option is unavailable.
 The shell lists only durable Conversation summaries returned by the backend.
-Messages and Conversation lifecycle remain A4-3; no assistant response is
-fabricated. The right pane currently renders a truthful owner summary and
+The right pane currently renders a truthful owner summary and
 explicit A4-4 boundary. A4-4 will select only server-declared, bounded Markdown, code,
 table, JSON, chart/diagram, or restricted Model-page renderers. At narrow width
 and equivalent 200% layout, a labelled pane selector retains the same owner
@@ -68,6 +67,24 @@ pending.
 Deprecated `?mode=legacy` and `?mode=evidence` entries remain isolated for
 regression only. They are not linked from Product Home and are removed only by
 the identity- and manifest-proven A4-5 retirement.
+
+## A4-3 persistent Conversation pane
+
+The left pane now lists active Conversations and exposes archived/trash
+recovery lists without changing the right workspace owner key. Users can create
+and switch named Conversations, bind an exact discovered provider/model before
+the first accepted message, rename/archive/restore/trash them, and permanently
+delete only after a separate preview, zero blockers, and exact typed-name
+confirmation.
+
+The transcript shows only closed public messages and platform cards.
+Attachments expose name, purpose, media type, size, digest, and time; temporary
+documents and skill/action records are metadata cards, never raw content,
+paths, rationale, intent, or tool payloads. Provider failure preserves the user
+message, emits no assistant message, announces `Agent: read only`, disables
+only the composer, and leaves lifecycle/resource controls operable. A4-3 uses a
+deterministic provider only for focused browser automation; real-provider exit
+acceptance remains owned by A4-6.
 
 Untrusted content is rendered from data ASTs into fixed elements with raw HTML
 disabled. Active/remote URLs and inline HTML/SVG are rejected, active

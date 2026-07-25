@@ -1856,6 +1856,12 @@ editing prior records.
 | Worker failure, timeout, cancel, resource limit | terminal `failed`/`timed_out`/`cancelled` | Exact immutable terminal metadata; no success artifacts. |
 | Lost response after commit | retry returns stored response | No new revision/event. |
 
+Stage 4 Product API note: this Gate-2 table records the historical transport
+contract. A4-3 supersedes it only for an accepted durable
+`POST /api/conversations/:id/turns` result: expected provider failure returns
+HTTP 200 with `mode: "read_only"`, persists the user message, and emits no
+assistant message. Admission and transport failures remain HTTP errors.
+
 Public errors contain only stable code, bounded message, correlation ID, and
 safe retry metadata. They never contain absolute paths, raw exception text,
 stack traces, credentials, environment, tool inputs, or unrelated project IDs.

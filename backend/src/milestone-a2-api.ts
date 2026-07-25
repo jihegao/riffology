@@ -1,7 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
 import { parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
-import type { ConversationOwner } from "./agent-domain.ts";
+import type {
+  AgentTurnDto,
+  ConversationMessageDto,
+  ConversationOwner,
+} from "./agent-domain.ts";
 import { AgentWorkspaceService } from "./agent-workspace-service.ts";
 import type {
   PermanentDeleteReceipt,
@@ -394,7 +398,10 @@ export class MilestoneA2Api {
     if (parts.length === 5 && parts[1] === "objects" && parts[4] === "conversations") {
       const owner = ownerFromRoute(parts[2], parts[3]);
       if (request.method === "GET") {
-        json(response, 200, { conversations: this.service.listConversations(owner) });
+        const lifecycle = lifecycleQuery(url);
+        json(response, 200, {
+          conversations: this.service.listConversations(owner, lifecycle),
+        });
         return true;
       }
       if (request.method === "POST") {
@@ -416,11 +423,44 @@ export class MilestoneA2Api {
         return true;
       }
       if (request.method === "GET" && parts.length === 4 && parts[3] === "messages") {
-        json(response, 200, { messages: this.service.listMessages(conversationId) });
+        json(response, 200, {
+          messages: this.service.listMessages(conversationId)
+            .map(publicConversationMessage),
+        });
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "attachments") {
+        json(response, 200, {
+          attachments: this.service.listAttachments(conversationId),
+        });
         return true;
       }
       if (request.method === "GET" && parts.length === 4 && parts[3] === "documents") {
         json(response, 200, { documents: this.service.listTemporaryDocuments(conversationId) });
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "actions") {
+        json(response, 200, this.service.listConversationActivity(conversationId));
+        return true;
+      }
+      if (request.method === "PATCH" && parts.length === 4
+        && parts[3] === "provider-binding") {
+        const body = await strictJsonBody(request, [
+          "commandId",
+          "expectedRecordDigest",
+          "providerId",
+          "modelId",
+        ]);
+        privateJson(response, 200, await this.service.changeConversationProvider({
+          commandId: requiredString(body.commandId, "commandId"),
+          conversationId,
+          expectedRecordDigest: requiredString(
+            body.expectedRecordDigest,
+            "expectedRecordDigest",
+          ),
+          providerId: requiredString(body.providerId, "providerId"),
+          modelId: requiredString(body.modelId, "modelId"),
+        }));
         return true;
       }
       if (request.method === "POST" && parts.length === 4 && parts[3] === "attachments") {
@@ -444,7 +484,15 @@ export class MilestoneA2Api {
           ...(body.attachmentIds === undefined ? {} : { attachmentIds: stringArray(body.attachmentIds, "attachmentIds") }),
           ...(body.visualInteractionConfirmation === undefined ? {} : { visualInteractionConfirmation: visualInteractionConfirmation(body.visualInteractionConfirmation) }),
         });
-        json(response, result.mode === "live" ? 200 : 503, result);
+        json(
+          response,
+          200,
+          {
+            ...result,
+            turn: publicAgentTurn(result.turn),
+            messages: result.messages.map(publicConversationMessage),
+          },
+        );
         return true;
       }
     }
@@ -455,7 +503,9 @@ export class MilestoneA2Api {
     const method = request.method ?? "";
     if (method === "GET" || method === "HEAD") {
       const collectionQuery = method === "GET"
-        && /^\/api\/(?:models|projects)$/u.test(url.pathname);
+        && (/^\/api\/(?:models|projects)$/u.test(url.pathname)
+          || /^\/api\/objects\/(?:model|project)\/[^/]+\/conversations$/u
+            .test(url.pathname));
       const eventQuery = method === "GET"
         && /\/diagnostic-events$/u.test(url.pathname);
       if (url.search !== "" && !collectionQuery && !eventQuery) {
@@ -1087,7 +1137,7 @@ const productRoute = (method: string, parts: string[]): boolean => {
     return true;
   }
   if (parts[1] === "conversations"
-    && ["GET", "POST"].includes(method)) {
+    && ["GET", "POST", "PATCH"].includes(method)) {
     return true;
   }
   if (parts[1] === "models" && parts.length >= 4
@@ -1305,6 +1355,105 @@ const strictBase64 = (value: unknown): Buffer => {
   if (!bytes.length || bytes.byteLength > 1_048_576 || bytes.toString("base64") !== value) throw new ApiError(422, "invalid_attachment", "Attachment bytes are empty or too large.");
   return bytes;
 };
+
+const publicConversationMessage = (
+  message: ConversationMessageDto,
+): Readonly<Record<string, unknown>> => {
+  const platformCard = message.messageKind === "platform_card"
+    ? publicPlatformCard(message.content)
+    : undefined;
+  const visualInteractionMarker = message.role === "user"
+    ? publicVisualInteractionMarker(message.content)
+    : undefined;
+  return Object.freeze({
+    id: message.id,
+    ordinal: message.ordinal,
+    role: message.role,
+    status: message.status,
+    messageKind: message.messageKind,
+    text: message.role === "tool" ? "Tool activity recorded." : message.text,
+    ...(platformCard ? { platformCard } : {}),
+    ...(visualInteractionMarker ? { visualInteractionMarker } : {}),
+    createdAt: message.createdAt,
+    updatedAt: message.updatedAt,
+  });
+};
+
+const publicVisualInteractionMarker = (
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const marker = (value as Record<string, unknown>).visualInteractionConfirmation;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return undefined;
+  const record = marker as Record<string, unknown>;
+  if (record.schemaVersion !== 1
+    || !["click", "type", "select"].includes(String(record.actionKind))
+    || !["role_name", "label"].includes(String(record.locatorKind))
+    || typeof record.actionCommitmentDigest !== "string"
+    || !/^[0-9a-f]{64}$/u.test(record.actionCommitmentDigest)
+    || !(record.valueDigest === null
+      || typeof record.valueDigest === "string"
+        && /^[0-9a-f]{64}$/u.test(record.valueDigest))) return undefined;
+  return Object.freeze({
+    schemaVersion: 1,
+    actionKind: record.actionKind,
+    locatorKind: record.locatorKind,
+    actionCommitmentDigest: record.actionCommitmentDigest,
+    valueDigest: record.valueDigest,
+  });
+};
+
+const publicPlatformCard = (
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const card = value as Record<string, unknown>;
+  const outputIds = card.outputIds;
+  if (typeof card.runId !== "string"
+    || !["succeeded", "failed", "cancelled", "timed_out"].includes(
+      String(card.status),
+    )
+    || !Number.isSafeInteger(card.sampleCount)
+    || Number(card.sampleCount) < 0
+    || !Number.isSafeInteger(card.outputCount)
+    || Number(card.outputCount) < 0
+    || !Array.isArray(outputIds)
+    || outputIds.some((id) => typeof id !== "string")
+    || Number(card.outputCount) !== outputIds.length) {
+    return undefined;
+  }
+  return Object.freeze({
+    runId: card.runId,
+    status: card.status,
+    sampleCount: card.sampleCount,
+    outputCount: card.outputCount,
+    outputIds: Object.freeze([...outputIds]),
+  });
+};
+
+const publicAgentTurn = (
+  turn: AgentTurnDto,
+): Readonly<Record<string, unknown>> => Object.freeze({
+  requestKey: turn.requestKey,
+  state: turn.state,
+  userMessageId: turn.userMessageId,
+  assistantMessageId: turn.assistantMessageId,
+  skillUses: turn.skillUses.map((skill) => Object.freeze({
+    id: skill.id,
+    skillId: skill.skillId,
+    skillVersion: skill.skillVersion,
+    routingMode: skill.routingMode,
+    loadState: skill.loadState,
+  })),
+  actions: turn.actions.map((action) => Object.freeze({
+    id: action.id,
+    actionKind: action.actionKind,
+    permissionDecision: action.permissionDecision,
+    state: action.state,
+    errorCode: action.errorCode,
+  })),
+  failure: turn.failure,
+});
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   const body = JSON.stringify(payload);
