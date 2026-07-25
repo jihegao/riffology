@@ -369,8 +369,10 @@ current routes or acceptance evidence:
    installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1,
    and the production build succeeds. This is not Firefox/WebKit or
    remote/HTTPS acceptance.
-9. **A3-2c Playwright — pending:** add internal, current-Project/current-healthy-attempt
-   observation and explicit one-turn interaction authority.
+9. **A3-2c Playwright — in progress:** c1 authority/audit and c2 bounded
+   current-Project/current-healthy-attempt read observation are implemented;
+   c3 explicit one-turn interaction and c4 live-CDP/complete Chromium security
+   closeout remain pending.
 10. **A3-2d generic outputs/events/direct controls — pending:** add exact
     same-run output list/download, bounded declared diagnostic-event ingestion
     with opaque run-bound cursors, add the missing download/trash/restore
@@ -598,6 +600,19 @@ capability, browser URL/port/cookie/nonce, locator text, typed value,
 observation summary/content, DOM, or screenshot bytes. A3-2c1 adds no HTTP
 route, Playwright runner, or OpenCode observation/interaction tool; those remain
 A3-2c2+ work.
+
+A3-2c2 exposes one Project-only MCP tool:
+`riff_observe_current_visual({kind})`, where `kind` is exactly `structured`,
+`accessibility`, `dom_text`, or `screenshot`. The caller cannot supply or
+override the Project, run, attempt, URL, host, port, path, cookie, nonce,
+capability, selector, script, or browser profile. The server internally
+mint-consumes one observation grant, re-resolves the sole healthy target,
+checks its exact listener and connected peer before sending an exact bounded
+GET, and revalidates the complete authority tuple before returning. Text/JSON
+and PNG DTOs are schema-versioned and explicitly untrusted; screenshot bytes
+are emitted as bounded MCP image content. Root HTML is rendered with scripts
+disabled and all subsequent HTTP/WebSocket traffic denied. No observation
+content or bytes enter the append-only audit.
 
 A3-2d follows the existing committed output index but adds the missing generic
 public surface: same-run list/download with path/size/digest revalidation,

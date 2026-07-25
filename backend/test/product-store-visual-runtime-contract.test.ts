@@ -54,6 +54,7 @@ const EXECUTION = {
     entryPoint: "code/model.py",
     protocol: "riff-visual-v1",
     healthPath: "/healthz",
+    structuredInspectionPath: "/inspection",
     webSocket: {
       path: "/events",
       subprotocols: ["riff.visual.v1"],
@@ -348,6 +349,7 @@ test("currentHealthyVisualFrameTarget returns only the exact healthy current vis
         loopbackHost: "127.0.0.1",
         loopbackPort: fixture.process.loopbackPort,
         healthPath: fixture.launch.healthPath,
+        structuredInspectionPath: EXECUTION.visual.structuredInspectionPath,
         healthyAt: HEALTHY_AT,
         webSocket: EXECUTION.visual.webSocket,
       },
@@ -373,6 +375,11 @@ test("currentHealthyVisualAgentTarget derives the sole healthy attempt without a
     assert.equal(target.attemptId, fixture.attempt.attemptId);
     assert.equal(target.processAttemptId, fixture.process.processAttemptId);
     assert.equal(target.processStartToken, fixture.process.processStartToken);
+    assert.equal(target.entryPath, "/");
+    assert.equal(
+      target.structuredInspectionPath,
+      EXECUTION.visual.structuredInspectionPath,
+    );
   } finally {
     closeFixture(fixture);
   }

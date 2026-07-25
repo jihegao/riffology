@@ -20,6 +20,7 @@ import { MilestoneA2Api } from "./milestone-a2-api.ts";
 import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
+import { VisualAgentObserver } from "./visual-agent-observer.ts";
 import { GenericBatchSupervisor, type BatchOutputCandidate } from "./generic-batch-supervisor.ts";
 import {
   GenericVisualSupervisor,
@@ -97,6 +98,7 @@ export type BackendOptions = {
   a3VisualSupervisor?: VisualSupervisorPort;
   a3VisualOutputConsumer?: (candidate: VisualOutputCandidate) => Buffer;
   a3VisualAuthority?: VisualAgentAuthority;
+  a3VisualObserver?: VisualAgentObserver;
   a3PythonExecutable?: string;
   a3ScratchRoot?: string;
   a3DispatcherLeaseMs?: number;
@@ -321,7 +323,9 @@ export class BackendApp {
         scratchRoot,
       });
       const visualAuthority = options.a3VisualAuthority
-        ?? new VisualAgentAuthority(this.productStore);
+        ?? new VisualAgentAuthority(this.productStore, {
+          observer: options.a3VisualObserver ?? new VisualAgentObserver(),
+        });
       this.productRunDispatcher = new ProductRunDispatcher({
         store: this.productStore,
         supervisor: batchSupervisor,

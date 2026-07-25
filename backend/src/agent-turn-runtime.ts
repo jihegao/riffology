@@ -9,6 +9,13 @@ import { ProductStoreV2, ProductStoreV2Error } from "./product-store-v2.ts";
 import { SimulationSkillCatalog, type LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 
+const VISUAL_OBSERVATION_OPERATIONS = Object.freeze({
+  structured: "observe_structured",
+  accessibility: "observe_accessibility",
+  dom_text: "observe_dom_text",
+  screenshot: "observe_screenshot",
+} as const);
+
 export type PreparedAgentTurnRuntime = Readonly<{
   capability: string;
   turnId: string;
@@ -58,6 +65,9 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       ? runtime.session.generation
       : (runtime.session?.generation ?? 0) + 1;
     const allowedTools = new Set(toolsForOwner(conversation.owner));
+    if (!this.visualAuthority?.observationAvailable) {
+      allowedTools.delete("riff_observe_current_visual");
+    }
     if (intentAuthority !== "explicit") {
       allowedTools.delete("riff_apply_model_changes");
       allowedTools.delete("riff_transition_temporary_document");
@@ -77,7 +87,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       turnId: input.turnId,
       intentAuthority,
       requiresMcp: intentAuthority === "explicit" || input.attachmentIds.length > 0 || Boolean(loadedSkill)
-        || /\b(?:model|workspace|file|document|attachment|schema|dependency)\b|(?:模型|工作区|文件|文档|附件|模式|依赖)/iu.test(intentText),
+        || /\b(?:model|workspace|file|document|attachment|schema|dependency|visual|observe|screenshot)\b|(?:模型|工作区|文件|文档|附件|模式|依赖|可视化|观察|截图)/iu.test(intentText),
       context: {
         attachments: attachments.map(({ metadata, preview }) => ({ id: metadata.id, conversationId: input.conversationId, mediaType: metadata.mediaType, preview, relevant: true })),
         documents: this.store.listTemporaryDocuments(input.conversationId).filter((document) => document.lifecycleState === "active")
@@ -128,6 +138,31 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       case "riff_create_temporary_document": return this.#createTemporaryDocument(grant, input);
       case "riff_transition_temporary_document": return this.#transitionTemporaryDocument(grant, input);
       case "riff_adopt_attachment": return this.#adoptAttachment(grant, input);
+      case "riff_observe_current_visual": {
+        if (grant.owner.kind !== "project" || !this.visualAuthority) {
+          throw new AgentRuntimeError(
+            "visual_observation_unavailable",
+            "The scoped visual observation is unavailable.",
+          );
+        }
+        const kind = String(input.kind);
+        const operationKind = VISUAL_OBSERVATION_OPERATIONS[
+          kind as keyof typeof VISUAL_OBSERVATION_OPERATIONS
+        ];
+        if (!operationKind) {
+          throw new AgentRuntimeError(
+            "visual_observation_kind_invalid",
+            "The scoped visual observation is unavailable.",
+          );
+        }
+        return await this.visualAuthority.observe({
+          conversationId: grant.conversationId,
+          turnId: grant.turnId,
+          externalSessionGeneration: grant.externalSessionGeneration,
+          operation: Object.freeze({ kind: operationKind }),
+          intentAuthority: grant.intentAuthority,
+        });
+      }
     }
   }
 

@@ -471,6 +471,7 @@ export type HealthyVisualFrameTarget = Readonly<{
   loopbackHost: "127.0.0.1";
   loopbackPort: number;
   healthPath: string;
+  structuredInspectionPath?: string;
   healthyAt: IsoTimestamp;
   webSocket?: NonNullable<NonNullable<ExecutionDescriptionV2["visual"]>["webSocket"]>;
 }>;
@@ -3527,7 +3528,15 @@ export class ProductStoreV2 {
         ORDER BY id`
       ).all(projectId) as Array<{ id: string }>;
       if (candidates.length !== 1) throw unavailable();
-      return this.currentHealthyVisualFrameTarget(projectId, candidates[0]!.id, options);
+      const target = this.currentHealthyVisualFrameTarget(
+        projectId,
+        candidates[0]!.id,
+        options,
+      );
+      return Object.freeze({
+        ...target,
+        entryPath: "/",
+      });
     } catch (error) {
       if (error instanceof ProductStoreV2Error
         && error.message.startsWith("visual_agent_unavailable:")) throw error;
@@ -3650,6 +3659,7 @@ export class ProductStoreV2 {
       }
       if (canonicalDigest(execution) !== run.executionDescriptionDigest) throw unavailable();
       const webSocket = execution.visual?.webSocket;
+      const structuredInspectionPath = execution.visual?.structuredInspectionPath;
 
       const attemptRows = this.#database.prepare(
         "SELECT * FROM run_attempts WHERE run_id = ? ORDER BY attempt_generation DESC, id",
@@ -3788,6 +3798,7 @@ export class ProductStoreV2 {
         loopbackHost: "127.0.0.1",
         loopbackPort: process.loopback_port,
         healthPath: launch.healthPath,
+        ...(structuredInspectionPath ? { structuredInspectionPath } : {}),
         healthyAt: healthReceipt.healthyAt,
         ...(webSocket ? { webSocket } : {}),
       });

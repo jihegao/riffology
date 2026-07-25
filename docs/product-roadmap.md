@@ -34,7 +34,9 @@
 > batch completion cards with startup reconciliation. A3-2a1 first froze
 > schema-v8 Store/recovery evidence while public visual starts still rejected;
 > A3-2a2 real visual lifecycle and the A3-2b isolated broker/frame/WebSocket
-> boundary are now published, while A3-2c scoped Playwright remains pending.
+> boundary are now published. A3-2c scoped Playwright is in progress: c1
+> authority/audit and c2 bounded read observation are implemented, while c3
+> interaction and c4 security closeout remain pending.
 > A3-2a1 remains schema/Store/recovery plus
 > negative admission only, hardening the existing v4 port/health shape and
 > rejecting unproven pre-v8 evidence. A3-2a2 uses the canonical single-sample input,
@@ -52,9 +54,11 @@
 > acceptance begins only after A3-2d. This is not completion evidence
 > for Stage 3. #15 owns the final shared shell and browser acceptance.
 
-> A3-2c1 is a merged authority/audit and legacy-CDP-isolation foundation
-> (PR #38). It exposes no observation or interaction tool.
-> A3-2c2 through A3-2c4 remain pending.
+> A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
+> (PR #38). A3-2c2 adds the bounded Project-only read-observation tool with
+> exact process/listener/peer binding, fresh script-disabled browser snapshots,
+> and no caller-controlled target or browser authority. A3-2c3 interaction and
+> A3-2c4 live-CDP/complete Chromium security closeout remain pending.
 
 > The current process claim is deliberately narrow: macOS, local user,
 > `sandbox-exec`, restricted Model workspace, scrubbed environment, no network

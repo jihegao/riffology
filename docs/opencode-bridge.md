@@ -131,7 +131,7 @@ Agent changes are proposals or domain actions, not prose side effects:
 | `run_experiment_revision` | Start an exact saved experiment revision; backend derives workflow labels from current scoped policy facts. |
 | `get_run_status` | Read bounded backend status/log facts. |
 | `read_run_evidence` | Read declared summaries, events, metrics, and view manifests. |
-| `observe_current_visual` | Future A3-2c2 target, not exposed by A3-2c1: derive the current Project/current healthy attempt and return one bounded audited observation. |
+| `riff_observe_current_visual` | A3-2c2 Project-only read tool: derive the current Project/current healthy attempt and return one bounded, schema-versioned, untrusted structured/accessibility/DOM-text/screenshot observation. |
 | `interact_current_visual` | Future A3-2c3 target, not exposed by A3-2c1: consume one explicit current-turn capability for one typed role/name or label interaction, then return bounded audited evidence. |
 
 The Agent cannot record a human endorsement, alter actor type/role, set
@@ -162,7 +162,9 @@ domain commit.
 
 A3-2c1, merged through PR #38, stops at a backend-private authority, append-only
 audit, revocation, and legacy-projector-isolation foundation. It has
-no Playwright runner/transport and does not expose either future A3-2c tool.
+no Playwright runner/transport by itself. A3-2c2 connects that authority to the
+single read-only `riff_observe_current_visual` tool; it still exposes no
+interaction tool.
 Audit facts retain only bound IDs, finite lifecycle/operation/action/locator
 kinds, and SHA-256 commitments; locator role/name-or-label, typed value,
 observation content/summary, DOM, and screenshot bytes are not retained.

@@ -73,9 +73,11 @@ implementation authority.
 | **3 — Project and execution** | In progress. Fixed-copy Projects, deterministic planning, batch lifecycle, cancellation/recovery/completion cards, visual persistence/supervision/dispatch, and the isolated browser broker/frame/WebSocket path plus Chromium security closeout are merged. Scoped Playwright, generic output/event/direct controls, and ordinary wind import remain. |
 | **4 — shared product shell** | Pending Stage 3. Owns Models/Projects home, final shared two-pane UX, cleanup, and complete wind browser acceptance. |
 
-A3-2c1 is a merged authority/audit and legacy-CDP-isolation foundation only
-(PR #38). It exposes no observation or interaction tool; A3-2c2 through A3-2c4
-remain pending and Stage 3 remains in progress.
+A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
+(PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
+backend-owned browser profile and exact process/listener/peer checks. It adds
+no interaction tool; A3-2c3 and A3-2c4 remain pending and Stage 3 remains in
+progress.
 
 A3-3 diagnostic-event acceptance begins only after A3-2d publishes the
 generic event-ingestion boundary; legacy wind/Gate event routes are not

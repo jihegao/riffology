@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
+import type { VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
 import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 
@@ -71,6 +72,7 @@ test("Project capability never exposes Model workspace mutation and attachment a
   const listed = await runtime.handle(prepared.capability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes")); assert.ok(!names.includes("riff_read_model_file"));
+  assert.ok(!names.includes("riff_observe_current_visual"));
   const forged = await runtime.handle(prepared.capability, call("riff_adopt_attachment", { attachmentId: "attachment_other", purpose: "forged", logicalName: "other.csv" }));
   assert.equal((forged?.result as any).isError, true);
   const adopted = await runtime.handle(prepared.capability, call("riff_adopt_attachment", { attachmentId: "attachment_project", purpose: "project input", logicalName: "source.csv" }));
@@ -78,6 +80,88 @@ test("Project capability never exposes Model workspace mutation and attachment a
   const projectFiles = store.listObjectFiles({ kind: "project", id: "project_alpha" });
   assert.ok(projectFiles.some((file) => file.kind === "adopted_attachment" && file.sourceAttachmentId === "attachment_project"));
   assert.equal(store.readObjectFile("file_model_alpha").toString("utf8"), "value = 1\n");
+});
+
+test("Project-only visual observation keeps target authority server-side", async (t) => {
+  const observed: unknown[] = [];
+  const visualAuthority = {
+    observationAvailable: true,
+    async observe(input: unknown) {
+      observed.push(input);
+      return {
+        schemaVersion: 1,
+        kind: "observe_accessibility",
+        untrusted: true,
+        contentType: "text/plain",
+        text: "- heading \"Current visual\"",
+      };
+    },
+    revokeTurn() {},
+    revokeAll() {},
+  } as unknown as VisualAgentAuthority;
+  const { store, runtime } = setup(t, true, visualAuthority);
+  store.startAgentTurn({
+    turnId: "turn_project_observe",
+    userMessageId: "message_project_observe",
+    conversationId: "conversation_project",
+    requestKey: "project-observe",
+    text: "Observe the current visual",
+    createdAt: NOW,
+  });
+  store.bindAgentSession({
+    id: "session_project_observe",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-observe",
+    at: NOW,
+  });
+  const prepared = await runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_observe",
+    text: "Observe the current visual",
+    attachmentIds: [],
+  });
+  t.after(() => prepared.release());
+  const listed = await runtime.handle(prepared.capability, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
+  assert.ok(names.includes("riff_observe_current_visual"));
+  assert.ok(!names.includes("riff_interact_current_visual"));
+  const response = await runtime.handle(
+    prepared.capability,
+    call("riff_observe_current_visual", { kind: "accessibility" }),
+  );
+  assert.equal((response?.result as any).isError, undefined, JSON.stringify(response));
+  const observedContent = JSON.parse(
+    (response?.result as any).content[0].text,
+  );
+  assert.equal(observedContent.schemaVersion, 1);
+  assert.equal(observedContent.untrusted, true);
+  assert.equal(observedContent.kind, "observe_accessibility");
+  assert.equal(observed.length, 1);
+  assert.deepEqual(observed[0], {
+    conversationId: "conversation_project",
+    turnId: "turn_project_observe",
+    externalSessionGeneration: 1,
+    operation: { kind: "observe_accessibility" },
+    intentAuthority: "proposal_only",
+  });
+  for (const injected of [
+    { kind: "dom_text", url: "http://127.0.0.1:9222" },
+    { kind: "dom_text", selector: "#secret" },
+    { kind: "dom_text", script: "document.cookie" },
+  ]) {
+    const denied = await runtime.handle(
+      prepared.capability,
+      call("riff_observe_current_visual", injected),
+    );
+    assert.equal((denied?.result as any).isError, true);
+  }
+  assert.equal(observed.length, 1);
 });
 
 test("intent classifier is conservative for questions and conditionals", () => {
@@ -88,7 +172,11 @@ test("intent classifier is conservative for questions and conditionals", () => {
   assert.equal(explicitImperative("Explain the model"), false);
 });
 
-function setup(t: TestContext, withProject = false) {
+function setup(
+  t: TestContext,
+  withProject = false,
+  visualAuthority?: VisualAgentAuthority,
+) {
   const root = mkdtempSync(join(tmpdir(), "riff-agent-runtime-"));
   const skillRoot = mkdtempSync(join(tmpdir(), "riff-agent-skills-"));
   t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(skillRoot, { recursive: true, force: true }); });
@@ -104,5 +192,11 @@ function setup(t: TestContext, withProject = false) {
     store.createConversation({ id: "conversation_project", owner: { kind: "project", id: "project_alpha" }, name: "Project", providerId: "provider", providerModelId: "model", createdAt: NOW });
   }
   const skills = new SimulationSkillCatalog(skillRoot, ["abm-modeling"]);
-  return { store, runtime: new AgentTurnRuntime(store, skills, { now: () => NOW }) };
+  return {
+    store,
+    runtime: new AgentTurnRuntime(store, skills, {
+      now: () => NOW,
+      ...(visualAuthority ? { visualAuthority } : {}),
+    }),
+  };
 }

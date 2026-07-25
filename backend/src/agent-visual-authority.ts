@@ -1,6 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import type { IsoTimestamp } from "./product-domain.ts";
+import type {
+  VisualAgentObservation,
+  VisualAgentObserver,
+  VisualObservationKind,
+} from "./visual-agent-observer.ts";
 
 export type VisualAgentLocator =
   | Readonly<{ kind: "role_name"; role: string; name: string }>
@@ -33,7 +38,9 @@ export type VisualAgentTarget = Readonly<{
   processGroupId: number;
   loopbackHost: "127.0.0.1";
   loopbackPort: number;
+  entryPath: "/";
   healthPath: string;
+  structuredInspectionPath?: string;
   healthyAt: IsoTimestamp;
 }>;
 
@@ -114,12 +121,16 @@ type Grant = {
   expiresAtMs: number;
   state: "active" | "consumed";
   terminal: boolean;
+  activeAbort?: AbortController;
 };
 
 const DEFAULT_TTL_MS = 60_000;
 const DEFAULT_MAX_GRANTS = 1_024;
+const DEFAULT_MAX_ACTIVE_OBSERVATIONS = 4;
 const MAX_TTL_MS = 60_000;
 const MAX_GRANTS = 4_096;
+const MAX_ACTIVE_OBSERVATIONS = 16;
+const LIFECYCLE_REVALIDATION_MS = 100;
 
 /**
  * A3-2c1 authority foundation. This registry never launches or attaches to a
@@ -131,6 +142,10 @@ export class VisualAgentAuthority {
   readonly #ttlMs: number;
   readonly #maxGrants: number;
   readonly #epochDigest: string;
+  readonly #observer?: Pick<VisualAgentObserver, "observe">;
+  readonly #maxActiveObservations: number;
+  readonly #activeObservationsByConversation = new Map<string, number>();
+  #activeObservationCount = 0;
   readonly #grants = new Map<string, Grant>();
   readonly #consumedHandles = new WeakMap<ConsumedVisualAgentCapability, Grant>();
 
@@ -141,6 +156,8 @@ export class VisualAgentAuthority {
       ttlMs?: number;
       maxGrants?: number;
       epochSecret?: Uint8Array;
+      observer?: Pick<VisualAgentObserver, "observe">;
+      maxActiveObservations?: number;
     }> = {},
   ) {
     this.#store = store;
@@ -155,9 +172,104 @@ export class VisualAgentAuthority {
       "Visual capability registry limit",
       MAX_GRANTS,
     );
+    this.#observer = options.observer;
+    this.#maxActiveObservations = boundedPositiveInteger(
+      options.maxActiveObservations ?? DEFAULT_MAX_ACTIVE_OBSERVATIONS,
+      "Visual observation concurrency limit",
+      MAX_ACTIVE_OBSERVATIONS,
+    );
     const epochSecret = Buffer.from(options.epochSecret ?? randomBytes(32));
     if (epochSecret.byteLength < 16) throw new Error("Visual capability epoch secret is too short.");
     this.#epochDigest = sha256(epochSecret);
+  }
+
+  get observationAvailable(): boolean {
+    return this.#observer !== undefined;
+  }
+
+  /**
+   * The only c2 execution entrance. Capability material, the consumed identity
+   * handle, and the resolved process target never leave this authority.
+   */
+  async observe(input: MintVisualAgentCapabilityInput & Readonly<{
+    operation: Extract<VisualAgentOperation, { kind: VisualObservationKind }>;
+  }>): Promise<VisualAgentObservation> {
+    if (!this.#observer) throw denied();
+    this.#acquireObservation(input.conversationId);
+    let capability: string | undefined;
+    let consumed: ConsumedVisualAgentCapability | undefined;
+    let grant: Grant | undefined;
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    let lifecycleTimer: ReturnType<typeof setInterval> | undefined;
+    try {
+      capability = this.mint(input);
+      grant = this.#grants.get(capability);
+      if (!grant) throw denied();
+      consumed = this.consume(capability, input.operation);
+      grant = this.#consumedHandles.get(consumed);
+      if (!grant || grant.terminal || !isObservation(grant.operation)) throw denied();
+      const controller = new AbortController();
+      grant.activeAbort = controller;
+      const remainingMs = Math.max(1, grant.expiresAtMs - this.#now().getTime());
+      expiryTimer = setTimeout(() => controller.abort(), remainingMs);
+      expiryTimer.unref?.();
+      lifecycleTimer = setInterval(() => {
+        try {
+          if (!grant || grant.terminal) controller.abort();
+          else this.#revalidate(grant);
+        } catch {
+          controller.abort();
+        }
+      }, LIFECYCLE_REVALIDATION_MS);
+      lifecycleTimer.unref?.();
+      const observation = await this.#observer.observe({
+        target: Object.freeze({
+          runId: grant.target.runId,
+          processAttemptId: grant.target.processAttemptId,
+          pid: grant.target.pid,
+          processStartToken: grant.target.processStartToken,
+          processGroupId: grant.target.processGroupId,
+          loopbackHost: grant.target.loopbackHost,
+          loopbackPort: grant.target.loopbackPort,
+          ...(grant.target.structuredInspectionPath
+            ? { structuredInspectionPath: grant.target.structuredInspectionPath }
+            : {}),
+        }),
+        kind: grant.operation.kind,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || grant.terminal) throw denied();
+      this.#revalidate(grant);
+      this.recordOutcome(consumed, {
+        status: "succeeded",
+        code: "observation_succeeded",
+      });
+      return observation;
+    } catch {
+      if (grant && !grant.terminal) {
+        try {
+          this.#terminal(
+            grant,
+            "failure",
+            grant.activeAbort?.signal.aborted
+              ? "observation_aborted"
+              : "observation_failed",
+            this.#now(),
+          );
+        } catch {
+          // A missing terminal append is reconciled as a crash gap after
+          // restart. The consumed grant is still removed below.
+          this.#deleteGrant(grant);
+        }
+      }
+      throw denied();
+    } finally {
+      if (expiryTimer) clearTimeout(expiryTimer);
+      if (lifecycleTimer) clearInterval(lifecycleTimer);
+      if (grant) delete grant.activeAbort;
+      if (consumed) this.#consumedHandles.delete(consumed);
+      this.#releaseObservation(input.conversationId);
+    }
   }
 
   mint(input: MintVisualAgentCapabilityInput): string {
@@ -353,6 +465,42 @@ export class VisualAgentAuthority {
     );
   }
 
+  #revalidate(grant: Grant): void {
+    const now = this.#now();
+    assertDate(now);
+    if (now.getTime() >= grant.expiresAtMs
+      || !equalDigest(this.#epochDigest, grant.capabilityEpochDigest)) throw denied();
+    const scope = this.#store.resolveVisualAgentTurnScope({
+      conversationId: grant.scope.conversationId,
+      turnId: grant.scope.turnId,
+      externalSessionGeneration: grant.scope.externalSessionGeneration,
+    });
+    if (canonicalDigest(scope) !== canonicalDigest(grant.scope)) throw denied();
+    const target = this.#store.currentHealthyVisualAgentTarget(scope.projectId, {
+      now: now.toISOString(),
+    });
+    if (!equalDigest(digestTarget(target), grant.processIdentityDigest)) throw denied();
+  }
+
+  #acquireObservation(conversationId: string): void {
+    if (typeof conversationId !== "string"
+      || !conversationId
+      || Buffer.byteLength(conversationId, "utf8") > 256
+      || this.#activeObservationCount >= this.#maxActiveObservations
+      || (this.#activeObservationsByConversation.get(conversationId) ?? 0) >= 1) {
+      throw denied();
+    }
+    this.#activeObservationCount += 1;
+    this.#activeObservationsByConversation.set(conversationId, 1);
+  }
+
+  #releaseObservation(conversationId: string): void {
+    if ((this.#activeObservationsByConversation.get(conversationId) ?? 0) > 0) {
+      this.#activeObservationsByConversation.delete(conversationId);
+      this.#activeObservationCount -= 1;
+    }
+  }
+
   #revokeMatching(
     predicate: (grant: Grant) => boolean,
     code: string,
@@ -361,6 +509,7 @@ export class VisualAgentAuthority {
     assertDate(now);
     for (const [capability, grant] of this.#grants) {
       if (!predicate(grant)) continue;
+      grant.activeAbort?.abort();
       if (!grant.terminal) {
         if (grant.state === "active") {
           grant.state = "consumed";
@@ -477,7 +626,9 @@ const digestTarget = (target: VisualAgentTarget): string => canonicalDigest({
   processGroupId: target.processGroupId,
   loopbackHost: target.loopbackHost,
   loopbackPort: target.loopbackPort,
+  entryPath: target.entryPath,
   healthPath: target.healthPath,
+  structuredInspectionPath: target.structuredInspectionPath ?? null,
   healthyAt: target.healthyAt,
 });
 
