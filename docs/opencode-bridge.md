@@ -132,7 +132,7 @@ Agent changes are proposals or domain actions, not prose side effects:
 | `get_run_status` | Read bounded backend status/log facts. |
 | `read_run_evidence` | Read declared summaries, events, metrics, and view manifests. |
 | `riff_observe_current_visual` | A3-2c2 Project-only read tool: derive the current Project/current healthy attempt and return one bounded, schema-versioned, untrusted structured/accessibility/DOM-text/screenshot observation. |
-| `riff_interact_current_visual` | A3-2c3 candidate Project-only tool, pending review and merge, with exactly `{}` input: consume one accepted structured visual-interaction confirmation from the immutable current human turn for one typed role/name or label interaction, then return an untrusted bounded dispatched receipt. |
+| `riff_interact_current_visual` | A3-2c3 Project-only tool, merged through PR #41, with exactly `{}` input: consume one accepted structured visual-interaction confirmation from the immutable current human turn for one typed role/name or label interaction, then return an untrusted bounded dispatched receipt. |
 
 The Agent cannot record a human endorsement, alter actor type/role, set
 `policySatisfied`, set trust, close an issue without a recorded resolution, or
@@ -155,8 +155,9 @@ permits manual continuation.
 `drive_workbench_ui` and its ambient `RIFF_CDP_URL` projector remain
 platform-internal legacy projection behavior, not an OpenCode tool. Project
 and A3-2c turn schemas and server-side dispatch allowlists never grant or
-dispatch it. A live-CDP negative remains part of A3-2c4 browser acceptance;
-A3-2c1 does not claim that evidence.
+dispatch it. A3-2c4's review-branch matrix now exercises that denial with a
+real live-CDP endpoint and the published BackendApp turn chain; final status
+still requires independent review and merge. A3-2c1 does not claim that evidence.
 Only the platform may invoke a fixed legacy mirror intent after the matching
 domain commit.
 
