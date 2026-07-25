@@ -75,7 +75,9 @@ implementation authority.
 
 ## Active product and stage documents
 
-- [`product-requirements.md`](product-requirements.md): the single MVP PRD.
+- [`product-requirements.md`](product-requirements.md): the Chinese single MVP
+  PRD, including Platform/Domain Pack ownership, requirement-ID lifecycle, and
+  PRD/Roadmap/Architecture/Code authority boundaries.
 - [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md):
   implemented Stage 1 SQLite/object-directory, atomic mutation, lifecycle,
   recovery, and fixed-copy Project design.
