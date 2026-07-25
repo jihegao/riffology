@@ -10,6 +10,10 @@ export type VisualListenerInspectionInput = Readonly<{
   assignedPort: number;
 }>;
 
+export type VisualConnectedPeerInspectionInput = VisualListenerInspectionInput & Readonly<{
+  brokerLocalPort: number;
+}>;
+
 export type VisualListenerInspectionCode =
   | "visual_listener_missing"
   | "visual_listener_wildcard"
@@ -22,7 +26,10 @@ export type VisualListenerInspectionCode =
   | "visual_listener_tool_failure"
   | "visual_listener_identity_mismatch"
   | "visual_listener_platform_unsupported"
-  | "visual_listener_invalid_input";
+  | "visual_listener_invalid_input"
+  | "visual_socket_missing"
+  | "visual_socket_foreign_owner"
+  | "visual_socket_ambiguous";
 
 export class VisualListenerInspectionError extends Error {
   readonly code: VisualListenerInspectionCode;
@@ -65,6 +72,14 @@ type Listener = Readonly<{
   port: number;
 }>;
 
+type ConnectedPeer = Readonly<{
+  pid: number;
+  localHost: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+}>;
+
 const ERROR_MESSAGES: Readonly<Record<VisualListenerInspectionCode, string>> = Object.freeze({
   visual_listener_missing: "The expected visual listener is not present.",
   visual_listener_wildcard: "The visual process group has a wildcard listener.",
@@ -78,6 +93,9 @@ const ERROR_MESSAGES: Readonly<Record<VisualListenerInspectionCode, string>> = O
   visual_listener_identity_mismatch: "The recorded visual process identity is no longer current.",
   visual_listener_platform_unsupported: "Exact visual listener inspection is unavailable on this platform.",
   visual_listener_invalid_input: "The recorded visual listener identity is invalid.",
+  visual_socket_missing: "The expected visual WebSocket peer is not present.",
+  visual_socket_foreign_owner: "The visual WebSocket peer is owned by another process group.",
+  visual_socket_ambiguous: "The visual WebSocket peer ownership observation is ambiguous.",
 });
 
 const READY: VisualListenerReady = Object.freeze({ kind: "ready" });
@@ -234,6 +252,64 @@ export const inspectVisualListenerAsync = async (
   });
 };
 
+export const inspectVisualConnectedPeer = (
+  input: VisualConnectedPeerInspectionInput,
+  dependencies: VisualListenerInspectorDependencies = {},
+): VisualListenerReady => {
+  assertInput(input);
+  assertPort(input.brokerLocalPort);
+  if ((dependencies.platform ?? process.platform) !== "darwin") {
+    throw new VisualListenerInspectionError("visual_listener_platform_unsupported");
+  }
+  const runCommand = dependencies.runCommand ?? defaultRunCommand;
+  const firstGroup = exactProcessGroup(readProcesses(runCommand), input);
+  const peers = readConnectedPeers(runCommand);
+  const secondGroup = exactProcessGroup(readProcesses(runCommand), input);
+  if (identityKey(firstGroup) !== identityKey(secondGroup)) {
+    throw new VisualListenerInspectionError("visual_socket_ambiguous");
+  }
+  return exactConnectedPeer(secondGroup, peers, input);
+};
+
+export const inspectVisualConnectedPeerAsync = async (
+  input: VisualConnectedPeerInspectionInput,
+  dependencies: AsyncVisualListenerInspectorDependencies = {},
+): Promise<VisualListenerReady> => {
+  assertInput(input);
+  assertPort(input.brokerLocalPort);
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin") {
+    throw new VisualListenerInspectionError("visual_listener_platform_unsupported");
+  }
+  const runCommand = dependencies.runCommand ?? defaultRunCommandAsync;
+  const commands = [
+    ["/bin/ps", ["-axo", "pid=", "-o", "pgid=", "-o", "lstart="]],
+    ["/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F0pn"]],
+    ["/bin/ps", ["-axo", "pid=", "-o", "pgid=", "-o", "lstart="]],
+  ] as const;
+  const results: CommandResult[] = [];
+  for (const [file, args] of commands) {
+    try {
+      results.push(await runCommand(file, args));
+    } catch {
+      throw new VisualListenerInspectionError("visual_listener_tool_failure");
+    }
+  }
+  let index = 0;
+  return inspectVisualConnectedPeer(input, {
+    platform,
+    runCommand: (file, args) => {
+      const expected = commands[index];
+      if (!expected || expected[0] !== file
+        || expected[1].length !== args.length
+        || expected[1].some((value, position) => value !== args[position])) {
+        throw new VisualListenerInspectionError("visual_listener_tool_failure");
+      }
+      return results[index++]!;
+    },
+  });
+};
+
 const assertInput = (input: VisualListenerInspectionInput): void => {
   if (!input || typeof input !== "object"
     || typeof input.runId !== "string" || input.runId.length < 3 || input.runId.length > 128
@@ -245,6 +321,12 @@ const assertInput = (input: VisualListenerInspectionInput): void => {
     || !Number.isSafeInteger(input.processGroupId) || input.processGroupId < 1
     || !Number.isSafeInteger(input.assignedPort)
     || input.assignedPort < 1 || input.assignedPort > 65_535) {
+    throw new VisualListenerInspectionError("visual_listener_invalid_input");
+  }
+};
+
+const assertPort = (value: number): void => {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
     throw new VisualListenerInspectionError("visual_listener_invalid_input");
   }
 };
@@ -381,6 +463,97 @@ const readListeners = (
     listeners.push(parseListener(currentPid, value));
   }
   return Object.freeze(listeners);
+};
+
+const readConnectedPeers = (
+  runCommand: NonNullable<VisualListenerInspectorDependencies["runCommand"]>,
+): readonly ConnectedPeer[] => {
+  let result: CommandResult;
+  try {
+    result = runCommand(
+      "/usr/sbin/lsof",
+      ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F0pn"],
+    );
+  } catch {
+    throw new VisualListenerInspectionError("visual_listener_tool_failure");
+  }
+  const emptyResult = result.status === 1
+    && result.stdout.trim() === ""
+    && result.stderr.trim() === "";
+  if (result.status !== 0 && !emptyResult) {
+    throw new VisualListenerInspectionError("visual_listener_tool_failure");
+  }
+  if (!result.stdout.trim()) return Object.freeze([]);
+  const peers: ConnectedPeer[] = [];
+  let currentPid: number | null = null;
+  for (const token of result.stdout.split(/[\0\r\n]+/u)) {
+    if (!token) continue;
+    const tag = token[0];
+    const value = token.slice(1);
+    if (tag === "p") {
+      const pid = Number(value);
+      if (!/^\d+$/u.test(value) || !Number.isSafeInteger(pid) || pid < 1) {
+        throw new VisualListenerInspectionError("visual_listener_parser_failure");
+      }
+      currentPid = pid;
+      continue;
+    }
+    if (tag === "f" && currentPid !== null && /^\d+$/u.test(value)) continue;
+    if (tag !== "n" || currentPid === null) {
+      throw new VisualListenerInspectionError("visual_listener_parser_failure");
+    }
+    const match = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d+)->(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?: \(ESTABLISHED\))?$/u.exec(value);
+    if (!match) {
+      if (/^\[[^\]]+\]:\d+->\[[^\]]+\]:\d+(?: \(ESTABLISHED\))?$/u.test(value)) continue;
+      throw new VisualListenerInspectionError("visual_listener_parser_failure");
+    }
+    if (!isIpv4(match[1]!) || !isIpv4(match[3]!)) {
+      throw new VisualListenerInspectionError("visual_listener_parser_failure");
+    }
+    const localPort = exactParsedPort(match[2]!);
+    const remotePort = exactParsedPort(match[4]!);
+    peers.push(Object.freeze({
+      pid: currentPid,
+      localHost: match[1]!,
+      localPort,
+      remoteHost: match[3]!,
+      remotePort,
+    }));
+  }
+  return Object.freeze(peers);
+};
+
+const exactConnectedPeer = (
+  group: readonly ProcessIdentity[],
+  peers: readonly ConnectedPeer[],
+  input: VisualConnectedPeerInspectionInput,
+): VisualListenerReady => {
+  const groupPids = new Set(group.map((member) => member.pid));
+  const matches = peers.filter((peer) =>
+    peer.localHost === "127.0.0.1"
+    && peer.localPort === input.assignedPort
+    && peer.remoteHost === "127.0.0.1"
+    && peer.remotePort === input.brokerLocalPort);
+  const owned = matches.filter((peer) => groupPids.has(peer.pid));
+  const foreign = matches.filter((peer) => !groupPids.has(peer.pid));
+  if (owned.length === 0 && foreign.length > 0) {
+    throw new VisualListenerInspectionError("visual_socket_foreign_owner");
+  }
+  if (owned.length !== 1 || foreign.length > 0) {
+    if (owned.length === 0 && foreign.length === 0) {
+      throw new VisualListenerInspectionError("visual_socket_missing");
+    }
+    throw new VisualListenerInspectionError("visual_socket_ambiguous");
+  }
+  return READY;
+};
+
+const exactParsedPort = (raw: string): number => {
+  const port = Number(raw);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new VisualListenerInspectionError("visual_listener_parser_failure");
+  }
+  return port;
 };
 
 const parseListener = (pid: number, value: string): Listener => {

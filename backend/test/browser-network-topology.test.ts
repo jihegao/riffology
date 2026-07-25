@@ -10,6 +10,7 @@ import {
   BrowserNetworkTopology,
   BrowserNetworkTopologyError,
   networkJson,
+  rejectUpgrade,
   type BrowserNetworkAddress,
 } from "../src/browser-network-topology.ts";
 import { BackendApp } from "../src/server.ts";
@@ -268,6 +269,68 @@ test("broker header overflow returns the frozen bounded limit error", async (t) 
   assert.match(response, /^HTTP\/1\.1 502 Bad Gateway\r\n/u);
   assert.match(response, /"code":"visual_frame_proxy_limit_exceeded"/u);
   assert.doesNotMatch(response, /x{128}/u);
+});
+
+test("upgrade routing rejects the app, exact-gates broker Host, and close destroys tracked sockets", async () => {
+  let brokerUpgrades = 0;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerUpgradeHandler: (_request, _socket) => {
+      brokerUpgrades += 1;
+      entered();
+    },
+  });
+  const appDenied = await rawUpgrade(topology.app, topology.app.authority);
+  assert.match(appDenied, /^HTTP\/1\.1 404 Not Found\r\n/u);
+  assert.match(appDenied, /"code":"platform_upgrade_denied"/u);
+  const brokerDenied = await rawUpgrade(topology.broker, topology.app.authority);
+  assert.match(brokerDenied, /^HTTP\/1\.1 421 Misdirected Request\r\n/u);
+  assert.equal(brokerUpgrades, 0);
+
+  const client = connect({
+    family: 6,
+    host: topology.broker.host,
+    port: topology.broker.port,
+  });
+  const clientClosed = new Promise<void>((resolve, reject) => {
+    client.once("close", resolve);
+    client.once("error", reject);
+  });
+  await new Promise<void>((resolve, reject) => {
+    client.once("connect", resolve);
+    client.once("error", reject);
+  });
+  client.write([
+    "GET /frame/c/opaque/ws HTTP/1.1",
+    `Host: ${topology.broker.authority}`,
+    "Connection: Upgrade",
+    "Upgrade: websocket",
+    "",
+    "",
+  ].join("\r\n"));
+  await enteredPromise;
+  assert.equal(brokerUpgrades, 1);
+  await topology.close();
+  await clientClosed;
+});
+
+test("upgrade rejection preserves the 504 Gateway Timeout contract", async (t) => {
+  const topology = await BrowserNetworkTopology.start({
+    appHandler: (_request, response) => networkJson(response, 404, {}),
+    brokerHandler: (_request, response) => networkJson(response, 404, {}),
+    brokerUpgradeHandler: (_request, socket) =>
+      rejectUpgrade(socket, 504, "visual_websocket_timeout"),
+  });
+  t.after(() => topology.close());
+
+  const response = await rawUpgrade(topology.broker, topology.broker.authority);
+  assert.match(response, /^HTTP\/1\.1 504 Gateway Timeout\r\n/u);
+  assert.match(response, /"code":"visual_websocket_timeout"/u);
 });
 
 test("close stops admission, drains an in-flight handler, and releases both ports", async () => {
@@ -580,6 +643,27 @@ const rawAt = async (
     outgoing.once("error", reject);
     outgoing.end();
   });
+
+const rawUpgrade = async (
+  address: BrowserNetworkAddress,
+  host: string,
+): Promise<string> => new Promise((resolve, reject) => {
+  const socket = connect({ family: 6, host: address.host, port: address.port });
+  const chunks: Buffer[] = [];
+  socket.once("connect", () => {
+    socket.write([
+      "GET /frame/c/opaque/ws HTTP/1.1",
+      `Host: ${host}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      "",
+      "",
+    ].join("\r\n"));
+  });
+  socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+  socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  socket.once("error", reject);
+});
 
 class NetworkFakeMesa implements MesaAdapter {
   async loadModel(): Promise<MesaModel> {

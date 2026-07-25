@@ -366,7 +366,7 @@ port, proxy, frame, WebSocket, Playwright authority, or real-browser acceptance
 row. The HTTP `422` `visual_completion_not_supported` negative gate remains.
 The remaining claims begin only in the later gates:
 
-- **A3-2b1 network topology — implementation under review:** focused Node tests start the
+- **A3-2b1 network topology — merged and published through PR #33:** focused Node tests start the
   real `BackendApp` app listener plus empty broker on separate server-owned
   `::1` ports. They prove canonical bracketed origins, distinct ports, Host
   rejection for localhost/IPv4/missing-port/expanded-IPv6/other-port values,
@@ -384,7 +384,7 @@ The remaining claims begin only in the later gates:
   `421` `platform_host_denied` for a wrong Host, HTTP `404`
   `broker_route_denied`, and a successful Vite `/api` proxy POST whose
   `changeOrigin` Host passes the exact app guard.
-- **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** the same-origin local
+- **A3-2b2 frame bootstrap and HTTP proxy — merged and published through PR #35:** the same-origin local
   bootstrap, isolated-broker HttpOnly one-use frame session,
   Origin/CORS rules, and exact CSP/HTTP forwarding. Platform app
   and broker exact-bind `::1` on different server-owned ports and use
@@ -465,12 +465,31 @@ The remaining claims begin only in the later gates:
   http://[::1]:<exact-app-port>` with no wildcard and must not emit
   `X-Frame-Options`. Exact app-origin host-page and real-browser evidence remain
   A3-2b4.
-- **A3-2b3 WebSocket, revocation, and secrecy — pending:** exact WebSocket
-  path/subprotocol enforcement, frame-size, connection-count, and idle-time
-  limits; strict broker Origin rejection for missing, `null`, app, child, and
-  foreign values; socket-set binding and socket-first generation/lifecycle
-  revocation; and three-party app/broker/child header, log, DTO, and SQLite
-  secret scans.
+- **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
+  integrated, under review:** exact path/subprotocol forwarding, fixed-child
+  peer reinspection, assembled-message and per-direction queue limits,
+  attempt-global pending/active connection limits across minted routes,
+  bounded child handshake, idle/absolute expiry, and socket-first
+  generation/lifecycle revocation are implemented. Server-level tests exercise
+  the complete bootstrap/issue/redeem path, real `::1` broker to
+  `127.0.0.1` child sockets, the negative pre-`101` matrix, exact
+  `maxConnections + 1` denial before a third child dial, child redirect and
+  non-`101` denial, and `1008` close on generation rotation and backend
+  shutdown. Sentinel and SHA-256 scans cover bounded broker errors, fixed-child
+  headers, the real ProductStore SQLite file, captured backend console output,
+  and unrelated public DTOs. These observable/persisted scans do not claim
+  arbitrary process heap bytes. This status records local implementation and
+  review evidence only; it does not claim publication or merge. The current
+  focused frame/network/WebSocket regression combination passes `32/32`; the
+  current serial official backend gate reports 464 total with 463 passed, zero failed, and
+  one optional installed-OpenCode smoke skipped. Web remains 104/104, its
+  network-entry integration passes 1/1, and the production build succeeds.
+  Stable pre-upgrade distinctions include parser-level
+  `400/broker_request_failed`, parsed-but-malformed handshake
+  `400/visual_websocket_protocol_denied`, non-GET
+  `405/visual_websocket_protocol_denied`, broker authority
+  `403/visual_frame_session_denied`, and offered-subprotocol/policy
+  `403/visual_websocket_protocol_denied`.
 - **A3-2b4 browser and security closeout — pending:** run the complete real-
   browser negative matrix for cookie delivery, HttpOnly denial, parent-DOM
   isolation, nonce replay/expiry/restart, CSP embedding, and live WebSocket

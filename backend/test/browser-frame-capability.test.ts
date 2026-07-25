@@ -5,9 +5,11 @@ import {
   BROKER_DOCUMENT_CSP,
   BrowserFrameCapability,
   BrowserFrameCapabilityError,
+  BrowserFrameInspectionTimeoutError,
   FixedChildHttpTransport,
   FrameHttpTransportFailure,
   type BrowserFrameTarget,
+  type BrowserFrameWebSocketOwner,
   type FrameHttpTransport,
   type FrameHttpTransportRequest,
   type FrameHttpTransportResponse,
@@ -17,6 +19,13 @@ const APP_ORIGIN = "http://[::1]:8787";
 const BROKER_ORIGIN = "http://[::1]:18788";
 const APP_HOST = "[::1]:8787";
 const BROKER_HOST = "[::1]:18788";
+const WEB_SOCKET_POLICY = Object.freeze({
+  path: "/events",
+  subprotocols: Object.freeze(["riff.visual.v1", "riff.visual.json"]),
+  maxFrameBytes: 65_536,
+  maxConnections: 2,
+  idleTimeoutMs: 30_000,
+});
 
 test("bootstrap requires the exact browser boundary and emits a bounded HTTP cookie", () => {
   const fixture = createFixture();
@@ -415,6 +424,251 @@ test("HTTP proxy enforces eight concurrent requests per capability", async () =>
   assert.equal((await Promise.all(firstEight)).length, 8);
 });
 
+test("WebSocket admission freezes the exact broker path, origin, cookie, upgrade, and subprotocol policy", async () => {
+  const fixture = createFixture({ target: { webSocket: WEB_SOCKET_POLICY } });
+  const session = await issueAndRedeem(fixture);
+  const owner = new RecordingWebSocketOwner();
+  const admission = await fixture.capability.admitWebSocket(
+    webSocketRequest(session.redeemed, {
+      protocols: "riff.visual.json, riff.visual.v1",
+      extensions: "permessage-deflate; client_max_window_bits",
+    }),
+    owner,
+  );
+  assert.equal(admission.childPath, "/events");
+  assert.deepEqual(admission.offeredSubprotocols, ["riff.visual.json", "riff.visual.v1"]);
+  assert.equal(admission.maxFrameBytes, 65_536);
+  assert.equal(admission.idleTimeoutMs, 30_000);
+  assert.equal(admission.live(), true);
+  assert.equal(Object.isFrozen(admission.target.webSocket), true);
+  assert.equal(Object.isFrozen(admission.target.webSocket?.subprotocols), true);
+  await admission.recheck();
+  admission.markOpen();
+  admission.release();
+  assert.equal(admission.live(), false);
+  assert.deepEqual(owner.codes, []);
+});
+
+test("WebSocket connected-peer recheck binds the exact child socket before repeating Store authority", async () => {
+  const observations: string[] = [];
+  const fixture = createFixture({
+    target: { webSocket: WEB_SOCKET_POLICY },
+    inspectConnectedPeer: async (target, peer) => {
+      observations.push(`peer:${target.port}:${peer.localPort}:${peer.remotePort}`);
+      return true;
+    },
+  });
+  const originalInspect = fixture.inspectTarget;
+  fixture.inspectTarget = async () => {
+    observations.push("target");
+    return originalInspect();
+  };
+  const session = await issueAndRedeem(fixture);
+  observations.length = 0;
+  const admission = await fixture.capability.admitWebSocket(
+    webSocketRequest(session.redeemed, { protocols: "riff.visual.v1" }),
+    new RecordingWebSocketOwner(),
+  );
+  observations.length = 0;
+  await admission.recheckConnected({
+    localHost: "127.0.0.1",
+    localPort: 52_001,
+    remoteHost: "127.0.0.1",
+    remotePort: 4_567,
+  });
+  assert.deepEqual(observations, ["peer:4567:52001:4567", "target"]);
+  assert.equal(admission.live(), true);
+  admission.release();
+});
+
+test("WebSocket connected-peer recheck releases the slot when peer inspection is absent or false", async () => {
+  for (const inspectConnectedPeer of [
+    undefined,
+    async () => false,
+    async () => { throw new Error("private peer inspection failure"); },
+  ]) {
+    const fixture = createFixture({
+      target: { webSocket: WEB_SOCKET_POLICY },
+      ...(inspectConnectedPeer ? { inspectConnectedPeer } : {}),
+    });
+    const session = await issueAndRedeem(fixture);
+    const admission = await fixture.capability.admitWebSocket(
+      webSocketRequest(session.redeemed, { protocols: "riff.visual.v1" }),
+      new RecordingWebSocketOwner(),
+    );
+    await assert.rejects(
+      admission.recheckConnected({
+        localHost: "127.0.0.1",
+        localPort: 52_001,
+        remoteHost: "127.0.0.1",
+        remotePort: 4_567,
+      }),
+      errorStatus("visual_frame_unavailable", 409),
+    );
+    assert.equal(admission.live(), false);
+  }
+});
+
+test("WebSocket inspection timeout is 504 while HTTP inspection denial remains 409", async () => {
+  const httpFixture = createFixture();
+  const bootstrap = httpFixture.capability.bootstrap(bootstrapRequest());
+  httpFixture.inspectTarget = async () => {
+    throw new BrowserFrameInspectionTimeoutError();
+  };
+  await assert.rejects(
+    httpFixture.capability.issueFrameSession(
+      frameRequest(bootstrap),
+      { projectId: "project", runId: "run" },
+    ),
+    errorStatus("visual_frame_unavailable", 409),
+  );
+
+  const initialTimeout = createFixture({ target: { webSocket: WEB_SOCKET_POLICY } });
+  const initialSession = await issueAndRedeem(initialTimeout);
+  initialTimeout.inspectTarget = async () => {
+    throw new BrowserFrameInspectionTimeoutError();
+  };
+  await assert.rejects(
+    initialTimeout.capability.admitWebSocket(
+      webSocketRequest(initialSession.redeemed, { protocols: "riff.visual.v1" }),
+      new RecordingWebSocketOwner(),
+    ),
+    errorStatus("visual_websocket_timeout", 504),
+  );
+
+  const connectedTimeout = createFixture({
+    target: { webSocket: WEB_SOCKET_POLICY },
+    inspectConnectedPeer: async () => {
+      throw new BrowserFrameInspectionTimeoutError();
+    },
+  });
+  const connectedSession = await issueAndRedeem(connectedTimeout);
+  const admission = await connectedTimeout.capability.admitWebSocket(
+    webSocketRequest(connectedSession.redeemed, { protocols: "riff.visual.v1" }),
+    new RecordingWebSocketOwner(),
+  );
+  await assert.rejects(
+    admission.recheckConnected({
+      localHost: "127.0.0.1",
+      localPort: 52_001,
+      remoteHost: "127.0.0.1",
+      remotePort: 4_567,
+    }),
+    errorStatus("visual_websocket_timeout", 504),
+  );
+  assert.equal(admission.live(), false);
+});
+
+test("WebSocket admission rejects every wrong raw upgrade or policy field with stable pre-101 pairs", async () => {
+  const fixture = createFixture({ target: { webSocket: WEB_SOCKET_POLICY } });
+  const session = await issueAndRedeem(fixture);
+  const base = webSocketRequest(session.redeemed, { protocols: "riff.visual.v1" });
+  const cases: Array<{
+    request: typeof base;
+    code: BrowserFrameCapabilityError["code"];
+    status: number;
+  }> = [
+    { request: { ...base, method: "POST" }, code: "visual_websocket_protocol_denied", status: 405 },
+    { request: { ...base, host: APP_HOST }, code: "visual_frame_session_denied", status: 403 },
+    { request: { ...base, origin: undefined }, code: "visual_frame_session_denied", status: 403 },
+    { request: { ...base, origin: [BROKER_ORIGIN, BROKER_ORIGIN] }, code: "visual_frame_session_denied", status: 403 },
+    { request: { ...base, cookie: "riff_frame_wrong=wrong-token-value-that-is-long-enough" }, code: "visual_frame_session_denied", status: 403 },
+    { request: { ...base, authorization: "Bearer agent" }, code: "visual_frame_session_denied", status: 403 },
+    { request: { ...base, path: `${session.redeemed.location}other` }, code: "visual_websocket_not_declared", status: 404 },
+    { request: { ...base, path: `${session.redeemed.location}events?query=1` }, code: "visual_websocket_not_declared", status: 404 },
+    { request: { ...base, protocols: undefined }, code: "visual_websocket_protocol_denied", status: 403 },
+    { request: { ...base, protocols: "not-declared" }, code: "visual_websocket_protocol_denied", status: 403 },
+    { request: { ...base, protocols: "riff.visual.v1, riff.visual.v1" }, code: "visual_websocket_protocol_denied", status: 403 },
+    { request: { ...base, protocols: ["riff.visual.v1", "riff.visual.json"] }, code: "visual_websocket_protocol_denied", status: 403 },
+    { request: { ...base, upgrade: ["websocket", "websocket"] }, code: "visual_websocket_protocol_denied", status: 400 },
+    { request: { ...base, connection: ["Upgrade", "Upgrade"] }, code: "visual_websocket_protocol_denied", status: 400 },
+    { request: { ...base, version: ["13", "13"] }, code: "visual_websocket_protocol_denied", status: 400 },
+    { request: { ...base, key: ["AQEBAQEBAQEBAQEBAQEBAQ==", "AgICAgICAgICAgICAgICAg=="] }, code: "visual_websocket_protocol_denied", status: 400 },
+    { request: { ...base, extensions: ["permessage-deflate", "permessage-deflate"] }, code: "visual_websocket_protocol_denied", status: 400 },
+  ];
+  for (const entry of cases) {
+    await assert.rejects(
+      fixture.capability.admitWebSocket(entry.request, new RecordingWebSocketOwner()),
+      errorStatus(entry.code, entry.status),
+    );
+  }
+
+  const noProtocol = createFixture({
+    target: { webSocket: { ...WEB_SOCKET_POLICY, subprotocols: Object.freeze([]) } },
+  });
+  const noProtocolSession = await issueAndRedeem(noProtocol);
+  const admission = await noProtocol.capability.admitWebSocket(
+    webSocketRequest(noProtocolSession.redeemed),
+    new RecordingWebSocketOwner(),
+  );
+  admission.release();
+  await assert.rejects(
+    noProtocol.capability.admitWebSocket(
+      webSocketRequest(noProtocolSession.redeemed, { protocols: "riff.visual.v1" }),
+      new RecordingWebSocketOwner(),
+    ),
+    errorStatus("visual_websocket_protocol_denied", 403),
+  );
+
+  const undeclared = createFixture();
+  const undeclaredSession = await issueAndRedeem(undeclared);
+  await assert.rejects(
+    undeclared.capability.admitWebSocket(
+      webSocketRequest(undeclaredSession.redeemed),
+      new RecordingWebSocketOwner(),
+    ),
+    errorStatus("visual_websocket_not_declared", 404),
+  );
+});
+
+test("WebSocket pending and open slots are attempt-global and revoke closes owners before authority removal", async () => {
+  const fixture = createFixture({
+    target: {
+      webSocket: { ...WEB_SOCKET_POLICY, subprotocols: Object.freeze([]), maxConnections: 1 },
+    },
+  });
+  const first = await issueAndRedeem(fixture);
+  const secondIssued = await fixture.capability.issueFrameSession(
+    frameRequest(first.bootstrap),
+    { projectId: "project", runId: "run" },
+  );
+  const secondRedeemed = await fixture.capability.redeem({
+    method: "GET",
+    host: BROKER_HOST,
+    path: new URL(secondIssued.frameUrl).pathname,
+  });
+  let entered!: () => void;
+  let releaseInspection!: () => void;
+  const inspectionEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const inspectionBlocked = new Promise<void>((resolve) => {
+    releaseInspection = resolve;
+  });
+  fixture.inspectTarget = async () => {
+    entered();
+    await inspectionBlocked;
+    return true;
+  };
+  const owner = new RecordingWebSocketOwner();
+  const pending = fixture.capability.admitWebSocket(
+    webSocketRequest(first.redeemed),
+    owner,
+  );
+  await inspectionEntered;
+  await assert.rejects(
+    fixture.capability.admitWebSocket(
+      webSocketRequest(secondRedeemed),
+      new RecordingWebSocketOwner(),
+    ),
+    errorStatus("visual_websocket_limit", 429),
+  );
+  fixture.capability.revokeRun("run");
+  assert.deepEqual(owner.codes, [1008]);
+  releaseInspection();
+  await assert.rejects(pending, errorStatus("visual_frame_session_denied", 403));
+});
+
 test("revoke removes pending nonce and redeemed HTTP authority", async () => {
   const fixture = createFixture();
   let session = await issueAndRedeem(fixture);
@@ -550,6 +804,9 @@ type FixtureOptions = {
   secureCookies?: boolean;
   random?: (size: number) => Uint8Array;
   target?: Partial<BrowserFrameTarget>;
+  inspectConnectedPeer?: NonNullable<
+    ConstructorParameters<typeof BrowserFrameCapability>[0]["targets"]["inspectConnectedPeer"]
+  >;
 };
 
 const createFixture = (options: FixtureOptions = {}) => {
@@ -585,12 +842,17 @@ const createFixture = (options: FixtureOptions = {}) => {
             attemptGeneration: options.target?.attemptGeneration ?? 3,
             port: options.target?.port ?? 4567,
             expiresAtMs: options.target?.expiresAtMs ?? current + 30 * 60_000,
+            ...(options.target?.webSocket ? { webSocket: options.target.webSocket } : {}),
           });
         },
-        inspect: async () => fixture.inspectAllowed,
+        inspect: async () => fixture.inspectTarget(),
+        ...(options.inspectConnectedPeer
+          ? { inspectConnectedPeer: options.inspectConnectedPeer }
+          : {}),
       },
       ...(selectedTransport ? { transport: selectedTransport } : {}),
     }),
+    inspectTarget: async (): Promise<boolean> => fixture.inspectAllowed,
   };
   fixture.capability = fixture.newCapability(options.target?.port ? null : transport);
   return fixture;
@@ -632,6 +894,13 @@ class DeferredTransport implements FrameHttpTransport {
   }
 }
 
+class RecordingWebSocketOwner implements BrowserFrameWebSocketOwner {
+  readonly codes: number[] = [];
+  close(code: 1008): void {
+    this.codes.push(code);
+  }
+}
+
 const bootstrapRequest = (origin = APP_ORIGIN) => ({
   method: "POST",
   host: APP_HOST,
@@ -662,6 +931,35 @@ const issueAndRedeem = async (fixture: ReturnType<typeof createFixture>) => {
   });
   return { bootstrap, issued, redeemed };
 };
+
+const webSocketRequest = (
+  redeemed: { location: string; setCookie: string },
+  overrides: Partial<{
+    method: string;
+    host: string | undefined;
+    origin: string | readonly string[] | undefined;
+    cookie: string | readonly string[] | undefined;
+    authorization: string | readonly string[] | undefined;
+    path: string;
+    protocols: string | readonly string[] | undefined;
+    upgrade: string | readonly string[] | undefined;
+    connection: string | readonly string[] | undefined;
+    version: string | readonly string[] | undefined;
+    key: string | readonly string[] | undefined;
+    extensions: string | readonly string[] | undefined;
+  }> = {},
+) => ({
+  method: "GET",
+  host: BROKER_HOST,
+  origin: BROKER_ORIGIN,
+  cookie: cookiePair(redeemed.setCookie),
+  path: `${redeemed.location}events`,
+  upgrade: "websocket",
+  connection: "keep-alive, Upgrade",
+  version: "13",
+  key: "AQEBAQEBAQEBAQEBAQEBAQ==",
+  ...overrides,
+});
 
 const cookiePair = (setCookie: string): string => setCookie.split(";", 1)[0];
 

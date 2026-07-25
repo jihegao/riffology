@@ -331,18 +331,31 @@ target contracts, not current routes or acceptance evidence:
    `/api/projects/{projectId}/runs` resource accepts eligible visual
    experiments and returns the existing allowlisted run DTO; no parallel
    visual-run API is introduced.
-5. **A3-2b1 browser network topology — implementation under review:** the isolated
+5. **A3-2b1 browser network topology — merged and published through PR #33:**
+   the isolated
    `BackendApp` entrypoint exact-binds platform app and empty broker servers to
    distinct server-owned `::1` ports, derives canonical bracketed origins, and
    rejects non-canonical Host counterexamples before invoking either handler.
    Startup and close are serialized and partial listener pairs do not admit
-   requests. Route-specific Origin/Fetch-Site checks remain A3-2b2.
-6. **A3-2b2 frame bootstrap and HTTP proxy — under implementation:** add browser bootstrap,
-   CSRF, cookies, one-time nonce redemption, visual frame sessions, isolated
-   broker HTTP forwarding, and exact CSP on the A3-2b1 topology.
-7. **A3-2b3 WebSocket, revocation, and secrecy — pending:** add exact path and
-   subprotocol forwarding, resource limits, generation/lifecycle revocation,
-   and three-party secret scans.
+   requests. Route-specific Origin/Fetch-Site checks are supplied by A3-2b2.
+6. **A3-2b2 frame bootstrap and HTTP proxy — merged and published through
+   PR #35:** browser bootstrap, CSRF, cookies, one-time nonce redemption,
+   visual frame sessions, isolated broker HTTP forwarding, and exact CSP use
+   the A3-2b1 topology.
+7. **A3-2b3 WebSocket, revocation, and secrecy — implemented and locally
+   integrated, under review:** exact path/subprotocol forwarding, fixed-child
+   inspection, assembled-message/queue/connection/handshake/idle limits,
+   socket-first generation/lifecycle revocation, redirect/non-`101` denial, and
+   observable response/header/log/DTO/SQLite sentinel scans are implemented.
+   The focused regression gate passes 32/32 and the serial official backend
+   gate reports 464 total with 463 passed, zero failed, and one optional smoke skipped. This
+   is review status, not a merge or publication claim.
+   Parser-level malformed HTTP is `400/broker_request_failed`; parsed HTTP with
+   malformed or duplicate WebSocket handshake structure is
+   `400/visual_websocket_protocol_denied`; non-GET is
+   `405/visual_websocket_protocol_denied`; missing broker authority is
+   `403/visual_frame_session_denied`; offered-subprotocol/policy denial is
+   `403/visual_websocket_protocol_denied`.
 8. **A3-2b4 browser and security closeout — pending:** run the real-browser
    negative matrix, complete focused/full suites, obtain an independent
    security review, and synchronize implementation records.

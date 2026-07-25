@@ -4,7 +4,11 @@ import { createServer, request, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { BrowserFrameTarget, BrowserFrameTargetResolver } from "../src/browser-frame-capability.ts";
+import {
+  BrowserFrameInspectionTimeoutError,
+  type BrowserFrameTarget,
+  type BrowserFrameTargetResolver,
+} from "../src/browser-frame-capability.ts";
 import type { BrowserNetworkAddress } from "../src/browser-network-topology.ts";
 import type { MesaAdapter, MesaRunRequest } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodePrompt, OpenCodeReadiness } from "../src/opencode-adapter.ts";
@@ -422,7 +426,10 @@ test("production frame resolver applies an overall inspection queue deadline", a
   const target = await resolver.resolve(healthy.projectId, healthy.runId);
   assert.ok(target);
   const started = Date.now();
-  assert.equal(await resolver.inspect(target), false);
+  await assert.rejects(
+    resolver.inspect(target),
+    (error: unknown) => error instanceof BrowserFrameInspectionTimeoutError,
+  );
   assert.equal(Date.now() - started < 250, true);
 });
 

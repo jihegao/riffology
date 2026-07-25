@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo, Socket } from "node:net";
+import type { AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 
 export const BROWSER_LOOPBACK_HOST = "::1" as const;
 
@@ -18,12 +19,20 @@ export type BrowserNetworkHandler = (
   address: BrowserNetworkAddress,
 ) => void | Promise<void>;
 
+export type BrowserNetworkUpgradeHandler = (
+  request: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  address: BrowserNetworkAddress,
+) => void | Promise<void>;
+
 export type BrowserNetworkTopologyOptions = {
   appPort?: number;
   brokerPort?: number;
   closeDrainTimeoutMs?: number;
   appHandler: BrowserNetworkHandler;
   brokerHandler: BrowserNetworkHandler;
+  brokerUpgradeHandler?: BrowserNetworkUpgradeHandler;
   beforeReady?: (addresses: Readonly<{
     app: BrowserNetworkAddress;
     broker: BrowserNetworkAddress;
@@ -88,9 +97,20 @@ export class BrowserNetworkTopology {
 
     let appAddress: BrowserNetworkAddress | undefined;
     let brokerAddress: BrowserNetworkAddress | undefined;
-    const gate: RequestGate = { ready: false, closing: false, inFlight: new Set() };
-    const appServer = createExactServer("platform", () => appAddress, options.appHandler, gate);
-    const brokerServer = createExactServer("broker", () => brokerAddress, options.brokerHandler, gate);
+    const gate: RequestGate = {
+      ready: false,
+      closing: false,
+      inFlight: new Set(),
+      upgradedSockets: new Set(),
+    };
+    const appServer = createExactServer("platform", () => appAddress, options.appHandler, undefined, gate);
+    const brokerServer = createExactServer(
+      "broker",
+      () => brokerAddress,
+      options.brokerHandler,
+      options.brokerUpgradeHandler,
+      gate,
+    );
     try {
       appAddress = await listenExact(appServer, appPort, "platform_listener_unavailable");
       brokerAddress = await listenExact(brokerServer, brokerPort, "broker_listener_unavailable");
@@ -124,6 +144,8 @@ export class BrowserNetworkTopology {
     this.#gate.ready = false;
     this.#appServer.closeIdleConnections?.();
     this.#brokerServer.closeIdleConnections?.();
+    for (const socket of this.#gate.upgradedSockets) socket.destroy();
+    this.#gate.upgradedSockets.clear();
     const closing = [
       closeServer(this.#brokerServer),
       closeServer(this.#appServer),
@@ -143,12 +165,14 @@ type RequestGate = {
   ready: boolean;
   closing: boolean;
   inFlight: Set<Promise<void>>;
+  upgradedSockets: Set<Duplex>;
 };
 
 const createExactServer = (
   role: BrowserNetworkRole,
   address: () => BrowserNetworkAddress | undefined,
   handler: BrowserNetworkHandler,
+  upgradeHandler: BrowserNetworkUpgradeHandler | undefined,
   gate: RequestGate,
 ): Server => {
   const server = createServer({ maxHeaderSize: 32 * 1_024 }, (request, response) => {
@@ -164,7 +188,31 @@ const createExactServer = (
     gate.inFlight.add(operation);
     void operation.then(() => gate.inFlight.delete(operation));
   });
-  server.on("clientError", (error: NodeJS.ErrnoException, socket: Socket) => {
+  server.on("upgrade", (request, socket, head) => {
+    const current = address();
+    gate.upgradedSockets.add(socket);
+    socket.once("close", () => gate.upgradedSockets.delete(socket));
+    if (!current || !gate.ready || gate.closing) {
+      return rejectUpgrade(socket, 503, `${role}_listener_unavailable`);
+    }
+    if (exactRawHost(request) !== current.authority) {
+      return rejectUpgrade(
+        socket,
+        421,
+        role === "platform" ? "platform_host_denied" : "broker_host_denied",
+      );
+    }
+    if (role !== "broker" || !upgradeHandler) {
+      return rejectUpgrade(socket, 404, `${role}_upgrade_denied`);
+    }
+    const operation = Promise.resolve()
+      .then(() => upgradeHandler(request, socket, Buffer.from(head), current))
+      .then(() => undefined)
+      .catch(() => rejectUpgrade(socket, 500, "broker_upgrade_failed"));
+    gate.inFlight.add(operation);
+    void operation.then(() => gate.inFlight.delete(operation));
+  });
+  server.on("clientError", (error: NodeJS.ErrnoException, socket: Duplex) => {
     if (!socket.writable) return socket.destroy();
     const overflow = error.code === "HPE_HEADER_OVERFLOW";
     const status = overflow && role === "broker" ? 502 : 400;
@@ -188,6 +236,59 @@ const createExactServer = (
   });
   return server;
 };
+
+const exactRawHost = (request: IncomingMessage): string | undefined => {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === "host") {
+      values.push(request.rawHeaders[index + 1] ?? "");
+    }
+  }
+  return values.length === 1 && !/[\r\n\u0000]/u.test(values[0]!) ? values[0] : undefined;
+};
+
+export const rejectUpgrade = (
+  socket: Duplex,
+  status: number,
+  code: string,
+): void => {
+  if (!socket.writable || socket.destroyed) {
+    socket.destroy();
+    return;
+  }
+  const safeStatus = [400, 403, 404, 405, 409, 421, 429, 500, 502, 503, 504].includes(status)
+    ? status
+    : 500;
+  const safeCode = /^[a-z][a-z0-9_]{0,63}$/u.test(code) ? code : "broker_upgrade_failed";
+  const body = Buffer.from(JSON.stringify({
+    accepted: false,
+    error: { code: safeCode, message: "The browser network request was denied." },
+  }));
+  socket.end([
+    `HTTP/1.1 ${safeStatus} ${upgradeStatusText(safeStatus)}`,
+    "Connection: close",
+    "Content-Type: application/json; charset=utf-8",
+    `Content-Length: ${body.byteLength}`,
+    "Cache-Control: no-store",
+    "X-Content-Type-Options: nosniff",
+    "",
+    body.toString("utf8"),
+  ].join("\r\n"));
+};
+
+const upgradeStatusText = (status: number): string => ({
+  400: "Bad Request",
+  403: "Forbidden",
+  404: "Not Found",
+  405: "Method Not Allowed",
+  409: "Conflict",
+  421: "Misdirected Request",
+  429: "Too Many Requests",
+  500: "Internal Server Error",
+  502: "Bad Gateway",
+  503: "Service Unavailable",
+  504: "Gateway Timeout",
+})[status] ?? "Internal Server Error";
 
 const listenExact = async (
   server: Server,

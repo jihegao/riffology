@@ -30,12 +30,72 @@ export type BrowserFrameTarget = Readonly<{
   attemptGeneration: number;
   port: number;
   expiresAtMs: number;
+  webSocket?: BrowserFrameWebSocketPolicy;
+}>;
+
+export type BrowserFrameWebSocketPolicy = Readonly<{
+  path: string;
+  subprotocols: readonly string[];
+  maxFrameBytes: number;
+  maxConnections: number;
+  idleTimeoutMs: number;
+}>;
+
+export type BrowserFrameWebSocketOwner = Readonly<{
+  close(code: 1008): void;
+}>;
+
+export type BrowserFrameWebSocketRequest = Readonly<{
+  method: string;
+  host: string | undefined;
+  origin?: string | readonly string[];
+  cookie?: string | readonly string[];
+  authorization?: string | readonly string[];
+  path: string;
+  protocols?: string | readonly string[];
+  upgrade?: string | readonly string[];
+  connection?: string | readonly string[];
+  version?: string | readonly string[];
+  key?: string | readonly string[];
+  extensions?: string | readonly string[];
+}>;
+
+export type BrowserFrameWebSocketAdmission = Readonly<{
+  target: BrowserFrameTarget;
+  childPath: string;
+  offeredSubprotocols: readonly string[];
+  maxFrameBytes: number;
+  idleTimeoutMs: number;
+  expiresAtMs: number;
+  live(): boolean;
+  recheck(): Promise<void>;
+  recheckConnected(peer: BrowserFrameConnectedPeer): Promise<void>;
+  markOpen(): void;
+  release(): void;
 }>;
 
 export type BrowserFrameTargetResolver = {
   resolve(projectId: string, runId: string): Promise<BrowserFrameTarget | null>;
   inspect(target: BrowserFrameTarget): Promise<boolean>;
+  inspectConnectedPeer?(
+    target: BrowserFrameTarget,
+    peer: BrowserFrameConnectedPeer,
+  ): Promise<boolean>;
 };
+
+export class BrowserFrameInspectionTimeoutError extends Error {
+  constructor() {
+    super("The bounded browser frame inspection timed out.");
+    this.name = "BrowserFrameInspectionTimeoutError";
+  }
+}
+
+export type BrowserFrameConnectedPeer = Readonly<{
+  localHost: "127.0.0.1";
+  localPort: number;
+  remoteHost: "127.0.0.1";
+  remotePort: number;
+}>;
 
 export type FrameHttpTransportRequest = Readonly<{
   method: "GET" | "HEAD";
@@ -99,7 +159,11 @@ export class BrowserFrameCapabilityError extends Error {
     | "visual_frame_proxy_redirect_denied"
     | "visual_frame_proxy_limit_exceeded"
     | "visual_frame_proxy_timeout"
-    | "visual_frame_proxy_failed";
+    | "visual_frame_proxy_failed"
+    | "visual_websocket_not_declared"
+    | "visual_websocket_protocol_denied"
+    | "visual_websocket_limit"
+    | "visual_websocket_timeout";
 
   constructor(
     status: number,
@@ -124,6 +188,7 @@ export class BrowserFrameCapability {
   #appSession?: AppSession;
   readonly #nonces = new Map<string, FrameCapability>();
   readonly #routes = new Map<string, FrameCapability>();
+  readonly #attemptSockets = new Map<string, Set<FrameWebSocketRegistration>>();
 
   constructor(options: BrowserFrameCapabilityOptions) {
     this.#appOrigin = exactLoopbackOrigin(options.appOrigin);
@@ -175,7 +240,7 @@ export class BrowserFrameCapability {
     const target = await this.#targets.resolve(exactId(identity.projectId), exactId(identity.runId));
     const now = exactNow(this.#now());
     if (!target || target.projectId !== identity.projectId || target.runId !== identity.runId
-      || !validTarget(target, now) || !await this.#targets.inspect(target)) {
+      || !validTarget(target, now) || !await this.#inspectHttp(target)) {
       throw denied(409, "visual_frame_unavailable");
     }
     if (!this.#appSession || this.#appSession.generation !== session.generation || this.#appSession.expiresAtMs <= now) {
@@ -190,12 +255,14 @@ export class BrowserFrameCapability {
     if (expiresAtMs <= now) throw denied(409, "visual_frame_unavailable");
     const capability: FrameCapability = {
       appGeneration: session.generation,
-      target: Object.freeze({ ...target }),
+      target: freezeTarget(target),
       nonceDigest: digest(nonce),
       routeId,
       nonceExpiresAtMs: expiresAtMs,
       brokerSessionExpiresAtMs: 0,
       inFlight: 0,
+      epoch: 0,
+      sockets: new Set(),
     };
     this.#nonces.set(capability.nonceDigest.toString("hex"), capability);
     this.#routes.set(routeId, capability);
@@ -220,7 +287,7 @@ export class BrowserFrameCapability {
     const now = exactNow(this.#now());
     if (capability.nonceExpiresAtMs <= now
       || !this.#live(capability, now)
-      || !await this.#targets.inspect(capability.target)) {
+      || !await this.#inspectHttp(capability.target)) {
       this.#routes.delete(capability.routeId);
       throw denied(404, "visual_frame_nonce_invalid");
     }
@@ -279,7 +346,7 @@ export class BrowserFrameCapability {
     }
     capability.inFlight += 1;
     try {
-      if (!await this.#targets.inspect(capability.target)) {
+      if (!await this.#inspectHttp(capability.target)) {
         this.#routes.delete(capability.routeId);
         throw denied(409, "visual_frame_unavailable");
       }
@@ -312,7 +379,7 @@ export class BrowserFrameCapability {
       if (response.body.byteLength > MAX_RESPONSE_BODY_BYTES) {
         throw denied(502, "visual_frame_proxy_limit_exceeded");
       }
-      if (!await this.#targets.inspect(capability.target)) {
+      if (!await this.#inspectHttp(capability.target)) {
         this.#routes.delete(capability.routeId);
         throw denied(409, "visual_frame_unavailable");
       }
@@ -356,21 +423,158 @@ export class BrowserFrameCapability {
     }
   }
 
-  revoke(projectId: string, runId?: string): void {
+  async admitWebSocket(
+    request: BrowserFrameWebSocketRequest,
+    owner: BrowserFrameWebSocketOwner,
+  ): Promise<BrowserFrameWebSocketAdmission> {
+    if (!owner || typeof owner.close !== "function") {
+      throw new Error("A browser WebSocket owner is required.");
+    }
+    if (request.method !== "GET") throw denied(405, "visual_websocket_protocol_denied");
+    if (request.host !== this.#brokerOrigin.host) throw denied(403, "visual_frame_session_denied");
+    if (exactSingle(request.origin) !== this.#brokerOrigin.origin
+      || request.authorization !== undefined) {
+      throw denied(403, "visual_frame_session_denied");
+    }
+    requireWebSocketUpgrade(request);
+    const parsed = webSocketCapabilityPath(request.path);
+    const capability = this.#routes.get(parsed.routeId);
+    const now = exactNow(this.#now());
+    if (!capability || !capability.cookieName || !capability.cookieDigest
+      || capability.brokerSessionExpiresAtMs <= now || !this.#live(capability, now)) {
+      throw denied(403, "visual_frame_session_denied");
+    }
+    const policy = capability.target.webSocket;
+    if (!policy || parsed.suffix !== policy.path) {
+      throw denied(404, "visual_websocket_not_declared");
+    }
+    const cookieValue = exactCookie(request.cookie, capability.cookieName);
+    if (!cookieValue || !safeDigestEqual(capability.cookieDigest, digest(cookieValue))) {
+      throw denied(403, "visual_frame_session_denied");
+    }
+    const offeredSubprotocols = exactWebSocketProtocols(request.protocols, policy);
+    const attemptKey = webSocketAttemptKey(capability.target);
+    const attemptSockets = this.#attemptSockets.get(attemptKey) ?? new Set<FrameWebSocketRegistration>();
+    if (attemptSockets.size >= policy.maxConnections
+      || [...attemptSockets].some((entry) => entry.owner === owner)) {
+      throw denied(429, "visual_websocket_limit");
+    }
+    if (!this.#attemptSockets.has(attemptKey)) this.#attemptSockets.set(attemptKey, attemptSockets);
+    const registration: FrameWebSocketRegistration = {
+      capability,
+      owner,
+      state: "pending",
+      epoch: capability.epoch,
+      released: false,
+    };
+    attemptSockets.add(registration);
+    capability.sockets.add(registration);
+
+    const release = (): void => this.#releaseWebSocket(attemptKey, registration);
+    const live = (): boolean => {
+      const checkedAt = exactNow(this.#now());
+      return !(registration.released
+        || registration.epoch !== capability.epoch
+        || this.#routes.get(capability.routeId) !== capability
+        || capability.brokerSessionExpiresAtMs <= checkedAt
+        || !this.#live(capability, checkedAt));
+    };
+    const requireCurrent = (): void => {
+      if (!live()) {
+        release();
+        throw denied(403, "visual_frame_session_denied");
+      }
+    };
+    const recheck = async (): Promise<void> => {
+      try {
+        requireCurrent();
+        if (!await this.#targets.inspect(capability.target)) {
+          release();
+          throw denied(409, "visual_frame_unavailable");
+        }
+        requireCurrent();
+      } catch (error) {
+        release();
+        if (error instanceof BrowserFrameCapabilityError) throw error;
+        if (error instanceof BrowserFrameInspectionTimeoutError) {
+          throw denied(504, "visual_websocket_timeout");
+        }
+        throw denied(409, "visual_frame_unavailable");
+      }
+    };
+    const recheckConnected = async (peer: BrowserFrameConnectedPeer): Promise<void> => {
+      try {
+        requireCurrent();
+        if (!validConnectedPeer(peer, capability.target)
+          || !this.#targets.inspectConnectedPeer
+          || !await this.#targets.inspectConnectedPeer(capability.target, peer)
+          || !await this.#targets.inspect(capability.target)) {
+          throw denied(409, "visual_frame_unavailable");
+        }
+        requireCurrent();
+      } catch (error) {
+        release();
+        if (error instanceof BrowserFrameCapabilityError) throw error;
+        if (error instanceof BrowserFrameInspectionTimeoutError) {
+          throw denied(504, "visual_websocket_timeout");
+        }
+        throw denied(409, "visual_frame_unavailable");
+      }
+    };
+
+    try {
+      await recheck();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    return Object.freeze({
+      target: capability.target,
+      childPath: policy.path,
+      offeredSubprotocols,
+      maxFrameBytes: policy.maxFrameBytes,
+      idleTimeoutMs: policy.idleTimeoutMs,
+      expiresAtMs: capability.brokerSessionExpiresAtMs,
+      live,
+      recheck,
+      recheckConnected,
+      markOpen: (): void => {
+        requireCurrent();
+        registration.state = "open";
+      },
+      release,
+    });
+  }
+
+  revoke(projectId: string, runId?: string, attemptGeneration?: number): void {
     for (const [routeId, capability] of this.#routes) {
       if (capability.target.projectId === projectId
-        && (runId === undefined || capability.target.runId === runId)) {
-        this.#routes.delete(routeId);
-        this.#nonces.delete(capability.nonceDigest.toString("hex"));
+        && (runId === undefined || capability.target.runId === runId)
+        && (attemptGeneration === undefined
+          || capability.target.attemptGeneration === attemptGeneration)) {
+        this.#revokeCapability(routeId, capability);
+      }
+    }
+  }
+
+  revokeRun(runId: string): void {
+    const exactRunId = exactId(runId);
+    for (const [routeId, capability] of this.#routes) {
+      if (capability.target.runId === exactRunId) {
+        this.#revokeCapability(routeId, capability);
       }
     }
   }
 
   clear(): void {
+    for (const [routeId, capability] of [...this.#routes]) {
+      this.#revokeCapability(routeId, capability);
+    }
     this.#generation += 1;
     this.#appSession = undefined;
     this.#nonces.clear();
     this.#routes.clear();
+    this.#attemptSockets.clear();
   }
 
   #requireAppAdmission(
@@ -415,6 +619,38 @@ export class BrowserFrameCapability {
       && capability.target.expiresAtMs > now);
   }
 
+  async #inspectHttp(target: BrowserFrameTarget): Promise<boolean> {
+    try {
+      return await this.#targets.inspect(target);
+    } catch (error) {
+      if (error instanceof BrowserFrameInspectionTimeoutError) return false;
+      throw error;
+    }
+  }
+
+  #revokeCapability(routeId: string, capability: FrameCapability): void {
+    capability.epoch += 1;
+    for (const registration of [...capability.sockets]) {
+      try {
+        registration.owner.close(1008);
+      } catch {
+        // Revocation remains best-effort across owners, then removes all authority.
+      }
+      this.#releaseWebSocket(webSocketAttemptKey(capability.target), registration);
+    }
+    this.#routes.delete(routeId);
+    this.#nonces.delete(capability.nonceDigest.toString("hex"));
+  }
+
+  #releaseWebSocket(attemptKey: string, registration: FrameWebSocketRegistration): void {
+    if (registration.released) return;
+    registration.released = true;
+    registration.capability.sockets.delete(registration);
+    const attemptSockets = this.#attemptSockets.get(attemptKey);
+    attemptSockets?.delete(registration);
+    if (attemptSockets?.size === 0) this.#attemptSockets.delete(attemptKey);
+  }
+
   #secret(): string {
     const bytes = this.#random(SECRET_BYTES);
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== SECRET_BYTES) {
@@ -441,6 +677,16 @@ type FrameCapability = {
   cookieDigest?: Buffer;
   brokerSessionExpiresAtMs: number;
   inFlight: number;
+  epoch: number;
+  sockets: Set<FrameWebSocketRegistration>;
+};
+
+type FrameWebSocketRegistration = {
+  capability: FrameCapability;
+  owner: BrowserFrameWebSocketOwner;
+  state: "pending" | "open";
+  epoch: number;
+  released: boolean;
 };
 
 export class FixedChildHttpTransport implements FrameHttpTransport {
@@ -531,12 +777,143 @@ const exactNow = (value: number): number => {
 
 const validPort = (value: number): boolean => Number.isSafeInteger(value) && value >= 1 && value <= 65_535;
 
+const validConnectedPeer = (
+  peer: BrowserFrameConnectedPeer,
+  target: BrowserFrameTarget,
+): boolean => Boolean(peer
+  && peer.localHost === "127.0.0.1"
+  && validPort(peer.localPort)
+  && peer.remoteHost === "127.0.0.1"
+  && peer.remotePort === target.port);
+
 const validTarget = (target: BrowserFrameTarget, now: number): boolean =>
   exactId(target.projectId) === target.projectId
   && exactId(target.runId) === target.runId
   && Number.isSafeInteger(target.attemptGeneration) && target.attemptGeneration >= 1
   && validPort(target.port)
-  && Number.isSafeInteger(target.expiresAtMs) && target.expiresAtMs > now;
+  && Number.isSafeInteger(target.expiresAtMs) && target.expiresAtMs > now
+  && (target.webSocket === undefined || validWebSocketPolicy(target.webSocket));
+
+const freezeTarget = (target: BrowserFrameTarget): BrowserFrameTarget => Object.freeze({
+  projectId: target.projectId,
+  runId: target.runId,
+  attemptGeneration: target.attemptGeneration,
+  port: target.port,
+  expiresAtMs: target.expiresAtMs,
+  ...(target.webSocket ? {
+    webSocket: Object.freeze({
+      path: target.webSocket.path,
+      subprotocols: Object.freeze([...target.webSocket.subprotocols]),
+      maxFrameBytes: target.webSocket.maxFrameBytes,
+      maxConnections: target.webSocket.maxConnections,
+      idleTimeoutMs: target.webSocket.idleTimeoutMs,
+    }),
+  } : {}),
+});
+
+const validWebSocketPolicy = (policy: BrowserFrameWebSocketPolicy): boolean =>
+  typeof policy === "object" && policy !== null
+  && exactSameOriginPath(policy.path)
+  && Array.isArray(policy.subprotocols)
+  && policy.subprotocols.length <= 8
+  && policy.subprotocols.every((value) => typeof value === "string" && WEB_SOCKET_TOKEN.test(value))
+  && new Set(policy.subprotocols).size === policy.subprotocols.length
+  && Number.isSafeInteger(policy.maxFrameBytes)
+  && policy.maxFrameBytes >= 1 && policy.maxFrameBytes <= 1_048_576
+  && Number.isSafeInteger(policy.maxConnections)
+  && policy.maxConnections >= 1 && policy.maxConnections <= 8
+  && Number.isSafeInteger(policy.idleTimeoutMs)
+  && policy.idleTimeoutMs >= 1_000 && policy.idleTimeoutMs <= 300_000;
+
+const exactSameOriginPath = (path: string): boolean =>
+  typeof path === "string" && path.startsWith("/") && !path.startsWith("//")
+  && !path.includes("?") && !path.includes("#") && !path.includes("\\")
+  && !/[\u0000-\u001f\u007f]/u.test(path)
+  && !path.includes("//")
+  && !path.split("/").some((segment) => segment === "." || segment === "..")
+  && Buffer.byteLength(path) <= MAX_SUFFIX_BYTES;
+
+const WEB_SOCKET_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$/u;
+
+const requireWebSocketUpgrade = (request: BrowserFrameWebSocketRequest): void => {
+  const upgrade = exactSingle(request.upgrade);
+  const connection = typeof request.connection === "string"
+    && request.connection.length <= 256
+    && !/[\r\n\u0000]/u.test(request.connection)
+    ? request.connection
+    : undefined;
+  const version = exactSingle(request.version);
+  const key = exactSingle(request.key);
+  const connectionTokens = connection?.split(",").map((value) => value.trim().toLowerCase()) ?? [];
+  let decodedKey: Buffer | undefined;
+  try {
+    decodedKey = key && /^[A-Za-z0-9+/]{22}==$/u.test(key)
+      ? Buffer.from(key, "base64")
+      : undefined;
+  } catch {
+    decodedKey = undefined;
+  }
+  if (upgrade?.toLowerCase() !== "websocket"
+    || connectionTokens.length < 1
+    || connectionTokens.some((value) => !value)
+    || !connectionTokens.includes("upgrade")
+    || new Set(connectionTokens).size !== connectionTokens.length
+    || version !== "13"
+    || decodedKey?.byteLength !== 16) {
+    throw denied(400, "visual_websocket_protocol_denied");
+  }
+  if (request.extensions !== undefined) {
+    const extensions = typeof request.extensions === "string"
+      ? request.extensions
+      : undefined;
+    if (!extensions || extensions.length > 1_024
+      || !/^[\u0020-\u007e]+$/u.test(extensions)) {
+      throw denied(400, "visual_websocket_protocol_denied");
+    }
+  }
+};
+
+const exactWebSocketProtocols = (
+  value: string | readonly string[] | undefined,
+  policy: BrowserFrameWebSocketPolicy,
+): readonly string[] => {
+  if (value === undefined) {
+    if (policy.subprotocols.length !== 0) {
+      throw denied(403, "visual_websocket_protocol_denied");
+    }
+    return Object.freeze([]);
+  }
+  if (policy.subprotocols.length === 0) {
+    throw denied(403, "visual_websocket_protocol_denied");
+  }
+  if (typeof value !== "string" || value.length > 1_024 || /[\r\n\u0000]/u.test(value)) {
+    throw denied(403, "visual_websocket_protocol_denied");
+  }
+  const protocols = value.split(",").map((protocol) => protocol.trim());
+  if (protocols.length < 1 || protocols.length > 8
+    || protocols.some((protocol) => !WEB_SOCKET_TOKEN.test(protocol))
+    || new Set(protocols).size !== protocols.length
+    || protocols.some((protocol) => !policy.subprotocols.includes(protocol))) {
+    throw denied(403, "visual_websocket_protocol_denied");
+  }
+  return Object.freeze(protocols);
+};
+
+const webSocketCapabilityPath = (path: string): { routeId: string; suffix: string } => {
+  if (typeof path !== "string" || Buffer.byteLength(path) > MAX_SUFFIX_BYTES + 128
+    || path.includes("?") || path.includes("#") || path.includes("\\")
+    || /[\u0000-\u001f\u007f]/u.test(path)) {
+    throw denied(404, "visual_websocket_not_declared");
+  }
+  const match = /^\/frame\/c\/([A-Za-z0-9_-]{40,80})(\/.*)$/u.exec(path);
+  if (!match || !exactSameOriginPath(match[2])) {
+    throw denied(404, "visual_websocket_not_declared");
+  }
+  return { routeId: match[1], suffix: match[2] };
+};
+
+const webSocketAttemptKey = (target: BrowserFrameTarget): string =>
+  `${target.projectId}\0${target.runId}\0${target.attemptGeneration}`;
 
 const exactId = (value: string): string => {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) {

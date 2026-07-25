@@ -467,6 +467,7 @@ export type HealthyVisualFrameTarget = Readonly<{
   loopbackPort: number;
   healthPath: string;
   healthyAt: IsoTimestamp;
+  webSocket?: NonNullable<NonNullable<ExecutionDescriptionV2["visual"]>["webSocket"]>;
 }>;
 
 export type ProcessIdentity =
@@ -3455,6 +3456,16 @@ export class ProductStoreV2 {
       if (run.contractVersion !== 4 || run.runKind !== "visual") throw unavailable();
       assertRunLimits(run.limits);
       if (canonicalDigest(run.limits) !== run.limitsDigest) throw unavailable();
+      const project = this.#project(projectId);
+      let execution: ExecutionDescriptionV2;
+      try {
+        execution = validateExecutionDescriptionV2(project.executionDescription);
+        assertRunCapabilityV2(execution, "visual");
+      } catch (error) {
+        throw unavailable(error);
+      }
+      if (canonicalDigest(execution) !== run.executionDescriptionDigest) throw unavailable();
+      const webSocket = execution.visual?.webSocket;
 
       const attemptRows = this.#database.prepare(
         "SELECT * FROM run_attempts WHERE run_id = ? ORDER BY attempt_generation DESC, id",
@@ -3594,6 +3605,7 @@ export class ProductStoreV2 {
         loopbackPort: process.loopback_port,
         healthPath: launch.healthPath,
         healthyAt: healthReceipt.healthyAt,
+        ...(webSocket ? { webSocket } : {}),
       });
     } catch (error) {
       if (error instanceof ProductStoreV2Error
