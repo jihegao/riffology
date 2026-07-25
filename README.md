@@ -67,8 +67,10 @@ supervisor into the shared dispatcher, admits eligible visual work through the
 existing Project-run API, and preserves child-port secrecy. Visual completion
 still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
 broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
-A3-2d2 diagnostic events were merged through PR #44. A3-2d direct controls
-and A3-3 ordinary wind import remain pending #14 slices.
+A3-2d1 output access, A3-2d2 diagnostic events, and A3-2d3 direct controls
+were merged through PRs #43, #44, and #45. A3-2d4 is the current
+cross-authority revocation review candidate; A3-3 ordinary wind import remains
+a pending #14 slice.
 Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
@@ -93,9 +95,8 @@ routes cannot satisfy that dependency.
 Live process rows created under schema v5 lack the v6 scratch/launch evidence
 needed for safe signalling and therefore fail restart recovery closed rather
 than being automatically cleaned.
-These published visual/browser slices are not completion evidence for Stage 3,
-scoped Playwright, generic output/event/direct-control completion, wind import,
-or final browser acceptance.
+These published visual/browser slices and the A3-2d4 review candidate are not
+completion evidence for Stage 3, wind import, or final browser acceptance.
 
 The older Gate wind path and `queue-network-v1` code still coexist in the tree.
 They remain runnable history, not current Milestone A product authority, and
@@ -264,7 +265,12 @@ through PR #37: the dedicated Chromium browser security
 matrix passes 5/5 and the complete Chromium suite passes 8/8. The current
 backend gate reports 466 total with 465 passed, zero failed, and one optional
 installed-OpenCode smoke skipped; web passes 104/104, network entry 1/1, and
-the production build succeeds. A3-2d and A3-3 remain pending.
+the production build succeeds. The A3-2d4 review candidate adds a 65/65 focused
+backend revocation gate and extends the dedicated broker Chromium matrix to
+6/6. Its full candidate gate is 553 backend total/552 passed/zero failed/one
+optional OpenCode smoke skipped, web 104/104, network entry 1/1, full Chromium
+15/15, successful production build, and a 24-file docs check. A3-3 wind import
+and final Stage 3 integration remain pending.
 
 Focused Milestone A2 verification:
 
