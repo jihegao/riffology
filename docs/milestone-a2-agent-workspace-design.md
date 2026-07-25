@@ -3,7 +3,7 @@
 Status: Stage 2 implemented and release-accepted, including the real-provider
 same-session two-turn browser closure recorded in
 [`test-plan.md`](test-plan.md). This document is subordinate to the
-[Milestone A product contract](milestone-a-product-contract.md) and builds on
+[Riff MVP PRD](product-requirements.md) and builds on
 the [Stage 1 data foundation](milestone-a1-data-foundation-design.md). It owns
 persistent Agent conversations and the generic Model workspace. Project
 execution and the final product shell remain later stages.

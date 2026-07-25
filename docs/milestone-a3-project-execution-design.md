@@ -3,7 +3,7 @@
 - Status: active
 - Role: active design
 - Scope: Stage 3 Project execution contract and implementation ledger for Issue #14
-- Source of truth: Milestone A product contract; merged code and PRs for implementation status
+- Source of truth: Riff MVP PRD; merged code and PRs for implementation status
 - Last reviewed: 2026-07-25
 
 The first foundation slice implemented fixed-copy Project creation and the
@@ -78,7 +78,7 @@ current implementation evidence, so this document does not claim that Stage 3
 is complete.
 
 This document is subordinate to the
-[Milestone A product contract](milestone-a-product-contract.md), builds on the
+[Riff MVP PRD](product-requirements.md), builds on the
 implemented [Stage 1 data foundation](milestone-a1-data-foundation-design.md),
 and preserves the
 [Stage 2 Agent and Model workspace](milestone-a2-agent-workspace-design.md)

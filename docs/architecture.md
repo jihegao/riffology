@@ -2,10 +2,11 @@
 
 ## Milestone A2 authority and A3 execution architecture
 
-The current authority is the
-[`Milestone A product contract`](milestone-a-product-contract.md), the
-[`Stage 1 data design`](milestone-a1-data-foundation-design.md), and the
-[`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md).
+The current product authority is the
+[`Riff MVP PRD`](product-requirements.md). The
+[`Stage 1 data design`](milestone-a1-data-foundation-design.md) and
+[`Stage 2 Agent/workspace design`](milestone-a2-agent-workspace-design.md)
+refine its implemented storage and Agent boundaries.
 `ProductStoreV2` over SQLite schema migration v7, execution contract v4, and
 checked object bytes is the system of
 record. Conversation/OpenCode services, scoped MCP/skills, Model workspace

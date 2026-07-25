@@ -1,7 +1,7 @@
 # Product positioning and roadmap: business-aligned simulation agents
 
-> **Superseded target notice:** the approved
-> [`milestone-a-product-contract.md`](milestone-a-product-contract.md) is the
+> **Superseded target notice:** the
+> [`Riff MVP PRD`](product-requirements.md) is the
 > current product authority. The Gate 0-4 roadmap below is retained as design
 > history and wind-model evidence. It must not be used to remove the OpenCode
 > conversation surface, require immutable user-visible revisions, or hard-code

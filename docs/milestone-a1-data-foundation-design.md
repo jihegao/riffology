@@ -1,7 +1,7 @@
 # Milestone A1 data-foundation design
 
 Status: Stage 1 implementation design. This document is subordinate to the
-[Milestone A product contract](milestone-a-product-contract.md). It defines the
+[Riff MVP PRD](product-requirements.md). It defines the
 local domain and persistence boundary only; it does not connect that boundary
 to HTTP, OpenCode, Mesa execution, or the final UI.
 

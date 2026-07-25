@@ -3,13 +3,13 @@
 - Status: active
 - Role: implementation record
 - Scope: repository overview, local operation, milestone status, and verification summary
-- Source of truth: Milestone A product contract and merged implementation
+- Source of truth: Riff MVP PRD and merged implementation
 - Last reviewed: 2026-07-25
 
 本地双栏演示：左侧为由 OpenCode 驱动的建模对话与文件上传，右侧为 Mesa 仿真工作台。
 
-> **Milestone A target:** the newly approved product contract is
-> [`docs/milestone-a-product-contract.md`](docs/milestone-a-product-contract.md).
+> **MVP target:** the single product requirements authority is
+> [`docs/product-requirements.md`](docs/product-requirements.md).
 > It restores this two-pane interaction as the shared shell for generic Models
 > and Projects and treats wind-turbine maintenance as the first ordinary case.
 > The legacy runtime described below predates that contract and still coexists
@@ -94,7 +94,7 @@ visual-health checks pass; it is not scientific validation or decision trust.
 `main` currently contains the completed historical Gate 0-3 wind implementation
 and the earlier `queue-network-v1` demo. Those records remain useful as wind-model
 evidence and implementation history, but they no longer define the target product.
-Where they conflict, the Milestone A contract above is authoritative.
+Where they conflict, the Riff MVP PRD above is authoritative.
 
 ## Delivery gates
 
@@ -115,10 +115,10 @@ Agent 工作平台。它帮助人类把目标、约束、数据和不确定假�
 配置、运行产物和适用范围积累的证据，则决定结果能否支持具体决策。产品核心
 价值是在业务要求、模型、实验、分析和人类决策之间保持结构化、可审查的连续性。
 
-Milestone A 依次交付 SQLite/对象目录基础、持久 OpenCode 对话与通用模型工作区、
+MVP 依次交付 SQLite/对象目录基础、持久 OpenCode 对话与通用模型工作区、
 项目实验与通用执行，以及共享双栏产品和风机案例的浏览器验收。它不保留旧的
 immutable-revision、Evidence Studio 或 Gate 4 作为产品路线。详见当前
-[`Milestone A contract`](docs/milestone-a-product-contract.md)；旧
+[`Riff MVP PRD`](docs/product-requirements.md)；旧
 [`product roadmap`](docs/product-roadmap.md) 仅保留为设计历史。
 
 ## Run locally
