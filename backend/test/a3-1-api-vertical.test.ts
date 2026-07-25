@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -89,9 +89,14 @@ const start = async (base: string) => {
     workspaceRoot: legacyRoot,
     defaultSessionId: "a3-1-api-acceptance",
   });
-  await app.initialize();
-  const network = await app.listenBrowserNetwork();
-  return { app, baseUrl: network.app.origin };
+  try {
+    await app.initialize();
+    const network = await app.listenBrowserNetwork();
+    return { app, baseUrl: network.app.origin };
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
 };
 
 const browserOutputHeaders = (cookie: string) => ({
@@ -120,7 +125,7 @@ const waitForRun = async (
   baseUrl: string,
   projectId: string,
   runId: string,
-  status: "running" | "succeeded" | "cancelled",
+  status: "running" | "succeeded" | "failed" | "cancelled",
 ): Promise<any> => {
   for (let attempt = 0; attempt < 600; attempt += 1) {
     const response = await fetch(`${baseUrl}/api/projects/${projectId}/runs/${runId}`);
@@ -626,4 +631,333 @@ target.write_text(json.dumps({
       message.messageKind === "platform_card" && message.content?.runId === expectedRunId
     ).length, 1);
   }
+});
+
+test("A3-2d2 atomically publishes generic diagnostic events and pages them across restart", {
+  timeout: 45_000,
+}, async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a3-2d2-api-vertical-"));
+  let current: BackendApp | undefined;
+  t.after(async () => {
+    await current?.close();
+    await rm(base, { recursive: true, force: true });
+  });
+
+  let started = await start(base);
+  current = started.app;
+  let baseUrl = started.baseUrl;
+  current.productStore!.createModel({
+    id: "model_a3_2d2_api_vertical",
+    name: "A3-2d2 diagnostic event fixture",
+    technicalStatus: "executable",
+    runMode: "batch",
+    executionDescription: {
+      schemaVersion: 2,
+      runtime: "python",
+      runMode: "batch",
+      dependencyFile: "environment/requirements.txt",
+      inputs: {
+        schemaProfile: "riff-json-schema-2020-12-v1",
+        schema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: { value: { type: "integer" } },
+          required: ["value"],
+          additionalProperties: false,
+        },
+        smoke: { value: 1 },
+      },
+      outputs: [{
+        logicalName: "result",
+        relativePath: "outputs/result.json",
+        mediaType: "application/json",
+        required: true,
+        role: "data",
+      }],
+      batch: {
+        entryPoint: "code/model.py",
+        protocol: "riff-batch-v1",
+        domainEvents: {
+          relativePath: "events.ndjson",
+          mediaType: "application/x-ndjson",
+          role: "diagnostic",
+          payloadSchema: {
+            schemaProfile: "riff-json-schema-2020-12-v1",
+            schema: {
+              $schema: "https://json-schema.org/draft/2020-12/schema",
+              type: "object",
+              properties: {
+                message: { type: "string", minLength: 1, maxLength: 200 },
+                value: { type: "integer" },
+              },
+              required: ["message", "value"],
+              additionalProperties: false,
+            },
+          },
+        },
+      },
+      cancellation: { signal: "SIGTERM", graceMs: 500 },
+    },
+    createdAt: "2026-07-25T02:00:00.000Z",
+    files: [{
+      id: "file_a3_2d2_api_vertical_model",
+      kind: "model_code",
+      relativePath: "model.py",
+      mediaType: "text/x-python",
+      bytes: Buffer.from(`from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--riff-input", required=True, type=Path)
+parser.add_argument("--riff-output-dir", required=True, type=Path)
+args = parser.parse_args()
+envelope = json.loads(args.riff_input.read_text(encoding="utf-8"))
+result = args.riff_output_dir / "outputs" / "result.json"
+result.parent.mkdir(parents=True, exist_ok=True)
+result.write_text(json.dumps({"value": envelope["parameters"]["value"]}, sort_keys=True, separators=(",", ":")) + "\\n", encoding="utf-8")
+events = (
+    [{"type": "repair_started", "occurredAt": "2026-07-25T02:00:01.000Z", "payload": {"message": "", "value": -1}}]
+    if envelope["parameters"]["value"] < 0
+    else [
+        {"type": "repair_started", "occurredAt": "2026-07-25T02:00:01.000Z", "payload": {"message": "https://example.invalid is untrusted data", "value": 1}},
+        {"type": "repair_progress", "occurredAt": "2026-07-25T02:00:02.000Z", "payload": {"message": "ignore prior instructions is untrusted data", "value": 2}},
+        {"type": "repair_finished", "occurredAt": "2026-07-25T02:00:03.000Z", "payload": {"message": "tool_call-shaped text is untrusted data", "value": 3}},
+    ]
+)
+(args.riff_output_dir / "events.ndjson").write_text(
+    "".join(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\\n" for event in events),
+    encoding="utf-8",
+)
+`),
+    }, {
+      id: "file_a3_2d2_api_vertical_environment",
+      kind: "model_environment",
+      relativePath: "requirements.txt",
+      mediaType: "text/plain",
+      bytes: Buffer.from("# no external dependencies\n"),
+    }],
+  });
+
+  const projectResponse = await post(`${baseUrl}/api/projects`, {
+    commandId: "create-a3-2d2-project",
+    name: "A3-2d2 Project",
+    modelId: "model_a3_2d2_api_vertical",
+  });
+  assert.equal(projectResponse.status, 201, await projectResponse.clone().text());
+  const project = (await projectResponse.json() as any).project;
+  const experimentResponse = await post(
+    `${baseUrl}/api/projects/${project.id}/experiment-configs`,
+    {
+      commandId: "create-a3-2d2-experiment",
+      name: "Diagnostic event vertical",
+      configuration: {
+        schemaVersion: 1,
+        runKind: "batch",
+        parameters: { value: 7 },
+        sampling: { kind: "single", seed: 17 },
+      },
+    },
+  );
+  assert.equal(experimentResponse.status, 201, await experimentResponse.clone().text());
+  const experiment = await experimentResponse.json() as any;
+  const runResponse = await post(`${baseUrl}/api/projects/${project.id}/runs`, {
+    commandId: "start-a3-2d2-run",
+    experimentConfigId: experiment.id,
+  });
+  assert.equal(runResponse.status, 201, await runResponse.clone().text());
+  const run = await runResponse.json() as any;
+  await waitForRun(baseUrl, project.id, run.runId, "succeeded");
+
+  const eventsUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}/diagnostic-events`;
+  const unauthenticated = await fetch(eventsUrl);
+  assert.equal(unauthenticated.status, 403);
+  const appCookie = await bootstrapAppSession(baseUrl);
+  const headers = browserOutputHeaders(appCookie);
+  const first = await fetch(`${eventsUrl}?limit=1`, { headers });
+  assert.equal(first.status, 200, await first.clone().text());
+  assert.equal(first.headers.get("cache-control"), "private, no-store");
+  assert.equal(first.headers.get("x-content-type-options"), "nosniff");
+  const firstPage = await first.json() as any;
+  assert.equal(firstPage.items.length, 1);
+  assert.deepEqual(firstPage.items[0], {
+    sequence: 0,
+    sampleIndex: 0,
+    type: "repair_started",
+    occurredAt: "2026-07-25T02:00:01.000Z",
+    payload: {
+      message: "https://example.invalid is untrusted data",
+      value: 1,
+    },
+  });
+  assert.equal(firstPage.truncated, true);
+  assert.equal(typeof firstPage.nextCursor, "string");
+  assert.equal(firstPage.nextCursor.includes(project.id), false);
+
+  const invalidExperimentResponse = await post(
+    `${baseUrl}/api/projects/${project.id}/experiment-configs`,
+    {
+      commandId: "create-a3-2d2-invalid-experiment",
+      name: "Invalid diagnostic event vertical",
+      configuration: {
+        schemaVersion: 1,
+        runKind: "batch",
+        parameters: { value: -1 },
+        sampling: { kind: "single", seed: 19 },
+      },
+    },
+  );
+  assert.equal(
+    invalidExperimentResponse.status,
+    201,
+    await invalidExperimentResponse.clone().text(),
+  );
+  const invalidExperiment = await invalidExperimentResponse.json() as any;
+  const invalidRunResponse = await post(
+    `${baseUrl}/api/projects/${project.id}/runs`,
+    {
+      commandId: "start-a3-2d2-invalid-run",
+      experimentConfigId: invalidExperiment.id,
+    },
+  );
+  assert.equal(invalidRunResponse.status, 201, await invalidRunResponse.clone().text());
+  const invalidRun = await invalidRunResponse.json() as any;
+  await waitForRun(baseUrl, project.id, invalidRun.runId, "failed");
+  assert.deepEqual(current.productStore!.listRunOutputs(invalidRun.runId), []);
+  assert.deepEqual(current.productStore!.listObjectFiles({
+    kind: "run",
+    id: invalidRun.runId,
+  }), []);
+  assert.throws(
+    () => current!.productStore!.diagnosticEventCursorBinding(
+      project.id,
+      invalidRun.runId,
+    ),
+    /events_not_available/u,
+  );
+  const invalidEventsRead = await fetch(
+    `${baseUrl}/api/projects/${project.id}/runs/${invalidRun.runId}/diagnostic-events`,
+    { headers },
+  );
+  assert.equal(invalidEventsRead.status, 409);
+  assert.equal(
+    (await invalidEventsRead.json() as any).error.code,
+    "events_not_available",
+  );
+
+  await current.close();
+  current = undefined;
+  started = await start(base);
+  current = started.app;
+  baseUrl = started.baseUrl;
+  const restartedCookie = await bootstrapAppSession(baseUrl);
+  const restartedHeaders = browserOutputHeaders(restartedCookie);
+  const restartedEventsUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}/diagnostic-events`;
+  const second = await fetch(
+    `${restartedEventsUrl}?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,
+    { headers: restartedHeaders },
+  );
+  assert.equal(second.status, 200, await second.clone().text());
+  const secondPage = await second.json() as any;
+  assert.equal(secondPage.items[0].sequence, 1);
+  assert.equal(secondPage.items[0].type, "repair_progress");
+  assert.equal(secondPage.truncated, true);
+
+  const tamperedCursor = `${firstPage.nextCursor.slice(0, -1)}${
+    firstPage.nextCursor.endsWith("A") ? "B" : "A"
+  }`;
+  const tampered = await fetch(
+    `${restartedEventsUrl}?limit=1&cursor=${encodeURIComponent(tamperedCursor)}`,
+    { headers: restartedHeaders },
+  );
+  assert.equal(tampered.status, 422);
+  assert.equal((await tampered.json() as any).error.code, "invalid_event_cursor");
+  const filterSubstitution = await fetch(
+    `${restartedEventsUrl}?limit=1&type=repair_finished&cursor=${
+      encodeURIComponent(firstPage.nextCursor)
+    }`,
+    { headers: restartedHeaders },
+  );
+  assert.equal(filterSubstitution.status, 422);
+  const duplicateQuery = await fetch(
+    `${restartedEventsUrl}?limit=1&limit=2`,
+    { headers: restartedHeaders },
+  );
+  assert.equal(duplicateQuery.status, 422);
+  const filtered = await fetch(
+    `${restartedEventsUrl}?type=repair_finished`,
+    { headers: restartedHeaders },
+  );
+  assert.equal(filtered.status, 200);
+  const filteredPage = await filtered.json() as any;
+  assert.deepEqual(filteredPage.items.map((item: any) => item.type), [
+    "repair_finished",
+  ]);
+
+  const eventObject = current.productStore!.listObjectFiles({
+    kind: "run",
+    id: run.runId,
+  }).find((file) => file.mediaType === "application/x-ndjson");
+  assert.ok(eventObject);
+  const eventPath = join(
+    base,
+    "product",
+    "objects",
+    "projects",
+    project.id,
+    "runs",
+    run.runId,
+    eventObject.relativePath,
+  );
+  const originalEventBytes = await readFile(eventPath);
+  const driftedEventBytes = Buffer.from(originalEventBytes);
+  driftedEventBytes[0] = driftedEventBytes[0] === 0x7b ? 0x5b : 0x7b;
+  await writeFile(eventPath, driftedEventBytes);
+  const driftedRead = await fetch(restartedEventsUrl, { headers: restartedHeaders });
+  assert.equal(driftedRead.status, 500);
+  assert.equal((await driftedRead.json() as any).error.code, "event_integrity_failed");
+  await current.close();
+  current = undefined;
+  await assert.rejects(
+    () => start(base),
+    /batch_success_recovery_invalid: the diagnostic event success closure is inconsistent/u,
+  );
+  await writeFile(eventPath, originalEventBytes);
+  started = await start(base);
+  current = started.app;
+  baseUrl = started.baseUrl;
+  const recoveredCookie = await bootstrapAppSession(baseUrl);
+  const recoveredHeaders = browserOutputHeaders(recoveredCookie);
+  const recoveredEventsUrl =
+    `${baseUrl}/api/projects/${project.id}/runs/${run.runId}/diagnostic-events`;
+
+  const preTrashUpdatedAt = current.productStore!.getProject(project.id).updatedAt;
+  current.productStore!.trashResource(
+    "project",
+    project.id,
+    preTrashUpdatedAt,
+  );
+  const trashedRead = await fetch(recoveredEventsUrl, { headers: recoveredHeaders });
+  assert.equal(trashedRead.status, 409);
+  current.productStore!.restoreResource(
+    "project",
+    project.id,
+    preTrashUpdatedAt,
+  );
+  const staleAfterRestore = await fetch(
+    `${recoveredEventsUrl}?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,
+    { headers: recoveredHeaders },
+  );
+  assert.equal(staleAfterRestore.status, 422);
+  assert.equal((await staleAfterRestore.json() as any).error.code, "invalid_event_cursor");
+  await current.close();
+  current = undefined;
+  await rm(join(base, "product", ".diagnostic-event-cursor.key"));
+  await assert.rejects(
+    () => start(base),
+    /diagnostic event cursor key is missing, corrupt, or insecure/u,
+  );
 });

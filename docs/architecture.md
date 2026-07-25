@@ -74,8 +74,11 @@ exit and verified cleanup evidence; otherwise
 the live attempt stays fail-closed for operator repair.
 
 The official generic scaffold now emits execution-description v2 and declares
-batch only. Visual starts fail with `capability_not_available`; batch
-`domainEvents` fail with `domain_events_not_supported`. Same-process backend
+batch only. At the historical A3-1b boundary, visual starts failed with
+`capability_not_available` and batch `domainEvents` failed with
+`domain_events_not_supported`. The A3-2d2 candidate admits only declared
+diagnostic NDJSON through strict validation and schema-v12 atomic publication.
+Same-process backend
 shutdown aborts the supervisor, terminates the verified process group, cleans
 owned scratch, and records `dispatcher_shutdown`. A3-1c-a cancellation
 immediately aborts the matching active in-process run and uses heartbeat
@@ -97,9 +100,10 @@ in the same SQLite transaction as terminal batch state, or records
 agreement and fails closed on drift. Agent turns cannot own platform cards;
 bounded Agent context serializes only their five allowlisted fields.
 A3-2a2 visual supervision and A3-2b scoped browser access are published.
-A3-2c scoped Playwright, A3-2d generic result access/direct controls, and
-A3-3 ordinary wind import remain later Stage 3 slices. Wind diagnostic-event
-acceptance starts only after A3-2d publishes generic event ingestion.
+A3-2c and A3-2d1 are published; A3-2d2 diagnostic events are a review
+candidate. A3-2d direct controls and A3-3 ordinary wind import remain later
+Stage 3 slices. Wind diagnostic-event acceptance starts only after A3-2d2 is
+published.
 
 The planned visual work is deliberately split so persistence authority lands
 before public execution:

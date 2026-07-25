@@ -791,13 +791,13 @@ target.write_text(
     plan: outputPlan,
     createdAt: "2026-07-24T04:00:01.000Z",
   });
-  const rejectedDomainEvents = await post(`${baseUrl}/api/projects/${eventProject.id}/runs`, {
+  const acceptedDomainEvents = await post(`${baseUrl}/api/projects/${eventProject.id}/runs`, {
     commandId: "command_domain_events_run",
     experimentConfigId: "experiment_domain_events_rejected",
   });
-  assert.equal(rejectedDomainEvents.status, 409);
-  assert.equal((await rejectedDomainEvents.json() as any).error.code, "domain_events_not_supported");
-  assert.deepEqual(app.productStore!.listRuns(eventProject.id), []);
+  assert.equal(acceptedDomainEvents.status, 201);
+  assert.equal((await acceptedDomainEvents.json() as any).status, "queued");
+  assert.equal(app.productStore!.listRuns(eventProject.id).length, 1);
   const visualExecutionDescription = structuredClone(outputExecutionDescription) as any;
   visualExecutionDescription.runMode = "visual";
   delete visualExecutionDescription.batch;

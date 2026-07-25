@@ -87,8 +87,9 @@ isolation foundation was merged through PR #38. A3-2c2 adds bounded,
 Project-only read observation while exposing no interaction or caller-selected
 browser target. A3-2c3's one-use typed interaction was merged through PR #41
 and A3-2c4's live-CDP/real-Chromium security closeout through PR #42. A3-2d1
-output list/download is a review-branch candidate; later A3-2d slices remain
-pending.
+output list/download was merged through PR #43. A3-2d2 strict diagnostic-event
+ingestion, schema-v12 atomic publication, and opaque cursor reads are a review-
+branch candidate; direct controls remain pending.
 The c3 merge gate reports 525 backend tests with 524 passed, zero
 failed, and one optional installed-OpenCode smoke skipped; web passes 104/104,
 network entry 1/1, the production build succeeds, and three independent reviews
@@ -205,7 +206,7 @@ intentionally narrow:
   `visual_completion_not_supported`; and
 - Project conversations continue to use the Stage 2 conversation contract.
 
-The product database is schema migration v9 while the current execution
+The product database is schema migration v12 while the current execution
 contract remains v4. Version-3 experiment/run/output rows remain
 readable but cannot be mutated or dispatched. `estimatedSampleCount` is retained
 only as a compatibility projection; v4 authority is `sampleCount` plus the
@@ -216,9 +217,7 @@ re-scaffold/upgrade path.
 The following are not implemented by the current boundary and must not be
 inferred from workspace DTOs or schema-v4 tables:
 
-- batch domain-event ingestion, public output list/download routes, or direct
-  Agent-independent trash/restore routes;
-- scoped Playwright observation or interaction authority; and
+- direct Agent-independent trash/restore routes;
 - a versioned wind installation manifest or example Project.
 
 Same-process shutdown does abort verified processes, clean owned scratch, and
@@ -234,8 +233,9 @@ healthy owner. Schema-v5 live process rows lack v6 scratch/launch evidence and
 intentionally require fail-closed repair instead of speculative signalling.
 Eligible visual starts without a completion conversation use the existing
 Project-run route; visual starts with `completionConversationId` fail with
-`visual_completion_not_supported`; and batch descriptions that
-declare `domainEvents` fail with `domain_events_not_supported`.
+`visual_completion_not_supported`. The A3-2d2 review candidate admits batch
+`domainEvents` only as strict diagnostic NDJSON with atomic terminal
+publication.
 
 The published A3-2a1/A3-2a2a/A3-2a2b/A3-2a2c contracts
 dispatcher/public admission implementation preserve this public boundary:
@@ -687,8 +687,8 @@ The current A3-1b batch implementation may claim hard enforcement only for:
 In the historical A3-1b batch-only boundary, `startupTimeMs`,
 `maxEventCount`, and `maxEventBytes` were frozen reserved fields and visual
 starts failed with `capability_not_available`. Published A3-2a2c enforces the
-visual startup budget and admits eligible visual starts; batch `domainEvents`
-remain unsupported with `domain_events_not_supported`.
+visual startup budget and admits eligible visual starts. The A3-2d2 candidate
+enforces the frozen event count/byte budgets for declared diagnostic NDJSON.
 
 A3-2a2 adds one server-owned global visual cap,
 `maxActiveVisualRuns = 1`. It is not a member of caller-controlled
@@ -944,12 +944,11 @@ Project APIs and records `not_requested`.
 
 ## Outputs, downloads, and bounded domain events
 
-This section is the A3-2d contract. The d1 review branch implements the output
-list/download subset. Existing successful-run DTOs may
-project their committed output index, and Store trash primitives already
-exist, but no current generic public output download, declared diagnostic-event
-ingestion, or complete Agent-independent direct-control surface satisfies this
-contract. Legacy wind/Gate event and download routes are not A3-2d evidence.
+This section is the A3-2d contract. A3-2d1 output list/download was merged
+through PR #43. The A3-2d2 review candidate implements declared diagnostic-
+event ingestion and opaque cursor reads. Store trash primitives already exist,
+but the complete Agent-independent direct-control surface is not yet
+published. Legacy wind/Gate event and download routes are not A3-2d evidence.
 
 Output listing returns only `id`, `runId`, sample index/ID, logical name,
 declared role/type, media type, byte size, SHA-256, and created time. Download
@@ -980,7 +979,7 @@ first response byte, including for a range request.
 Optional batch events use bounded NDJSON records:
 
 ```json
-{"type":"repair_started","occurredAt":"optional ISO-8601","payload":{}}
+{"type":"repair_started","occurredAt":"optional exact YYYY-MM-DDTHH:mm:ss.sssZ","payload":{}}
 ```
 
 Riff assigns authoritative sequence and sample index. It rejects invalid JSON,
@@ -1007,6 +1006,9 @@ keys, invalid Unicode, unsafe numbers, external schema references, and
 noncanonical object/array depth, key count, item count, string length, event
 type vocabulary, or UTC `occurredAt` range fail before terminal publication.
 Ingestion and the immutable terminal event-set digest/count commit atomically.
+Each read revalidates at most the frozen 16 MB/10,000-event set; a dedicated
+event-read rate/concurrency gate remains a P2 follow-up and is not claimed by
+the d2 candidate.
 
 The cursor is bounded, versioned, expiry-bearing, and MACed with a private
 restart-stable installation key using constant-time verification. Its payload
@@ -1014,12 +1016,14 @@ binds route Project ID, run ID, execution contract/schema version, immutable
 event-set digest, terminal/trash generation, direction, page limit, and every
 normalized filter. Cursor parsing is byte-bounded before decoding. Explicit
 key-epoch rotation, expiry, trash, or tuple mismatch invalidates it; ordinary
-backend restart does not. The installation key is generated atomically on
-first start with owner-only filesystem permissions. It is excluded from
-SQLite, public DTOs, backups, exports, logs, errors, and child-process
-environments. A missing or corrupt key after initialization fails startup and
-cursor verification closed until an explicit operator rotation; the service
-never silently regenerates it. Concurrent first starts converge on one key.
+backend restart does not. The current implementation creates the installation
+key directly at its final path with `O_EXCL` and owner-only filesystem
+permissions. Atomic publication and concurrent first-start convergence remain
+review gaps and are not current claims. The key is excluded from SQLite, public
+DTOs, logs, errors, and child-process environments; ordinary backup/export
+exclusion remains unverified and is not claimed. A missing or corrupt key after
+initialization fails startup and cursor verification closed until an explicit
+operator rotation; the service never silently regenerates it.
 
 Cancel is the existing A3-1c-a authority. A3-2d adds no parallel cancel route;
 it proves that cancel and the new download/trash/restore controls remain
@@ -1475,13 +1479,15 @@ POST   /api/projects/:projectId/runs/:runId/visual-frame-session   # current A3-
 GET|HEAD /frame/c/:routeId/<declared-relative-path>                # current A3-2b2
 WS     /frame/c/:routeId/<declared-websocket-path>                 # current A3-2b3
 
-GET    /api/projects/:projectId/runs/:runId/outputs                # A3-2d1 candidate
-GET|HEAD /api/projects/:projectId/runs/:runId/outputs/:outputId/download # A3-2d1 candidate
-GET    /api/projects/:projectId/runs/:runId/events                 # target A3-2d
+GET    /api/projects/:projectId/runs/:runId/outputs                # current A3-2d1
+GET|HEAD /api/projects/:projectId/runs/:runId/outputs/:outputId/download # current A3-2d1
+GET    /api/projects/:projectId/runs/:runId/diagnostic-events      # A3-2d2 candidate
 ```
 
 The legacy Gate runtime currently occupies the same textual
-`/api/projects/:projectId/runs/:runId/events` path for its own object model.
+`/api/projects/:projectId/runs/:runId/events` path for its own object model;
+the generic diagnostic stream therefore uses the unambiguous
+`/diagnostic-events` suffix.
 A3-2d must route current ProductV2 Project/run identities to the ProductV2
 handler before any legacy fallback and must return a current-surface
 not-found/ownership error rather than silently reading legacy artifacts.
@@ -1511,7 +1517,7 @@ Current admission/request codes include `unknown_field`, `invalid_request`,
 `resource_not_found`, `state_conflict`, `idempotency_conflict`,
 `legacy_contract_read_only`, `execution_protocol_upgrade_required`,
 `project_snapshot_corrupt`, `capability_not_declared`,
-`capability_not_available`, `domain_events_not_supported`,
+`capability_not_available`, `events_not_available`,
 `invalid_sample_plan`, and `sample_limit_exceeded`. Current batch terminal
 codes are `batch_run_succeeded`, `batch_process_failed`,
 `run_wall_timeout`, `run_stdout_limit`, `run_stderr_limit`,
@@ -1698,12 +1704,13 @@ Output indexes never resolve outside the owning Project/run object root.
    through PR #41. c4 live-CDP/real-Chromium security and docs closeout was
    merged through PR #42.
 14. **A3-2d generic outputs/events/direct controls — in progress:** d1's exact
-   same-run output list/download with byte/digest revalidation is a review-
-   branch candidate. Bounded declared
-   diagnostic-event ingestion with opaque run/filter-bound cursors, and
-   Agent-independent cancel/download/trash/restore acceptance. Cancel is
-   already current; this slice adds missing generic download/trash/restore
-   routes and proves the complete direct-control set without OpenCode. A3-3
+   same-run output list/download with byte/digest revalidation was merged
+   through PR #43. D2's bounded declared diagnostic-event ingestion,
+   schema-v12 atomic publication, and opaque run/filter-bound cursors are a
+   review-branch candidate. Agent-independent cancel/download/trash/restore
+   acceptance remains. Cancel is
+   already current and download was merged in d1; the later controls slice adds
+   trash/restore routes and proves the complete direct-control set without OpenCode. A3-3
    cannot declare wind diagnostic events until this slice is published.
 15. **A3-3 wind import — pending:** versioned manifest, normal technical check, example Project
    and experiment, baseline equivalence, and non-claim labels.

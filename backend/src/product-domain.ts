@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 11 as const;
+export const PRODUCT_SCHEMA_VERSION = 12 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -167,6 +167,30 @@ export type OutputIndexRecord =
       declaredRole: "metric" | "table" | "document" | "data" | "diagnostic";
       outputContractDigest: Sha256Digest;
     });
+
+export type DiagnosticEventSetRecord = Readonly<{
+  runId: ProductId;
+  executionDescriptionDigest: Sha256Digest;
+  declarationDigest: Sha256Digest;
+  eventSetDigest: Sha256Digest;
+  eventCount: number;
+  totalBytes: number;
+  createdAt: IsoTimestamp;
+}>;
+
+export type DiagnosticEventRecord = Readonly<{
+  runId: ProductId;
+  sequence: number;
+  sampleIndex: number;
+  sampleId: Sha256Digest;
+  sourceOrdinal: number;
+  type: string;
+  occurredAt: IsoTimestamp | null;
+  payload: Record<string, unknown> | readonly unknown[];
+  payloadDigest: Sha256Digest;
+  byteCount: number;
+  createdAt: IsoTimestamp;
+}>;
 
 export type RunAttemptRecord = {
   id: ProductId;

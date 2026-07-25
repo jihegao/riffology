@@ -37,6 +37,11 @@ import {
   type ModelWorkspaceCapability,
 } from "./restricted-process.ts";
 import type { RunLimitsV1, VisualLaunchReceipt } from "./product-store-v2.ts";
+import {
+  parseDiagnosticEventNdjson,
+  type DiagnosticEventPayloadSchema,
+  type ParsedDiagnosticEventSet,
+} from "./diagnostic-events.ts";
 
 export type FrozenBatchSample = Readonly<{
   sampleIndex: number;
@@ -164,6 +169,20 @@ export type BatchOutputCandidate = Readonly<{
   inode: number;
 }>;
 
+export type BatchDiagnosticEventFileCandidate = Readonly<{
+  sampleIndex: number;
+  sampleId: string;
+  sourcePath: string;
+  scratchPath: string;
+  sizeBytes: number;
+  sha256: string;
+  owner: number;
+  device: number;
+  inode: number;
+  payloadSchema: DiagnosticEventPayloadSchema | null;
+  parsed: ParsedDiagnosticEventSet;
+}>;
+
 export type BatchSampleResult = Readonly<{
   sampleIndex: number;
   sampleId: string;
@@ -192,6 +211,7 @@ export type BatchSupervisionResult = Readonly<{
   finishedAt: string;
   samples: readonly BatchSampleResult[];
   outputs: readonly BatchOutputCandidate[];
+  diagnosticEventFiles?: readonly BatchDiagnosticEventFileCandidate[];
   resources: Readonly<{
     maxConcurrencyObserved: number;
     stdoutBytes: number;
@@ -342,12 +362,6 @@ export class GenericBatchSupervisor {
     }
     const description = validateExecutionDescriptionV2(input.project.executionDescription);
     assertRunCapabilityV2(description, "batch");
-    if (description.batch?.domainEvents) {
-      throw new GenericBatchSupervisorError(
-        "domain_events_not_supported",
-        "A3-1b batch execution does not admit domain-event declarations.",
-      );
-    }
     const run = validateFrozenRun(input.run);
     if (canonicalOwnedDirectory(this.#scratchRoot, "batch scratch root") !== this.#scratchRoot) {
       throw new GenericBatchSupervisorError("unsafe_batch_path", "The batch scratch root changed before execution.");
@@ -360,6 +374,7 @@ export class GenericBatchSupervisor {
     const active = new Map<number, ActiveProcess>();
     const results = new Map<number, MutableSample>();
     const outputIdentities = new Set<string>();
+    const diagnosticEventFiles = new Map<number, BatchDiagnosticEventFileCandidate>();
     let fatal: Fatal | null = null;
     let nextIndex = 0;
     let activeCount = 0;
@@ -368,6 +383,8 @@ export class GenericBatchSupervisor {
     let stderrBytes = 0;
     let outputFiles = 0;
     let outputBytes = 0;
+    let diagnosticEventCount = 0;
+    let diagnosticEventBytes = 0;
 
     const terminateAll = (): void => {
       for (const process of active.values()) {
@@ -662,12 +679,19 @@ export class GenericBatchSupervisor {
           outputIdentities,
           remainingFiles: run.limits.maxOutputFiles - outputFiles,
           remainingBytes: run.limits.maxOutputBytes - outputBytes,
+          remainingEventCount: run.limits.maxEventCount - diagnosticEventCount,
+          remainingEventBytes: run.limits.maxEventBytes - diagnosticEventBytes,
           deadline: runDeadline,
           now: this.#now,
         });
         outputFiles += validated.fileCount;
         outputBytes += validated.totalBytes;
+        diagnosticEventCount += validated.eventCount;
+        diagnosticEventBytes += validated.diagnosticEventFile?.sizeBytes ?? 0;
         mutable.outputs.push(...validated.candidates);
+        if (validated.diagnosticEventFile) {
+          diagnosticEventFiles.set(sample.sampleIndex, validated.diagnosticEventFile);
+        }
         mutable.status = "succeeded";
         mutable.code = "batch_sample_succeeded";
         mutable.diagnostic = `Sample ${sample.sampleIndex} produced every required declared output.`;
@@ -735,6 +759,7 @@ export class GenericBatchSupervisor {
     }
     if (finalFatal) {
       for (const sample of results.values()) sample.outputs = [];
+      diagnosticEventFiles.clear();
     }
     const samples = [...results.values()].sort((left, right) => left.sampleIndex - right.sampleIndex).map(freezeSample);
     const outputs = samples.flatMap((sample) => sample.outputs);
@@ -748,6 +773,10 @@ export class GenericBatchSupervisor {
       finishedAt: new Date(this.#now()).toISOString(),
       samples: Object.freeze(samples),
       outputs: Object.freeze(outputs),
+      diagnosticEventFiles: Object.freeze(
+        [...diagnosticEventFiles.values()].sort((left, right) =>
+          left.sampleIndex - right.sampleIndex),
+      ),
       resources: Object.freeze({
         maxConcurrencyObserved,
         stdoutBytes,
@@ -1199,9 +1228,17 @@ const validateOutputCandidates = (input: {
   outputIdentities: Set<string>;
   remainingFiles: number;
   remainingBytes: number;
+  remainingEventCount: number;
+  remainingEventBytes: number;
   deadline: number;
   now: () => number;
-}): { candidates: BatchOutputCandidate[]; fileCount: number; totalBytes: number } => {
+}): {
+  candidates: BatchOutputCandidate[];
+  diagnosticEventFile: BatchDiagnosticEventFileCandidate | null;
+  eventCount: number;
+  fileCount: number;
+  totalBytes: number;
+} => {
   let rootInfo: ReturnType<typeof lstatSync>;
   try {
     rootInfo = lstatSync(input.outputDirectory);
@@ -1278,7 +1315,61 @@ const validateOutputCandidates = (input: {
       inode: captured.inode,
     }));
   }
-  return { candidates, fileCount, totalBytes };
+  let diagnosticEventFile: BatchDiagnosticEventFileCandidate | null = null;
+  let eventCount = 0;
+  if (eventPath) {
+    if (input.remainingEventCount < 1 || input.remainingEventBytes < 1) {
+      throw new GenericBatchSupervisorError(
+        "run_event_count_limit",
+        "The frozen run diagnostic event count limit was exceeded.",
+      );
+    }
+    const captured = found.get(eventPath);
+    if (!captured) {
+      throw new GenericBatchSupervisorError(
+        "batch_required_output_missing",
+        "The declared diagnostic event file is missing.",
+      );
+    }
+    let parsed: ParsedDiagnosticEventSet;
+    try {
+      parsed = parseDiagnosticEventNdjson(captured.bytes, {
+        limits: {
+          maxEventCount: input.remainingEventCount,
+          maxEventBytes: Math.min(
+            16_000_000,
+            input.remainingBytes,
+            input.remainingEventBytes,
+          ),
+        },
+        payloadSchema: input.description.batch?.domainEvents?.payloadSchema ?? null,
+      });
+    } catch (error) {
+      const code = error instanceof Error && "code" in error && typeof error.code === "string"
+        ? error.code
+        : "invalid_diagnostic_events";
+      throw new GenericBatchSupervisorError(
+        code,
+        "The declared diagnostic event file is invalid.",
+        { cause: error },
+      );
+    }
+    eventCount = parsed.eventCount;
+    diagnosticEventFile = Object.freeze({
+      sampleIndex: input.sample.sampleIndex,
+      sampleId: input.sample.sampleId,
+      sourcePath: captured.absolutePath,
+      scratchPath: dirname(input.outputDirectory),
+      sizeBytes: captured.bytes.byteLength,
+      sha256: captured.sha256,
+      owner,
+      device: captured.device,
+      inode: captured.inode,
+      payloadSchema: input.description.batch?.domainEvents?.payloadSchema ?? null,
+      parsed,
+    });
+  }
+  return { candidates, diagnosticEventFile, eventCount, fileCount, totalBytes };
 };
 
 /**
@@ -1297,6 +1388,40 @@ export const consumeBatchOutputCandidate = (candidate: BatchOutputCandidate): Bu
     );
   }
   return Buffer.from(captured.bytes);
+};
+
+export const consumeBatchDiagnosticEventFileCandidate = (
+  candidate: BatchDiagnosticEventFileCandidate,
+): Readonly<{ bytes: Buffer; parsed: ParsedDiagnosticEventSet }> => {
+  assertNoSymlinkAncestors(candidate.scratchPath, candidate.sourcePath, "batch_output_changed");
+  const captured = readStableRegular(
+    candidate.sourcePath,
+    candidate.owner,
+    "batch_output_changed",
+  );
+  if (captured.device !== candidate.device || captured.inode !== candidate.inode
+    || captured.bytes.byteLength !== candidate.sizeBytes || captured.sha256 !== candidate.sha256) {
+    throw new GenericBatchSupervisorError(
+      "batch_output_changed",
+      "A validated diagnostic event file changed before immutable byte capture.",
+    );
+  }
+  const parsed = parseDiagnosticEventNdjson(captured.bytes, {
+    limits: {
+      maxEventCount: 10_000,
+      maxEventBytes: Math.min(16_000_000, candidate.sizeBytes),
+    },
+    payloadSchema: candidate.payloadSchema,
+  });
+  if (parsed.eventCount !== candidate.parsed.eventCount
+    || parsed.totalBytes !== candidate.parsed.totalBytes
+    || parsed.eventSetDigest !== candidate.parsed.eventSetDigest) {
+    throw new GenericBatchSupervisorError(
+      "batch_output_changed",
+      "A validated diagnostic event file changed semantically before publication.",
+    );
+  }
+  return Object.freeze({ bytes: Buffer.from(captured.bytes), parsed });
 };
 
 const assertNoSymlinkAncestors = (root: string, path: string, code: string): void => {

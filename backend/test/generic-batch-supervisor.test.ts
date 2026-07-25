@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
+  consumeBatchDiagnosticEventFileCandidate,
   consumeBatchOutputCandidate,
   GenericBatchSupervisor,
   verifyProjectExecutionRootCapability,
@@ -182,6 +183,9 @@ if inputMutationBlocked is not None:
 if childPid is not None:
     payload["childPid"]=childPid
 target.write_text(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\\n",encoding="utf-8")
+if mode=="events":
+    event={"type":"sample_finished","occurredAt":"2026-07-25T00:00:00.000Z","payload":{"sampleIndex":envelope["sampleIndex"]}}
+    (args.riff_output_dir/"events.ndjson").write_text(json.dumps(event,sort_keys=True,separators=(",",":"))+"\\n",encoding="utf-8")
 if mode=="extra":
     (args.riff_output_dir/"extra.txt").write_text("undeclared",encoding="utf-8")
 if mode=="fork_descendant_sleep":
@@ -380,7 +384,7 @@ test("batch output discovery rejects missing, undeclared, symlink, special, and 
   }
 });
 
-test("A3-1b rejects declared domain events instead of silently ignoring their limits", {
+test("A3-2d2 validates and reconsumes one declared diagnostic event file", {
   skip: process.platform !== "darwin",
 }, async (t) => {
   const fixture = customFixture(t);
@@ -399,10 +403,22 @@ test("A3-1b rejects declared domain events instead of silently ignoring their li
     pythonExecutable: SYSTEM_PYTHON,
     scratchRoot: fixture.scratchRoot,
   });
-  await assert.rejects(
-    () => runWithSupervisor(supervisor, fixture, [{ mode: "success" }], {}, undefined, execution),
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "domain_events_not_supported",
+  const result = await runWithSupervisor(
+    supervisor,
+    fixture,
+    [{ mode: "events" }],
+    {},
+    undefined,
+    execution,
   );
+  assert.equal(result.status, "succeeded", result.diagnostic);
+  assert.equal(result.diagnosticEventFiles?.length, 1);
+  const consumed = consumeBatchDiagnosticEventFileCandidate(
+    result.diagnosticEventFiles![0]!,
+  );
+  assert.equal(consumed.parsed.eventCount, 1);
+  assert.equal(consumed.parsed.events[0]?.type, "sample_finished");
+  assert.deepEqual({ ...consumed.parsed.events[0]?.payload }, { sampleIndex: 0 });
 });
 
 test("batch-specific sandbox leaves Project and input read-only while output remains writable", {

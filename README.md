@@ -67,8 +67,8 @@ supervisor into the shared dispatcher, admits eligible visual work through the
 existing Project-run API, and preserves child-port secrecy. Visual completion
 still fails with HTTP `422` `visual_completion_not_supported`. A3-2b
 broker/frame/WebSocket was merged through PRs #33, #35, #36, and #37.
-A3-2c scoped Playwright access, A3-2d generic outputs/events/direct controls,
-and A3-3 ordinary wind import remain pending #14 slices. Their active contract
+A3-2d direct controls and A3-3 ordinary wind import remain pending #14 slices.
+Their active contract
 and negative-test gates are in
 [`docs/milestone-a3-project-execution-design.md`](docs/milestone-a3-project-execution-design.md).
 A3-2c1's authority/audit and legacy-CDP-isolation foundation was merged through
@@ -79,8 +79,10 @@ identity, streaming exact-path reads, a script-disabled no-network snapshot,
 and in-flight lifecycle revocation. It exposes no interaction, URL, selector,
 script, cookie, nonce, port, capability, or legacy-CDP control. A3-2c3 was
 merged through PR #41 and A3-2c4 through PR #42. A3-2d1's same-run output
-list/download boundary is a review-branch candidate; events and direct controls
-remain pending. The A3-2c2 gate reported 511 backend tests with
+list/download boundary was merged through PR #43. A3-2d2's strict diagnostic
+NDJSON ingestion, schema-v12 atomic publication, and authenticated opaque
+cursor read surface are a review-branch candidate; direct controls remain
+pending. The A3-2c2 gate reported 511 backend tests with
 510 passed, zero failed, and one optional installed-OpenCode smoke skipped; web
 passes 104/104,
 the network-entry integration passes 1/1, the production build succeeds, and

@@ -10,6 +10,7 @@ import {
   experimentConfigurationRecordDigest,
   ProductStoreV2,
   ProductStoreV2Error,
+  type DiagnosticEventReadBinding,
   type FrozenRunCancelReceipt,
   type FrozenRunStartReceipt,
   type RunLimitsV1,
@@ -83,6 +84,14 @@ export type RunOutputAccessDto = Pick<ProjectOutputDto,
 export type RunOutputDownload = Readonly<{
   output: RunOutputAccessDto;
   read: VerifiedObjectRead;
+}>;
+
+export type RunDiagnosticEventDto = Readonly<{
+  sequence: number;
+  sampleIndex: number;
+  type: string;
+  occurredAt: string | null;
+  payload: Record<string, unknown> | readonly unknown[];
 }>;
 
 export type ProjectRunDto = {
@@ -310,6 +319,57 @@ export class AgentWorkspaceService {
     }
   }
 
+  diagnosticEventCursorBinding(
+    projectIdInput: string,
+    runIdInput: string,
+  ): DiagnosticEventReadBinding {
+    const projectId = boundedId(projectIdInput);
+    const runId = boundedId(runIdInput);
+    try {
+      return this.store.diagnosticEventCursorBinding(projectId, runId);
+    } catch (error) {
+      throw diagnosticEventApiError(error);
+    }
+  }
+
+  listRunDiagnosticEvents(input: Readonly<{
+    projectId: string;
+    runId: string;
+    afterSequence: number;
+    limit: number;
+    types: readonly string[];
+    sampleIndexes: readonly number[];
+    occurredAtFrom: string | null;
+    occurredAtTo: string | null;
+  }>): Readonly<{
+    items: readonly RunDiagnosticEventDto[];
+    hasMore: boolean;
+    binding: DiagnosticEventReadBinding;
+  }> {
+    const projectId = boundedId(input.projectId);
+    const runId = boundedId(input.runId);
+    try {
+      const page = this.store.listRunDiagnosticEvents({
+        ...input,
+        projectId,
+        runId,
+      });
+      return Object.freeze({
+        items: Object.freeze(page.items.map((event) => Object.freeze({
+          sequence: event.sequence,
+          sampleIndex: event.sampleIndex,
+          type: event.type,
+          occurredAt: event.occurredAt,
+          payload: event.payload,
+        }))),
+        hasMore: page.hasMore,
+        binding: page.binding,
+      });
+    } catch (error) {
+      throw diagnosticEventApiError(error);
+    }
+  }
+
   startRun(input: {
     projectId: string;
     commandId: string;
@@ -372,14 +432,6 @@ export class AgentWorkspaceService {
     } catch (error) {
       if (error instanceof ExecutionProtocolV2Error) throw new ApiError(409, error.code, error.message);
       throw error;
-    }
-    if (experiment.configuration.runKind === "batch"
-      && description.batch?.domainEvents) {
-      throw new ApiError(
-        409,
-        "domain_events_not_supported",
-        "Batch domain events are not supported by this run dispatcher.",
-      );
     }
     const plan = planExperiment({
       configuration: experiment.configuration,
@@ -970,7 +1022,6 @@ const storeApiError = (error: unknown): ApiError => {
   if (/^execution_protocol_upgrade_required:/u.test(error.message)) return new ApiError(409, "execution_protocol_upgrade_required", "The copied Project does not have an accepted execution-description v2 contract.");
   if (/^capability_not_declared:/u.test(error.message)) return new ApiError(409, "capability_not_declared", "The copied Project does not declare the requested run capability.");
   if (/^capability_not_available:/u.test(error.message)) return new ApiError(409, "capability_not_available", "The requested run capability is not available in this milestone.");
-  if (/^domain_events_not_supported:/u.test(error.message)) return new ApiError(409, "domain_events_not_supported", "Batch domain events are not supported by this run dispatcher.");
   if (/^project_snapshot_corrupt:/u.test(error.message)) return new ApiError(409, "project_snapshot_corrupt", "The copied Project snapshot failed its integrity check.");
   if (/^stale_configuration:/u.test(error.message)) return new ApiError(409, "stale_configuration", "The experiment configuration changed after it was observed.");
   if (/^stale_record:/u.test(error.message)) return new ApiError(409, "stale_record", "The experiment record changed after it was observed.");
@@ -994,4 +1045,33 @@ const outputApiError = (error: unknown): ApiError => {
   }
   return new ApiError(500, "output_integrity_failed",
     "The output failed its integrity check.");
+};
+
+const diagnosticEventApiError = (error: unknown): ApiError => {
+  if (error instanceof ApiError) return error;
+  if (!(error instanceof ProductStoreV2Error)) {
+    return new ApiError(
+      500,
+      "event_integrity_failed",
+      "Diagnostic event integrity verification failed.",
+    );
+  }
+  if (/^events_not_available:/u.test(error.message)) {
+    return new ApiError(
+      409,
+      "events_not_available",
+      "Diagnostic events are unavailable for this run.",
+    );
+  }
+  if (/^run_event_query_invalid:/u.test(error.message)) {
+    return new ApiError(422, "invalid_request", "The diagnostic event query is invalid.");
+  }
+  if (/^run_event_integrity_failed:/u.test(error.message)) {
+    return new ApiError(
+      500,
+      "event_integrity_failed",
+      "Diagnostic event integrity verification failed.",
+    );
+  }
+  return storeApiError(error);
 };

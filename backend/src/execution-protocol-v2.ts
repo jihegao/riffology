@@ -145,6 +145,9 @@ export const validateExecutionDescriptionV2 = (input: unknown): ExecutionDescrip
     }
 
     const batch = needsBatch ? validateBatchCapability(description.batch) : undefined;
+    if (batch?.domainEvents && outputPaths.has(batch.domainEvents.relativePath)) {
+      invalidDescription("The batch domain-event path must differ from every ordinary output path.");
+    }
     const visual = needsVisual ? validateVisualCapability(description.visual) : undefined;
     const cancellation = validateCancellation(description.cancellation);
     const overview = Object.hasOwn(description, "overview") ? validateOverview(description.overview) : undefined;

@@ -2937,6 +2937,144 @@ export const PRODUCT_SCHEMA_V11_SQL = SQL`
     WHERE fact_kind = 'mint' AND operation_kind = 'interact';
 `;
 
+export const PRODUCT_SCHEMA_V12_SQL = SQL`
+  CREATE TABLE diagnostic_event_sets (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    execution_description_sha256 TEXT NOT NULL
+      CHECK (length(execution_description_sha256) = 64
+        AND execution_description_sha256 NOT GLOB '*[^0-9a-f]*'),
+    declaration_sha256 TEXT NOT NULL
+      CHECK (length(declaration_sha256) = 64
+        AND declaration_sha256 NOT GLOB '*[^0-9a-f]*'),
+    event_set_sha256 TEXT NOT NULL
+      CHECK (length(event_set_sha256) = 64
+        AND event_set_sha256 NOT GLOB '*[^0-9a-f]*'),
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 10000),
+    total_bytes INTEGER NOT NULL CHECK (total_bytes BETWEEN 1 AND 67108864),
+    created_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE diagnostic_event_files (
+    run_id TEXT NOT NULL REFERENCES diagnostic_event_sets(run_id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+    sample_id TEXT NOT NULL
+      CHECK (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*'),
+    object_file_id TEXT NOT NULL UNIQUE REFERENCES object_files(id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    file_sha256 TEXT NOT NULL
+      CHECK (length(file_sha256) = 64 AND file_sha256 NOT GLOB '*[^0-9a-f]*'),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND 67108864),
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 10000),
+    file_event_set_sha256 TEXT NOT NULL
+      CHECK (length(file_event_set_sha256) = 64
+        AND file_event_set_sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, sample_index)
+  ) WITHOUT ROWID, STRICT;
+
+  CREATE TABLE diagnostic_events (
+    run_id TEXT NOT NULL REFERENCES diagnostic_event_sets(run_id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+    sample_id TEXT NOT NULL
+      CHECK (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*'),
+    source_ordinal INTEGER NOT NULL CHECK (source_ordinal >= 0),
+    type TEXT NOT NULL CHECK (length(type) BETWEEN 1 AND 128),
+    occurred_at TEXT,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    payload_sha256 TEXT NOT NULL
+      CHECK (length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'),
+    byte_count INTEGER NOT NULL CHECK (byte_count BETWEEN 2 AND 1048576),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    UNIQUE (run_id, sample_index, source_ordinal),
+    FOREIGN KEY (run_id, sample_index)
+      REFERENCES diagnostic_event_files(run_id, sample_index)
+      ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) WITHOUT ROWID, STRICT;
+
+  CREATE INDEX diagnostic_events_filter_v12
+    ON diagnostic_events(run_id, type, sample_index, occurred_at, sequence);
+
+  CREATE TRIGGER diagnostic_event_set_atomic_insert_v12
+  BEFORE INSERT ON diagnostic_event_sets
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM runs r
+      WHERE r.id = NEW.run_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'batch'
+        AND r.status = 'succeeded'
+        AND r.terminal_code = 'run_succeeded'
+        AND r.execution_description_sha256 = NEW.execution_description_sha256
+        AND riff_atomic_batch_success_context(r.id) = 1
+    ) THEN RAISE(ABORT, 'diagnostic event set requires atomic v4 batch success') END;
+  END;
+
+  CREATE TRIGGER diagnostic_event_file_atomic_insert_v12
+  BEFORE INSERT ON diagnostic_event_files
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM runs r
+      JOIN object_files f ON f.id = NEW.object_file_id
+      WHERE r.id = NEW.run_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'batch'
+        AND r.status = 'succeeded'
+        AND riff_atomic_batch_success_context(r.id) = 1
+        AND NEW.sample_index < r.requested_sample_count
+        AND json_extract(r.sample_plan_json, '$[' || NEW.sample_index || '].sampleIndex')
+          = NEW.sample_index
+        AND json_extract(r.sample_plan_json, '$[' || NEW.sample_index || '].sampleId')
+          = NEW.sample_id
+        AND f.owner_run_id = NEW.run_id
+        AND f.kind = 'run_file'
+        AND f.sha256 = NEW.file_sha256
+        AND f.size_bytes = NEW.size_bytes
+    ) THEN RAISE(ABORT, 'diagnostic event file binding mismatch') END;
+  END;
+
+  CREATE TRIGGER diagnostic_event_atomic_insert_v12
+  BEFORE INSERT ON diagnostic_events
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1
+      FROM runs r
+      JOIN diagnostic_event_files f
+        ON f.run_id = NEW.run_id
+        AND f.sample_index = NEW.sample_index
+        AND f.sample_id = NEW.sample_id
+      WHERE r.id = NEW.run_id
+        AND r.contract_version = 4
+        AND r.run_kind = 'batch'
+        AND r.status = 'succeeded'
+        AND riff_atomic_batch_success_context(r.id) = 1
+    ) THEN RAISE(ABORT, 'diagnostic event binding mismatch') END;
+  END;
+
+  CREATE TRIGGER diagnostic_event_sets_immutable_update_v12
+  BEFORE UPDATE ON diagnostic_event_sets
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event sets are immutable'); END;
+  CREATE TRIGGER diagnostic_event_sets_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_event_sets
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event sets are immutable'); END;
+  CREATE TRIGGER diagnostic_event_files_immutable_update_v12
+  BEFORE UPDATE ON diagnostic_event_files
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event files are immutable'); END;
+  CREATE TRIGGER diagnostic_event_files_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_event_files
+  BEGIN SELECT RAISE(ABORT, 'diagnostic event files are immutable'); END;
+  CREATE TRIGGER diagnostic_events_immutable_update_v12
+  BEFORE UPDATE ON diagnostic_events
+  BEGIN SELECT RAISE(ABORT, 'diagnostic events are immutable'); END;
+  CREATE TRIGGER diagnostic_events_immutable_delete_v12
+  BEFORE DELETE ON diagnostic_events
+  BEGIN SELECT RAISE(ABORT, 'diagnostic events are immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -2949,4 +3087,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 9, sql: PRODUCT_SCHEMA_V9_SQL }),
   Object.freeze({ version: 10, sql: PRODUCT_SCHEMA_V10_SQL }),
   Object.freeze({ version: 11, sql: PRODUCT_SCHEMA_V11_SQL }),
+  Object.freeze({ version: 12, sql: PRODUCT_SCHEMA_V12_SQL }),
 ]);
