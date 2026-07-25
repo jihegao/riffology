@@ -71,7 +71,7 @@ implementation authority.
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
 | **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
-| **4 — shared product shell** | A4-0 design gate established. A4-1 Product API/lifecycle implementation is present with focused and full backend evidence; A4-2 through A4-6 remain pending. No shared-shell or complete-MVP claim. |
+| **4 — shared product shell** | A4-0 design and A4-1 Product API/lifecycle are merged. A4-2 Home, router, and responsive shared-shell foundation are implemented on branch; A4-3 through A4-6 and every final trace row remain pending. No complete-MVP claim. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -117,8 +117,11 @@ defines the Stage 4 traceability, target Home/API/shell/renderer contracts,
 resource deletion safety, browser admission, recovery, and precise retirement
 boundary. A4-1 now supplies schema-v14 lifecycle/delete receipts, closed Home
 and collection DTOs, generic lifecycle routes, preview/confirm permanent
-deletion, and uniform Product browser admission. The entry UI is unchanged;
-A4-2 through A4-6 remain pending, and no Issue #15 exit item is complete.
+deletion, and uniform Product browser admission. A4-2 consumes that boundary
+for the default Home, Model/Project routes, one shared two-pane shell, honest
+read-only creation states, and responsive/keyboard foundations. Deprecated
+Legacy/Evidence query entries remain isolated until A4-5. A4-3 through A4-6
+remain pending, and no Issue #15 exit item is complete.
 
 ## Active product and stage documents
 
@@ -134,8 +137,9 @@ A4-2 through A4-6 remain pending, and no Issue #15 exit item is complete.
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
   implemented Stage 3 execution design and implementation ledger.
 - [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md):
-  A4-0 design gate plus the A4-1 Product API implementation record; visible
-  Home/shared-shell work remains in later slices.
+  A4-0 design gate, A4-1 Product API record, and A4-2 Home/shared-shell branch
+  record; Conversation, renderer/execution, cutover, and final exit remain
+  pending.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.

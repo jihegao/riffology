@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-const attachOwner = async (page: import("@playwright/test").Page) => { await page.goto("/"); await page.getByLabel(/E2E Owner/).check(); await page.getByRole("button", { name: "Attach selected actor" }).click(); await expect(page.getByRole("main", { name: "Wind-turbine maintenance Evidence Studio" })).toBeVisible(); };
+const attachOwner = async (page: import("@playwright/test").Page) => { await page.goto("/?mode=evidence"); await page.getByLabel(/E2E Owner/).check(); await page.getByRole("button", { name: "Attach selected actor" }).click(); await expect(page.getByRole("main", { name: "Wind-turbine maintenance Evidence Studio" })).toBeVisible(); };
 const discardIfStale = async (page: import("@playwright/test").Page) => { const button = page.getByRole("button", { name: "Discard and load current" }); await button.waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined); if (await button.isVisible().catch(() => false)) await button.click(); };
 
 test("live backend requires explicit actor attachment and preserves legacy entry", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/?mode=evidence");
   await expect(page.getByRole("heading", { name: "Playwright Wind Evidence" })).toBeVisible();
   await expect(page.getByText("No actor is selected silently.")).toBeVisible();
   await page.getByLabel(/E2E Owner/).check();
@@ -21,7 +21,7 @@ test("live backend requires explicit actor attachment and preserves legacy entry
 
 test("narrow layout exposes an explicit one-pane selector", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 900 });
-  await page.goto("/");
+  await page.goto("/?mode=evidence");
   await page.getByLabel(/E2E Owner/).check();
   await page.getByRole("button", { name: "Attach selected actor" }).click();
   await expect(page.getByRole("button", { name: "Conversation / alignment" })).toBeVisible();

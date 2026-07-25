@@ -678,9 +678,10 @@ runtime/browser test.
 
 A4-1 adds focused contract, owner-scope, failure, idempotency, restart,
 secrecy, lifecycle/deletion, schema-v14, exact-file-identity, and
-authority-issuance-fence evidence. A4-2 through A4-5 must add responsive,
-keyboard, renderer, Agent, Run, recovery, and exact legacy-manifest evidence in
-their owning slices. A4-6
+authority-issuance-fence evidence. A4-2 now adds the responsive Home/router/
+shared-shell foundation and its focused browser evidence. A4-3 through A4-5
+must add full Conversation, renderer, Agent, Run, recovery, and exact
+legacy-manifest evidence in their owning slices. A4-6
 alone owns one continuous real-Chromium exit scenario covering Home/four
 entries, creation and opening of a functional generic New Model workspace,
 ordinary wind Model, real multi-turn provider use, a second persistent
@@ -747,6 +748,43 @@ network-entry 1/1; production web build passed; 27 Markdown files and
 `git diff --check` passed. These counts are branch evidence, not post-merge or
 A4-6 browser evidence. Independent Product/correctness, Architecture, and
 Security final reviews each report P0=0/P1=0/P2=0 for the current A4-1 diff.
+
+### A4-2 Home and shared-shell evidence
+
+The 2026-07-25 A4-2 branch changes the visible default Vite entry without
+claiming startup cutover. Component tests cover separate Home collections,
+all four entry types, closed DTO ordering, Model creation intent, honest
+provider/executable-Model disabled states, route parse/rejection, browser
+bootstrap/CSRF reuse, public errors, and right-workspace DOM identity across
+Conversation selection. The full Web component suite currently passes
+112/112; the focused Product component/client/router subset passes 10/10; and
+network entry passes 1/1.
+
+`cd web && npm run test:e2e:a4-2` runs one isolated real Chromium scenario
+against a temporary ProductStoreV2 plus the ordinary preinstalled wind
+Model/Project. It verifies the real bootstrap/cookie/CSRF path through Vite,
+Home and four entry types, provider-unavailable honesty, the same shell for a
+Model and Project, a missing Conversation error without right-pane remount,
+desktop dual landmarks, narrow keyboard pane switching, equivalent 200%
+layout with no horizontal overflow, three reviewed screenshots, and zero
+unexpected console errors. The dedicated scenario passes 1/1. The
+Visual-Agent browser security matrix, updated to use the same real Product
+browser admission rather than a raw bypass, passes 6/6.
+
+The deprecated Evidence/Legacy query paths remain regression-only until A4-5.
+Their retained full Chromium matrix must pass on the current branch before
+A4-2 merges; its current-branch rerun passes 15/15. The backend full suite
+passes 583 total / 582 passed / zero failed / one optional installed-OpenCode
+smoke skipped. Production build, 27-document governance check, and
+`git diff --check` pass. Final independent Product/architecture review reports
+P0=0/P1=0/P2=1, Accessibility/interaction reports P0=0/P1=0/P2=0, and
+Test/documentation consistency reports P0=0/P1=0/P2=0. The sole P2 is the
+explicitly documented equivalent-200%-layout limitation; actual browser zoom
+remains owned by A4-6.
+
+No A4-3 Conversation messages/actions, A4-4 renderer/execution, A4-5
+cutover/retirement, A4-6 continuous browser exit, Issue closure, or complete
+MVP claim is A4-2 evidence. All 69 final traceability rows remain `pending`.
 
 ---
 

@@ -41,6 +41,7 @@ test("the published BackendApp turn chain performs one real interaction without 
   const priorCdp = process.env.RIFF_CDP_URL;
   process.env.RIFF_CDP_URL = legacy.proxyOrigin;
   let app: InstanceType<(typeof import("../../backend/src/server.ts"))["BackendApp"]> | undefined;
+  let productBrowser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
     // These production modules are first evaluated only after the live CDP
     // endpoint is installed, so import-time ambient capture cannot pass unseen.
@@ -281,19 +282,53 @@ test("the published BackendApp turn chain performs one real interaction without 
       providerModelId: "model-c4",
       createdAt,
     });
-    const address = await app.listen();
+    const network = await app.listenBrowserNetwork();
+    productBrowser = await chromium.launch();
+    const productContext = await productBrowser.newContext();
+    const productPage = await productContext.newPage();
+    await productPage.goto(`${network.app.origin}/a2`);
+    const browserSession = await productPage.evaluate(async () => {
+      const response = await fetch("/api/browser-session/bootstrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      return {
+        status: response.status,
+        body: await response.json() as { csrfToken?: string },
+      };
+    });
+    expect(browserSession.status).toBe(201);
+    expect(browserSession.body.csrfToken).toMatch(/^[A-Za-z0-9_-]+$/u);
     await legacy.resetConnections();
     expect(await probeCdpVersion(legacy.proxyOrigin))
       .toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\//u);
     expect(legacy.connections).toBeGreaterThan(0);
     await legacy.resetConnections();
     expect(legacy.connections).toBe(0);
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/api/conversations/conversation_c4_chain/turns`,
+    const turnResponse = await productPage.evaluate(
+      async ({ csrfToken, body }) => {
+        const response = await fetch(
+          "/api/conversations/conversation_c4_chain/turns",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-riff-csrf": csrfToken,
+            },
+            body: JSON.stringify(body),
+          },
+        );
+        const text = await response.text();
+        return {
+          status: response.status,
+          text,
+          body: text ? JSON.parse(text) : null,
+        };
+      },
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+        csrfToken: browserSession.body.csrfToken!,
+        body: {
           requestKey: "c4-chain-interaction",
           text: "Perform the separately confirmed visual interaction.",
           attachmentIds: [],
@@ -302,11 +337,11 @@ test("the published BackendApp turn chain performs one real interaction without 
             locator: { kind: "label", label: "Secret value" },
             value: TYPED_SECRET,
           },
-        }),
+        },
       },
     );
-    expect(response.status, await response.clone().text()).toBe(200);
-    const publicTurn = await response.json();
+    expect(turnResponse.status, turnResponse.text).toBe(200);
+    const publicTurn = turnResponse.body;
     const database = new DatabaseSync(databasePath, {
       open: true,
       readOnly: true,
@@ -385,6 +420,7 @@ test("the published BackendApp turn chain performs one real interaction without 
     expect(openCode.denials.every((entry) => entry.result?.isError === true))
       .toBe(true);
   } finally {
+    await productBrowser?.close().catch(() => undefined);
     await app?.close().catch(() => undefined);
     restoreEnv("RIFF_CDP_URL", priorCdp);
     await rm(root, { recursive: true, force: true });
