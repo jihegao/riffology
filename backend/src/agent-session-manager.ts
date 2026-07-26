@@ -1,6 +1,10 @@
 import { ApiError } from "./errors.ts";
 import { buildBoundedAgentContext, type AgentContextInput, type AgentContextLimits, type BoundedAgentContext } from "./agent-context.ts";
-import type { OpenCodeAssistantResponse, OpenCodeConversationPort } from "./opencode-adapter.ts";
+import type {
+  OpenCodeAssistantResponse,
+  OpenCodeConversationPort,
+  OpenCodeWorkspaceBinding,
+} from "./opencode-adapter.ts";
 
 export type DurableConversationRuntime = {
   conversationId: string;
@@ -43,6 +47,8 @@ export type PreparedConversationSession =
       modelId: string;
       reconstructed: boolean;
       context: BoundedAgentContext;
+      /** Backend-only owner binding. Never include its directory in browser DTOs. */
+      workspace: OpenCodeWorkspaceBinding;
     }
   | { mode: "read_only"; conversationId: string; reason: AgentReadOnlyReason; retryable: boolean };
 
@@ -55,14 +61,21 @@ export class AgentConversationSessionManager {
   readonly #repository: AgentSessionRepositoryPort;
   readonly #openCode: OpenCodeConversationPort;
   readonly #contextLimits: Partial<AgentContextLimits>;
+  readonly #workspaceForOwner: (
+    owner: DurableConversationRuntime["owner"],
+  ) => OpenCodeWorkspaceBinding;
 
   constructor(
     repository: AgentSessionRepositoryPort,
     openCode: OpenCodeConversationPort,
+    workspaceForOwner: (
+      owner: DurableConversationRuntime["owner"],
+    ) => OpenCodeWorkspaceBinding,
     contextLimits: Partial<AgentContextLimits> = {},
   ) {
     this.#repository = repository;
     this.#openCode = openCode;
+    this.#workspaceForOwner = workspaceForOwner;
     this.#contextLimits = contextLimits;
   }
 
@@ -92,6 +105,7 @@ export class AgentConversationSessionManager {
         { providerId: prepared.providerId, modelId: prepared.modelId },
         { text, system: prepared.context.text, attachments, ...(scopedMcpScopeId ? { scopedMcpScopeId } : {}) },
         signal,
+        prepared.workspace,
       );
       return { ...prepared, assistant };
     } catch (error) {
@@ -99,7 +113,7 @@ export class AgentConversationSessionManager {
       // A prompt may have reached OpenCode even when the client times out or
       // disconnects. Retiring that opaque session prevents a late user/assistant
       // pair from being mistaken for the next serialized Riff turn.
-      await this.#openCode.abort(prepared.externalSessionRef).catch(() => undefined);
+      await this.#openCode.abort(prepared.externalSessionRef, prepared.workspace).catch(() => undefined);
       await this.#repository.markSessionLost({
         conversationId,
         generation: prepared.generation,
@@ -118,8 +132,9 @@ export class AgentConversationSessionManager {
       throw new ApiError(409, "conversation_context_mismatch", "The bounded context does not belong to this conversation.");
     }
     const context = buildBoundedAgentContext(contextInput, this.#contextLimits);
+    const workspace = this.#workspaceForOwner(runtime.owner);
     let catalogue;
-    try { catalogue = await this.#openCode.discoverProviderModels(); }
+    try { catalogue = await this.#openCode.discoverProviderModels(workspace); }
     catch (error) {
       return { mode: "read_only", conversationId, reason: stableReason(error, "opencode_unavailable"), retryable: true };
     }
@@ -131,10 +146,11 @@ export class AgentConversationSessionManager {
     const current = runtime.session;
     if (current?.state === "available" && current.externalSessionRef) {
       try {
-        if (await this.#openCode.getSession(current.externalSessionRef)) {
+        if (await this.#openCode.getSession(current.externalSessionRef, workspace)) {
           return {
             mode: "live", conversationId, generation: current.generation, externalSessionRef: current.externalSessionRef,
-            providerId: runtime.providerId, modelId: runtime.providerModelId, reconstructed: false, context,
+            providerId: runtime.providerId, modelId: runtime.providerModelId,
+            reconstructed: false, context, workspace,
           };
         }
         await this.#repository.markSessionLost({
@@ -152,12 +168,12 @@ export class AgentConversationSessionManager {
     try {
       const started = await this.#repository.beginSessionGeneration({ conversationId, expectedGeneration: current?.generation ?? null });
       generation = started.generation;
-      const externalSessionRef = await this.#openCode.createSession(conversationId);
-      await this.#openCode.injectContext(externalSessionRef, context.text);
+      const externalSessionRef = await this.#openCode.createSession(conversationId, workspace);
+      await this.#openCode.injectContext(externalSessionRef, context.text, undefined, workspace);
       await this.#repository.activateSession({ conversationId, generation, externalSessionRef, contextSha256: context.sha256 });
       return {
         mode: "live", conversationId, generation, externalSessionRef, providerId: runtime.providerId,
-        modelId: runtime.providerModelId, reconstructed: true, context,
+        modelId: runtime.providerModelId, reconstructed: true, context, workspace,
       };
     } catch (error) {
       if (generation !== undefined) await this.#repository.failSessionGeneration({ conversationId, generation, reason: "session_rebuild_failed" }).catch(() => undefined);

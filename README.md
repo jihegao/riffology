@@ -280,6 +280,10 @@ server credentials:
 OPENCODE_API_KEY=your-provider-key          # consumed by your local OpenCode provider configuration
 OPENCODE_MODEL=provider_id/model_id
 OPENCODE_URL=http://127.0.0.1:4096
+# Exact server version required by this Product startup contract (the launcher defaults to 1.18.4).
+OPENCODE_EXPECTED_VERSION=1.18.4
+# Canonical absolute directory opened by the local OpenCode Server.
+OPENCODE_WORKDIR=/absolute/path/to/developer-repo-root
 OPENCODE_ALLOWED_PROVIDERS=provider_id
 # Optional only when the local OpenCode server requires basic auth.
 OPENCODE_SERVER_USERNAME=opencode
@@ -303,6 +307,35 @@ the exact virtual-environment/framework runtime roots it derives from that
 interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 `RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
 deterministic mode.
+
+### OpenCode working-directory contract (Issue #56, PR 1)
+
+`OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
+separately managed OpenCode server, not a browser path and not a permission
+grant. A **developer repo-root** profile may use this repository root for local
+developer operation. Product Conversations do not inherit that root: the
+backend derives the current owner from durable Product state and scopes every
+session/message/control/MCP request with the exact server-owned Model workspace
+or Project `model-snapshot/` workspace. A normal Product Agent therefore cannot
+gain generic repository files or command authority merely because the developer
+profile exists.
+
+Live readiness requires all of the following from the configured loopback
+server: successful `/global/health`, an exact version equal to
+`OPENCODE_EXPECTED_VERSION` (the launcher defaults it to `1.18.4`), and
+directory-scoped `/path` resolving to the requested canonical work directory.
+Riff repeats version/path identity checks before location-sensitive operations,
+so a server restarted at the same URL cannot retain cached authority after its
+version or workspace changes. The launcher produces the same valid default
+regardless of its caller's current directory. A missing, non-directory,
+symlink-ambiguous, or `/path`-mismatched directory, or a version mismatch, makes
+the Agent explicitly read-only; the Product still starts and keeps Home,
+resource, and direct Run controls available.
+
+This is only the Issue #56 PR 1 startup/server contract. Native session
+busy-to-idle completion, streamed Conversation projection, tool/Playwright
+integration, and durable target-completion verification remain the separately
+ordered PR 2–5 work; this document does not claim them complete.
 
 ## Verification
 

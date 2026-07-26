@@ -264,6 +264,7 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-06 | Agent 必须提供仿真 skill catalog，仅在需要时加载完整 skill，并记录实际使用的 skill。 |
 | FR-CONV-07 | provider 或 OpenCode 失败时，Agent 修改能力必须进入明确只读状态，不得伪造回复。 |
 | FR-CONV-08 | 只有明确且允许的指令可以触发直接修改；修改必须 typed、owner-scoped、经过验证且原子提交。 |
+| FR-CONV-09 | OpenCode 的 developer repo-root 与普通 Product 的精确 Model/Project workspace 必须是不同的工作目录 profile；Product backend 必须从 durable owner 派生目录并作用域化所有会话相关请求，前者不得给普通 Product Agent 产品源码、任意文件或命令权限。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |
@@ -451,6 +452,7 @@ MVP 在本地 macOS 运行：
 | NFR-FAIL-01 | 缺失、冲突、过期或不支持的权威证据必须 fail closed，并返回明确可见错误。 |
 | NFR-SEC-01 | Provider credential、ambient credential、OpenCode session ID、process identity、任意 path 和 child port 不得投影给 browser。 |
 | NFR-SEC-02 | Model/Run 进程必须获得最小 path 权限、清理环境、默认无网络、取消能力和有限 resource/output/time。 |
+| NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.4`）；Product backend 必须从 durable Conversation owner 派生精确 Model workspace 或 Project `model-snapshot/`，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
 | NFR-SCOPE-01 | Conversations、documents、attachments、tools、Runs、outputs、visual capabilities 和 Playwright 必须 owner-scoped，并拒绝跨对象使用。 |
 | NFR-IDEM-01 | 重试 create/start/cancel/finalize command 不得产生重复持久副作用。 |
 | NFR-HONEST-01 | UI 和 Agent 必须区分 target、pending、running、completed、cancelled、failed、read-only 和 recovery-required，不乐观推断。 |

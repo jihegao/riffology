@@ -7,7 +7,7 @@ import test from "node:test";
 import { BackendApp } from "../src/server.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { UnavailableMesaAdapter } from "../src/mesa-adapter.ts";
-import type { OpenCodeAdapter, OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel, OpenCodeReadiness } from "../src/opencode-adapter.ts";
+import type { OpenCodeAdapter, OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel, OpenCodeReadiness, OpenCodeWorkspaceBinding } from "../src/opencode-adapter.ts";
 import { captureWorkspaceDigest, executionDescriptionDigest, validateExecutionDescription } from "../src/model-workspace.ts";
 import type { ModelTechnicalCheckerPort } from "../src/model-technical-check-service.ts";
 
@@ -19,13 +19,19 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   prompts: Array<{ sessionId: string; binding: { providerId: string; modelId: string }; text: string }> = [];
   assistantText = "A real normalized assistant response.";
   discoveryError?: Error;
+  workspaceCatalogue?: OpenCodeProviderModel[];
+  providerWorkspaces: Array<OpenCodeWorkspaceBinding | undefined> = [];
   scopedBindings = new Map<string, string>();
   scopedUrls: string[] = [];
   unboundScopes: string[] = [];
   executeScopedMutation = false;
 
   async initialize(): Promise<OpenCodeReadiness> { return { status: "ready", modelId: "provider-a/model-a", version: "test" }; }
-  async discoverProviderModels() { if (this.discoveryError) throw this.discoveryError; return this.catalogue; }
+  async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding) {
+    this.providerWorkspaces.push(workspace);
+    if (this.discoveryError) throw this.discoveryError;
+    return workspace ? this.workspaceCatalogue ?? this.catalogue : this.catalogue;
+  }
   async getSession(sessionId: string) { return this.sessions.has(sessionId); }
   async createSession(conversationId: string) {
     const sessionId = `opaque-session-${this.created.length + 1}`;
@@ -349,6 +355,62 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   assert.equal((await expired.json() as any).error.code, -32001);
 });
 
+test("owner-bound conversation provider selection rejects developer-profile-only models", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-owner-provider-"));
+  const openCode = new ApiOpenCode();
+  openCode.catalogue = [
+    { providerId: "provider-a", modelId: "model-a", qualifiedId: "provider-a/model-a" },
+    { providerId: "provider-b", modelId: "model-b", qualifiedId: "provider-b/model-b" },
+  ];
+  openCode.workspaceCatalogue = [
+    { providerId: "provider-a", modelId: "model-a", qualifiedId: "provider-a/model-a" },
+  ];
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "owner-provider-model");
+  const ownerRoot = app.productStore!.ownerWorkspaceRoot({
+    kind: "model",
+    id: created.model.id,
+  });
+  const ownerUrl = `${baseUrl}/api/objects/model/${created.model.id}/conversations`;
+
+  const createRejected = await post(ownerUrl, {
+    commandId: "developer-only-provider-conversation",
+    name: "Unavailable in owner",
+    providerId: "provider-b",
+    modelId: "model-b",
+  });
+  assert.equal(createRejected.status, 409);
+  assert.equal((await createRejected.json() as any).error.code, "provider_unavailable");
+
+  const detail = await (await apiFetch(
+    `${baseUrl}/api/conversations/${created.conversation.id}`,
+  )).json() as any;
+  const changeRejected = await patch(
+    `${baseUrl}/api/conversations/${created.conversation.id}/provider-binding`,
+    {
+      commandId: "developer-only-provider-change",
+      expectedRecordDigest: detail.recordDigest,
+      providerId: "provider-b",
+      modelId: "model-b",
+    },
+  );
+  assert.equal(changeRejected.status, 409);
+  assert.equal((await changeRejected.json() as any).error.code, "provider_unavailable");
+  const unchanged = await (await apiFetch(
+    `${baseUrl}/api/conversations/${created.conversation.id}`,
+  )).json() as any;
+  assert.equal(unchanged.provider.providerId, "provider-a");
+  assert.equal(unchanged.provider.locked, false);
+  assert.equal(openCode.prompts.length, 0);
+  assert.equal(
+    openCode.providerWorkspaces.filter(Boolean).every(
+      (workspace) => workspace?.directory === ownerRoot,
+    ),
+    true,
+  );
+});
+
 test("two conversations keep independent sessions and a missing session rebuilds", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "riff-a2-sessions-"));
   const openCode = new ApiOpenCode();
@@ -417,6 +479,38 @@ test("an empty synchronous OpenCode response fails durably without assistant fab
   assert.equal(payload.turn.state, "failed");
   assert.equal(payload.messages.length, 1);
   assert.equal(payload.messages[0].role, "user");
+});
+
+test("owner workspace resolution failure terminalizes and replays the durable turn", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-owner-workspace-failure-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "missing-owner-workspace");
+  const ownerRoot = app.productStore!.ownerWorkspaceRoot({
+    kind: "model",
+    id: created.model.id,
+  });
+  await rm(ownerRoot, { recursive: true, force: true });
+  const turnUrl = `${baseUrl}/api/conversations/${created.conversation.id}/turns`;
+  const request = {
+    requestKey: "missing-owner-workspace-turn",
+    text: "Do not leave this running.",
+    attachmentIds: [],
+  };
+
+  const response = await post(turnUrl, request);
+  assert.equal(response.status, 200);
+  const payload = await response.json() as any;
+  assert.equal(payload.mode, "read_only");
+  assert.equal(payload.turn.state, "failed");
+  assert.equal(payload.turn.failure.code, "agent_failed");
+  assert.equal(openCode.prompts.length, 0);
+
+  const replay = await post(turnUrl, request);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), payload);
+  assert.equal(openCode.prompts.length, 0);
 });
 
 test("Model workspace projection and technical-check start/read are digest-bound and path-safe", async (t) => {
