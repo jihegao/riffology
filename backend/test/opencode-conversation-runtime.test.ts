@@ -8,6 +8,7 @@ import type { AgentContextInput } from "../src/agent-context.ts";
 import { ApiError } from "../src/errors.ts";
 import {
   HttpOpenCodeAdapter,
+  redactPublicRuntimeText,
   type OpenCodeConfig,
   type OpenCodeConversationPort,
   type OpenCodePrompt,
@@ -175,6 +176,29 @@ test("adapter accepts only credential-free loopback HTTP base URLs", () => {
   ]) assert.throws(() => new HttpOpenCodeAdapter({ baseUrl: unsafe }), /loopback HTTP URL|unauthenticated|path/u);
 });
 
+test("public runtime text redacts punctuated local paths without hiding provider IDs or web URLs", () => {
+  const redacted = redactPublicRuntimeText([
+    "[/tmp/secret]",
+    "x,/var/private",
+    "path=[/Users/alice/private]",
+    "note;file:///tmp/private",
+    "foo{relative/private.txt}",
+    "<./workspace/a>",
+    "provider/model-b",
+    "https://example.com/docs/runtime",
+    "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    "\\\\server\\share\\private.txt",
+    "exact-session-ref",
+  ].join(" "));
+  const exactRedacted = redactPublicRuntimeText(redacted, ["exact-session-ref"]);
+  assert.doesNotMatch(
+    exactRedacted,
+    /\/tmp\/|\/var\/|\/Users\/|file:\/\/|relative\/|\.\/workspace|127\.0\.0\.1|opaque-capability|server\\share|exact-session-ref/u,
+  );
+  assert.match(exactRedacted, /provider\/model-b/u);
+  assert.match(exactRedacted, /https:\/\/example\.com\/docs\/runtime/u);
+});
+
 test("ready adapter refuses redirects and never follows a cross-host location", async (t) => {
   const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-redirect-"));
   t.after(() => rm(workdir, { recursive: true, force: true }));
@@ -273,7 +297,222 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });
   assert.equal("messageID" in bodies[0], false);
   assert.equal(bodies[0].tools["*"], false);
-  assert.equal(Object.values(bodies[0].tools).every((value) => value === false), true);
+  assert.equal(bodies[0].tools.question, true);
+  assert.equal(Object.entries(bodies[0].tools)
+    .filter(([name]) => name !== "question")
+    .every(([, value]) => value === false), true);
+});
+
+test("runtime snapshot stays on the current turn boundary and exposes only redacted typed controls", async (t) => {
+  let prompted = false;
+  let currentVisible = false;
+  let terminal = false;
+  let currentMessagePolls = 0;
+  let mcpName = "";
+  const scopeId = "runtime-snapshot-scope";
+  let mutatePermissionDuringResponse = false;
+  let permissionReadsAfterMutationTrigger = 0;
+  const replies: Array<{ path: string; body: any }> = [];
+  const old = [
+    { info: { id: "old-user", sessionID: "opaque-session", role: "user" }, parts: [] },
+    {
+      info: {
+        id: "old-assistant", sessionID: "opaque-session", role: "assistant",
+        parentID: "old-user", error: { name: "ProviderAuthError" },
+      },
+      parts: [{ type: "tool", callID: "old-tool", tool: "old", state: { status: "running" } }],
+    },
+  ];
+  const current = () => [
+    { info: { id: "new-user", sessionID: "opaque-session", role: "user" }, parts: [] },
+    {
+      info: {
+        id: "new-assistant", sessionID: "opaque-session", role: "assistant",
+        parentID: "new-user", time: terminal ? { completed: 2 } : {},
+      },
+      parts: [
+        {
+          type: "text",
+          text: [
+            "token=api-secret-value",
+            "runtime-secret-capability",
+            "opaque-session new-user new-assistant new-tool q1",
+            "[/Users/alice/private/model.py] x,/tmp/private.json",
+            "note;file:///var/private.json <./workspace/model.py>",
+            "foo{relative/private.txt} provider/model-b",
+          ].join(" "),
+        },
+        {
+          type: "tool", callID: "new-tool", tool: `${mcpName}_edit`,
+          state: {
+            status: terminal ? "completed" : "running",
+            title: "raw input={path:/var/private.txt} output=relative/result.json",
+          },
+        },
+        {
+          type: "tool", callID: "q1", tool: "question",
+          state: { status: terminal ? "completed" : "running" },
+        },
+      ],
+    },
+  ];
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        if (currentVisible) currentMessagePolls += 1;
+        return Response.json([...old, ...(currentVisible ? current() : [])]);
+      }
+      if (path === "/permission") {
+        if (mutatePermissionDuringResponse) permissionReadsAfterMutationTrigger += 1;
+        return Response.json([
+          { id: "per-old", sessionID: "opaque-session", permission: "old", tool: { messageID: "old-assistant", callID: "old-tool" } },
+          {
+            id: "per-new",
+            sessionID: "opaque-session",
+            permission: "edit",
+            patterns: mutatePermissionDuringResponse
+              && permissionReadsAfterMutationTrigger >= 2
+              ? Array.from({ length: 257 }, (_, index) => `scope-${index}`)
+              : ["current-turn-only"],
+            always: [],
+            tool: { messageID: "new-assistant", callID: "new-tool" },
+          },
+        ]);
+      }
+      if (path === "/question") return Response.json([
+        {
+          id: "que-new", sessionID: "opaque-session", tool: { messageID: "new-assistant", callID: "q1" },
+          questions: [{
+            header: "Choose [/tmp/private]", question: "Use token=api-secret-value or note;file:///var/private?",
+            options: [
+              { label: "/tmp/private-choice", description: "Use foo{relative/private.txt}" },
+              { label: "/var/private-choice", description: "Use workspace/private.txt" },
+            ],
+            custom: false,
+          }],
+        },
+      ]);
+      if (path.startsWith("/permission/") || path.startsWith("/question/")) {
+        replies.push({ path, body: init?.body ? JSON.parse(String(init.body)) : null });
+        return Response.json({ ok: true });
+      }
+      if (path === "/mcp" && init?.method === "POST") {
+        mcpName = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (path === "/mcp") {
+        return Response.json({ [mcpName]: { status: "connected" } });
+      }
+      if (path.startsWith("/mcp/")) return Response.json({});
+      if (path === "/agent") return Response.json([
+        {
+          name: "build",
+          description: "Build [/Users/alice/private] and foo{workspace/private.txt} with provider/model-b",
+          mode: "primary",
+          native: true,
+        },
+        { name: "hidden", mode: "primary", hidden: true },
+        { name: "explore", mode: "subagent" },
+      ]);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: terminal ? "idle" : "busy" } } : {}));
+
+  const agents = await adapter.discoverAgents();
+  assert.deepEqual(agents.map((agent) => [agent.name, agent.mode, agent.native]), [
+    ["build", "primary", true],
+  ]);
+  assert.doesNotMatch(
+    agents[0].description ?? "",
+    /\/Users\/|\/tmp\/|\/var\/|file:\/\/|workspace\/|relative\//u,
+  );
+  assert.match(agents[0].description ?? "", /provider\/model-b/u);
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=runtime-secret-capability",
+  );
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    {
+      text: "current",
+      system: "bounded",
+      attachments: [],
+      agentName: "build",
+      scopedMcpScopeId: scopeId,
+    },
+  );
+  await waitUntil(() => prompted, "prompt dispatch");
+  const beforeUser = await adapter.runtimeSnapshot("opaque-session", scopeId);
+  assert.equal(beforeUser.assistant, null);
+  assert.deepEqual(beforeUser.tools, []);
+  assert.deepEqual(beforeUser.interactions, []);
+  assert.equal(beforeUser.failureCode, null);
+
+  currentVisible = true;
+  await waitUntil(() => currentMessagePolls > 0, "current user boundary");
+  const active = await adapter.runtimeSnapshot("opaque-session", scopeId);
+  assert.equal(active.assistant?.status, "streaming");
+  assert.doesNotMatch(
+    active.assistant?.text ?? "",
+    /api-secret-value|runtime-secret-capability|opaque-session|new-user|new-assistant|new-tool|q1|\/Users\/|\/tmp\/|\/var\/|file:\/\/|(?:^|\s)(?:\.{1,2}\/|relative\/|workspace\/)/u,
+  );
+  assert.deepEqual(active.tools.map((tool) => [tool.tool, tool.status]), [
+    ["Riff edit", "running"],
+    ["Question", "running"],
+  ]);
+  assert.equal(active.tools[0].title, null);
+  assert.deepEqual(active.interactions.map((interaction) => interaction.kind), ["permission", "question"]);
+  assert.doesNotMatch(
+    JSON.stringify(active.interactions),
+    /api-secret-value|\/Users\/|\/home\/|\/tmp\/|\/var\/|file:\/\/|relative\//u,
+  );
+  const permission = active.interactions.find((interaction) => interaction.kind === "permission")!;
+  assert.deepEqual(permission, {
+    id: permission.id,
+    kind: "permission",
+    title: "Permission required",
+    permission: "Allow Riff edit once for the current turn?",
+  });
+  mutatePermissionDuringResponse = true;
+  await assert.rejects(
+    () => adapter.respondPermission("opaque-session", permission.id, "once"),
+    (error: any) => error.code === "interaction_not_pending",
+  );
+  assert.deepEqual(replies, [], "a mutated permission grant must fail before the control POST");
+  mutatePermissionDuringResponse = false;
+  permissionReadsAfterMutationTrigger = 0;
+  await adapter.respondPermission("opaque-session", permission.id, "once");
+  const question = active.interactions.find((interaction) => interaction.kind === "question")!;
+  await assert.rejects(
+    () => adapter.respondQuestion("opaque-session", question.id, { answers: [["Other"]] }),
+    (error: any) => error.code === "invalid_interaction_response",
+  );
+  const publicChoices = question.questions[0].options;
+  assert.equal(publicChoices[0].label, publicChoices[1].label,
+    "distinct upstream labels may collapse to the same redacted public label");
+  assert.notEqual(publicChoices[0].id, publicChoices[1].id,
+    "opaque choice IDs must preserve exact option identity");
+  await adapter.respondQuestion(
+    "opaque-session",
+    question.id,
+    { answers: [[publicChoices[1].id]] },
+  );
+  assert.deepEqual(replies.map((reply) => [reply.path, reply.body]), [
+    ["/permission/per-new/reply", { reply: "once" }],
+    ["/question/que-new/reply", { answers: [["/var/private-choice"]] }],
+  ]);
+  terminal = true;
+  assert.equal((await operation).text.includes("token=api-secret-value"), true,
+    "durable assistant aggregation remains authoritative; public runtime alone is redacted");
+  await adapter.unbindScopedMcp(scopeId);
+  adapter.releaseRuntimeBoundary("opaque-session");
 });
 
 test("adapter reuses one OpenCode session across turns with server-generated user message IDs", async (t) => {
@@ -492,6 +731,7 @@ test("retry with an errored attempt stays nonterminal and accepts the later succ
           parts: [{ type: "text", text: "retry succeeded" }],
         }] : []),
       ] : []);
+      if (path === "/permission" || path === "/question") return Response.json([]);
       throw new Error(`unexpected OpenCode endpoint ${path}`);
     },
   }, async () => {
@@ -510,10 +750,74 @@ test("retry with an errored attempt stays nonterminal and accepts the later succ
   );
   await retryObserved;
   assert.equal(await remainsPending(operation), true);
+  const duringRetry = await adapter.runtimeSnapshot("opaque-session", undefined);
+  assert.equal(duringRetry.assistant, null,
+    "a failed attempt must not reappear as current streaming assistant content");
+  assert.equal(duringRetry.failureCode, null,
+    "the retained failure boundary is not the post-retry attempt");
   allowSuccess = true;
   const result = await operation;
   assert.equal(result.text, "retry succeeded");
   assert.doesNotMatch(JSON.stringify(result.content), /private retry detail/u);
+});
+
+test("runtime projection and durable completion share one fail-closed retry boundary", async (t) => {
+  let prompted = false;
+  let dropFailure = false;
+  let observedRetry!: () => void;
+  const retryObserved = new Promise<void>((resolve) => { observedRetry = resolve; });
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 120,
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "retry" }] },
+        ...(!dropFailure ? [{
+          info: {
+            id: "failed-attempt",
+            role: "assistant",
+            parentID: "server-user",
+            error: { name: "ProviderError" },
+          },
+          parts: [],
+        }] : [{
+          info: {
+            id: "success-without-boundary",
+            role: "assistant",
+            parentID: "server-user",
+            time: { completed: 2 },
+          },
+          parts: [{ type: "text", text: "must not be accepted" }],
+        }]),
+      ] : []);
+      if (path === "/permission" || path === "/question") return Response.json([]);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => {
+    if (!prompted) return Response.json({});
+    if (!dropFailure) {
+      observedRetry();
+      return Response.json({ "opaque-session": { type: "retry" } });
+    }
+    return Response.json({ "opaque-session": { type: "idle" } });
+  });
+
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "retry", system: "bounded", attachments: [] },
+  );
+  await retryObserved;
+  await adapter.runtimeSnapshot("opaque-session", undefined);
+  dropFailure = true;
+  await assert.rejects(
+    operation,
+    (error: any) => error.code === "opencode_prompt_timeout",
+  );
 });
 
 test("idle waits for terminal tool evidence and persists only a bounded redacted part summary", async (t) => {
@@ -1256,6 +1560,9 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
         projectPrompted = true;
         return new Response(null, { status: 204 });
       }
+      if (url.pathname === "/permission" || url.pathname === "/question") {
+        return Response.json([]);
+      }
       if (url.pathname.startsWith("/session/")) {
         return Response.json({});
       }
@@ -1327,6 +1634,37 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
     projectWorkspace,
   );
   assert.equal(assistant.text, "scoped answer");
+  const projectRuntime = await adapter.runtimeSnapshot(
+    "session-project",
+    undefined,
+    projectWorkspace,
+  );
+  assert.equal(projectRuntime.status, "idle");
+  const crossOwnerControlStart = calls.length;
+  await assert.rejects(
+    () => adapter.runtimeSnapshot("session-project", undefined, modelWorkspace),
+    (error: any) => error.code === "opencode_session_workspace_mismatch",
+  );
+  await assert.rejects(
+    () => adapter.respondPermission(
+      "session-project",
+      `permission_${"a".repeat(32)}`,
+      "once",
+      modelWorkspace,
+    ),
+    (error: any) => error.code === "opencode_session_workspace_mismatch",
+  );
+  adapter.releaseRuntimeBoundary("session-project", modelWorkspace);
+  assert.equal(
+    (await adapter.runtimeSnapshot("session-project", undefined, projectWorkspace)).status,
+    "idle",
+    "a cross-owner release must not erase the admitted runtime boundary",
+  );
+  assert.equal(calls.slice(crossOwnerControlStart).some((call) =>
+    call.method === "POST"
+      && (call.path.startsWith("/permission/")
+        || call.path.startsWith("/question/")
+        || call.path.endsWith("/abort"))), false);
   await adapter.abort("session-project", projectWorkspace);
   await adapter.bindScopedMcp(
     "conversation-model",
@@ -1339,6 +1677,7 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
     modelWorkspace,
   );
   unsubscribe();
+  adapter.releaseRuntimeBoundary("session-project", projectWorkspace);
 
   const locationCalls = calls.filter((call) =>
     call.path.startsWith("/session") || call.path.startsWith("/mcp"));

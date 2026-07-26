@@ -75,6 +75,21 @@ export type ProviderDiscovery =
     providerModels: readonly [];
   }>;
 
+export type AgentDiscovery =
+  | Readonly<{
+    mode: "live";
+    agents: readonly Readonly<{
+      name: string;
+      label: string;
+      description: string | null;
+    }>[];
+  }>
+  | Readonly<{
+    mode: "read_only";
+    reason: string;
+    agents: readonly [];
+  }>;
+
 export type ConversationSummary = Readonly<{
   id: string;
   owner: Readonly<{ kind: OwnerKind; id: string }>;
@@ -150,6 +165,62 @@ export type ActionRecord = Readonly<{
   permissionDecision: "pending" | "allowed" | "denied";
   state: "proposed" | "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed";
   errorCode: string | null;
+}>;
+
+export type ConversationRuntimeStatus =
+  | "busy"
+  | "waiting_for_tool"
+  | "waiting_for_user"
+  | "idle"
+  | "failed";
+
+export type ConversationRuntimePart = Readonly<{
+  id: string;
+  kind: "text" | "tool_call" | "tool_result" | "error" | "command" | "skill" | "mcp";
+  state: "streaming" | "pending" | "complete" | "failed";
+  title: string;
+  summary: string | null;
+}>;
+
+export type ConversationInteraction =
+  | Readonly<{
+    id: string;
+    kind: "permission";
+    title: string;
+    prompt: string;
+    decisions: readonly ("allow_once" | "reject")[];
+  }>
+  | Readonly<{
+    id: string;
+    kind: "question";
+    title: string;
+    questions: readonly Readonly<{
+      prompt: string;
+      multiple: boolean;
+      custom: boolean;
+      choices: readonly Readonly<{ value: string; label: string }>[];
+    }>[];
+  }>;
+
+export type ConversationRuntimeProjection = Readonly<{
+  schemaVersion: 1;
+  revision: string;
+  status: ConversationRuntimeStatus;
+  activeTurn: null | Readonly<{
+    requestKey: string;
+    canStop: boolean;
+    canRetry: boolean;
+  }>;
+  parts: readonly ConversationRuntimePart[];
+  pendingInteractions: readonly ConversationInteraction[];
+  agent: Readonly<{
+    selectedName: string | null;
+    locked: boolean;
+  }>;
+  mcp: Readonly<{
+    state: "connected" | "disconnected" | "unavailable";
+    label: string;
+  }>;
 }>;
 
 export type ConversationBundle = Readonly<{

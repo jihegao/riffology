@@ -1259,7 +1259,11 @@ export class ProductStoreV2 {
     if (attachmentIds.length !== (input.attachmentIds ?? []).length) throw new ProductStoreV2Error("Agent turn attachment IDs must be unique.");
     const marker = input.visualInteractionMarker ?? null;
     assertVisualInteractionMarker(marker);
-    const intentDigest = canonicalDigest({ text: input.text, attachmentIds, visualInteractionMarker: marker });
+    const agentName = input.agentName ?? null;
+    if (agentName !== null && (!agentName.trim() || agentName.length > 300 || /[\u0000-\u001f\u007f\s]/u.test(agentName))) {
+      throw new ProductStoreV2Error("Agent turn Agent name is invalid.");
+    }
+    const intentDigest = canonicalDigest({ text: input.text, attachmentIds, visualInteractionMarker: marker, agentName });
     const existing = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?")
       .get(input.conversationId, input.requestKey) as any;
     if (existing) {
@@ -1277,7 +1281,10 @@ export class ProductStoreV2 {
         WHERE id = ? AND lifecycle_state = 'active'`, params: [input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
       { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
         SELECT ?, ?, count(*), 'user', 'complete', ?, ?, ?, ? FROM messages WHERE conversation_id = ?`,
-        params: [input.userMessageId, input.conversationId, input.text, json(marker ? { visualInteractionConfirmation: marker } : {}), input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
+        params: [input.userMessageId, input.conversationId, input.text, json({
+          ...(marker ? { visualInteractionConfirmation: marker } : {}),
+          ...(agentName ? { agentName } : {}),
+        }), input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
       ...attachmentIds.map((attachmentId) => ({ sql: `INSERT INTO message_attachments (message_id, attachment_id)
         SELECT ?, id FROM attachments WHERE id = ? AND conversation_id = ?`, params: [input.userMessageId, attachmentId, input.conversationId], expectedChanges: 1 } satisfies DatabaseMutationStatement)),
       { sql: `INSERT INTO agent_turns (id, conversation_id, request_key, intent_sha256, input_message_id, state, created_at, updated_at)
@@ -1321,6 +1328,52 @@ export class ProductStoreV2 {
     this.#databaseMutation([{ sql: `UPDATE agent_turns SET state = 'failed', failure_code = ?, failure_retryable = ?, updated_at = ?
       WHERE conversation_id = ? AND request_key = ? AND state IN ('queued', 'running')`, params: [code, retryable ? 1 : 0, at, conversationId, requestKey], expectedChanges: 1 }]);
     return this.#agentTurn(conversationId, requestKey);
+  }
+
+  retryableAgentTurnInput(conversationId: string, requestKey: string): {
+    text: string;
+    attachmentIds: string[];
+    agentName: string | null;
+  } {
+    this.#assertOpen();
+    const row = this.#database.prepare(
+      `SELECT t.state, t.failure_retryable, m.id AS message_id, m.text, m.content_json
+       FROM agent_turns t
+       JOIN messages m ON m.id = t.input_message_id AND m.conversation_id = t.conversation_id
+       WHERE t.conversation_id = ? AND t.request_key = ?`,
+    ).get(conversationId, requestKey) as {
+      state: string;
+      failure_retryable: number | null;
+      message_id: string;
+      text: string;
+      content_json: string;
+    } | undefined;
+    if (!row) throw new ProductStoreV2Error("Agent turn does not exist.");
+    if (row.state !== "failed" || !Boolean(row.failure_retryable)) {
+      throw new ProductStoreV2Error("Agent turn is not retryable.");
+    }
+    const content = JSON.parse(row.content_json) as Record<string, unknown>;
+    if (content.visualInteractionConfirmation !== undefined) {
+      throw new ProductStoreV2Error("Visual interaction turns cannot be retried without a new explicit confirmation.");
+    }
+    const agentName = typeof content.agentName === "string" ? content.agentName : null;
+    const attachmentIds = (this.#database.prepare(
+      "SELECT attachment_id FROM message_attachments WHERE message_id = ? ORDER BY attachment_id",
+    ).all(row.message_id) as Array<{ attachment_id: string }>).map((item) => item.attachment_id);
+    return { text: row.text, attachmentIds, agentName };
+  }
+
+  latestAgentTurn(conversationId: string): AgentTurnDto | null {
+    this.#assertOpen();
+    const row = this.#database.prepare(
+      `SELECT t.request_key
+       FROM agent_turns t
+       JOIN messages m ON m.id = t.input_message_id
+       WHERE t.conversation_id = ?
+       ORDER BY m.ordinal DESC
+       LIMIT 1`,
+    ).get(conversationId) as { request_key: string } | undefined;
+    return row ? this.#agentTurn(conversationId, row.request_key) : null;
   }
 
   createMessage(input: CreateMessageInput): void {
@@ -7369,41 +7422,42 @@ export class ProductStoreV2 {
 
   #sessionProjection(conversationId: string): "none" | "connecting" | "available" | "lost" | "read_only" {
     const row = this.#database.prepare("SELECT state FROM agent_sessions WHERE conversation_id = ? AND state != 'closed'").get(conversationId) as { state: DurableAgentSessionState } | undefined;
-    if (!row) {
-      const latestTurn = this.#database.prepare(
-        `SELECT state, failure_code, failure_retryable FROM agent_turns
-         WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
-      ).get(conversationId) as {
-        state: string;
-        failure_code: string | null;
-        failure_retryable: number | null;
-      } | undefined;
-      const readOnlyFailures = new Set([
-        "opencode_unavailable",
-        "opencode_auth_failed",
-        "provider_unavailable",
-        "model_unavailable",
-        "session_validation_failed",
-        "session_rebuild_failed",
-        "opencode_session_aborted",
-        "opencode_session_error",
-        "opencode_session_generation_changed",
-        "opencode_prompt_timeout",
-        "empty_assistant_response",
-        "opencode_mcp_unavailable",
-      ]);
-      if (latestTurn?.state === "failed" && Boolean(latestTurn.failure_retryable)
-        && !readOnlyFailures.has(latestTurn.failure_code ?? "")) return "lost";
-      return latestTurn?.state === "read_only"
-        || latestTurn?.state === "failed"
-          && Boolean(latestTurn.failure_retryable)
-          && readOnlyFailures.has(latestTurn.failure_code ?? "")
-        ? "read_only"
-        : "none";
+    if (row?.state === "available") return "available";
+    if (row && row.state !== "lost") return "connecting";
+    const latestTurn = this.#database.prepare(
+      `SELECT t.state, t.failure_code, t.failure_retryable
+       FROM agent_turns t
+       JOIN messages m ON m.id = t.input_message_id
+       WHERE t.conversation_id = ?
+       ORDER BY m.ordinal DESC
+       LIMIT 1`,
+    ).get(conversationId) as {
+      state: string;
+      failure_code: string | null;
+      failure_retryable: number | null;
+    } | undefined;
+    const readOnlyFailures = new Set([
+      "opencode_unavailable",
+      "opencode_auth_failed",
+      "provider_unavailable",
+      "model_unavailable",
+      "session_validation_failed",
+      "session_rebuild_failed",
+      "opencode_session_error",
+      "opencode_session_generation_changed",
+      "opencode_prompt_timeout",
+      "empty_assistant_response",
+      "opencode_mcp_unavailable",
+    ]);
+    if (latestTurn?.state === "failed" && Boolean(latestTurn.failure_retryable)
+      && !readOnlyFailures.has(latestTurn.failure_code ?? "")) return "lost";
+    if (latestTurn?.state === "read_only"
+      || latestTurn?.state === "failed"
+        && Boolean(latestTurn.failure_retryable)
+        && readOnlyFailures.has(latestTurn.failure_code ?? "")) {
+      return "read_only";
     }
-    if (row.state === "available") return "available";
-    if (row.state === "lost") return "lost";
-    return "connecting";
+    return row?.state === "lost" ? "lost" : "none";
   }
 
   #skillUses(turnId: string): SkillUseDto[] {
@@ -7423,8 +7477,14 @@ export class ProductStoreV2 {
   #agentTurn(conversationId: string, requestKey: string): AgentTurnDto {
     const row = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(conversationId, requestKey) as any;
     if (!row) throw new ProductStoreV2Error("Agent turn does not exist.");
+    const message = this.#database.prepare(
+      "SELECT content_json FROM messages WHERE id = ? AND conversation_id = ?",
+    ).get(row.input_message_id, conversationId) as { content_json: string } | undefined;
+    const content = message ? JSON.parse(message.content_json) as Record<string, unknown> : {};
     return {
-      requestKey: row.request_key, state: row.state, userMessageId: row.input_message_id, assistantMessageId: row.assistant_message_id,
+      requestKey: row.request_key,
+      agentName: typeof content.agentName === "string" ? content.agentName : null,
+      state: row.state, userMessageId: row.input_message_id, assistantMessageId: row.assistant_message_id,
       skillUses: this.#skillUses(row.id), actions: this.#actions(row.id),
       failure: row.failure_code ? { code: row.failure_code, retryable: Boolean(row.failure_retryable) } : null,
     };

@@ -32,6 +32,14 @@ class ProductApiOpenCode implements OpenCodeConversationPort {
       qualifiedId: "provider-b/model-b",
     }];
   }
+  async discoverAgents() {
+    return [{
+      name: "build",
+      description: "Build scoped models.",
+      mode: "primary" as const,
+      native: true,
+    }];
+  }
   async initialize(): Promise<OpenCodeReadiness> {
     return { status: "ready", modelId: "provider-a/model-a", version: "test" };
   }
@@ -1150,12 +1158,14 @@ test("A4-3 Conversation browser projections bind providers, redact durable cards
     {
       requestKey: "request_a4_read_only",
       text: "Use the attached input.",
+      agentName: "build",
       attachmentIds: [attachment.id],
     },
   );
   assert.equal(turn.status, 200);
   const turnBody = await turn.json() as any;
   assert.equal(turnBody.mode, "read_only");
+  assert.equal(turnBody.turn.agentName, "build");
   assert.deepEqual(
     turnBody.messages.map((message: any) => message.role),
     ["user"],
@@ -1163,6 +1173,56 @@ test("A4-3 Conversation browser projections bind providers, redact durable cards
   assert.equal(
     turnBody.messages.some((message: any) => message.role === "assistant"),
     false,
+  );
+  const runtimeResponse = await fetch(
+    `${baseUrl}/api/conversations/conversation_a4_binding/runtime`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(runtimeResponse.status, 200);
+  const runtime = await runtimeResponse.json() as any;
+  assert.deepEqual(Object.keys(runtime).sort(), [
+    "activeTurn", "agent", "mcp", "parts", "pendingInteractions",
+    "revision", "schemaVersion", "status",
+  ]);
+  assert.equal(runtime.schemaVersion, 1);
+  assert.equal(runtime.status, "failed");
+  assert.equal(runtime.activeTurn.requestKey, "request_a4_read_only");
+  assert.equal(runtime.activeTurn.canStop, false);
+  assert.equal(runtime.activeTurn.canRetry, true);
+  assert.doesNotMatch(
+    JSON.stringify(runtime),
+    /(?:externalSessionRef|sessionID|capability|rawToolPayload|\/Users\/)/u,
+  );
+  const agentResponse = await fetch(
+    `${baseUrl}/api/agents?ownerKind=model&ownerId=model_a4_api`,
+    {
+    headers: readHeaders(session),
+    },
+  );
+  assert.equal(agentResponse.status, 200, await agentResponse.clone().text());
+  assert.deepEqual(await agentResponse.json(), {
+    mode: "live",
+    agents: [{
+      name: "build",
+      label: "build",
+      description: "Build scoped models.",
+    }],
+  });
+  const retryResponse = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/conversations/conversation_a4_binding/turns/request_a4_read_only/retry",
+    { requestKey: "request_a4_read_only_retry" },
+  );
+  assert.equal(retryResponse.status, 200);
+  const retryBody = await retryResponse.json() as any;
+  assert.equal(retryBody.turn.requestKey, "request_a4_read_only_retry");
+  assert.equal(retryBody.turn.agentName, "build");
+  assert.deepEqual(
+    retryBody.messages.filter((message: any) => message.role === "user")
+      .map((message: any) => message.text),
+    ["Use the attached input.", "Use the attached input."],
   );
   const locked = await (await fetch(
     `${baseUrl}/api/conversations/conversation_a4_binding`,

@@ -101,6 +101,7 @@ export class AgentConversationSessionManager {
     scopedMcpScopeId?: string,
     signal?: AbortSignal,
     expectedSessionGeneration?: number,
+    agentName?: string,
   ): Promise<ConversationPromptResult> {
     const prepared = await this.ensureSession(conversationId, contextInput);
     if (prepared.mode === "read_only") return prepared;
@@ -115,7 +116,13 @@ export class AgentConversationSessionManager {
       const assistant = await this.#openCode.promptWithModel(
         prepared.externalSessionRef,
         { providerId: prepared.providerId, modelId: prepared.modelId },
-        { text, system: prepared.context.text, attachments, ...(scopedMcpScopeId ? { scopedMcpScopeId } : {}) },
+        {
+          text,
+          system: prepared.context.text,
+          attachments,
+          ...(agentName ? { agentName } : {}),
+          ...(scopedMcpScopeId ? { scopedMcpScopeId } : {}),
+        },
         signal,
         prepared.workspace,
       );

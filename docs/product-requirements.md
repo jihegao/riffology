@@ -266,6 +266,9 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-08 | 只有明确且允许的指令可以触发直接修改；修改必须 typed、owner-scoped、经过验证且原子提交。 |
 | FR-CONV-09 | OpenCode 的 developer repo-root 与普通 Product 的精确 Model/Project workspace 必须是不同的工作目录 profile；Product backend 必须从 durable owner 派生目录并作用域化所有会话相关请求，前者不得给普通 Product Agent 产品源码、任意文件或命令权限。 |
 | FR-CONV-10 | OpenCode 第一段 assistant 文本和中间 tool step 只能作为流式证据；Riff 必须在精确 session 不再 busy/retry、该 turn 的完整 assistant messages 均具备完成证据且相关 Riff action 已提交后，才可完成 durable turn 并撤销 scoped MCP capability。 |
+| FR-CONV-11 | Conversation 必须以可恢复的 revisioned public runtime DTO 投影当前 Agent 状态、脱敏 activity 和等待中的 permission/question；SSE 只是便利通道，普通 GET 是断线后的恢复权威。浏览器不得接收上游 session/message/request ID、tool input/output、raw metadata、credential、path 或 capability。 |
+| FR-CONV-12 | Stop、Retry、Resume 必须绑定精确 turn：Stop 仅中止当前 requestKey 并等待持久终态；Retry 使用新 requestKey 且只恢复 Riff 持久化的原始 intent；Resume 只回答该 turn 当前等待的 interaction，不得发起第二个 prompt。 |
+| FR-CONV-13 | 用户可以按 turn 选择已发现的 primary Agent；Agent 选择必须进入 turn intent 与持久消息，active/waiting turn 期间锁定。Provider/model 仍按 Conversation 在首个接受的 message 后锁定。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |

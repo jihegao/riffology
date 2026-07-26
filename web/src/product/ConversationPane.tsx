@@ -6,11 +6,14 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import type { ProductClient } from "./api";
+import { ProductApiError, type ProductClient } from "./api";
 import { navigateProduct, workspaceHref } from "./router";
 import type {
   ConversationBundle,
   ConversationSummary,
+  ConversationRuntimeProjection,
+  ConversationRuntimeStatus,
+  AgentDiscovery,
   OwnerKind,
   PermanentDeletePreview,
   ProviderDiscovery,
@@ -44,7 +47,10 @@ export function ConversationPane({
   const [collections, setCollections] =
     useState<ConversationCollections>(emptyCollections);
   const [providers, setProviders] = useState<ProviderDiscovery>();
+  const [agents, setAgents] = useState<AgentDiscovery>();
   const [bundle, setBundle] = useState<ConversationBundle>();
+  const [runtime, setRuntime] = useState<ConversationRuntimeProjection>();
+  const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sendingConversationId, setSendingConversationId] = useState<string>();
   const [error, setError] = useState<string>();
@@ -80,6 +86,13 @@ export function ConversationPane({
       client.providers().then((value) => {
         if (current) setProviders(value);
       }),
+      client.agents
+        ? client.agents(ownerKind, ownerId).then((value) => {
+          if (current) setAgents(value);
+        }).catch((cause) => {
+          if (!optionalRuntimeUnavailable(cause)) throw cause;
+        })
+        : Promise.resolve(),
     ]).catch((cause) => {
       if (current) setError(messageOf(cause, "Conversations could not be loaded."));
     }).finally(() => {
@@ -109,10 +122,58 @@ export function ConversationPane({
     return () => { current = false; };
   }, [client, selected?.id]);
 
+  useEffect(() => {
+    let current = true;
+    let close: (() => void) | undefined;
+    setRuntime(undefined);
+    setRuntimeUnavailable(false);
+    if (!selected || !client.conversationRuntime) return () => { current = false; };
+    void client.conversationRuntime(selected.id).then(async (projection) => {
+      if (!current) return;
+      setRuntime(projection);
+      if (!client.subscribeConversationRuntime) return;
+      const unsubscribe = await client.subscribeConversationRuntime(
+        selected.id,
+        (next) => {
+          if (current) setRuntime(next);
+        },
+        () => {
+          // The durable bundle and next snapshot remain usable if SSE drops.
+        },
+      );
+      if (current) close = unsubscribe;
+      else unsubscribe();
+    }).catch((cause) => {
+      if (!current) return;
+      if (optionalRuntimeUnavailable(cause)) {
+        setRuntimeUnavailable(true);
+        return;
+      }
+      setError(messageOf(cause, "Live Agent activity could not be loaded."));
+    });
+    return () => {
+      current = false;
+      close?.();
+    };
+  }, [client, selected?.id]);
+
   const refreshConversation = async (conversationId: string) => {
     await refreshCollections();
     const nextBundle = await client.conversationBundle(conversationId);
-    if (selectedIdRef.current === conversationId) setBundle(nextBundle);
+    if (selectedIdRef.current === conversationId) {
+      setBundle(nextBundle);
+      setReadOnlyReason(nextBundle.conversation.sessionState === "read_only"
+        ? "The provider is unavailable for this Conversation."
+        : undefined);
+    }
+    if (client.conversationRuntime && !runtimeUnavailable) {
+      try {
+        const nextRuntime = await client.conversationRuntime(conversationId);
+        if (selectedIdRef.current === conversationId) setRuntime(nextRuntime);
+      } catch (cause) {
+        if (!optionalRuntimeUnavailable(cause)) throw cause;
+      }
+    }
   };
 
   const selectConversation = (conversationId: string) => {
@@ -130,15 +191,20 @@ export function ConversationPane({
   };
 
   const sending = sendingConversationId === selected?.id;
-  const status = sending
-    ? "connecting"
-    : conversationStatus(bundle?.conversation, providers, readOnlyReason);
+  const status = conversationStatus(
+    bundle?.conversation,
+    providers,
+    readOnlyReason,
+    runtime,
+    sending,
+  );
 
   return (
     <div className="product-conversation-content" ref={paneRef}>
-      <p className={`product-agent-status product-agent-status-${status}`} role="status">
-        Agent: {status.replace("_", " ")}
-      </p>
+      <div className={`product-agent-status product-agent-status-${status}`} role="status">
+        <strong>Agent: {status.replaceAll("_", " ")}</strong>
+        <span>{statusDescription(status)}</span>
+      </div>
       {error && <p className="product-form-error" role="alert">{error}</p>}
       {selectedConversationId && !loading && !selected && (
         <p className="product-form-error" role="alert">
@@ -182,7 +248,15 @@ export function ConversationPane({
               if (selectedIdRef.current === bundle.conversation.id) setError(message);
             }}
           />
-          <Transcript bundle={bundle} />
+          <RuntimeControls
+            client={client}
+            conversationId={bundle.conversation.id}
+            runtime={runtime}
+            unavailable={runtimeUnavailable}
+            onChanged={() => refreshConversation(bundle.conversation.id)}
+            onError={setError}
+          />
+          <Transcript bundle={bundle} runtime={runtime} />
           <AttachmentForm
             client={client}
             conversationId={bundle.conversation.id}
@@ -196,10 +270,18 @@ export function ConversationPane({
             }}
           />
           <Composer
-            disabled={status === "read_only"}
+            disabled={status === "read_only"
+              || status === "busy"
+              || status === "waiting_for_tool"
+              || status === "waiting_for_user"}
+            disabledMessage={status === "read_only"
+              ? undefined
+              : "Respond to, stop, or finish the active turn before starting another message."}
             sending={sending}
             bundle={bundle}
-            onSend={async (text, attachmentIds) => {
+            agents={agents}
+            runtime={runtime}
+            onSend={async (text, attachmentIds, agentName) => {
               const conversationId = bundle.conversation.id;
               setSendingConversationId(conversationId);
               setError(undefined);
@@ -209,11 +291,8 @@ export function ConversationPane({
                   conversationId,
                   text,
                   attachmentIds,
+                  ...(agentName ? { agentName } : {}),
                 });
-                if (selectedIdRef.current === conversationId
-                  && result.mode === "read_only") {
-                  setReadOnlyReason(readOnlyMessage(result.reason));
-                }
                 await refreshConversation(conversationId);
                 if (result.turn.actions.some((action) =>
                   action.state === "committed"
@@ -508,7 +587,251 @@ function ConversationControls({
   );
 }
 
-function Transcript({ bundle }: Readonly<{ bundle: ConversationBundle }>) {
+function RuntimeControls({
+  client,
+  conversationId,
+  runtime,
+  unavailable,
+  onChanged,
+  onError,
+}: Readonly<{
+  client: ProductClient;
+  conversationId: string;
+  runtime?: ConversationRuntimeProjection;
+  unavailable: boolean;
+  onChanged: () => Promise<void>;
+  onError: (message: string) => void;
+}>) {
+  const [pending, setPending] = useState<string>();
+  if (!runtime) {
+    return unavailable ? null : (
+      <section className="product-runtime-controls" aria-label="Agent runtime controls">
+        <p className="product-form-note" role="status">Restoring live Agent state…</p>
+      </section>
+    );
+  }
+  const invoke = async (label: string, operation: (() => Promise<unknown>) | undefined) => {
+    if (!operation) return;
+    setPending(label);
+    try {
+      await operation();
+      await onChanged();
+    } catch (cause) {
+      onError(messageOf(cause, `The Agent could not ${label}.`));
+    } finally {
+      setPending(undefined);
+    }
+  };
+  const active = runtime.activeTurn;
+  return (
+    <section className="product-runtime-controls" aria-label="Agent runtime controls">
+      <div className="product-runtime-actions">
+        <div>
+          <strong>Turn controls</strong>
+          <p>{statusDescription(runtime.status)}</p>
+        </div>
+        <div>
+          {active?.canStop && (
+            <button
+              type="button"
+              className="product-danger"
+              disabled={Boolean(pending) || !client.stopConversation}
+              onClick={() => void invoke("stop", client.stopConversation
+                ? () => client.stopConversation!({
+                  conversationId,
+                  requestKey: active.requestKey,
+                })
+                : undefined)}
+            >
+              {pending === "stop" ? "Stopping…" : "Stop"}
+            </button>
+          )}
+          {active?.canRetry && (
+            <button
+              type="button"
+              className="product-secondary"
+              disabled={Boolean(pending) || !client.retryConversation}
+              onClick={() => void invoke("retry", client.retryConversation
+                ? () => client.retryConversation!({
+                  conversationId,
+                  oldRequestKey: active.requestKey,
+                  newRequestKey: crypto.randomUUID(),
+                })
+                : undefined)}
+            >
+              {pending === "retry" ? "Retrying…" : "Retry"}
+            </button>
+          )}
+        </div>
+      </div>
+      {runtime.pendingInteractions.map((interaction) => (
+        <InteractionResponse
+          key={interaction.id}
+          interaction={interaction}
+          pending={pending === interaction.id}
+          disabled={Boolean(pending)}
+          onPermission={(decision) => invoke(interaction.id,
+            client.respondConversationInteraction && interaction.kind === "permission"
+              ? () => client.respondConversationInteraction!({
+                conversationId,
+                requestKey: active?.requestKey ?? "",
+                interactionId: interaction.id,
+                kind: "permission",
+                decision,
+              })
+              : undefined)}
+          onQuestion={(response) => invoke(interaction.id,
+            client.respondConversationInteraction && interaction.kind === "question"
+              ? () => client.respondConversationInteraction!({
+                conversationId,
+                requestKey: active?.requestKey ?? "",
+                interactionId: interaction.id,
+                kind: "question",
+                response,
+              })
+              : undefined)}
+        />
+      ))}
+    </section>
+  );
+}
+
+function InteractionResponse({
+  interaction,
+  pending,
+  disabled,
+  onPermission,
+  onQuestion,
+}: Readonly<{
+  interaction: ConversationRuntimeProjection["pendingInteractions"][number];
+  pending: boolean;
+  disabled: boolean;
+  onPermission: (decision: "allow_once" | "reject") => Promise<void>;
+  onQuestion: (response: Readonly<{ answers: readonly (readonly string[])[] } | { reject: true }>) => Promise<void>;
+}>) {
+  const [decision, setDecision] = useState<"allow_once" | "reject">(
+    interaction.kind === "permission" ? interaction.decisions[0] ?? "reject" : "allow_once",
+  );
+  const [answers, setAnswers] = useState<string[][]>(() =>
+    interaction.kind === "question"
+      ? interaction.questions.map((question) =>
+        !question.multiple && question.choices[0]
+          ? [question.choices[0].value]
+          : [])
+      : []);
+  const [customAnswers, setCustomAnswers] = useState<string[]>(() =>
+    interaction.kind === "question"
+      ? interaction.questions.map(() => "")
+      : []);
+  const submittedAnswers = interaction.kind === "question"
+    ? answers.map((answer, index) => [
+      ...answer,
+      ...(customAnswers[index]?.trim() ? [customAnswers[index].trim()] : []),
+    ])
+    : [];
+  const validAnswers = interaction.kind === "question"
+    && submittedAnswers.length === interaction.questions.length
+    && submittedAnswers.every((answer) => answer.some((value) => value.trim()));
+  return (
+    <form className="product-interaction-card" onSubmit={(event) => {
+      event.preventDefault();
+      if (interaction.kind === "permission") void onPermission(decision);
+      else if (validAnswers) void onQuestion({ answers: submittedAnswers });
+    }}>
+      <span className="product-interaction-kind">
+        {interaction.kind === "permission" ? "Permission required" : "Question"}
+      </span>
+      <strong>{interaction.title}</strong>
+      {interaction.kind === "permission" ? (
+        <fieldset disabled={disabled}>
+          <legend>{interaction.prompt}</legend>
+          {interaction.decisions.map((value) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name={`interaction-${interaction.id}`}
+                value={value}
+                checked={decision === value}
+                onChange={() => setDecision(value)}
+              />
+              {value === "allow_once" ? "Allow once" : "Reject"}
+            </label>
+          ))}
+        </fieldset>
+      ) : (
+        <>
+          {interaction.questions.map((question, index) => (
+            <fieldset key={`${interaction.id}-question-${index}`} disabled={disabled}>
+              <legend>{question.prompt}</legend>
+              {question.choices.map((choice) => {
+                const checked = answers[index]?.includes(choice.value) ?? false;
+                return (
+                  <label key={`${index}-${choice.value}`}>
+                    <input
+                      type={question.multiple ? "checkbox" : "radio"}
+                      name={`interaction-${interaction.id}-question-${index}`}
+                      value={choice.value}
+                      checked={checked}
+                      onChange={(event) => setAnswers((current) =>
+                        current.map((answer, answerIndex) => {
+                          if (answerIndex !== index) return answer;
+                          if (!question.multiple) return [choice.value];
+                          return event.target.checked
+                            ? [...answer, choice.value]
+                            : answer.filter((value) => value !== choice.value);
+                        }))}
+                    />
+                    {choice.label}
+                  </label>
+                );
+              })}
+              {question.custom && (
+                <textarea
+                  aria-label={question.choices.length
+                    ? `Answer ${index + 1} custom`
+                    : `Answer ${index + 1}`}
+                  rows={3}
+                  maxLength={1_000}
+                  value={customAnswers[index] ?? ""}
+                  onChange={(event) => setCustomAnswers((current) =>
+                    current.map((answer, answerIndex) =>
+                      answerIndex === index ? event.target.value : answer))}
+                />
+              )}
+            </fieldset>
+          ))}
+          <button
+            type="button"
+            className="product-secondary"
+            disabled={disabled}
+            onClick={() => void onQuestion({ reject: true })}
+          >
+            Decline to answer
+          </button>
+        </>
+      )}
+      <button
+        type="submit"
+        className="product-primary"
+        disabled={disabled || (interaction.kind === "question" && !validAnswers)}
+      >
+        {pending
+          ? "Sending…"
+          : interaction.kind === "permission"
+            ? decision === "allow_once" ? "Allow once & Resume" : "Reject request"
+            : "Send answers & Resume"}
+      </button>
+    </form>
+  );
+}
+
+function Transcript({
+  bundle,
+  runtime,
+}: Readonly<{
+  bundle: ConversationBundle;
+  runtime?: ConversationRuntimeProjection;
+}>) {
   return (
     <>
       <ol className="product-message-list" aria-label="Conversation messages">
@@ -520,6 +843,30 @@ function Transcript({ bundle }: Readonly<{ bundle: ConversationBundle }>) {
           </li>
         ))}
       </ol>
+      {runtime && runtime.parts.length > 0 && (
+        <section className="product-runtime-parts" aria-labelledby="runtime-parts-heading">
+          <div className="product-runtime-heading">
+            <h3 id="runtime-parts-heading">Live Agent activity</h3>
+            <span className={`product-runtime-mcp product-runtime-mcp-${runtime.mcp.state}`}>
+              MCP: {runtime.mcp.label}
+            </span>
+          </div>
+          <ol>
+            {runtime.parts.map((part) => (
+              <li key={part.id} className={`product-runtime-part product-runtime-part-${part.kind}`}>
+                <span className="product-runtime-part-icon" aria-hidden="true">
+                  {partIcon(part.kind)}
+                </span>
+                <div>
+                  <strong>{part.title}</strong>
+                  {part.summary && <p>{part.summary}</p>}
+                  <small>{partStateLabel(part.state)}</small>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
       {bundle.attachments.length > 0 && (
         <section className="product-conversation-records" aria-labelledby="attachment-heading">
           <h3 id="attachment-heading">Attachments</h3>
@@ -632,25 +979,53 @@ function AttachmentForm({
 
 function Composer({
   disabled,
+  disabledMessage,
   sending,
   bundle,
+  agents,
+  runtime,
   onSend,
 }: Readonly<{
   disabled: boolean;
+  disabledMessage?: string;
   sending: boolean;
   bundle: ConversationBundle;
-  onSend: (text: string, attachmentIds: readonly string[]) => Promise<void>;
+  agents?: AgentDiscovery;
+  runtime?: ConversationRuntimeProjection;
+  onSend: (text: string, attachmentIds: readonly string[], agentName?: string) => Promise<void>;
 }>) {
   const [text, setText] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [agentName, setAgentName] = useState("");
+  useEffect(() => {
+    if (runtime?.agent.selectedName) setAgentName(runtime.agent.selectedName);
+  }, [runtime?.agent.selectedName]);
   return (
     <form className="product-composer" onSubmit={(event) => {
       event.preventDefault();
       if (!text.trim()) return;
       const accepted = text.trim();
       setText("");
-      void onSend(accepted, attachmentIds);
+      void onSend(accepted, attachmentIds, agentName || undefined);
     }}>
+      <label>
+        Agent for this turn
+        <select
+          value={agentName}
+          disabled={disabled || sending || runtime?.agent.locked}
+          onChange={(event) => setAgentName(event.target.value)}
+        >
+          <option value="">Default Agent</option>
+          {agents?.agents.map((agent) => (
+            <option key={agent.name} value={agent.name}>{agent.label}</option>
+          ))}
+        </select>
+      </label>
+      {runtime?.agent.locked && (
+        <p className="product-form-note" role="status">
+          Agent selection is locked for the active turn.
+        </p>
+      )}
       <label>
         Message
         <textarea
@@ -682,7 +1057,8 @@ function Composer({
       )}
       {disabled && (
         <p className="product-form-note" role="status">
-          Agent replies are read-only while the configured provider is unavailable. Lifecycle controls remain available.
+          {disabledMessage
+            ?? "Agent replies are read-only while the configured provider is unavailable. Lifecycle controls remain available."}
         </p>
       )}
       <button type="submit" className="product-primary" disabled={disabled || sending || !text.trim()}>
@@ -855,27 +1231,53 @@ const conversationStatus = (
   conversation: ConversationSummary | undefined,
   providers: ProviderDiscovery | undefined,
   readOnlyReason: string | undefined,
-): "live" | "connecting" | "lost" | "read_only" => {
+  runtime: ConversationRuntimeProjection | undefined,
+  sending: boolean,
+): ConversationRuntimeStatus | "connecting" | "read_only" => {
+  if (runtime?.status === "waiting_for_user"
+    || runtime?.status === "waiting_for_tool") {
+    return runtime.status;
+  }
+  if (sending) return "busy";
   if (!conversation || !providers) return "connecting";
   if (readOnlyReason || providers.mode === "read_only"
     || conversation.sessionState === "read_only") return "read_only";
-  if (conversation.sessionState === "lost") return "lost";
+  if (runtime) return runtime.status;
+  if (conversation.sessionState === "lost") return "failed";
   if (conversation.sessionState === "connecting") return "connecting";
-  return "live";
+  return "idle";
 };
 
-const readOnlyMessage = (reason: string | undefined): string => {
-  const labels: Record<string, string> = {
-    opencode_unavailable: "OpenCode is unavailable.",
-    opencode_auth_failed: "OpenCode authentication is unavailable.",
-    provider_unavailable: "The configured provider is unavailable.",
-    model_unavailable: "The configured provider model is unavailable.",
-    session_validation_failed: "The provider session could not be validated.",
-    session_rebuild_failed: "The provider session could not be rebuilt.",
-    empty_assistant_response: "The provider returned no assistant response.",
-  };
-  return reason && labels[reason] ? labels[reason] : "The Agent turn is read-only.";
-};
+const statusDescription = (
+  status: ConversationRuntimeStatus | "connecting" | "read_only",
+): string => ({
+  busy: "The Agent is reasoning or streaming a response.",
+  waiting_for_tool: "A scoped tool is running. You can stop this turn.",
+  waiting_for_user: "The Agent needs your permission or an answer before it can continue.",
+  idle: "The Conversation is ready for your next message.",
+  failed: "This turn stopped with an error. Review the activity before retrying.",
+  connecting: "Restoring the Conversation session.",
+  read_only: "The configured provider is unavailable; existing records remain readable.",
+})[status];
+
+const partIcon = (kind: ConversationRuntimeProjection["parts"][number]["kind"]): string => ({
+  text: "A",
+  tool_call: "↗",
+  tool_result: "✓",
+  error: "!",
+  command: ">",
+  skill: "S",
+  mcp: "M",
+})[kind];
+
+const partStateLabel = (
+  state: ConversationRuntimeProjection["parts"][number]["state"],
+): string => ({
+  streaming: "Streaming",
+  pending: "In progress",
+  complete: "Complete",
+  failed: "Failed",
+})[state];
 
 const fileBase64 = async (file: File): Promise<string> => {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -891,3 +1293,6 @@ const formatBytes = (bytes: number): string =>
 
 const messageOf = (cause: unknown, fallback: string): string =>
   cause instanceof Error && cause.message ? cause.message : fallback;
+
+const optionalRuntimeUnavailable = (cause: unknown): boolean =>
+  cause instanceof ProductApiError && [404, 405].includes(cause.status);
