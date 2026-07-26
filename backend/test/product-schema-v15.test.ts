@@ -25,7 +25,7 @@ test("schema v15 adds immutable Conversation provider-binding receipts", () => {
   try {
     installVersion14(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 15);
+    assert.equal(PRODUCT_SCHEMA_VERSION, 16);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;
@@ -67,6 +67,7 @@ test("schema v15 migration failure restores both version markers", () => {
         sql: `${PRODUCT_SCHEMA_V15_SQL}
           SELECT * FROM missing_v15_rollback_probe;`,
       },
+      PRODUCT_SCHEMA_MIGRATIONS[15]!,
     ];
     assert.throws(
       () => initializeProductSchema(database, broken),

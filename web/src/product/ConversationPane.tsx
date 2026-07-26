@@ -273,7 +273,9 @@ export function ConversationPane({
             disabled={status === "read_only"
               || status === "busy"
               || status === "waiting_for_tool"
-              || status === "waiting_for_user"}
+              || status === "waiting_for_user"
+                && (runtime?.activeTurn?.canStop === true
+                  || Boolean(runtime?.pendingInteractions.length))}
             disabledMessage={status === "read_only"
               ? undefined
               : "Respond to, stop, or finish the active turn before starting another message."}
@@ -664,6 +666,9 @@ function RuntimeControls({
           )}
         </div>
       </div>
+      {runtime.goalVerification && (
+        <GoalVerificationCard verification={runtime.goalVerification} />
+      )}
       {runtime.pendingInteractions.map((interaction) => (
         <InteractionResponse
           key={interaction.id}
@@ -692,6 +697,43 @@ function RuntimeControls({
               : undefined)}
         />
       ))}
+    </section>
+  );
+}
+
+function GoalVerificationCard({
+  verification,
+}: Readonly<{
+  verification: NonNullable<ConversationRuntimeProjection["goalVerification"]>;
+}>) {
+  const copy = goalVerificationCopy(verification);
+  const actionSummary = verification.evidence.actionCount > 0
+    ? `${verification.evidence.committedActionCount} committed of `
+      + `${verification.evidence.actionCount} recorded actions.`
+    : verification.evidence.intentKind === "response_delivery"
+      ? "The assistant response was durably delivered."
+      : "No workspace mutation was verified.";
+  const ownerStateSummary =
+    verification.evidence.intentKind === "response_delivery"
+      ? "No workspace outcome is claimed."
+      : verification.evidence.ownerStateVerified
+        ? "The durable owner state captured at verification was verified."
+        : "The owner state captured at verification was not sufficient to prove the goal.";
+  return (
+    <section
+      className={`product-goal-verification product-goal-verification-${verification.disposition}`}
+      aria-label="Goal verification"
+      role="status"
+    >
+      <div>
+        <strong>{copy.title}</strong>
+        <span>{copy.description}</span>
+      </div>
+      <small>
+        {actionSummary}
+        {" "}
+        {ownerStateSummary}
+      </small>
     </section>
   );
 }
@@ -832,6 +874,14 @@ function Transcript({
   bundle: ConversationBundle;
   runtime?: ConversationRuntimeProjection;
 }>) {
+  const runtimeParts = runtime?.parts.filter((part) =>
+    !(runtime.activeTurn?.canStop !== true
+      && part.kind === "text"
+      && part.state === "complete"
+      && bundle.messages.some((message) =>
+        message.role === "assistant"
+        && message.status === "complete"
+        && message.text === part.summary)));
   return (
     <>
       <ol className="product-message-list" aria-label="Conversation messages">
@@ -843,7 +893,7 @@ function Transcript({
           </li>
         ))}
       </ol>
-      {runtime && runtime.parts.length > 0 && (
+      {runtime && runtimeParts && runtimeParts.length > 0 && (
         <section className="product-runtime-parts" aria-labelledby="runtime-parts-heading">
           <div className="product-runtime-heading">
             <h3 id="runtime-parts-heading">Live Agent activity</h3>
@@ -852,7 +902,7 @@ function Transcript({
             </span>
           </div>
           <ol>
-            {runtime.parts.map((part) => (
+            {runtimeParts.map((part) => (
               <li key={part.id} className={`product-runtime-part product-runtime-part-${part.kind}`}>
                 <span className="product-runtime-part-icon" aria-hidden="true">
                   {partIcon(part.kind)}
@@ -1259,6 +1309,44 @@ const statusDescription = (
   connecting: "Restoring the Conversation session.",
   read_only: "The configured provider is unavailable; existing records remain readable.",
 })[status];
+
+const goalVerificationCopy = (
+  verification: NonNullable<ConversationRuntimeProjection["goalVerification"]>,
+): Readonly<{ title: string; description: string }> => {
+  if (verification.disposition === "completed"
+    && verification.evidence.intentKind === "response_delivery") {
+    return {
+      title: "Response delivered",
+      description: "OpenCode reached idle and the assistant response was durably recorded.",
+    };
+  }
+  return ({
+  completed: {
+    title: "Goal verified",
+    description: "OpenCode reached idle and the current durable workspace satisfies this goal.",
+  },
+  needs_user_input: {
+    title: "Needs your input",
+    description: "The turn is terminal, but durable evidence cannot prove the requested outcome. Send a clarifying or corrective message.",
+  },
+  outcome_unknown: {
+    title: "Outcome unknown",
+    description: "An action may have taken effect before the turn stopped. Review the current Model or Project before sending another instruction.",
+  },
+  budget_exhausted: {
+    title: "Budget exhausted",
+    description: "The turn reached its wall-clock budget before a durable effect was verified. Send a new message to continue.",
+  },
+  read_only: {
+    title: "Provider unavailable",
+    description: "The Agent could not start, so existing durable workspace state remains readable.",
+  },
+  failed: {
+    title: "Goal not completed",
+    description: "The turn stopped before a durable effect was verified. Review the activity before continuing.",
+  },
+  })[verification.disposition];
+};
 
 const partIcon = (kind: ConversationRuntimeProjection["parts"][number]["kind"]): string => ({
   text: "A",

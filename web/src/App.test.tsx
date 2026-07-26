@@ -259,6 +259,7 @@ describe("Stage 4 Product entry", () => {
           state: "committed" as const,
           errorCode: null,
         }],
+        goalVerification: null,
         failure: null,
       },
       messages: [],
@@ -482,6 +483,7 @@ describe("Stage 4 Product entry", () => {
         assistantMessageId: null,
         skillUses: [],
         actions: [],
+        goalVerification: null,
         failure: { code: "opencode_unavailable", retryable: true },
       },
       messages: readOnlyBundle.messages,
@@ -572,6 +574,7 @@ describe("Stage 4 Product entry", () => {
         assistantMessageId: null,
         skillUses: [],
         actions: [],
+        goalVerification: null,
         failure: { code: "opencode_unavailable", retryable: true },
       },
       messages: bundleFor("conversation-main").messages,
@@ -647,6 +650,7 @@ describe("Stage 4 Product entry", () => {
           choices: [],
         }],
       }],
+      goalVerification: null,
       agent: { selectedName: "planner", locked: true },
       mcp: { state: "connected" as const, label: "Scoped Model tools" },
       rawPayload: "secret-capability-must-not-render",
@@ -702,6 +706,7 @@ describe("Stage 4 Product entry", () => {
       activeTurn: { requestKey: "previous-turn", canStop: false, canRetry: true },
       parts: [],
       pendingInteractions: [],
+      goalVerification: null,
       agent: { selectedName: null, locked: false },
       mcp: { state: "disconnected" as const, label: "Riff tools" },
     }));
@@ -737,6 +742,83 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByText("Allow scoped work")).toBeInTheDocument();
   });
 
+  it("restores a bounded terminal goal result and keeps follow-up messaging available", async () => {
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-goal-needs-input",
+      status: "waiting_for_user" as const,
+      activeTurn: null,
+      parts: [],
+      pendingInteractions: [],
+      goalVerification: {
+        disposition: "needs_user_input" as const,
+        reasonCode: "visual_model_goal_unverified",
+        receiptDigest: "a".repeat(64),
+        evidence: {
+          openCodeTerminal: "idle" as const,
+          intentKind: "model_visual" as const,
+          actionCount: 1,
+          terminalActionCount: 1,
+          committedActionCount: 1,
+          affectedResourceCount: 2,
+          ownerStateVerified: false,
+          partialEffect: false,
+        },
+      },
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "disconnected" as const, label: "Riff tools" },
+    }));
+    productClient.subscribeConversationRuntime = vi.fn(async () => () => {});
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("Needs your input")).toBeInTheDocument();
+    expect(screen.getByText(/durable evidence cannot prove/u)).toBeInTheDocument();
+    expect(screen.getByText(/1 committed of 1 recorded actions/u)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    expect(screen.queryByText("visual_model_goal_unverified")).not.toBeInTheDocument();
+    expect(screen.queryByText("a".repeat(64))).not.toBeInTheDocument();
+  });
+
+  it("labels durable response delivery without claiming workspace satisfaction", async () => {
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-response-delivered",
+      status: "idle" as const,
+      activeTurn: null,
+      parts: [],
+      pendingInteractions: [],
+      goalVerification: {
+        disposition: "completed" as const,
+        reasonCode: "durable_response_delivered",
+        receiptDigest: "b".repeat(64),
+        evidence: {
+          openCodeTerminal: "idle" as const,
+          intentKind: "response_delivery" as const,
+          actionCount: 0,
+          terminalActionCount: 0,
+          committedActionCount: 0,
+          affectedResourceCount: 0,
+          ownerStateVerified: false,
+          partialEffect: false,
+        },
+      },
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "disconnected" as const, label: "Riff tools" },
+    }));
+    productClient.subscribeConversationRuntime = vi.fn(async () => () => {});
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("Response delivered")).toBeInTheDocument();
+    expect(screen.getByText(/assistant response was durably recorded/u)).toBeInTheDocument();
+    expect(screen.getByText(/No workspace outcome is claimed/u)).toBeInTheDocument();
+    expect(screen.queryByText("Goal verified")).not.toBeInTheDocument();
+    expect(screen.queryByText(/durable workspace satisfies/u)).not.toBeInTheDocument();
+  });
+
   it("uses exact active-turn Stop and terminal Retry contracts while replacing full runtime snapshots", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
@@ -755,6 +837,7 @@ describe("Stage 4 Product entry", () => {
         summary: "Inspecting the Model.",
       }],
       pendingInteractions: [],
+      goalVerification: null,
       agent: { selectedName: null, locked: true },
       mcp: { state: "connected" as const, label: "Scoped Model tools" },
     }));
@@ -785,6 +868,7 @@ describe("Stage 4 Product entry", () => {
         summary: "The turn can be retried.",
       }],
       pendingInteractions: [],
+      goalVerification: null,
       agent: { selectedName: null, locked: false },
       mcp: { state: "disconnected", label: "Scoped tools released" },
     });

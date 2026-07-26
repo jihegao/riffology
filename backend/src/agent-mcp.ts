@@ -18,7 +18,43 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
   riff_read_model_file: definition("Read one bounded Model file by its logical file ID.", { fileId: { type: "string" } }, ["fileId"]),
   riff_apply_model_changes: definition("Apply one explicit, validated, atomic Model change set.", {
     requestKey: { type: "string" },
-    changes: { type: "array", minItems: 1, maxItems: 64, items: { type: "object" } },
+    changes: {
+      type: "array",
+      minItems: 1,
+      maxItems: 64,
+      items: {
+        type: "object",
+        properties: {
+          objectFileId: { type: "string" },
+          kind: {
+            type: "string",
+            enum: [
+              "model_code",
+              "model_environment",
+              "model_visual_asset",
+            ],
+          },
+          relativePath: { type: "string" },
+          mediaType: { type: "string" },
+          text: { type: "string" },
+          expectedPriorSha256: {
+            anyOf: [
+              { type: "string", pattern: "^[0-9a-f]{64}$" },
+              { type: "null" },
+            ],
+          },
+        },
+        required: [
+          "objectFileId",
+          "kind",
+          "relativePath",
+          "mediaType",
+          "text",
+          "expectedPriorSha256",
+        ],
+        additionalProperties: false,
+      },
+    },
     executionDescription: { type: "object" },
   }, ["requestKey", "changes"]),
   riff_list_experiment_configurations: definition(

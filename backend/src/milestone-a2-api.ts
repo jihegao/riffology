@@ -1627,8 +1627,29 @@ const publicAgentTurn = (
     state: action.state,
     errorCode: action.errorCode,
   })),
+  goalVerification: publicGoalVerification(turn.goalVerification),
   failure: turn.failure,
 });
+
+const publicGoalVerification = (
+  receipt: AgentTurnDto["goalVerification"],
+): Readonly<Record<string, unknown>> | null => receipt
+  ? Object.freeze({
+      disposition: receipt.disposition,
+      reasonCode: receipt.reasonCode,
+      receiptDigest: receipt.receiptDigest,
+      evidence: Object.freeze({
+        openCodeTerminal: receipt.evidence.openCodeTerminal,
+        intentKind: receipt.evidence.intentKind,
+        actionCount: receipt.evidence.actionCount,
+        terminalActionCount: receipt.evidence.terminalActionCount,
+        committedActionCount: receipt.evidence.committedActionCount,
+        affectedResourceCount: receipt.evidence.affectedResourceCount,
+        ownerStateVerified: receipt.evidence.ownerStateVerified,
+        partialEffect: receipt.evidence.partialEffect,
+      }),
+    })
+  : null;
 
 const publicConversationRuntime = (
   runtime: ConversationRuntimeDto,
@@ -1712,6 +1733,7 @@ const publicConversationRuntime = (
     revision: runtime.revision,
     status: runtime.status,
     activeTurn,
+    goalVerification: runtime.goalVerification,
     parts: Object.freeze(parts),
     pendingInteractions: Object.freeze(runtime.interactions.map((interaction) =>
       interaction.kind === "permission"

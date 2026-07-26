@@ -1110,3 +1110,56 @@ Each gate receives an independent contract/diff review. Blocking findings are
 resolved before closure. Review checks for scope creep, identity drift,
 non-reproducible randomness, evidence loss, unsafe provider fallback,
 qualitative approval/trust conflation, and unsupported claims.
+
+## Issue #56 PR 5 goal-verification gate
+
+The PR 5 aggregate backend gate covers schema-v16 migration and immutable
+receipt triggers, atomic success/failure finalization, digest readback,
+action/resource reconciliation, startup recovery, provider/timeout/abort/stale
+negative outcomes, runtime/API secrecy, and the retained product/execution
+suite:
+
+```bash
+cd backend
+npm test
+```
+
+Observed 2026-07-26: 665 total, 663 passed, zero failed, and two optional
+installed-OpenCode smoke cases skipped by the default uncredentialed suite.
+
+The Web gate covers the current public runtime DTO, bounded legacy
+normalization, goal cards, terminal follow-up availability, retained component
+behavior, production entry, and build:
+
+```bash
+cd web
+npm test
+npm run build
+npm run test:e2e:a4-3
+```
+
+Observed: 38/38 component tests, production-entry 1/1, build passed, and the
+retained Conversation Chromium gate 2/2.
+
+The credentialed final exit is:
+
+```bash
+cd web
+npm run test:e2e:issue-56-live
+```
+
+Observed: Chromium 1/1 with OpenCode `1.18.4` and
+`zhipuai-coding-plan/glm-5.2`. One browser user message produced the four
+requested completed redacted Riff tool-result labels in order, exactly one
+committed visual Model mutation, canonical idle,
+`visual_model_state_verified`, and the same receipt after refresh and backend
+restart. The scenario was 40.5 seconds (41.9 seconds including runner setup).
+The exact evidence and non-claims are in
+[`issue-56-pr5-exit-evidence.md`](issue-56-pr5-exit-evidence.md).
+
+Documentation/whitespace authority passes:
+
+```bash
+bash scripts/check-docs.sh
+git diff --check
+```

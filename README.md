@@ -308,7 +308,7 @@ interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 `RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
 deterministic mode.
 
-### OpenCode server, native turn, controls, and scoped tools (Issue #56, PR 1–4)
+### OpenCode server, native turn, controls, scoped tools, and goal verification (Issue #56, PR 1–5)
 
 `OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
 separately managed OpenCode server, not a browser path and not a permission
@@ -406,9 +406,40 @@ selectors, scripts, downloads, redirects outside the inspected loopback peer,
 shared browser state, cookies, authorization headers, and page artifacts are
 not accepted or projected.
 
-This is the Issue #56 PR 1–4 contract. Durable target-completion verification
-and the real browser exit remain the separately ordered PR 5 work; this
-document does not claim them complete.
+PR 5 finalizes every turn that reaches a new terminal state under schema v16
+with an immutable goal-verification receipt in the same transaction. Legacy
+terminal turns migrated from schema v15 remain readable with no fabricated
+receipt. OpenCode `idle` is necessary evidence, not a completion claim.
+Explicit mutation goals complete only after all actions reconcile, every
+committed action declares a nonempty effect, the supported goal/action mapping
+matches, and the current owner resources match the committed mutation
+transaction. Visual Model goals additionally require a committed Model-file
+mutation and a valid execution-protocol-v2 description whose run mode is
+`visual` or `both`.
+Proposal-only turns may complete when their durable response is delivered.
+Denied or unverified explicit work becomes `needs_user_input`; provider
+read-only, bounded timeout, interruption, stale resource evidence, and effects
+whose outcome cannot be reconstructed map to separate terminal dispositions.
+Outcome-unknown and post-effect timeout/interruption states are not
+automatically retried.
+
+Riff does not submit a second outer follow-up prompt after the native OpenCode
+tool loop. A duplicate loop could repeat a mutation after an ambiguous
+transport boundary; the durable receipt and visible follow-up composer expose
+the bounded result instead. The public runtime projects the disposition,
+reason, an opaque receipt digest, bounded counts, and verification flags,
+but never the goal text/digest, provider material, upstream IDs, paths, tool
+arguments, or raw results.
+
+The Issue #56 live exit starts OpenCode `1.18.4` in the exact ephemeral Model
+owner directory and uses `zhipuai-coding-plan/glm-5.2`. One browser message
+requests four ordered Riff tools; the public result labels appear in that exact
+order before exactly one atomic Model mutation reaches
+`visual_model_state_verified`, and survives browser refresh plus backend
+restart. This proves the scoped Conversation/tool/receipt contract for that
+model and provider; it does not prove simulation semantics, calibration,
+generic technical-check success, provider generality, or merged-main state.
+See [`docs/issue-56-pr5-exit-evidence.md`](docs/issue-56-pr5-exit-evidence.md).
 
 ## Verification
 

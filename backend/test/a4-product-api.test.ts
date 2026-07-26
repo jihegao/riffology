@@ -13,6 +13,7 @@ import type {
   OpenCodeReadiness,
 } from "../src/opencode-adapter.ts";
 import { HttpOpenCodeAdapter } from "../src/opencode-adapter.ts";
+import { verifyAgentGoal } from "../src/agent-goal-verifier.ts";
 import { BackendApp } from "../src/server.ts";
 
 const NOW = "2026-07-25T10:00:00.000Z";
@@ -956,12 +957,39 @@ test("A4-3 Conversation browser projections bind providers, redact durable cards
     affectedResources: [{ absolutePath: "/Users/private/model.py" }],
     createdAt: NOW,
   });
+  const activityGoalEvidence = app.productStore!.agentGoalEvidence(
+    "conversation_a4_activity",
+    "request_a4_activity",
+  );
+  const activityTurn = app.productStore!.latestAgentTurn(
+    "conversation_a4_activity",
+  )!;
+  const activityGoalVerification = verifyAgentGoal({
+    phase: "failed",
+    goalText: "Record safe public activity.",
+    goalDigest: activityGoalEvidence.goalDigest,
+    intentAuthority: "explicit",
+    ownerKind: activityGoalEvidence.ownerKind,
+    sessionGeneration: null,
+    assistantDelivered: false,
+    actions: activityTurn.actions,
+    ownerEvidence: {
+      stateDigest: activityGoalEvidence.stateDigest,
+      runMode: activityGoalEvidence.runMode,
+      executionDescriptionValid:
+        activityGoalEvidence.executionDescriptionValid,
+      affectedResourcesVerified:
+        activityGoalEvidence.affectedResourcesVerified,
+    },
+    verifiedAt: NOW,
+  });
   app.productStore!.failAgentTurn(
     "conversation_a4_activity",
     "request_a4_activity",
     "fixture_complete",
     false,
     NOW,
+    activityGoalVerification,
   );
   let network = await app.listenBrowserNetwork();
   let baseUrl = network.app.origin;
@@ -1181,7 +1209,7 @@ test("A4-3 Conversation browser projections bind providers, redact durable cards
   assert.equal(runtimeResponse.status, 200);
   const runtime = await runtimeResponse.json() as any;
   assert.deepEqual(Object.keys(runtime).sort(), [
-    "activeTurn", "agent", "mcp", "parts", "pendingInteractions",
+    "activeTurn", "agent", "goalVerification", "mcp", "parts", "pendingInteractions",
     "revision", "schemaVersion", "status",
   ]);
   assert.equal(runtime.schemaVersion, 1);
@@ -1189,14 +1217,24 @@ test("A4-3 Conversation browser projections bind providers, redact durable cards
   assert.equal(runtime.activeTurn.requestKey, "request_a4_read_only");
   assert.equal(runtime.activeTurn.canStop, false);
   assert.equal(runtime.activeTurn.canRetry, true);
+  assert.equal(runtime.goalVerification.disposition, "read_only");
+  assert.equal(
+    runtime.goalVerification.reasonCode,
+    "agent_read_only",
+  );
+  assert.equal(
+    runtime.goalVerification.evidence.ownerStateDigest,
+    undefined,
+  );
   assert.doesNotMatch(
     JSON.stringify(runtime),
-    /(?:externalSessionRef|sessionID|capability|rawToolPayload|\/Users\/)/u,
+    /(?:externalSessionRef|sessionID|capability|rawToolPayload|ownerStateDigest|\/Users\/)/u,
   );
+  assert.doesNotMatch(JSON.stringify(turnBody), /ownerStateDigest/u);
   const agentResponse = await fetch(
     `${baseUrl}/api/agents?ownerKind=model&ownerId=model_a4_api`,
     {
-    headers: readHeaders(session),
+      headers: readHeaders(session),
     },
   );
   assert.equal(agentResponse.status, 200, await agentResponse.clone().text());

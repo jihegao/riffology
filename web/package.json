@@ -16,6 +16,7 @@
     "test:e2e:a4-4": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-workspace.config.ts",
     "test:e2e:a4-5": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-recovery.config.ts",
     "test:e2e:a4-6": "npm run build && env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-exit.config.ts",
+    "test:e2e:issue-56-live": "npm run build && env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.issue-56-live.config.ts",
     "test:e2e:a3": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a3-product.config.ts",
     "test:e2e:a3-2b": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.visual.config.ts",
     "test:e2e:a3-2c4": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.visual-agent.config.ts"
