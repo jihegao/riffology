@@ -1056,7 +1056,11 @@ export class AgentWorkspaceService {
       return existing;
     }
     this.#assertOwnerExists(input.owner);
-    await this.#requireProviderModel(providerId, providerModelId);
+    await this.#requireProviderModel(
+      providerId,
+      providerModelId,
+      this.#workspaceBinding(input.owner),
+    );
     try {
       return this.store.createConversation({ id, owner: input.owner, name, providerId, providerModelId, createdAt: this.#now() });
     } catch (error) { throw storeApiError(error); }
@@ -1125,7 +1129,12 @@ export class AgentWorkspaceService {
     } catch (error) {
       throw storeApiError(error);
     }
-    await this.#requireProviderModel(providerId, providerModelId);
+    const conversation = this.getConversation(conversationId);
+    await this.#requireProviderModel(
+      providerId,
+      providerModelId,
+      this.#workspaceBinding(conversation.owner),
+    );
     try {
       return this.store.changeConversationProviderCommand({
         commandId,
@@ -1421,9 +1430,13 @@ export class AgentWorkspaceService {
     if (!exists) throw new ApiError(404, "resource_not_found", "The conversation owner does not exist.");
   }
 
-  async #requireProviderModel(providerId: string, modelId: string): Promise<void> {
+  async #requireProviderModel(
+    providerId: string,
+    modelId: string,
+    workspace?: OpenCodeWorkspaceBinding,
+  ): Promise<void> {
     let models: OpenCodeProviderModel[];
-    try { models = await this.openCode.discoverProviderModels(); }
+    try { models = await this.openCode.discoverProviderModels(workspace); }
     catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.code === "opencode_auth_failed")) throw new ApiError(503, "opencode_auth_failed", "OpenCode provider authentication is unavailable.");
       throw new ApiError(503, "opencode_unavailable", "OpenCode provider discovery is unavailable.");
