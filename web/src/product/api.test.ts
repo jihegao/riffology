@@ -257,7 +257,7 @@ describe("Product browser client", () => {
     });
 
     runtimeBody = {
-      ...runtimeBody,
+      ...(runtimeBody as Record<string, unknown>),
       parts: [{
         id: "assistant-one",
         kind: "text",
