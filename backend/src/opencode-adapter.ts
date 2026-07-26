@@ -125,6 +125,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   async #checkReadiness(
     workspace: OpenCodeWorkspaceBinding | undefined,
     verifyConfiguredModel: boolean,
+    signal?: AbortSignal,
   ): Promise<OpenCodeReadiness> {
     if (this.config.skipLive) {
       // Compatibility-only deterministic mode for the old component-test route.
@@ -150,7 +151,10 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       if (allowed.size && !allowed.has(binding.providerId)) {
         return this.#setReadinessError("opencode_provider_not_allowed", "The configured OpenCode provider is not approved.");
       }
-      const health = await this.#json("/global/health");
+      const health = await this.#json(
+        "/global/health",
+        signal ? { signal } : {},
+      );
       const version = openCodeVersion(health);
       if (health.healthy !== true || !version) {
         return this.#setReadinessError("opencode_unavailable", "The local OpenCode server did not report a healthy compatible version.");
@@ -158,7 +162,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       if (version !== expectedVersion) {
         return this.#setReadinessError("opencode_version_mismatch", "The local OpenCode server version does not match this Riff deployment.");
       }
-      const activePath = await this.#json("/path", {}, workdir);
+      const activePath = await this.#json(
+        "/path",
+        signal ? { signal } : {},
+        workdir,
+      );
       const activeWorkdir = openCodePath(activePath);
       if (!activeWorkdir) {
         return this.#setReadinessError("opencode_unavailable", "The local OpenCode server did not report its active directory.");
@@ -167,13 +175,14 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         return this.#setReadinessError("opencode_workdir_mismatch", "The local OpenCode server is running from a different directory.");
       }
       if (verifyConfiguredModel) {
-        const models = await this.#discoverProviderModelsUnchecked(workdir);
+        const models = await this.#discoverProviderModelsUnchecked(workdir, signal);
         const candidate = models.find((item) => item.providerId === binding.providerId && item.modelId === binding.modelId);
         if (!candidate) return this.#setReadinessError("opencode_model_unavailable", "The configured OpenCode model was not found in the live provider catalogue.");
       }
       this.#readiness = { status: "ready", modelId: `${binding.providerId}/${binding.modelId}`, version };
       return this.#readiness;
     } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return this.#setReadinessError(
         error instanceof ApiError && error.status === 401 ? "opencode_auth_failed" : "opencode_unavailable",
         error instanceof ApiError && error.status === 401 ? "OpenCode rejected the local server credential." : "The local OpenCode server is not reachable.",
@@ -186,9 +195,16 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return this.#discoverProviderModelsUnchecked(this.#workspaceDirectory(workspace));
   }
 
-  async #discoverProviderModelsUnchecked(directory?: string): Promise<OpenCodeProviderModel[]> {
+  async #discoverProviderModelsUnchecked(
+    directory?: string,
+    signal?: AbortSignal,
+  ): Promise<OpenCodeProviderModel[]> {
     this.#requireLiveBaseUrl();
-    const payload = await this.#json("/config/providers", {}, directory);
+    const payload = await this.#json(
+      "/config/providers",
+      signal ? { signal } : {},
+      directory,
+    );
     const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
     return discoveredProviderModels(payload).filter((item) => !allowed.size || allowed.has(item.providerId));
   }
@@ -282,7 +298,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         tools: this.#promptTools(prompt.scopedMcpScopeId, directory),
       }),
     }, directory);
-    return this.#waitForAssistant(sessionId, priorMessageIds, deadlineSignal, directory);
+    return this.#waitForAssistant(
+      sessionId,
+      priorMessageIds,
+      deadlineSignal,
+      directory,
+      workspace,
+    );
   }
 
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
@@ -507,6 +529,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     priorMessageIds: Set<string>,
     deadlineSignal: AbortSignal,
     directory: string,
+    workspace?: OpenCodeWorkspaceBinding,
   ): Promise<OpenCodeAssistantResponse> {
     let userMessageId: string | null = null;
     while (!deadlineSignal.aborted) {
@@ -519,8 +542,20 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       }
       const assistants = messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId);
       for (const assistant of assistants.toReversed()) {
-        if (assistant.info?.error) throw new ApiError(502, "opencode_prompt_failed", "OpenCode failed to complete the assistant response.");
-        try { return normalizedAssistantResponse(assistant); }
+        if (assistant.info?.error) {
+          await this.#ensureReady(workspace, deadlineSignal);
+          await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+          throw new ApiError(502, "opencode_prompt_failed", "OpenCode failed to complete the assistant response.");
+        }
+        try {
+          const candidate = normalizedAssistantResponse(assistant);
+          // A same-URL OpenCode restart can occur after prompt submission.
+          // Re-establish server and session identity only once a non-empty
+          // response is ready to return; tool-only streaming polls stay cheap.
+          await this.#ensureReady(workspace, deadlineSignal);
+          await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+          return candidate;
+        }
         catch (error) {
           if (!(error instanceof ApiError) || error.code !== "opencode_empty_response") throw error;
         }
@@ -570,8 +605,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return this.#baseUrl;
   }
 
-  async #ensureReady(workspace?: OpenCodeWorkspaceBinding): Promise<void> {
-    const readiness = await this.#checkReadiness(workspace, false);
+  async #ensureReady(
+    workspace?: OpenCodeWorkspaceBinding,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const readiness = await this.#checkReadiness(workspace, false, signal);
     if (readiness.status === "ready") return;
     throw new ApiError(
       503,

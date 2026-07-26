@@ -373,6 +373,198 @@ test("adapter waits past a tool-only assistant segment for the final text segmen
   assert.equal(polls, 3);
 });
 
+test("adapter revalidates server and session identity before accepting a polled reply", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-reply-drift-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  let version = "test";
+  let prompted = false;
+  let messageReads = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir,
+    expectedVersion: "test",
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") {
+        return Response.json({ healthy: true, version });
+      }
+      if (path === "/path") return Response.json({ directory: workdir });
+      if (path === "/config/providers") {
+        return Response.json({
+          providers: [{ id: "provider-z", models: { "model-2": {} } }],
+        });
+      }
+      if (path === "/session/opaque-session") {
+        return Response.json({ id: "opaque-session", directory: workdir });
+      }
+      if (path === "/session/opaque-session/prompt_async") {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/session/opaque-session/message") {
+        messageReads += 1;
+        if (!prompted) return Response.json([]);
+        version = "restarted-version";
+        return Response.json([
+          { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
+          { info: { id: "untrusted-reply", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "must not be accepted" }] },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path} ${init?.method ?? "GET"}`);
+    },
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  const workspace = {
+    owner: { kind: "model" as const, id: "model-owner" },
+    directory: workdir,
+  };
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "next", system: "bounded", attachments: [] },
+      undefined,
+      workspace,
+    ),
+    (error: any) => error.code === "opencode_version_mismatch",
+  );
+  assert.equal(messageReads, 2);
+});
+
+test("tool-only polling performs one final identity check instead of amplifying readiness traffic", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-tool-poll-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  let healthChecks = 0;
+  let pathChecks = 0;
+  let prompted = false;
+  let postPromptReads = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir,
+    expectedVersion: "test",
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") {
+        healthChecks += 1;
+        return Response.json({ healthy: true, version: "test" });
+      }
+      if (path === "/path") {
+        pathChecks += 1;
+        return Response.json({ directory: workdir });
+      }
+      if (path === "/config/providers") {
+        return Response.json({
+          providers: [{ id: "provider-z", models: { "model-2": {} } }],
+        });
+      }
+      if (path === "/session/opaque-session") {
+        return Response.json({ id: "opaque-session", directory: workdir });
+      }
+      if (path === "/session/opaque-session/prompt_async") {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/session/opaque-session/message") {
+        if (!prompted) return Response.json([]);
+        postPromptReads += 1;
+        return Response.json([
+          { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
+          postPromptReads < 4
+            ? { info: { id: "tool-only", role: "assistant", parentID: "new-user" }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] }
+            : { info: { id: "final-text", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "final answer" }] },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  const workspace = {
+    owner: { kind: "model" as const, id: "model-owner" },
+    directory: workdir,
+  };
+  const result = await adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "next", system: "bounded", attachments: [] },
+    undefined,
+    workspace,
+  );
+  assert.equal(result.text, "final answer");
+  assert.equal(postPromptReads, 4);
+  assert.equal(healthChecks, 3, "initialize, prompt admission, and final acceptance only");
+  assert.equal(pathChecks, 3, "initialize, prompt admission, and final acceptance only");
+});
+
+test("final reply identity revalidation inherits the turn abort signal", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-final-abort-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  const controller = new AbortController();
+  const cancelled = new Error("cancel final identity check");
+  let prompted = false;
+  let blockIdentity = false;
+  let inheritedTurnSignal = false;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir,
+    expectedVersion: "test",
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") {
+        if (!blockIdentity) {
+          return Response.json({ healthy: true, version: "test" });
+        }
+        inheritedTurnSignal = init?.signal === controller.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          const rejectCancelled = () => reject(signal?.reason ?? cancelled);
+          if (signal?.aborted) rejectCancelled();
+          else signal?.addEventListener("abort", rejectCancelled, { once: true });
+        });
+      }
+      if (path === "/path") return Response.json({ directory: workdir });
+      if (path === "/config/providers") {
+        return Response.json({
+          providers: [{ id: "provider-z", models: { "model-2": {} } }],
+        });
+      }
+      if (path === "/session/opaque-session") {
+        return Response.json({ id: "opaque-session", directory: workdir });
+      }
+      if (path === "/session/opaque-session/prompt_async") {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/session/opaque-session/message") {
+        if (!prompted) return Response.json([]);
+        blockIdentity = true;
+        return Response.json([
+          { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
+          { info: { id: "candidate", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "candidate answer" }] },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  const workspace = {
+    owner: { kind: "model" as const, id: "model-owner" },
+    directory: workdir,
+  };
+  const pending = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "next", system: "bounded", attachments: [] },
+    controller.signal,
+    workspace,
+  );
+  setTimeout(() => controller.abort(cancelled), 10);
+  await assert.rejects(pending, (error) => error === cancelled);
+  assert.equal(inheritedTurnSignal, true);
+});
+
 test("session manager reuses one available session per conversation", async () => {
   const repository = new MemoryRepository();
   repository.runtime.session = { generation: 3, state: "available", externalSessionRef: "external-one" };

@@ -1303,10 +1303,11 @@ export class AgentWorkspaceService {
     let prepared: PreparedAgentTurnRuntime | undefined;
     let scopedRelease: (() => void) | undefined;
     let mcpBound = false;
-    const workspace = this.#workspaceBinding(
-      this.store.getConversation(conversationId).owner,
-    );
+    let workspace: OpenCodeWorkspaceBinding | undefined;
     try {
+      workspace = this.#workspaceBinding(
+        this.store.getConversation(conversationId).owner,
+      );
       prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
       if (prepared?.requiresMcp) {
         if (!this.#scopedMcpUrl || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
@@ -1347,7 +1348,7 @@ export class AgentWorkspaceService {
       return { mode: "read_only", reason: asReadOnlyReason(code), turn, messages: this.store.listConversationMessages(conversationId) };
     } finally {
       prepared?.release();
-      if (mcpBound && prepared) {
+      if (mcpBound && prepared && workspace) {
         await this.openCode.unbindScopedMcp?.(conversationId, workspace)
           .catch(() => undefined);
       }

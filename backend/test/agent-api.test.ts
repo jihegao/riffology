@@ -419,6 +419,38 @@ test("an empty synchronous OpenCode response fails durably without assistant fab
   assert.equal(payload.messages[0].role, "user");
 });
 
+test("owner workspace resolution failure terminalizes and replays the durable turn", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-owner-workspace-failure-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "missing-owner-workspace");
+  const ownerRoot = app.productStore!.ownerWorkspaceRoot({
+    kind: "model",
+    id: created.model.id,
+  });
+  await rm(ownerRoot, { recursive: true, force: true });
+  const turnUrl = `${baseUrl}/api/conversations/${created.conversation.id}/turns`;
+  const request = {
+    requestKey: "missing-owner-workspace-turn",
+    text: "Do not leave this running.",
+    attachmentIds: [],
+  };
+
+  const response = await post(turnUrl, request);
+  assert.equal(response.status, 200);
+  const payload = await response.json() as any;
+  assert.equal(payload.mode, "read_only");
+  assert.equal(payload.turn.state, "failed");
+  assert.equal(payload.turn.failure.code, "agent_failed");
+  assert.equal(openCode.prompts.length, 0);
+
+  const replay = await post(turnUrl, request);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), payload);
+  assert.equal(openCode.prompts.length, 0);
+});
+
 test("Model workspace projection and technical-check start/read are digest-bound and path-safe", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "riff-a2-technical-check-"));
   const openCode = new ApiOpenCode();
