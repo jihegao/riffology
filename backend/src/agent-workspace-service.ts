@@ -1625,6 +1625,7 @@ export class AgentWorkspaceService {
         await this.openCode.bindScopedMcp(
           conversationId,
           this.#scopedMcpUrl(prepared.capability),
+          prepared.allowedTools,
           workspace,
         );
         mcpBound = true;
@@ -1641,6 +1642,7 @@ export class AgentWorkspaceService {
         active.controller.signal,
         prepared?.externalSessionGeneration ?? session.generation,
         agentName ?? undefined,
+        mcpBound ? prepared?.allowedTools : undefined,
       );
       if (active.controlState !== "open" || active.controller.signal.aborted) {
         throw new ApiError(

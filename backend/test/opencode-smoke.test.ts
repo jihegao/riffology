@@ -97,25 +97,33 @@ test("opt-in installed OpenCode 1.18.4 completes two scoped MCP tools before idl
   assert.equal((await adapter.initialize()).status, "ready");
 
   const scopeId = "turn_live_multi_tool_smoke";
-  await adapter.bindScopedMcp(scopeId, mcp.url);
+  const exactTools = [
+    "riff_list_model_workspace",
+    "riff_read_owner_summary",
+  ] as const;
+  await adapter.bindScopedMcp(scopeId, mcp.url, exactTools);
   const sessionId = await adapter.createSession("live-multi-tool-smoke");
   observedSessionId = sessionId;
   const operation = adapter.promptWithModel(sessionId, { providerId, modelId }, {
     system: [
       "This is a deterministic integration smoke.",
       "Use the two enabled scoped MCP tools and no other tools.",
-      "Call observe_phase exactly once, then call commit_phase exactly once.",
+      "Call riff_list_model_workspace exactly once, then call riff_read_owner_summary exactly once.",
       "Only after both tool results, return a short text confirmation.",
     ].join(" "),
     text: "Execute both required phases now.",
     attachments: [],
     scopedMcpScopeId: scopeId,
+    scopedMcpTools: exactTools,
   }).finally(() => { settledBeforeCanonicalIdle = !canonicalIdleObserved; });
   const response = await operation;
 
   assert.equal(settledBeforeCanonicalIdle, false, "the adapter must not settle before canonical replay observes exact-session idle");
   assert.ok(statusObservations.includes("busy") || statusObservations.includes("retry"), "the live turn must expose a non-terminal status");
-  assert.deepEqual(mcp.calls.map((call) => call.name), ["observe_phase", "commit_phase"]);
+  assert.deepEqual(mcp.calls.map((call) => call.name), [
+    "riff_list_model_workspace",
+    "riff_read_owner_summary",
+  ]);
   assert.match(response.text, /\S/u);
   assert.equal(mcp.calls.every((call) => call.completed), true, "both controlled MCP calls must reconcile before prompt completion");
 
@@ -193,12 +201,12 @@ const controlledMcpServer = async (t: any): Promise<{
         result: {
           tools: [
             {
-              name: "observe_phase",
+              name: "riff_list_model_workspace",
               description: "Required first phase. Observe the controlled live smoke state.",
               inputSchema: { type: "object", properties: {}, additionalProperties: false },
             },
             {
-              name: "commit_phase",
+              name: "riff_read_owner_summary",
               description: "Required second phase. Commit the controlled live smoke state after observation.",
               inputSchema: { type: "object", properties: {}, additionalProperties: false },
             },
