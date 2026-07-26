@@ -274,6 +274,23 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByTestId("workspace-owner-card")).toBe(ownerCard);
   });
 
+  it("does not report a nonexistent Conversation as busy", async () => {
+    history.replaceState({}, "", "/models/model-one");
+    const productClient = client();
+    productClient.workspace = vi.fn(async () => ({
+      ...workspace,
+      conversations: [],
+    }));
+    productClient.conversations = vi.fn(async () => []);
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("No active Conversations yet."))
+      .toBeInTheDocument();
+    await waitFor(() => expect(productClient.providers).toHaveBeenCalled());
+    expect(screen.getByText("Agent: connecting")).toBeInTheDocument();
+    expect(screen.queryByText("Agent: busy")).not.toBeInTheDocument();
+  });
+
   it("creates a Model from only its name and discovered provider/model", async () => {
     const user = userEvent.setup();
     const productClient = client();

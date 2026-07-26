@@ -190,7 +190,8 @@ export function ConversationPane({
     });
   };
 
-  const sending = sendingConversationId === selected?.id;
+  const sending = selected !== undefined
+    && sendingConversationId === selected.id;
   const status = conversationStatus(
     bundle?.conversation,
     providers,
