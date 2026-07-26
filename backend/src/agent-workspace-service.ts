@@ -14,7 +14,11 @@ import type {
   TemporaryDocumentCardDto,
 } from "./agent-domain.ts";
 import { createGenericModelScaffold } from "./model-workspace.ts";
-import type { OpenCodeConversationPort, OpenCodeProviderModel } from "./opencode-adapter.ts";
+import type {
+  OpenCodeConversationPort,
+  OpenCodeProviderModel,
+  OpenCodeWorkspaceBinding,
+} from "./opencode-adapter.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import {
   experimentConfigurationRecordDigest,
@@ -221,7 +225,12 @@ export class AgentWorkspaceService {
   ) {
     this.store = store;
     this.openCode = openCode;
-    this.#sessions = new AgentConversationSessionManager(store, openCode);
+    this.#sessions = new AgentConversationSessionManager(
+      store,
+      openCode,
+      (owner) => this.#workspaceBinding(owner),
+      {},
+    );
     this.#now = now;
     this.technicalChecks = new ModelTechnicalCheckService(store, technicalChecker, now);
     this.turnRuntime = turnRuntime;
@@ -1294,6 +1303,9 @@ export class AgentWorkspaceService {
     let prepared: PreparedAgentTurnRuntime | undefined;
     let scopedRelease: (() => void) | undefined;
     let mcpBound = false;
+    const workspace = this.#workspaceBinding(
+      this.store.getConversation(conversationId).owner,
+    );
     try {
       prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
       if (prepared?.requiresMcp) {
@@ -1305,7 +1317,11 @@ export class AgentWorkspaceService {
         // Only its short-lived capability URL rotates per turn. Some OpenCode
         // runtimes stop advancing a reused session when every turn introduces
         // an entirely new tool namespace.
-        await this.openCode.bindScopedMcp(conversationId, this.#scopedMcpUrl(prepared.capability));
+        await this.openCode.bindScopedMcp(
+          conversationId,
+          this.#scopedMcpUrl(prepared.capability),
+          workspace,
+        );
         mcpBound = true;
       }
       const context = this.#contextFor(conversationId, turn.userMessageId, prepared);
@@ -1331,9 +1347,21 @@ export class AgentWorkspaceService {
       return { mode: "read_only", reason: asReadOnlyReason(code), turn, messages: this.store.listConversationMessages(conversationId) };
     } finally {
       prepared?.release();
-      if (mcpBound && prepared) await this.openCode.unbindScopedMcp?.(conversationId).catch(() => undefined);
+      if (mcpBound && prepared) {
+        await this.openCode.unbindScopedMcp?.(conversationId, workspace)
+          .catch(() => undefined);
+      }
       scopedRelease?.();
     }
+  }
+
+  #workspaceBinding(
+    owner: { kind: "model" | "project"; id: string },
+  ): OpenCodeWorkspaceBinding {
+    return Object.freeze({
+      owner: Object.freeze({ ...owner }),
+      directory: this.store.ownerWorkspaceRoot(owner),
+    });
   }
 
   async #acquireScopedMcpTurn(): Promise<() => void> {

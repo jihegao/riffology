@@ -310,23 +310,27 @@ deterministic mode.
 
 ### OpenCode working-directory contract (Issue #56, PR 1)
 
-`OPENCODE_WORKDIR` is an absolute, canonical directory identity, not a browser
-path and not a permission grant. The startup contract distinguishes two
-profiles: a **developer repo-root** profile may use this repository root for
-local developer operation, while a **Product workspace** profile must use the
-exact server-owned Model or Project workspace for that owner. A normal Product
-Agent must not gain generic repository files or command authority merely because
-the developer profile exists.
+`OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
+separately managed OpenCode server, not a browser path and not a permission
+grant. A **developer repo-root** profile may use this repository root for local
+developer operation. Product Conversations do not inherit that root: the
+backend derives the current owner from durable Product state and scopes every
+session/message/control/MCP request with the exact server-owned Model workspace
+or Project `model-snapshot/` workspace. A normal Product Agent therefore cannot
+gain generic repository files or command authority merely because the developer
+profile exists.
 
 Live readiness requires all of the following from the configured loopback
 server: successful `/global/health`, an exact version equal to
-`OPENCODE_EXPECTED_VERSION` (the launcher defaults it to `1.18.4`), and `/path`
-resolving to the configured canonical work directory. The launcher must produce
-the same result regardless of its caller's current directory. A missing,
-non-directory, symlink-ambiguous, or `/path`-mismatched work directory, or an
-OpenCode version mismatch, is an explicit OpenCode read-only failure: Riff
-keeps direct Product controls available and does not silently substitute another
-directory or provider.
+`OPENCODE_EXPECTED_VERSION` (the launcher defaults it to `1.18.4`), and
+directory-scoped `/path` resolving to the requested canonical work directory.
+Riff repeats version/path identity checks before location-sensitive operations,
+so a server restarted at the same URL cannot retain cached authority after its
+version or workspace changes. The launcher produces the same valid default
+regardless of its caller's current directory. A missing, non-directory,
+symlink-ambiguous, or `/path`-mismatched directory, or a version mismatch, makes
+the Agent explicitly read-only; the Product still starts and keeps Home,
+resource, and direct Run controls available.
 
 This is only the Issue #56 PR 1 startup/server contract. Native session
 busy-to-idle completion, streamed Conversation projection, tool/Playwright

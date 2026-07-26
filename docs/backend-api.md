@@ -5,7 +5,7 @@
 - Scope: implemented Stage 2 through A4-5 HTTP/API, startup/recovery boundaries,
   and retained legacy API history
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
-- Last reviewed: 2026-07-25
+- Last reviewed: 2026-07-26
 
 The passed A4-6 local cumulative gate and continuous Chromium exit cover
 browser admission, same-root restart, and provider-down read-only projection
@@ -15,25 +15,29 @@ Merge and the merged-revision rerun remain before Issue closure; see
 
 ## OpenCode startup/readiness contract (Issue #56 PR 1)
 
-`OPENCODE_WORKDIR` is server-side configuration. It names one explicit,
-absolute, canonical directory and is never accepted from the browser or
-returned by an API DTO. The launcher resolves it independently of the shell
-directory from which it was invoked. A developer repo-root profile is limited
-to local developer operation; a normal Product Agent profile must instead bind
-OpenCode to the exact server-owned Model or Project workspace. Selecting the
-former does not authorize a Product Agent to read, write, or run against
-product-source files.
+`OPENCODE_WORKDIR` is server-side configuration for the OpenCode server's
+explicit absolute canonical default profile. It is never accepted from the
+browser or returned by an API DTO. The launcher resolves a valid value
+independently of the shell directory from which it was invoked. A developer
+repo-root profile is limited to local developer operation. Each normal Product
+Conversation is instead bound from its durable owner to the canonical Model
+workspace or Project `model-snapshot/` workspace, and that directory is attached
+to all location-sensitive OpenCode requests. Selecting the developer profile
+does not authorize a Product Agent to read, write, or run against product-source
+files.
 
 When live OpenCode is enabled, the backend considers the adapter ready only
 after loopback reachability and `/global/health`, an exact health version equal
 to configured `OPENCODE_EXPECTED_VERSION` (the launcher default is `1.18.4`),
-and `/path` whose canonical directory equals configured `OPENCODE_WORKDIR`.
-Credentials, the raw `/path` value, and server process details remain
-backend-only. Any missing path, non-directory, unsafe symlink resolution,
-version mismatch, or path mismatch yields the existing explicit OpenCode
-read-only state; Riff must not infer the caller's cwd, choose a different
-directory, or silently fall back to another provider. Direct Product resource
-and Run controls remain independent of this Agent read-only state.
+and directory-scoped `/path` whose canonical directory equals the server-derived
+owner workspace. Riff repeats these identity checks before session reuse,
+creation, prompting, abort, event, and MCP operations; cached readiness is not a
+continuing grant after a same-URL restart. Credentials, raw paths, owner
+bindings, and server process details remain backend-only. Any missing path,
+non-directory, unsafe symlink resolution, version mismatch, or path mismatch
+yields explicit Agent read-only state. The launcher still starts the Product
+when `OPENCODE_WORKDIR` is invalid, and Home, resource, and direct Run controls
+remain independent of Agent readiness.
 
 This contract deliberately does not change turn completion semantics. Native
 session lifecycle/event handling, streamed parts and UI controls, tool-layer

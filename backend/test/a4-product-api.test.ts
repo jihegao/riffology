@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -227,6 +227,26 @@ test("invalid live OpenCode configuration keeps Product health, Home, and direct
 
   await app.initialize();
   addFixtureData(app);
+  assert.equal(
+    app.productStore!.ownerWorkspaceRoot({
+      kind: "model",
+      id: "model_a4_api",
+    }),
+    await realpath(join(productRoot, "objects", "models", "model_a4_api")),
+  );
+  assert.equal(
+    app.productStore!.ownerWorkspaceRoot({
+      kind: "project",
+      id: "project_a4_api",
+    }),
+    await realpath(join(
+      productRoot,
+      "objects",
+      "projects",
+      "project_a4_api",
+      "model-snapshot",
+    )),
+  );
   const network = await app.listenBrowserNetwork();
   const baseUrl = network.app.origin;
   const health = await fetch(`${baseUrl}/health`);

@@ -411,7 +411,15 @@ test("OpenCode adapter creates a fresh session for every synchronous bounded cha
       if (path === "/global/health") return Response.json({ healthy: true, version: "1.2.3" });
       if (path === "/path") return Response.json({ directory: workspace });
       if (path === "/config/providers") return Response.json({ providers: [{ id: "deepseek", models: { v4: {} } }] });
-      if (path === "/session") return Response.json({ id: `internal-session-${++createdSessions}` });
+      if (path === "/session") {
+        return Response.json({
+          id: `internal-session-${++createdSessions}`,
+          directory: workspace,
+        });
+      }
+      if (path === "/session/internal-session-1" && init?.method === "GET") {
+        return Response.json({ id: "internal-session-1", directory: workspace });
+      }
       if (path === "/session/internal-session-1/message" && init?.method === "POST") return Response.json({ id: "assistant-message" });
       return new Response(null, { status: 404 });
     },

@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentConversationSessionManager, type AgentSessionRepositoryPort, type DurableConversationRuntime } from "../src/agent-session-manager.ts";
 import type { AgentContextInput } from "../src/agent-context.ts";
-import { HttpOpenCodeAdapter, type OpenCodeConfig, type OpenCodeConversationPort, type OpenCodePrompt, type OpenCodeProviderModel } from "../src/opencode-adapter.ts";
+import {
+  HttpOpenCodeAdapter,
+  type OpenCodeConfig,
+  type OpenCodeConversationPort,
+  type OpenCodePrompt,
+  type OpenCodeProviderModel,
+  type OpenCodeWorkspaceBinding,
+} from "../src/opencode-adapter.ts";
 
 const context = (conversationId = "conversation-a"): AgentContextInput => ({
   conversationId,
@@ -14,6 +21,10 @@ const context = (conversationId = "conversation-a"): AgentContextInput => ({
   messages: [{ id: "message-a", conversationId, ordinal: 0, role: "user", status: "complete", text: "Inspect the model" }],
   sensitiveValues: ["external-one", "external-two"],
 });
+
+const testWorkspaceForOwner = (
+  owner: DurableConversationRuntime["owner"],
+): OpenCodeWorkspaceBinding => ({ owner, directory: tmpdir() });
 
 class MemoryRepository implements AgentSessionRepositoryPort {
   runtime: DurableConversationRuntime = {
@@ -48,14 +59,23 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
   injected: Array<{ sessionId: string; context: string }> = [];
   prompts: Array<{ sessionId: string; binding: { providerId: string; modelId: string }; prompt: OpenCodePrompt }> = [];
   aborted: string[] = [];
+  workspaces: Array<OpenCodeWorkspaceBinding | undefined> = [];
   createDelay?: Promise<void>;
   failDiscovery?: Error;
   failCreate?: Error;
   failPrompt?: Error;
 
-  async discoverProviderModels() { if (this.failDiscovery) throw this.failDiscovery; return this.catalogue; }
-  async getSession(sessionId: string) { return this.existing.has(sessionId); }
-  async createSession(conversationId: string) {
+  async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding) {
+    this.workspaces.push(workspace);
+    if (this.failDiscovery) throw this.failDiscovery;
+    return this.catalogue;
+  }
+  async getSession(sessionId: string, workspace?: OpenCodeWorkspaceBinding) {
+    this.workspaces.push(workspace);
+    return this.existing.has(sessionId);
+  }
+  async createSession(conversationId: string, workspace?: OpenCodeWorkspaceBinding) {
+    this.workspaces.push(workspace);
     if (this.createDelay) await this.createDelay;
     if (this.failCreate) throw this.failCreate;
     const id = `external-${this.created.length + 1}`;
@@ -63,12 +83,30 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
     this.existing.add(id);
     return id;
   }
-  async injectContext(sessionId: string, value: string) { this.injected.push({ sessionId, context: value }); }
-  async promptWithModel(sessionId: string, binding: { providerId: string; modelId: string }, prompt: OpenCodePrompt) {
+  async injectContext(
+    sessionId: string,
+    value: string,
+    _signal?: AbortSignal,
+    workspace?: OpenCodeWorkspaceBinding,
+  ) {
+    this.workspaces.push(workspace);
+    this.injected.push({ sessionId, context: value });
+  }
+  async promptWithModel(
+    sessionId: string,
+    binding: { providerId: string; modelId: string },
+    prompt: OpenCodePrompt,
+    _signal?: AbortSignal,
+    workspace?: OpenCodeWorkspaceBinding,
+  ) {
+    this.workspaces.push(workspace);
     this.prompts.push({ sessionId, binding, prompt });
     if (this.failPrompt) throw this.failPrompt;
   }
-  async abort(sessionId: string) { this.aborted.push(sessionId); }
+  async abort(sessionId: string, workspace?: OpenCodeWorkspaceBinding) {
+    this.workspaces.push(workspace);
+    this.aborted.push(sessionId);
+  }
 }
 
 const readyAdapter = async (t: any, config: OpenCodeConfig): Promise<HttpOpenCodeAdapter> => {
@@ -91,6 +129,9 @@ const readyAdapter = async (t: any, config: OpenCodeConfig): Promise<HttpOpenCod
         const providerId = model.slice(0, slash);
         const modelId = model.slice(slash + 1);
         return Response.json({ providers: [{ id: providerId, models: { [modelId]: {} } }] });
+      }
+      if (path === "/session/opaque-session") {
+        return Response.json({ id: "opaque-session", directory: workdir });
       }
       return behavior(input, init);
     },
@@ -132,7 +173,10 @@ test("ready adapter refuses redirects and never follows a cross-host location", 
   });
   assert.equal((await adapter.initialize()).status, "ready");
   await assert.rejects(() => adapter.discoverProviderModels(), (error: any) => error.code === "opencode_redirect_forbidden");
-  assert.deepEqual(calls.map((call) => new URL(call.url).pathname), ["/global/health", "/path", "/config/providers", "/config/providers"]);
+  assert.deepEqual(calls.map((call) => new URL(call.url).pathname), [
+    "/global/health", "/path", "/config/providers",
+    "/global/health", "/path", "/config/providers",
+  ]);
   assert.equal(calls.every((call) => call.redirect === "manual"), true);
   assert.equal(calls.every((call) => /^http:\/\/127\.0\.0\.1:4096\//u.test(call.url)), true);
 });
@@ -334,7 +378,7 @@ test("session manager reuses one available session per conversation", async () =
   repository.runtime.session = { generation: 3, state: "available", externalSessionRef: "external-one" };
   const openCode = new FakeConversationOpenCode();
   openCode.existing.add("external-one");
-  const manager = new AgentConversationSessionManager(repository, openCode);
+  const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
   const first = await manager.prompt("conversation-a", context(), "first");
   const second = await manager.prompt("conversation-a", context(), "second");
   assert.equal(first.mode, "live");
@@ -347,13 +391,202 @@ test("session manager reuses one available session per conversation", async () =
   ]);
 });
 
+test("session manager derives one backend-only workspace binding from the durable owner", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "riff-owner-workspace-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const repository = new MemoryRepository();
+  const openCode = new FakeConversationOpenCode();
+  const workspace = Object.freeze({
+    owner: Object.freeze({ kind: "model" as const, id: "model-a" }),
+    directory,
+  });
+  const manager = new AgentConversationSessionManager(
+    repository,
+    openCode,
+    (owner) => {
+      assert.deepEqual(owner, workspace.owner);
+      return workspace;
+    },
+    {},
+  );
+
+  await manager.prompt("conversation-a", context(), "Inspect the model");
+  assert.equal(openCode.workspaces.length >= 4, true);
+  assert.equal(openCode.workspaces.every((value) => value === workspace), true);
+});
+
+test("adapter scopes Product sessions and controls to the server-derived owner directory", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "riff-opencode-owner-scope-"));
+  const defaultDirectory = join(root, "default");
+  const modelDirectory = join(root, "model");
+  const projectDirectory = join(root, "project");
+  await Promise.all([
+    mkdir(defaultDirectory),
+    mkdir(modelDirectory),
+    mkdir(projectDirectory),
+  ]);
+  const modelCanonical = await realpath(modelDirectory);
+  const projectCanonical = await realpath(projectDirectory);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls: Array<{ path: string; directory: string | null; method: string }> = [];
+  let misdirectCreatedSession = false;
+  let projectPrompted = false;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir: defaultDirectory,
+    expectedVersion: "test",
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      calls.push({
+        path: url.pathname,
+        directory: url.searchParams.get("directory"),
+        method: init?.method ?? "GET",
+      });
+      if (url.pathname === "/global/health") {
+        return Response.json({ healthy: true, version: "test" });
+      }
+      if (url.pathname === "/path") {
+        return Response.json({ directory: url.searchParams.get("directory") });
+      }
+      if (url.pathname === "/config/providers") {
+        return Response.json({
+          providers: [{ id: "provider-z", models: { "model-2": {} } }],
+        });
+      }
+      if (url.pathname === "/session" && init?.method === "POST") {
+        return Response.json({
+          id: url.searchParams.get("directory") === modelCanonical
+            ? "session-model"
+            : "session-project",
+          directory: misdirectCreatedSession
+            ? projectCanonical
+            : url.searchParams.get("directory"),
+        });
+      }
+      if (url.pathname === "/session/session-model") {
+        return Response.json({ id: "session-model", directory: modelCanonical });
+      }
+      if (url.pathname === "/session/session-project") {
+        return Response.json({
+          id: "session-project",
+          directory: projectCanonical,
+        });
+      }
+      if (url.pathname === "/session/session-project/message") {
+        return Response.json(projectPrompted ? [
+          { info: { id: "project-user", role: "user" }, parts: [{ type: "text", text: "inspect" }] },
+          { info: { id: "project-assistant", role: "assistant", parentID: "project-user" }, parts: [{ type: "text", text: "scoped answer" }] },
+        ] : []);
+      }
+      if (url.pathname === "/session/session-project/prompt_async") {
+        projectPrompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.startsWith("/session/")) {
+        return Response.json({});
+      }
+      if (url.pathname === "/mcp" || url.pathname.includes("/mcp/")) {
+        return Response.json({});
+      }
+      if (url.pathname === "/event") {
+        return new Response(new ReadableStream({
+          start(controller) { controller.close(); },
+        }), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      throw new Error(`unexpected OpenCode endpoint ${url.pathname}`);
+    },
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  const modelWorkspace = {
+    owner: { kind: "model" as const, id: "model-owner" },
+    directory: modelDirectory,
+  };
+  const projectWorkspace = {
+    owner: { kind: "project" as const, id: "project-owner" },
+    directory: projectDirectory,
+  };
+
+  assert.equal(
+    await adapter.createSession("conversation-model", modelWorkspace),
+    "session-model",
+  );
+  assert.equal(
+    await adapter.createSession("conversation-project", projectWorkspace),
+    "session-project",
+  );
+  assert.equal(await adapter.getSession("session-model", modelWorkspace), true);
+  assert.equal(await adapter.getSession("session-model", projectWorkspace), false);
+  misdirectCreatedSession = true;
+  await assert.rejects(
+    () => adapter.createSession("conversation-misdirected", modelWorkspace),
+    (error: any) => error.code === "opencode_session_workspace_mismatch",
+  );
+  misdirectCreatedSession = false;
+  const wrongOwnerStart = calls.length;
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "session-model",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "must not cross owners", system: "bounded", attachments: [] },
+      undefined,
+      projectWorkspace,
+    ),
+    (error: any) => error.code === "opencode_session_workspace_mismatch",
+  );
+  await assert.rejects(
+    () => adapter.abort("session-model", projectWorkspace),
+    (error: any) => error.code === "opencode_session_workspace_mismatch",
+  );
+  const wrongOwnerCalls = calls.slice(wrongOwnerStart);
+  assert.equal(wrongOwnerCalls.some((call) =>
+    call.path === "/session/session-model/message"
+      || call.path === "/session/session-model/prompt_async"
+      || call.path === "/session/session-model/abort"), false);
+
+  const assistant = await adapter.promptWithModel(
+    "session-project",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "inspect", system: "bounded", attachments: [] },
+    undefined,
+    projectWorkspace,
+  );
+  assert.equal(assistant.text, "scoped answer");
+  await adapter.abort("session-project", projectWorkspace);
+  await adapter.bindScopedMcp(
+    "conversation-model",
+    "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    modelWorkspace,
+  );
+  await adapter.unbindScopedMcp("conversation-model", modelWorkspace);
+  const unsubscribe = await adapter.subscribeEvents(
+    () => undefined,
+    modelWorkspace,
+  );
+  unsubscribe();
+
+  const locationCalls = calls.filter((call) =>
+    call.path.startsWith("/session") || call.path.startsWith("/mcp"));
+  assert.equal(locationCalls.length > 0, true);
+  assert.equal(locationCalls.every((call) =>
+    call.directory === modelCanonical || call.directory === projectCanonical), true);
+  assert.equal(locationCalls.some((call) => call.directory === modelCanonical), true);
+  assert.equal(locationCalls.some((call) => call.directory === projectCanonical), true);
+  assert.equal(calls.filter((call) => call.path === "/global/health")
+    .every((call) => call.directory === null), true);
+  assert.equal(calls.some((call) =>
+    call.path === "/event" && call.directory === modelCanonical), true);
+});
+
 test("a failed prompt retires its session before the next turn rebuilds", async () => {
   const repository = new MemoryRepository();
   repository.runtime.session = { generation: 3, state: "available", externalSessionRef: "external-one" };
   const openCode = new FakeConversationOpenCode();
   openCode.existing.add("external-one");
   openCode.failPrompt = new Error("timed out after OpenCode accepted the prompt");
-  const manager = new AgentConversationSessionManager(repository, openCode);
+  const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
 
   const failed = await manager.prompt("conversation-a", context(), "first");
   assert.deepEqual(failed, { mode: "read_only", conversationId: "conversation-a", reason: "opencode_unavailable", retryable: true });
@@ -373,7 +606,7 @@ test("a failed prompt retires its session before the next turn rebuilds", async 
 test("a second named conversation receives an independent external session", async () => {
   const repository = new MemoryRepository();
   const openCode = new FakeConversationOpenCode();
-  const manager = new AgentConversationSessionManager(repository, openCode);
+  const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
   const first = await manager.ensureSession("conversation-a", context("conversation-a"));
   repository.runtime = {
     conversationId: "conversation-b",
@@ -394,7 +627,12 @@ test("missing external session is marked lost and rebuilt with bounded Riff cont
   const repository = new MemoryRepository();
   repository.runtime.session = { generation: 4, state: "available", externalSessionRef: "external-one" };
   const openCode = new FakeConversationOpenCode();
-  const manager = new AgentConversationSessionManager(repository, openCode, { maxBytes: 512 });
+  const manager = new AgentConversationSessionManager(
+    repository,
+    openCode,
+    testWorkspaceForOwner,
+    { maxBytes: 512 },
+  );
   const result = await manager.ensureSession("conversation-a", context());
   assert.equal(result.mode, "live");
   if (result.mode !== "live") return;
@@ -413,7 +651,7 @@ test("concurrent preparation for one conversation creates only one external sess
   const openCode = new FakeConversationOpenCode();
   let release!: () => void;
   openCode.createDelay = new Promise<void>((resolve) => { release = resolve; });
-  const manager = new AgentConversationSessionManager(repository, openCode);
+  const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
   const first = manager.ensureSession("conversation-a", context());
   const second = manager.ensureSession("conversation-a", context());
   release();
@@ -430,7 +668,11 @@ test("missing exact provider/model and rebuild failure yield stable read-only wi
     const repository = new MemoryRepository();
     const openCode = new FakeConversationOpenCode();
     openCode.catalogue = [...catalogue];
-    const result = await new AgentConversationSessionManager(repository, openCode).prompt("conversation-a", context(), "must not be sent");
+    const result = await new AgentConversationSessionManager(
+      repository,
+      openCode,
+      testWorkspaceForOwner,
+    ).prompt("conversation-a", context(), "must not be sent");
     assert.deepEqual(result, { mode: "read_only", conversationId: "conversation-a", reason, retryable: true });
     assert.equal(openCode.created.length, 0);
     assert.equal(openCode.prompts.length, 0);
@@ -438,7 +680,11 @@ test("missing exact provider/model and rebuild failure yield stable read-only wi
   const repository = new MemoryRepository();
   const openCode = new FakeConversationOpenCode();
   openCode.failCreate = new Error("down");
-  const result = await new AgentConversationSessionManager(repository, openCode).prompt("conversation-a", context(), "must not be sent");
+  const result = await new AgentConversationSessionManager(
+    repository,
+    openCode,
+    testWorkspaceForOwner,
+  ).prompt("conversation-a", context(), "must not be sent");
   assert.deepEqual(result, { mode: "read_only", conversationId: "conversation-a", reason: "session_rebuild_failed", retryable: true });
   assert.equal(openCode.prompts.length, 0);
   assert.equal(repository.failed.length, 1);

@@ -823,6 +823,17 @@ export class ProductStoreV2 {
     this.#closed = true;
   }
 
+  /** Backend-only canonical workspace for one durable Model/Project owner. */
+  ownerWorkspaceRoot(owner: Extract<ResourceOwner, { kind: "model" | "project" }>): string {
+    this.#assertOpen();
+    if (owner.kind === "project") {
+      return this.projectExecutionCapability(owner.id).workspace.root;
+    }
+    const root = this.#objects.ownerRoot(owner);
+    this.#objects.listOwnerFiles(owner);
+    return realpathSync(root);
+  }
+
   createModel(input: CreateModelInput): ModelRecord {
     this.#assertOpen();
     assertId(input.id);

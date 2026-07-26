@@ -146,7 +146,7 @@ test("failed mandatory readiness gates every live OpenCode surface without netwo
   assert.equal(requests, 0);
 });
 
-test("launcher exports one canonical default workdir from different caller directories and rejects a relative override", async (t) => {
+test("launcher canonicalizes valid workdirs and preserves invalid overrides for Agent-only read-only degradation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "riff-opencode-launcher-"));
   const tools = join(root, "tools");
   const nested = join(root, "unrelated", "nested");
@@ -162,10 +162,85 @@ test("launcher exports one canonical default workdir from different caller direc
     await runLauncher(cwd, { RIFF_CAPTURE: capture, PATH: `${tools}:/usr/bin:/bin`, RIFF_MODEL_PYTHON: process.execPath });
     assert.equal((await readFile(capture, "utf8")).trim(), expected);
   }
+  const invalidFile = join(root, "not-a-directory");
+  await writeFile(invalidFile, "not a workspace\n");
+  for (const [name, invalid] of [
+    ["relative", "relative/workspace"],
+    ["missing", join(root, "missing")],
+    ["file", invalidFile],
+  ]) {
+    const capture = join(root, `capture-${name}`);
+    await runLauncher(nested, {
+      RIFF_CAPTURE: capture,
+      PATH: `${tools}:/usr/bin:/bin`,
+      RIFF_MODEL_PYTHON: process.execPath,
+      OPENCODE_WORKDIR: invalid,
+      RIFF_SKIP_OPENCODE: "false",
+    });
+    assert.equal((await readFile(capture, "utf8")).trim(), invalid);
+  }
+});
+
+test("a ready adapter revalidates version and directory before reusing a session", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "riff-opencode-drift-"));
+  const workspace = join(root, "workspace");
+  const driftedWorkspace = join(root, "drifted");
+  await Promise.all([mkdir(workspace), mkdir(driftedWorkspace)]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let version = "1.18.4";
+  let reportedDirectory = workspace;
+  let sessionRequests = 0;
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir: workspace,
+    expectedVersion: "1.18.4",
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/global/health") {
+        return Response.json({ healthy: true, version });
+      }
+      if (url.pathname === "/path") {
+        return Response.json({ directory: reportedDirectory });
+      }
+      if (url.pathname === "/config/providers") {
+        return Response.json({
+          providers: [{ id: "provider-z", models: { "model-2": {} } }],
+        });
+      }
+      if (url.pathname === "/session/opaque-session") {
+        sessionRequests += 1;
+        return Response.json({
+          id: "opaque-session",
+          directory: reportedDirectory,
+        });
+      }
+      throw new Error(`unexpected OpenCode endpoint ${url.pathname}`);
+    },
+  });
+
+  assert.equal((await adapter.initialize()).status, "ready");
+  assert.equal(await adapter.getSession("opaque-session"), true);
+  assert.equal(sessionRequests, 1);
+
+  version = "1.19.0";
   await assert.rejects(
-    () => runLauncher(nested, { RIFF_CAPTURE: join(root, "relative"), PATH: `${tools}:/usr/bin:/bin`, RIFF_MODEL_PYTHON: process.execPath, OPENCODE_WORKDIR: "relative/workspace" }),
-    /OPENCODE_WORKDIR must be an absolute (?:existing )?directory/u,
+    () => adapter.getSession("opaque-session"),
+    (error: any) => error.code === "opencode_version_mismatch",
   );
+  assert.equal(sessionRequests, 1);
+
+  version = "1.18.4";
+  reportedDirectory = driftedWorkspace;
+  await assert.rejects(
+    () => adapter.getSession("opaque-session"),
+    (error: any) => error.code === "opencode_workdir_mismatch",
+  );
+  assert.equal(sessionRequests, 1);
+
+  reportedDirectory = workspace;
+  assert.equal(await adapter.getSession("opaque-session"), true);
+  assert.equal(sessionRequests, 2);
 });
 
 test("OpenCode readiness requires healthy versioned server and matching canonical path before provider discovery", async (t) => {

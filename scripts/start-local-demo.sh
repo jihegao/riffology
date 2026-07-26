@@ -21,21 +21,20 @@ export RIFF_VISUAL_BROKER_PORT="${RIFF_VISUAL_BROKER_PORT:-8788}"
 export RIFF_MODEL_PYTHON="${RIFF_MODEL_PYTHON:-$ROOT_DIR/mesa_service/.venv/bin/python}"
 export OPENCODE_EXPECTED_VERSION="${OPENCODE_EXPECTED_VERSION:-1.18.4}"
 
-# OpenCode is a separately managed loopback service, so its process directory
-# cannot be inferred from this script's caller. Resolve it once, after .env is
-# loaded, and pass the canonical directory to the backend for /path readiness.
-# Only an omitted value receives the developer repo-root default; a configured
-# value must already be absolute so it cannot inherit the caller's $PWD.
+# OpenCode is a separately managed loopback service, so its default profile
+# directory cannot be inferred from this script's caller. Resolve a valid value
+# after .env is loaded. Product Conversations are scoped separately by their
+# durable owner. An invalid override is preserved for stable Agent-only
+# read-only projection; it must not prevent Product Home/direct controls.
 OPENCODE_WORKDIR="${OPENCODE_WORKDIR:-$ROOT_DIR}"
 if [[ "$OPENCODE_WORKDIR" != /* ]]; then
-  echo "OPENCODE_WORKDIR must be an absolute directory: $OPENCODE_WORKDIR" >&2
-  exit 1
+  echo "Warning: invalid OPENCODE_WORKDIR; Agent will start read-only." >&2
+elif [[ ! -d "$OPENCODE_WORKDIR" ]]; then
+  echo "Warning: missing OPENCODE_WORKDIR; Agent will start read-only." >&2
+else
+  OPENCODE_WORKDIR="$(cd "$OPENCODE_WORKDIR" && pwd -P)"
 fi
-if [[ ! -d "$OPENCODE_WORKDIR" ]]; then
-  echo "OPENCODE_WORKDIR must name an existing directory: $OPENCODE_WORKDIR" >&2
-  exit 1
-fi
-export OPENCODE_WORKDIR="$(cd "$OPENCODE_WORKDIR" && pwd -P)"
+export OPENCODE_WORKDIR
 
 if [[ ! -x "$RIFF_MODEL_PYTHON" ]]; then
   echo "Riff Demo requires an executable approved Model runtime at $RIFF_MODEL_PYTHON" >&2
