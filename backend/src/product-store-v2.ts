@@ -7385,6 +7385,10 @@ export class ProductStoreV2 {
         "model_unavailable",
         "session_validation_failed",
         "session_rebuild_failed",
+        "opencode_session_aborted",
+        "opencode_session_error",
+        "opencode_session_generation_changed",
+        "opencode_prompt_timeout",
         "empty_assistant_response",
         "opencode_mcp_unavailable",
       ]);

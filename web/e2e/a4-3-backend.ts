@@ -65,7 +65,7 @@ implements OpenCodeAdapter, OpenCodeConversationPort {
     return {
       messageId: `fixture-message-${++this.#sequence}`,
       text: `Assistant (${binding.providerId}/${binding.modelId}) retained: ${prompt.text}`,
-      content: { source: "opencode", textParts: 1 },
+      content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
     };
   }
 

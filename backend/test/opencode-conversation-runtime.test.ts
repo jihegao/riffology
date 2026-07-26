@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { AgentConversationSessionManager, type AgentSessionRepositoryPort, type DurableConversationRuntime } from "../src/agent-session-manager.ts";
 import type { AgentContextInput } from "../src/agent-context.ts";
+import { ApiError } from "../src/errors.ts";
 import {
   HttpOpenCodeAdapter,
   type OpenCodeConfig,
@@ -109,7 +110,11 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
   }
 }
 
-const readyAdapter = async (t: any, config: OpenCodeConfig): Promise<HttpOpenCodeAdapter> => {
+const readyAdapter = async (
+  t: any,
+  config: OpenCodeConfig,
+  sessionStatus?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): Promise<HttpOpenCodeAdapter> => {
   const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-ready-adapter-"));
   t.after(() => rm(workdir, { recursive: true, force: true }));
   const behavior = config.fetch ?? fetch;
@@ -133,12 +138,32 @@ const readyAdapter = async (t: any, config: OpenCodeConfig): Promise<HttpOpenCod
       if (path === "/session/opaque-session") {
         return Response.json({ id: "opaque-session", directory: workdir });
       }
+      if (path === "/session/status") return sessionStatus ? sessionStatus(input, init) : Response.json({});
       return behavior(input, init);
     },
   });
   assert.equal((await adapter.initialize()).status, "ready");
   return adapter;
 };
+
+const remainsPending = async (operation: Promise<unknown>, milliseconds = 25): Promise<boolean> =>
+  Promise.race([
+    operation.then(() => false, () => false),
+    new Promise<true>((resolve) => setTimeout(() => resolve(true), milliseconds)),
+  ]);
+
+const waitUntil = async (predicate: () => boolean, label: string, timeoutMs = 2_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}.`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+
+const writeSse = (
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  event: Record<string, unknown>,
+): void => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
 
 test("adapter accepts only credential-free loopback HTTP base URLs", () => {
   assert.doesNotThrow(() => new HttpOpenCodeAdapter({ baseUrl: "http://127.0.0.1:4096" }));
@@ -240,7 +265,7 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
       }
       return Response.json(prompted ? [
         { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "hello" }] },
-        { info: { id: "ok", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "assistant answer" }] },
+        { info: { id: "ok", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [{ type: "text", text: "assistant answer" }] },
       ] : []);
     },
   });
@@ -265,7 +290,7 @@ test("adapter reuses one OpenCode session across turns with server-generated use
         const userId = `server-user-${promptNumber}`;
         messages.push(
           { info: { id: userId, role: "user" }, parts: body.parts },
-          { info: { id: `assistant-${promptNumber}`, role: "assistant", parentID: userId }, parts: [{ type: "text", text: `answer-${promptNumber}` }] },
+          { info: { id: `assistant-${promptNumber}`, role: "assistant", parentID: userId, time: { completed: promptNumber } }, parts: [{ type: "text", text: `answer-${promptNumber}` }] },
         );
         return new Response(null, { status: 204 });
       }
@@ -292,7 +317,7 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
       if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
       return Response.json(prompted ? [
         { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "change" }] },
-        { info: { id: "ok", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "scoped answer" }] },
+        { info: { id: "ok", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [{ type: "text", text: "scoped answer" }] },
       ] : []);
     },
   });
@@ -339,7 +364,7 @@ test("adapter ignores a stale assistant and waits for the response parented to t
       polls += 1;
       const messages: any[] = [{ info: { id: "stale", role: "assistant", parentID: "older-user" }, parts: [{ type: "text", text: "old answer" }] }];
       if (prompted) messages.push({ info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "next" }] });
-      if (polls > 2) messages.push({ info: { id: "fresh", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "new answer" }] });
+      if (polls > 2) messages.push({ info: { id: "fresh", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [{ type: "text", text: "new answer" }] });
       return Response.json(messages);
     },
   });
@@ -361,16 +386,512 @@ test("adapter waits past a tool-only assistant segment for the final text segmen
       polls += 1;
       const messages: any[] = prompted ? [
         { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
-        { info: { id: "tool-segment", role: "assistant", parentID: "server-user" }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] },
+        { info: { id: "tool-segment", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [
+          { type: "tool", tool: "riff_read_owner_summary", state: { status: "completed" } },
+        ] },
       ] : [];
-      if (polls > 2) messages.push({ info: { id: "final-segment", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "final answer" }] });
+      if (polls > 2) messages.push({ info: { id: "final-segment", role: "assistant", parentID: "server-user", time: { completed: 2 } }, parts: [{ type: "text", text: "final answer" }] });
       return Response.json(messages);
     },
-  });
+  }, async () => Response.json({ "opaque-session": { type: polls > 2 ? "idle" : "busy" } }));
   const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "next", system: "bounded", attachments: [] });
   assert.equal(result.text, "final answer");
   assert.equal(result.messageId, "final-segment");
-  assert.equal(polls, 3);
+  assert.ok(polls >= 3, "terminal replay may perform one final canonical message read");
+});
+
+test("first assistant text cannot complete while the target session is busy or retrying, and all tool phases aggregate after idle", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let statusPolls = 0;
+  let observeBusy!: () => void;
+  const busyObserved = new Promise<void>((resolve) => { observeBusy = resolve; });
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        return Response.json([
+          { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "change it" }] },
+          { info: { id: "assistant-phase-1", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [
+            { type: "text", text: "I will inspect the workspace." },
+            { type: "tool", callID: "tool-1", tool: "riff_list_model_workspace", state: { status: "completed" } },
+          ] },
+          ...(terminal ? [{ info: { id: "assistant-phase-2", role: "assistant", parentID: "server-user", time: { completed: 2 } }, parts: [
+            { type: "tool", callID: "tool-2", tool: "riff_apply_model_changes", state: { status: "completed" } },
+            { type: "text", text: "The model change is committed." },
+          ] }] : []),
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => {
+    if (!prompted) return Response.json({});
+    statusPolls += 1;
+    if (!terminal) {
+      observeBusy();
+      return Response.json({ unrelated_session: { type: "idle" }, "opaque-session": { type: statusPolls % 2 ? "busy" : "retry" } });
+    }
+    return Response.json({ unrelated_session: { type: "busy" }, "opaque-session": { type: "idle" } });
+  });
+
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "change it", system: "bounded", attachments: [] },
+  );
+  const firstOutcome = await Promise.race([operation.then(() => "settled", () => "settled"), busyObserved.then(() => "busy")]);
+  assert.equal(firstOutcome, "busy", "the first assistant text must not settle the turn before target-session status is terminal");
+  assert.equal(await remainsPending(operation), true);
+  terminal = true;
+  const result = await operation;
+  assert.equal(result.text, "I will inspect the workspace.\nThe model change is committed.");
+  assert.equal(result.content.textParts, 2);
+  assert.deepEqual(result.content.parts, [
+    { ordinal: 0, kind: "text", state: "complete" },
+    { ordinal: 1, kind: "tool", state: "complete", toolName: "riff_list_model_workspace" },
+    { ordinal: 2, kind: "tool", state: "complete", toolName: "riff_apply_model_changes" },
+    { ordinal: 3, kind: "text", state: "complete" },
+  ]);
+  assert.equal(result.messageId, "assistant-phase-2");
+  assert.ok(statusPolls >= 1);
+});
+
+test("retry with an errored attempt stays nonterminal and accepts the later successful attempt", async (t) => {
+  let prompted = false;
+  let allowSuccess = false;
+  let observedRetry!: () => void;
+  const retryObserved = new Promise<void>((resolve) => { observedRetry = resolve; });
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "retry" }] },
+        {
+          info: {
+            id: "failed-attempt",
+            role: "assistant",
+            parentID: "server-user",
+            error: { name: "ProviderError", data: { message: "private retry detail" } },
+          },
+          parts: [],
+        },
+        ...(allowSuccess ? [{
+          info: {
+            id: "successful-attempt",
+            role: "assistant",
+            parentID: "server-user",
+            time: { completed: 2 },
+          },
+          parts: [{ type: "text", text: "retry succeeded" }],
+        }] : []),
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => {
+    if (!prompted) return Response.json({});
+    if (!allowSuccess) {
+      observedRetry();
+      return Response.json({ "opaque-session": { type: "retry" } });
+    }
+    return Response.json({ "opaque-session": { type: "idle" } });
+  });
+
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "retry", system: "bounded", attachments: [] },
+  );
+  await retryObserved;
+  assert.equal(await remainsPending(operation), true);
+  allowSuccess = true;
+  const result = await operation;
+  assert.equal(result.text, "retry succeeded");
+  assert.doesNotMatch(JSON.stringify(result.content), /private retry detail/u);
+});
+
+test("idle waits for terminal tool evidence and persists only a bounded redacted part summary", async (t) => {
+  let prompted = false;
+  let toolComplete = false;
+  let observedRunning!: () => void;
+  const runningObserved = new Promise<void>((resolve) => { observedRunning = resolve; });
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        if (!toolComplete) observedRunning();
+        return Response.json([
+          { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "change" }] },
+          {
+            info: { id: "assistant", role: "assistant", parentID: "server-user", time: { completed: 1 } },
+            parts: [
+              { id: "text-1", type: "text", text: "change committed" },
+              {
+                id: "tool-1",
+                type: "tool",
+                tool: "riff_apply_model_changes",
+                state: {
+                  status: toolComplete ? "completed" : "running",
+                  input: { workspacePath: "/private/owner", secret: "must-not-persist" },
+                  output: "private tool output",
+                },
+              },
+            ],
+          },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: "idle" } } : {}));
+
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "change", system: "bounded", attachments: [] },
+  );
+  await runningObserved;
+  assert.equal(await remainsPending(operation), true);
+  toolComplete = true;
+  const result = await operation;
+  assert.deepEqual(result.content.parts, [
+    { ordinal: 0, kind: "text", state: "complete" },
+    { ordinal: 1, kind: "tool", state: "complete", toolName: "riff_apply_model_changes" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(result.content), /workspacePath|must-not-persist|private tool output/u);
+});
+
+test("idle rejects a failed tool part with a stable session error", async (t) => {
+  let prompted = false;
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [] },
+        {
+          info: { id: "assistant", role: "assistant", parentID: "server-user", time: { completed: 1 } },
+          parts: [
+            { type: "text", text: "not terminal success" },
+            { type: "tool", tool: "riff_apply_model_changes", state: { status: "error", error: "private" } },
+          ],
+        },
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: "idle" } } : {}));
+
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "change", system: "bounded", attachments: [] },
+    ),
+    (error: any) => error.code === "opencode_session_error"
+      && !error.message.includes("private"),
+  );
+});
+
+test("durable assistant part evidence rejects an oversized terminal replay", async (t) => {
+  let prompted = false;
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [] },
+        {
+          info: { id: "assistant", role: "assistant", parentID: "server-user", time: { completed: 1 } },
+          parts: [
+            { type: "text", text: "bounded terminal answer" },
+            ...Array.from({ length: 512 }, (_, index) => ({
+              id: `tool-${index}`,
+              type: "tool",
+              tool: "riff_read_owner_summary",
+              state: { status: "completed" },
+            })),
+          ],
+        },
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: "idle" } } : {}));
+
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "inspect", system: "bounded", attachments: [] },
+    ),
+    (error: any) => error.code === "opencode_response_too_large",
+  );
+});
+
+test("an absent target status does not complete until the new assistant message itself is complete", async (t) => {
+  let prompted = false;
+  let assistantComplete = false;
+  let observeMissing!: () => void;
+  const missingObserved = new Promise<void>((resolve) => { observeMissing = resolve; });
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        { info: { id: "assistant", role: "assistant", parentID: "server-user", time: assistantComplete ? { completed: 1 } : {} }, parts: [{ type: "text", text: "complete only after reconciliation" }] },
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => { if (prompted) observeMissing(); return Response.json({ unrelated_session: { type: "idle" } }); });
+  const operation = adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "continue", system: "bounded", attachments: [] });
+  const firstOutcome = await Promise.race([operation.then(() => "settled", () => "settled"), missingObserved.then(() => "missing")]);
+  assert.equal(firstOutcome, "missing");
+  assert.equal(await remainsPending(operation), true);
+  assistantComplete = true;
+  assert.equal((await operation).text, "complete only after reconciliation");
+});
+
+test("transient status reconnects, duplicate messages are deduped, and late unrelated generations are ignored", async (t) => {
+  let prompted = false;
+  let statusPolls = 0;
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "late-user", role: "user" }, parts: [{ type: "text", text: "older generation" }] },
+        { info: { id: "late-assistant", role: "assistant", parentID: "late-user", time: { completed: 1 } }, parts: [{ id: "late-part", type: "text", text: "late old answer" }] },
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "current generation" }] },
+        { info: { id: "fresh-assistant", role: "assistant", parentID: "server-user", time: {} }, parts: [{ id: "fresh-part", type: "text", text: "partial answer" }] },
+        { info: { id: "fresh-assistant", role: "assistant", parentID: "server-user", time: { completed: 2 } }, parts: [{ id: "fresh-part", type: "text", text: "fresh answer" }] },
+      ] : [
+        { info: { id: "late-user", role: "user" }, parts: [{ type: "text", text: "older generation" }] },
+        { info: { id: "late-assistant", role: "assistant", parentID: "late-user", time: { completed: 1 } }, parts: [{ id: "late-part", type: "text", text: "late old answer" }] },
+      ]);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => {
+    statusPolls += 1;
+    if (statusPolls === 1) return Response.json({ error: { code: "server_restarting" } }, { status: 503 });
+    if (statusPolls === 2) return Response.json({ retired_session: { type: "idle" }, "opaque-session": { type: "busy" } });
+    return Response.json({ retired_session: { type: "busy" }, "opaque-session": { type: "idle" } });
+  });
+  const result = await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "current generation", system: "bounded", attachments: [] });
+  assert.equal(result.text, "fresh answer");
+  assert.equal(result.content.textParts, 1);
+  assert.equal(result.messageId, "fresh-assistant");
+  assert.ok(statusPolls >= 3);
+});
+
+test("managed /event reconnect filters duplicate, late, and unrelated events while canonical replay gates idle and cleanup", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let messagePolls = 0;
+  let eventRequests = 0;
+  const order: string[] = [];
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+  const signals: AbortSignal[] = [];
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 2_000,
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/event") {
+        eventRequests += 1;
+        order.push(`event:${eventRequests}`);
+        const signal = init?.signal;
+        if (!(signal instanceof AbortSignal)) throw new Error("missing managed event signal");
+        signals.push(signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllers.push(controller);
+            signal.addEventListener("abort", () => {
+              try { controller.close(); } catch { /* deterministic disconnect may have closed it */ }
+            }, { once: true });
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }
+      if (path.endsWith("/prompt_async")) {
+        order.push("prompt");
+        prompted = true;
+        for (const event of [
+          { id: "early-error", type: "session.error", properties: { sessionID: "opaque-session", error: { name: "ToolExecutionError" } } },
+          { id: "late-other", type: "session.error", properties: { sessionID: "retired-session", error: { name: "ToolExecutionError" } } },
+          { id: "duplicate", type: "session.status", properties: { sessionID: "opaque-session", status: { type: "busy" } } },
+          { id: "duplicate", type: "session.status", properties: { sessionID: "opaque-session", status: { type: "idle" } } },
+        ]) writeSse(controllers[0], event);
+        await new Promise((resolve) => setImmediate(resolve));
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        messagePolls += 1;
+        return Response.json([
+          { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "current" }] },
+          { info: { id: "assistant", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [{ type: "text", text: "canonical replay wins" }] },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? {
+    "opaque-session": { type: terminal ? "idle" : "busy" },
+    "retired-session": { type: "idle" },
+  } : {}));
+
+  const operation = adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
+    text: "current", system: "bounded", attachments: [],
+  });
+  await waitUntil(() => messagePolls > 0 && controllers.length === 1, "initial replay");
+  assert.deepEqual(order.slice(0, 2), ["event:1", "prompt"]);
+  assert.equal(await remainsPending(operation), true, "pre-arm error and first complete text cannot bypass target busy");
+  controllers[0].close();
+  await waitUntil(() => eventRequests === 2 && controllers.length === 2, "event reconnect");
+  writeSse(controllers[1], { id: "idle-accelerator", type: "session.idle", properties: { sessionID: "opaque-session" } });
+  assert.equal(await remainsPending(operation), true, "idle event cannot override canonical busy");
+  terminal = true;
+  writeSse(controllers[1], {
+    id: "idle-after-replay",
+    type: "session.status",
+    properties: { sessionID: "opaque-session", status: { type: "idle" } },
+  });
+  assert.equal((await operation).text, "canonical replay wins");
+  assert.equal(signals.every((signal) => signal.aborted), true);
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(eventRequests, 2, "terminal cleanup must prevent late reconnect");
+});
+
+test("managed /event never attributes a delayed exact-session error to the current turn without canonical evidence", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let messagePolls = 0;
+  let eventRequests = 0;
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+  const signals: AbortSignal[] = [];
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 2_000,
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/event") {
+        eventRequests += 1;
+        const signal = init?.signal;
+        if (!(signal instanceof AbortSignal)) throw new Error("missing managed event signal");
+        signals.push(signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllers.push(controller);
+            signal.addEventListener("abort", () => {
+              try { controller.close(); } catch { /* already closed */ }
+            }, { once: true });
+          },
+        }));
+      }
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        messagePolls += 1;
+        return Response.json([
+          { info: { id: "server-user", role: "user" }, parts: [] },
+          {
+            info: {
+              id: "assistant",
+              role: "assistant",
+              parentID: "server-user",
+              time: terminal ? { completed: 1 } : {},
+            },
+            parts: [{ type: "text", text: terminal ? "current turn succeeds" : "partial" }],
+          },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: terminal ? "idle" : "busy" } } : {}));
+
+  const operation = adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
+    text: "current", system: "bounded", attachments: [],
+  });
+  await waitUntil(() => messagePolls > 0, "new-user replay");
+  writeSse(controllers[0], {
+    id: "target-error",
+    type: "session.error",
+    properties: { sessionID: "opaque-session", error: { name: "ToolExecutionError", data: { message: "private" } } },
+  });
+  assert.equal(await remainsPending(operation), true,
+    "a delayed prior-turn error with a new event ID cannot be associated to the current user message");
+  writeSse(controllers[0], {
+    id: "target-error",
+    type: "session.error",
+    properties: { sessionID: "opaque-session", error: { name: "MessageAbortedError" } },
+  });
+  terminal = true;
+  writeSse(controllers[0], {
+    id: "current-idle",
+    type: "session.idle",
+    properties: { sessionID: "opaque-session" },
+  });
+  assert.equal((await operation).text, "current turn succeeds");
+  assert.equal(eventRequests, 1);
+  assert.equal(signals[0].aborted, true);
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(eventRequests, 1);
+});
+
+test("assistant abort and session errors map to stable terminal failures", async (t) => {
+  for (const [errorName, code] of [
+    ["MessageAbortedError", "opencode_session_aborted"],
+    ["ToolExecutionError", "opencode_session_error"],
+  ] as const) {
+    let prompted = false;
+    const adapter = await readyAdapter(t, {
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+        if (path.endsWith("/message")) return Response.json(prompted ? [
+          { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+          { info: { id: `assistant-${errorName}`, role: "assistant", parentID: "server-user", error: { name: errorName, data: { message: "private upstream detail" } } }, parts: [] },
+        ] : []);
+        throw new Error(`unexpected OpenCode endpoint ${path}`);
+      },
+    }, async () => Response.json(prompted ? { "opaque-session": { type: "idle" } } : {}));
+    await assert.rejects(
+      () => adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "continue", system: "bounded", attachments: [] }),
+      (error: any) => error.code === code && !error.message.includes("private upstream detail"),
+    );
+  }
+});
+
+test("a permanently busy target session times out with a stable bounded failure", async (t) => {
+  let prompted = false;
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 40,
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        { info: { id: "assistant-first-text", role: "assistant", parentID: "server-user" }, parts: [{ type: "text", text: "still working" }] },
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: "busy" } } : {}));
+  await assert.rejects(
+    () => adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "continue", system: "bounded", attachments: [] }),
+    (error: any) => error.code === "opencode_prompt_timeout",
+  );
 });
 
 test("adapter revalidates server and session identity before accepting a polled reply", async (t) => {
@@ -402,13 +923,16 @@ test("adapter revalidates server and session identity before accepting a polled 
         prompted = true;
         return new Response(null, { status: 204 });
       }
+      if (path === "/session/status") {
+        return Response.json(prompted ? { "opaque-session": { type: "idle" } } : {});
+      }
       if (path === "/session/opaque-session/message") {
         messageReads += 1;
         if (!prompted) return Response.json([]);
         version = "restarted-version";
         return Response.json([
           { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
-          { info: { id: "untrusted-reply", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "must not be accepted" }] },
+          { info: { id: "untrusted-reply", role: "assistant", parentID: "new-user", time: { completed: 1 } }, parts: [{ type: "text", text: "must not be accepted" }] },
         ]);
       }
       throw new Error(`unexpected OpenCode endpoint ${path} ${init?.method ?? "GET"}`);
@@ -432,7 +956,7 @@ test("adapter revalidates server and session identity before accepting a polled 
   assert.equal(messageReads, 2);
 });
 
-test("tool-only polling performs one final identity check instead of amplifying readiness traffic", async (t) => {
+test("completed tool evidence survives a later abbreviated replay and performs one final identity check", async (t) => {
   const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-tool-poll-"));
   t.after(() => rm(workdir, { recursive: true, force: true }));
   let healthChecks = 0;
@@ -466,14 +990,20 @@ test("tool-only polling performs one final identity check instead of amplifying 
         prompted = true;
         return new Response(null, { status: 204 });
       }
+      if (path === "/session/status") {
+        return Response.json(prompted ? { "opaque-session": { type: "idle" } } : {});
+      }
       if (path === "/session/opaque-session/message") {
         if (!prompted) return Response.json([]);
         postPromptReads += 1;
         return Response.json([
           { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
           postPromptReads < 4
-            ? { info: { id: "tool-only", role: "assistant", parentID: "new-user" }, parts: [{ type: "tool", tool: "riff_read_owner_summary" }] }
-            : { info: { id: "final-text", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "final answer" }] },
+            ? {
+              info: { id: "tool-only", role: "assistant", parentID: "new-user", time: { completed: postPromptReads } },
+              parts: [{ type: "tool", tool: "riff_read_owner_summary", state: { status: "completed" } }],
+            }
+            : { info: { id: "final-text", role: "assistant", parentID: "new-user", time: { completed: 4 } }, parts: [{ type: "text", text: "final answer" }] },
         ]);
       }
       throw new Error(`unexpected OpenCode endpoint ${path}`);
@@ -495,6 +1025,51 @@ test("tool-only polling performs one final identity check instead of amplifying 
   assert.equal(postPromptReads, 4);
   assert.equal(healthChecks, 3, "initialize, prompt admission, and final acceptance only");
   assert.equal(pathChecks, 3, "initialize, prompt admission, and final acceptance only");
+});
+
+test("a running tool that disappears from replay cannot be mistaken for terminal success", async (t) => {
+  let prompted = false;
+  let messageReads = 0;
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 80,
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        messageReads += 1;
+        return Response.json([
+          { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
+          ...(messageReads === 1 ? [{
+            info: { id: "tool-only", role: "assistant", parentID: "new-user", time: { completed: 1 } },
+            parts: [{
+              id: "running-tool",
+              type: "tool",
+              tool: "riff_read_owner_summary",
+              state: { status: "running" },
+            }],
+          }] : [{
+            info: { id: "final-text", role: "assistant", parentID: "new-user", time: { completed: 2 } },
+            parts: [{ type: "text", text: "must not be accepted" }],
+          }]),
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted ? { "opaque-session": { type: "idle" } } : {}));
+
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "next", system: "bounded", attachments: [] },
+    ),
+    (error: any) => error.code === "opencode_prompt_timeout",
+  );
+  assert.ok(messageReads >= 2);
 });
 
 test("final reply identity revalidation inherits the turn abort signal", async (t) => {
@@ -537,12 +1112,15 @@ test("final reply identity revalidation inherits the turn abort signal", async (
         prompted = true;
         return new Response(null, { status: 204 });
       }
+      if (path === "/session/status") {
+        return Response.json(prompted ? { "opaque-session": { type: "idle" } } : {});
+      }
       if (path === "/session/opaque-session/message") {
         if (!prompted) return Response.json([]);
         blockIdentity = true;
         return Response.json([
           { info: { id: "new-user", role: "user" }, parts: [{ type: "text", text: "next" }] },
-          { info: { id: "candidate", role: "assistant", parentID: "new-user" }, parts: [{ type: "text", text: "candidate answer" }] },
+          { info: { id: "candidate", role: "assistant", parentID: "new-user", time: { completed: 1 } }, parts: [{ type: "text", text: "candidate answer" }] },
         ]);
       }
       throw new Error(`unexpected OpenCode endpoint ${path}`);
@@ -561,7 +1139,10 @@ test("final reply identity revalidation inherits the turn abort signal", async (
     workspace,
   );
   setTimeout(() => controller.abort(cancelled), 10);
-  await assert.rejects(pending, (error) => error === cancelled);
+  await assert.rejects(
+    pending,
+    (error: any) => error.code === "opencode_session_aborted",
+  );
   assert.equal(inheritedTurnSignal, true);
 });
 
@@ -668,7 +1249,7 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
       if (url.pathname === "/session/session-project/message") {
         return Response.json(projectPrompted ? [
           { info: { id: "project-user", role: "user" }, parts: [{ type: "text", text: "inspect" }] },
-          { info: { id: "project-assistant", role: "assistant", parentID: "project-user" }, parts: [{ type: "text", text: "scoped answer" }] },
+          { info: { id: "project-assistant", role: "assistant", parentID: "project-user", time: { completed: 1 } }, parts: [{ type: "text", text: "scoped answer" }] },
         ] : []);
       }
       if (url.pathname === "/session/session-project/prompt_async") {
@@ -793,6 +1374,47 @@ test("a failed prompt retires its session before the next turn rebuilds", async 
   assert.equal(recovered.mode, "live");
   assert.deepEqual(openCode.prompts.map((item) => item.sessionId), ["external-one", "external-1"]);
   assert.equal(repository.activated.at(-1)?.generation, 4);
+});
+
+test("session manager maps lifecycle timeout and session error to durable read-only reasons before retiring the generation", async () => {
+  for (const code of ["opencode_prompt_timeout", "opencode_session_error"] as const) {
+    const repository = new MemoryRepository();
+    repository.runtime.session = { generation: 7, state: "available", externalSessionRef: "external-one" };
+    const openCode = new FakeConversationOpenCode();
+    openCode.existing.add("external-one");
+    openCode.failPrompt = new ApiError(504, code, "bounded lifecycle failure");
+    const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
+
+    assert.deepEqual(await manager.prompt("conversation-a", context(), "continue"), {
+      mode: "read_only", conversationId: "conversation-a", reason: code, retryable: true,
+    });
+    assert.deepEqual(openCode.aborted, ["external-one"]);
+    assert.equal(repository.lost[0]?.reason, `prompt_failed:${code}`);
+    assert.equal(repository.runtime.session?.state, "lost");
+  }
+});
+
+test("caller abort is rethrown only after the exact session generation is aborted and retired", async () => {
+  const repository = new MemoryRepository();
+  repository.runtime.session = { generation: 9, state: "available", externalSessionRef: "external-one" };
+  const openCode = new FakeConversationOpenCode();
+  openCode.existing.add("external-one");
+  openCode.failPrompt = new ApiError(409, "opencode_session_aborted", "caller stopped the target session");
+  const manager = new AgentConversationSessionManager(repository, openCode, testWorkspaceForOwner);
+  const controller = new AbortController();
+  controller.abort(new Error("caller stop"));
+
+  await assert.rejects(
+    () => manager.prompt("conversation-a", context(), "stop", [], undefined, controller.signal),
+    (error: any) => error.code === "opencode_session_aborted",
+  );
+  assert.deepEqual(openCode.aborted, ["external-one"]);
+  assert.deepEqual(repository.lost, [{
+    conversationId: "conversation-a",
+    generation: 9,
+    expectedExternalSessionRef: "external-one",
+    reason: "prompt_failed:opencode_session_aborted",
+  }]);
 });
 
 test("a second named conversation receives an independent external session", async () => {

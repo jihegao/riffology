@@ -28,7 +28,16 @@ export type OpenCodeProviderModel = {
 export type OpenCodeAssistantResponse = {
   messageId: string | null;
   text: string;
-  content: { source: "opencode"; textParts: number };
+  content: {
+    source: "opencode";
+    textParts: number;
+    parts: Array<{
+      ordinal: number;
+      kind: "text" | "tool";
+      state: "complete";
+      toolName?: string;
+    }>;
+  };
 };
 
 export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Record<string, unknown> };
@@ -282,29 +291,46 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     const parts = [{ type: "text", text: `${prompt.text}\n\nAttachments:\n${attachmentText || "(none)"}` }];
     const deadlineSignal = signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
     const directory = this.#workspaceDirectory(workspace);
-    await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
-    const before = await this.#sessionMessages(sessionId, deadlineSignal, directory);
-    const priorMessageIds = new Set(before.map(messageId).filter((id): id is string => Boolean(id)));
-    // OpenCode treats `directory` as routing context rather than an ownership
-    // boundary, so revalidate immediately before the prompt side effect.
-    await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
-    await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
-      method: "POST",
-      signal: deadlineSignal,
-      body: JSON.stringify({
-        model,
-        system: prompt.system,
-        parts,
-        tools: this.#promptTools(prompt.scopedMcpScopeId, directory),
-      }),
-    }, directory);
-    return this.#waitForAssistant(
-      sessionId,
-      priorMessageIds,
-      deadlineSignal,
-      directory,
-      workspace,
-    );
+    let lifecycle: OpenCodeTurnEventSupervisor | undefined;
+    try {
+      await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+      const before = await this.#sessionMessages(sessionId, deadlineSignal, directory);
+      const priorMessageIds = new Set(before.map(messageId).filter((id): id is string => Boolean(id)));
+      lifecycle = this.#startTurnEventSupervisor(
+        sessionId,
+        deadlineSignal,
+        directory,
+      );
+      // OpenCode treats `directory` as routing context rather than an ownership
+      // boundary, so revalidate immediately before the prompt side effect.
+      await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+      await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+        method: "POST",
+        signal: deadlineSignal,
+        body: JSON.stringify({
+          model,
+          system: prompt.system,
+          parts,
+          tools: this.#promptTools(prompt.scopedMcpScopeId, directory),
+        }),
+      }, directory);
+      lifecycle.arm();
+      return await this.#waitForAssistantUntilIdle(
+        sessionId,
+        priorMessageIds,
+        deadlineSignal,
+        lifecycle,
+        directory,
+        workspace,
+      );
+    } catch (error) {
+      if (!deadlineSignal.aborted) throw error;
+      throw signal
+        ? new ApiError(409, "opencode_session_aborted", "The target OpenCode session turn was cancelled.")
+        : new ApiError(504, "opencode_prompt_timeout", "OpenCode did not complete the target session turn in time.");
+    } finally {
+      lifecycle?.close();
+    }
   }
 
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
@@ -524,45 +550,129 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return Array.isArray(result.payload) ? result.payload : [];
   }
 
-  async #waitForAssistant(
+  async #sessionStatus(
+    sessionId: string,
+    signal: AbortSignal,
+    directory: string,
+  ): Promise<"busy" | "retry" | "idle"> {
+    const result = await this.#request(
+      "/session/status",
+      { method: "GET", signal },
+      directory,
+    );
+    if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+    const statuses = result.payload;
+    if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) {
+      throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an invalid session status payload.");
+    }
+    // OpenCode removes idle sessions from this map. Own-property lookup avoids
+    // treating an opaque session ID such as "constructor" as inherited state.
+    if (!Object.prototype.hasOwnProperty.call(statuses, sessionId)) return "idle";
+    const type = statuses[sessionId]?.type;
+    if (type === "busy" || type === "retry" || type === "idle") return type;
+    throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an invalid target session status.");
+  }
+
+  async #waitForAssistantUntilIdle(
     sessionId: string,
     priorMessageIds: Set<string>,
     deadlineSignal: AbortSignal,
+    lifecycle: OpenCodeTurnEventSupervisor,
     directory: string,
     workspace?: OpenCodeWorkspaceBinding,
   ): Promise<OpenCodeAssistantResponse> {
     let userMessageId: string | null = null;
+    let failureBoundaryId: string | null = null;
+    const toolEvidence = new AssistantToolEvidenceTracker();
     while (!deadlineSignal.aborted) {
-      const messages = await this.#sessionMessages(sessionId, deadlineSignal, directory);
-      userMessageId ??= messageId(messages.find((entry: any) => entry?.info?.role === "user"
-        && !priorMessageIds.has(messageId(entry) ?? "")));
-      if (!userMessageId) {
+      let status: "busy" | "retry" | "idle";
+      let messages: any[];
+      try {
+        status = await this.#sessionStatus(sessionId, deadlineSignal, directory);
+        messages = await this.#sessionMessages(sessionId, deadlineSignal, directory);
+      } catch (error) {
+        if (deadlineSignal.aborted) throw deadlineSignal.reason ?? error;
+        if (!retryableLifecyclePollError(error)) throw error;
         await abortableDelay(50, deadlineSignal);
         continue;
       }
-      const assistants = messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId);
-      for (const assistant of assistants.toReversed()) {
-        if (assistant.info?.error) {
-          await this.#ensureReady(workspace, deadlineSignal);
-          await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
-          throw new ApiError(502, "opencode_prompt_failed", "OpenCode failed to complete the assistant response.");
+      userMessageId ??= messageId(messages.find((entry: any) => entry?.info?.role === "user"
+        && !priorMessageIds.has(messageId(entry) ?? "")));
+      if (!userMessageId) {
+        await lifecycle.wait(50, deadlineSignal);
+        continue;
+      }
+      lifecycle.observeUser();
+      const assistants = uniqueMessages(messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId));
+      const lastFailureIndex = assistants.findLastIndex(
+        (assistant: any) => Boolean(assistant.info?.error),
+      );
+      const existingBoundaryIndex = failureBoundaryId === null
+        ? -1
+        : assistants.findIndex((assistant) => messageId(assistant) === failureBoundaryId);
+      if (lastFailureIndex >= 0
+        && (failureBoundaryId === null
+          || existingBoundaryIndex >= 0 && lastFailureIndex > existingBoundaryIndex)) {
+        const observedBoundary = messageId(assistants[lastFailureIndex]);
+        if (!observedBoundary) {
+          throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an assistant error without a stable message ID.");
         }
-        try {
-          const candidate = normalizedAssistantResponse(assistant);
-          // A same-URL OpenCode restart can occur after prompt submission.
-          // Re-establish server and session identity only once a non-empty
-          // response is ready to return; tool-only streaming polls stay cheap.
-          await this.#ensureReady(workspace, deadlineSignal);
-          await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
-          return candidate;
-        }
-        catch (error) {
-          if (!(error instanceof ApiError) || error.code !== "opencode_empty_response") throw error;
+        if (observedBoundary !== failureBoundaryId) {
+          failureBoundaryId = observedBoundary;
+          toolEvidence.clear();
         }
       }
-      await abortableDelay(50, deadlineSignal);
+      const boundaryIndex = failureBoundaryId === null
+        ? -1
+        : assistants.findIndex((assistant) => messageId(assistant) === failureBoundaryId);
+      // Once a failed attempt has been observed, a later canonical replay must
+      // retain that boundary. Otherwise Riff cannot prove which tool parts
+      // belong to the post-retry attempt and must keep waiting fail-closed.
+      const replayHasFailureBoundary = failureBoundaryId === null || boundaryIndex >= 0;
+      const currentAttempt = replayHasFailureBoundary
+        ? assistants.slice(boundaryIndex + 1)
+        : [];
+      toolEvidence.observe(currentAttempt);
+      // Text is only a streaming observation while the target session remains
+      // busy/retrying. Idle (including an absent status-map entry) is terminal
+      // only after OpenCode marks the final post-retry sequence complete.
+      if (status === "idle" && assistants.length > 0 && replayHasFailureBoundary) {
+        if (failureBoundaryId !== null && currentAttempt.length === 0) {
+          await this.#ensureReady(workspace, deadlineSignal);
+          await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+          throw assistantFailure(assistants[boundaryIndex].info.error);
+        }
+        if (currentAttempt.length > 0
+          && currentAttempt.every(completedAssistant)) {
+          const toolState = toolEvidence.state();
+          if (toolState === "failed") {
+            await this.#ensureReady(workspace, deadlineSignal);
+            await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+            throw new ApiError(
+              502,
+              "opencode_session_error",
+              "OpenCode reported a failed tool call for the target session turn.",
+            );
+          }
+          if (toolState === "complete") {
+            try {
+              const response = normalizedAssistantResponses(
+                currentAttempt,
+                toolEvidence.completed(),
+              );
+              await this.#ensureReady(workspace, deadlineSignal);
+              await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+              return response;
+            } catch (error) {
+              if (!(error instanceof ApiError)
+                || error.code !== "opencode_empty_response") throw error;
+            }
+          }
+        }
+      }
+      await lifecycle.wait(50, deadlineSignal);
     }
-    throw deadlineSignal.reason ?? new ApiError(504, "opencode_prompt_timeout", "OpenCode did not complete the assistant response in time.");
+    throw new ApiError(504, "opencode_prompt_timeout", "OpenCode did not complete the target session turn in time.");
   }
 
   async #request(
@@ -640,9 +750,168 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return normalizeOpenCodeWorkdir(raw);
   }
 
+  #startTurnEventSupervisor(
+    sessionId: string,
+    signal: AbortSignal,
+    directory: string,
+  ): OpenCodeTurnEventSupervisor {
+    const baseUrl = this.#requireLiveBaseUrl();
+    const eventUrl = new URL("/event", baseUrl);
+    eventUrl.searchParams.set("directory", directory);
+    return new OpenCodeTurnEventSupervisor({
+      sessionId,
+      signal,
+      maximumBufferBytes: this.#maxEventBufferBytes,
+      open: async (streamSignal) => {
+        let response: Response;
+        try {
+          response = await this.#fetch(eventUrl, {
+            headers: this.#authorization(),
+            signal: streamSignal,
+            redirect: "manual",
+          });
+        } catch (error) {
+          if (streamSignal.aborted) throw error;
+          throw new ApiError(503, "opencode_event_unavailable", "OpenCode event streaming is unavailable.");
+        }
+        if (isRedirect(response.status)) throw new ApiError(502, "opencode_redirect_forbidden", "OpenCode redirects are not accepted.");
+        if (!response.ok || !response.body) throw new ApiError(503, "opencode_event_unavailable", "OpenCode event streaming is unavailable.");
+        return response.body;
+      },
+    });
+  }
+
   #setReadinessError(code: string, message: string): OpenCodeReadiness {
     this.#readiness = { status: "error", modelId: null, lastError: { code, message } };
     return this.#readiness;
+  }
+}
+
+type OpenCodeTurnEventSupervisorOptions = {
+  sessionId: string;
+  signal: AbortSignal;
+  maximumBufferBytes: number;
+  open: (signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>;
+};
+
+class OpenCodeTurnEventSupervisor {
+  readonly #options: OpenCodeTurnEventSupervisorOptions;
+  readonly #controller = new AbortController();
+  readonly #seen = new Set<string>();
+  readonly #seenOrder: string[] = [];
+  readonly #waiters = new Set<() => void>();
+  #armed = false;
+  #userObserved = false;
+  #closed = false;
+
+  constructor(options: OpenCodeTurnEventSupervisorOptions) {
+    this.#options = options;
+    if (options.signal.aborted) this.close();
+    else options.signal.addEventListener("abort", this.#onPromptAbort, { once: true });
+    // Starting the async loop initiates the first /event fetch synchronously
+    // before prompt_async is dispatched; connection failure is replay-safe.
+    void this.#run();
+  }
+
+  arm(): void {
+    if (this.#closed) return;
+    this.#armed = true;
+    this.#wake();
+  }
+
+  observeUser(): void {
+    if (this.#closed || this.#userObserved) return;
+    this.#userObserved = true;
+    this.#wake();
+  }
+
+  wait(milliseconds: number, signal: AbortSignal): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        this.#waiters.delete(finish);
+        resolve();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.#waiters.delete(finish);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(finish, milliseconds);
+      this.#waiters.add(finish);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#options.signal.removeEventListener("abort", this.#onPromptAbort);
+    this.#controller.abort();
+    this.#wake();
+  }
+
+  readonly #onPromptAbort = (): void => this.close();
+
+  async #run(): Promise<void> {
+    let reconnectDelayMs = 50;
+    while (!this.#closed) {
+      try {
+        const stream = await this.#options.open(this.#controller.signal);
+        if (this.#closed) {
+          await stream.cancel().catch(() => undefined);
+          return;
+        }
+        reconnectDelayMs = 50;
+        await consumeSse(
+          stream,
+          (event) => this.#handle(event),
+          this.#controller.signal,
+          this.#options.maximumBufferBytes,
+        );
+      } catch {
+        // Status/message replay remains authoritative while SSE reconnects.
+      }
+      if (this.#closed) return;
+      try { await abortableDelay(reconnectDelayMs, this.#controller.signal); }
+      catch { return; }
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 500);
+    }
+  }
+
+  #handle(event: OpenCodeRuntimeEvent): void {
+    if (runtimeEventSessionId(event) !== this.#options.sessionId) return;
+    const eventId = safeRuntimeEventId(event.id);
+    if (eventId) {
+      if (this.#seen.has(eventId)) return;
+      this.#seen.add(eventId);
+      this.#seenOrder.push(eventId);
+      if (this.#seenOrder.length > 512) {
+        const expired = this.#seenOrder.shift();
+        if (expired) this.#seen.delete(expired);
+      }
+    }
+    const status = event.type === "session.status" ? runtimeSessionStatus(event.properties?.status) : undefined;
+    const terminal = event.type === "session.idle" || event.type === "session.error" || status === "idle";
+    if (terminal && (!this.#armed || !this.#userObserved)) return;
+    // The same opaque session is reused across turns and OpenCode events carry
+    // no prompt/message cursor. Even an exact-session error can therefore be a
+    // delayed prior-turn event. SSE only accelerates canonical replay; failure
+    // is accepted exclusively from an assistant parented to this turn's new
+    // user message.
+    this.#wake();
+  }
+
+  #wake(): void {
+    for (const waiter of [...this.#waiters]) waiter();
   }
 }
 
@@ -799,17 +1068,200 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
 const apiErrorFromResponse = (response: Response, payload: Record<string, any>): ApiError =>
   new ApiError(response.status, String(payload?.error?.code ?? "opencode_error"), "OpenCode rejected the local request.");
 
-const normalizedAssistantResponse = (payload: Record<string, any>): OpenCodeAssistantResponse => {
-  const parts = Array.isArray(payload.parts) ? payload.parts : Array.isArray(payload.message?.parts) ? payload.message.parts : [];
-  const texts = parts
-    .filter((part: any) => part && part.type === "text" && typeof part.text === "string" && part.text.trim())
-    .map((part: any) => part.text.trim());
-  if (!texts.length && typeof payload.text === "string" && payload.text.trim()) texts.push(payload.text.trim());
+type CompletedToolEvidence = Readonly<{
+  key: string;
+  toolName: string;
+}>;
+
+class AssistantToolEvidenceTracker {
+  readonly #tools = new Map<string, { toolName: string; state: "pending" | "complete" | "failed" }>();
+
+  clear(): void {
+    this.#tools.clear();
+  }
+
+  observe(payloads: Array<Record<string, any>>): void {
+    for (const payload of payloads) {
+      const parts = assistantParts(payload);
+      for (const [index, part] of parts.entries()) {
+        if (!part || part.type !== "tool") continue;
+        const key = toolEvidenceKey(payload, part, index);
+        const prior = this.#tools.get(key);
+        if (!prior && this.#tools.size >= 512) {
+          throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many assistant tool parts for one turn.");
+        }
+        const status = part.state?.status;
+        const observedState = status === "error" || status === "failed"
+          ? "failed"
+          : status === "completed" ? "complete" : "pending";
+        this.#tools.set(key, {
+          toolName: safeToolName(part.tool ?? part.name),
+          // Terminal evidence is monotonic within one attempt. A later partial
+          // replay cannot erase an already observed completion or failure.
+          state: prior?.state === "failed" || observedState === "failed"
+            ? "failed"
+            : prior?.state === "complete" || observedState === "complete"
+              ? "complete"
+              : "pending",
+        });
+      }
+    }
+  }
+
+  state(): "complete" | "pending" | "failed" {
+    if ([...this.#tools.values()].some((tool) => tool.state === "failed")) return "failed";
+    if ([...this.#tools.values()].some((tool) => tool.state !== "complete")) return "pending";
+    return "complete";
+  }
+
+  completed(): CompletedToolEvidence[] {
+    return [...this.#tools.entries()].map(([key, tool]) => {
+      if (tool.state !== "complete") {
+        throw new ApiError(502, "opencode_invalid_response", "OpenCode tool evidence is not terminal.");
+      }
+      return Object.freeze({ key, toolName: tool.toolName });
+    });
+  }
+}
+
+const normalizedAssistantResponses = (
+  payloads: Array<Record<string, any>>,
+  completedTools: CompletedToolEvidence[],
+): OpenCodeAssistantResponse => {
+  const texts: string[] = [];
+  const seenParts = new Set<string>();
+  const summarizedTools = new Set<string>();
+  const completedToolMap = new Map(completedTools.map((tool) => [tool.key, tool]));
+  const summary: OpenCodeAssistantResponse["content"]["parts"] = [];
+  for (const payload of payloads) {
+    const parts = assistantParts(payload);
+    for (const [index, part] of parts.entries()) {
+      if (!part || !["text", "tool"].includes(part.type) || part.ignored === true) continue;
+      const partId = typeof part.id === "string" ? `${messageId(payload) ?? ""}:${part.id}` : null;
+      if (partId && seenParts.has(partId)) continue;
+      if (partId) seenParts.add(partId);
+      if (summary.length >= 512) {
+        throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many assistant parts for one turn.");
+      }
+      if (part.type === "tool") {
+        const key = toolEvidenceKey(payload, part, index);
+        const evidence = completedToolMap.get(key);
+        if (!evidence || summarizedTools.has(key)) continue;
+        summarizedTools.add(key);
+        summary.push({
+          ordinal: summary.length,
+          kind: "tool",
+          state: "complete",
+          toolName: evidence.toolName,
+        });
+        continue;
+      }
+      if (typeof part.text !== "string" || !part.text.trim()) continue;
+      texts.push(part.text.trim());
+      summary.push({ ordinal: summary.length, kind: "text", state: "complete" });
+    }
+    if (!parts.length && typeof payload.text === "string" && payload.text.trim()) {
+      if (summary.length >= 512) {
+        throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many assistant parts for one turn.");
+      }
+      texts.push(payload.text.trim());
+      summary.push({ ordinal: summary.length, kind: "text", state: "complete" });
+    }
+  }
+  for (const evidence of completedTools) {
+    if (summarizedTools.has(evidence.key)) continue;
+    if (summary.length >= 512) {
+      throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many assistant parts for one turn.");
+    }
+    summarizedTools.add(evidence.key);
+    summary.push({
+      ordinal: summary.length,
+      kind: "tool",
+      state: "complete",
+      toolName: evidence.toolName,
+    });
+  }
   const text = texts.join("\n").trim();
   if (!text) throw new ApiError(502, "opencode_empty_response", "OpenCode returned no assistant text.");
-  const rawId = payload.info?.id ?? payload.info?.messageID ?? payload.id ?? payload.messageID;
-  const messageId = typeof rawId === "string" && rawId.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(rawId) ? rawId : null;
-  return { messageId, text, content: { source: "opencode", textParts: texts.length } };
+  return {
+    messageId: messageId(payloads.at(-1)),
+    text,
+    content: { source: "opencode", textParts: texts.length, parts: summary },
+  };
+};
+
+const assistantParts = (payload: Record<string, any>): any[] =>
+  Array.isArray(payload.parts)
+    ? payload.parts
+    : Array.isArray(payload.message?.parts) ? payload.message.parts : [];
+
+const toolEvidenceKey = (
+  payload: Record<string, any>,
+  part: Record<string, any>,
+  index: number,
+): string => {
+  const ownerMessageId = messageId(payload);
+  if (!ownerMessageId) {
+    throw new ApiError(502, "opencode_invalid_response", "OpenCode returned a tool part without a stable assistant message ID.");
+  }
+  const partIdentity = [part.id, part.callID, part.callId].find(
+    (value) => typeof value === "string" && value.length > 0 && value.length <= 500
+      && !/[\u0000-\u001f\u007f]/u.test(value),
+  );
+  return `${ownerMessageId}:${partIdentity ?? `ordinal-${index}`}`;
+};
+
+const safeToolName = (value: unknown): string =>
+  typeof value === "string" && /^[A-Za-z0-9_.:-]{1,120}$/u.test(value)
+    ? value
+    : "tool";
+
+const assistantFailure = (error: unknown): ApiError => {
+  const name = error && typeof error === "object" && typeof (error as any).name === "string" ? (error as any).name : "";
+  if (name === "MessageAbortedError") return new ApiError(409, "opencode_session_aborted", "OpenCode aborted the target session turn.");
+  if (name === "ProviderAuthError") return new ApiError(401, "opencode_auth_failed", "OpenCode provider authentication failed.");
+  return new ApiError(502, "opencode_session_error", "OpenCode failed to complete the target session turn.");
+};
+
+const runtimeEventSessionId = (event: OpenCodeRuntimeEvent): string | null => {
+  const properties = event.properties;
+  const nested = properties?.part && typeof properties.part === "object"
+    ? properties.part as Record<string, unknown>
+    : properties?.info && typeof properties.info === "object"
+      ? properties.info as Record<string, unknown>
+      : undefined;
+  const value = properties?.sessionID ?? nested?.sessionID;
+  return typeof value === "string" && value.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null;
+};
+
+const runtimeSessionStatus = (value: unknown): "busy" | "retry" | "idle" | null => {
+  const type = typeof value === "string"
+    ? value
+    : value && typeof value === "object" ? (value as Record<string, unknown>).type : undefined;
+  return type === "busy" || type === "retry" || type === "idle" ? type : null;
+};
+
+const safeRuntimeEventId = (value: unknown): string | null =>
+  typeof value === "string" && value.length > 0 && value.length <= 500 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null;
+
+const retryableLifecyclePollError = (error: unknown): boolean =>
+  error instanceof ApiError && (error.code === "opencode_unavailable"
+    || error.status >= 500 && !["opencode_invalid_response", "opencode_response_too_large", "opencode_redirect_forbidden"].includes(error.code));
+
+const completedAssistant = (payload: Record<string, any>): boolean =>
+  Number.isFinite(payload.info?.time?.completed);
+
+const uniqueMessages = (payloads: Array<Record<string, any>>): Array<Record<string, any>> => {
+  const latest = new Map<string, { payload: Record<string, any>; index: number }>();
+  for (const [index, payload] of payloads.entries()) {
+    const id = messageId(payload);
+    if (!id) continue;
+    latest.set(id, { payload, index });
+  }
+  if (latest.size > 512) throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many assistant messages for one turn.");
+  // Replay may contain an early incomplete copy followed by the updated
+  // completed message with the same ID. Last list occurrence is authoritative.
+  return [...latest.values()].sort((left, right) => left.index - right.index).map((entry) => entry.payload);
 };
 
 const messageId = (payload: Record<string, any> | undefined): string | null => {

@@ -308,7 +308,7 @@ interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 `RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
 deterministic mode.
 
-### OpenCode working-directory contract (Issue #56, PR 1)
+### OpenCode server and native turn lifecycle (Issue #56, PR 1–2)
 
 `OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
 separately managed OpenCode server, not a browser path and not a permission
@@ -332,10 +332,44 @@ symlink-ambiguous, or `/path`-mismatched directory, or a version mismatch, makes
 the Agent explicitly read-only; the Product still starts and keeps Home,
 resource, and direct Run controls available.
 
-This is only the Issue #56 PR 1 startup/server contract. Native session
-busy-to-idle completion, streamed Conversation projection, tool/Playwright
-integration, and durable target-completion verification remain the separately
-ordered PR 2–5 work; this document does not claim them complete.
+For a live Product turn, Riff snapshots the OpenCode session messages, submits
+one asynchronous prompt, and then reconciles `GET /session/status` with the
+complete message list for the exact session and newly created user message.
+Assistant text is streaming evidence only while the target session is `busy` or
+`retry`; it cannot complete the Riff turn or release the scoped MCP capability.
+Each turn also opens and, after disconnect, reconnects the owner-directory
+scoped `GET /event` stream, then filters events to the exact session. Those
+events can wake canonical reconciliation or surface new activity, but neither
+an idle nor error event can override or replace current-user status/message
+evidence.
+Only an `idle` target (OpenCode may omit fully idle sessions from the status
+map) whose parented assistant messages all carry completion evidence is
+aggregated into the durable Riff response. Provider authentication failure,
+session error, abort, and timeout are distinct redacted failure codes. Transient
+status/message read failures are retried against the same session until the
+bounded deadline; a failed prompt retires that exact opaque session generation
+before a later turn rebuilds it.
+
+The installed-server multi-tool integration smoke is intentionally opt-in
+because it invokes a configured provider:
+
+```bash
+cd backend
+RUN_OPENCODE_MULTI_TOOL_SMOKE=true \
+OPENCODE_LIVE_SMOKE_MODEL=provider/model \
+node --experimental-strip-types --test test/opencode-smoke.test.ts
+```
+
+It pins OpenCode `1.18.4`, starts a real pure server, binds a controlled
+capability-scoped MCP, and requires two ordered tool calls before terminal
+reconciliation and revocation. The default test suite skips this credentialed
+case.
+
+This is the Issue #56 PR 1–2 server and premature-completion contract. Streamed
+Conversation controls and permission/question interaction, expanded
+Skill/MCP/Playwright integration, and durable target-completion verification
+remain the separately ordered PR 3–5 work; this document does not claim them
+complete.
 
 ## Verification
 

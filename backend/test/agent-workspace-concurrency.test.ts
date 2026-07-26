@@ -34,7 +34,11 @@ class ControlledOpenCode implements OpenCodeConversationPort {
     if (!conversationId) throw new Error("unknown test session");
     this.starts.push({ conversationId, text: prompt.text });
     await this.holds.get(prompt.text)?.promise;
-    return { messageId: `upstream-${this.starts.length}`, text: `answer:${prompt.text}`, content: { source: "opencode", textParts: 1 } };
+    return {
+      messageId: `upstream-${this.starts.length}`,
+      text: `answer:${prompt.text}`,
+      content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+    };
   }
   async abort(): Promise<void> {}
 }

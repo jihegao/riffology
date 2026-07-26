@@ -44,8 +44,8 @@ export class OpenCodeEventBridge {
       return;
     }
     if (event.type === "session.status") {
-      const status = string(properties.status);
-      if (status === "busy") this.#setAgentStatus(browserSessionId, "thinking");
+      const status = sessionStatus(properties.status);
+      if (status === "busy" || status === "retry") this.#setAgentStatus(browserSessionId, "thinking");
       if (status === "idle") {
         this.#finishStreaming(browserSessionId, openCodeSessionId, "complete");
         this.#setAgentStatus(browserSessionId, "ready");
@@ -110,6 +110,12 @@ export class OpenCodeEventBridge {
 }
 
 const string = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
+const sessionStatus = (value: unknown): "busy" | "retry" | "idle" | undefined => {
+  const type = typeof value === "string"
+    ? value
+    : value && typeof value === "object" ? (value as Record<string, unknown>).type : undefined;
+  return type === "busy" || type === "retry" || type === "idle" ? type : undefined;
+};
 const redact = (text: string): string => text
   .replace(/(?:sk|rk|api)[-_][A-Za-z0-9]{12,}/gi, "[redacted]")
   .replace(/(?:\/Users\/|\/home\/)[^\s)]+/g, "[local path]");
