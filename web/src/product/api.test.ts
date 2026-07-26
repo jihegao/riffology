@@ -215,7 +215,7 @@ describe("Product browser client", () => {
         kind: "text",
         state: "streaming",
         title: "Assistant",
-        summary: "Choose one.",
+        summary: "Choose one.\nThen explain the choice.",
       }],
       pendingInteractions: [{
         id: "question-one",
@@ -247,11 +247,27 @@ describe("Product browser client", () => {
     await expect(client.conversationRuntime("conversation-one")).resolves.toMatchObject({
       schemaVersion: 1,
       activeTurn: { requestKey: "turn-one" },
+      parts: [{
+        summary: "Choose one.\nThen explain the choice.",
+      }],
       pendingInteractions: [{
         kind: "question",
         questions: [{ choices: [{ value: choiceId, label: "Same public label" }] }],
       }],
     });
+
+    runtimeBody = {
+      ...runtimeBody,
+      parts: [{
+        id: "assistant-one",
+        kind: "text",
+        state: "streaming",
+        title: "Assistant",
+        summary: "Reject embedded\u0000controls.",
+      }],
+    };
+    await expect(client.conversationRuntime("conversation-one"))
+      .rejects.toMatchObject({ code: "invalid_response", status: 502 });
 
     runtimeBody = {
       revision: "internal-shape",

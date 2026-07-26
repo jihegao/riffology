@@ -966,7 +966,7 @@ const normalizeRuntimePart = (
     || !["text", "tool_call", "tool_result", "error", "command", "skill", "mcp"].includes(String(record.kind))
     || !["streaming", "pending", "complete", "failed"].includes(String(record.state))
     || !boundedRuntimeString(record.title, 1_000)
-    || !(record.summary === null || boundedRuntimeString(record.summary, 64_000))) {
+    || !(record.summary === null || boundedRuntimeText(record.summary, 64_000))) {
     throw invalidRuntimeProjection();
   }
   return Object.freeze({
@@ -1063,6 +1063,10 @@ const strictRuntimeRecord = (
 const boundedRuntimeString = (value: unknown, maximum: number): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= maximum
   && !/[\u0000-\u001f\u007f]/u.test(value);
+
+const boundedRuntimeText = (value: unknown, maximum: number): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= maximum
+  && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 
 const invalidRuntimeProjection = (): ProductApiError =>
   new ProductApiError(502, "invalid_response", "The Agent runtime response is invalid.");
