@@ -228,6 +228,7 @@ describe("Product browser client", () => {
           choices: [{ value: choiceId, label: "Same public label" }],
         }],
       }],
+      goalVerification: null,
       agent: { selectedName: "build", locked: true },
       mcp: { state: "connected", label: "Riff tools" },
     };
@@ -286,6 +287,152 @@ describe("Product browser client", () => {
 
     await new HttpProductClient().agents("project", "project-one");
     expect(calls[1]).toBe("/api/agents?ownerKind=project&ownerId=project-one");
+  });
+
+  it("normalizes only the bounded durable goal-verification projection", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/bootstrap")
+        ? new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          csrfToken: "csrf-token",
+          platformOrigin: "http://localhost:8787",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 })
+        : new Response(JSON.stringify({
+          schemaVersion: 1,
+          revision: "runtime-goal-receipt",
+          status: "idle",
+          activeTurn: null,
+          parts: [{
+            id: "part-model-change",
+            kind: "tool_result",
+            state: "complete",
+            title: "Riff apply model changes",
+            summary: "Tool completed.",
+          }],
+          pendingInteractions: [],
+          goalVerification: {
+            disposition: "completed",
+            reasonCode: "visual_model_state_verified",
+            receiptDigest: "a".repeat(64),
+            evidence: {
+              openCodeTerminal: "idle",
+              intentKind: "model_visual",
+              actionCount: 2,
+              terminalActionCount: 2,
+              committedActionCount: 2,
+              affectedResourceCount: 3,
+              ownerStateDigest: "b".repeat(64),
+              ownerStateVerified: true,
+              partialEffect: false,
+              rawWorkspacePath: "/private/owner/path",
+            },
+            goalText: "secret prompt",
+          },
+          mcp: {
+            state: "disconnected",
+            label: "Riff tools",
+          },
+          agent: { selectedName: null, locked: false },
+        }), { status: 200 })));
+
+    const runtime = await new HttpProductClient()
+      .conversationRuntime("conversation-one");
+
+    expect(runtime.goalVerification).toEqual({
+      disposition: "completed",
+      reasonCode: "visual_model_state_verified",
+      receiptDigest: "a".repeat(64),
+      evidence: {
+        openCodeTerminal: "idle",
+        intentKind: "model_visual",
+        actionCount: 2,
+        terminalActionCount: 2,
+        committedActionCount: 2,
+        affectedResourceCount: 3,
+        ownerStateVerified: true,
+        partialEffect: false,
+      },
+    });
+    expect(JSON.stringify(runtime)).not.toContain("secret prompt");
+    expect(JSON.stringify(runtime)).not.toContain("/private/owner/path");
+    expect(JSON.stringify(runtime)).not.toContain("ownerStateDigest");
+    expect(runtime.activeTurn).toBeNull();
+    expect(runtime.parts).toEqual([{
+      id: "part-model-change",
+      kind: "tool_result",
+      state: "complete",
+      title: "Riff apply model changes",
+      summary: "Tool completed.",
+    }]);
+    expect(runtime.pendingInteractions).toEqual([]);
+    expect(runtime.agent).toEqual({ selectedName: null, locked: false });
+    expect(runtime.mcp).toEqual({ state: "disconnected", label: "Riff tools" });
+  });
+
+  it("normalizes the actual public permission projection for exact-turn Resume", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/bootstrap")
+        ? new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          csrfToken: "csrf-token",
+          platformOrigin: "http://localhost:8787",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 })
+        : new Response(JSON.stringify({
+          schemaVersion: 1,
+          revision: "runtime-permission",
+          status: "waiting_for_user",
+          activeTurn: {
+            requestKey: "request-goal",
+            canStop: true,
+            canRetry: false,
+          },
+          goalVerification: null,
+          parts: [{
+            id: "part-model-change",
+            kind: "tool_call",
+            state: "pending",
+            title: "Riff apply model changes",
+            summary: "Waiting for permission.",
+          }],
+          pendingInteractions: [{
+            id: "permission-goal",
+            kind: "permission",
+            title: "Permission required",
+            prompt: "Allow this scoped Agent tool for the current turn?",
+            decisions: ["allow_once", "reject"],
+          }],
+          agent: { selectedName: "build", locked: true },
+          mcp: { state: "connected", label: "Riff tools" },
+        }), { status: 200 })));
+
+    const runtime = await new HttpProductClient()
+      .conversationRuntime("conversation-one");
+
+    expect(runtime.activeTurn).toEqual({
+      requestKey: "request-goal",
+      canStop: true,
+      canRetry: false,
+    });
+    expect(runtime.pendingInteractions).toEqual([{
+      id: "permission-goal",
+      kind: "permission",
+      title: "Permission required",
+      prompt: "Allow this scoped Agent tool for the current turn?",
+      decisions: ["allow_once", "reject"],
+    }]);
+    expect(runtime.parts[0]).toMatchObject({
+      id: "part-model-change",
+      kind: "tool_call",
+      state: "pending",
+    });
+    expect(runtime.agent).toEqual({ selectedName: "build", locked: true });
+    expect(runtime.mcp).toEqual({ state: "connected", label: "Riff tools" });
   });
 
   it("issues a visual frame through the current browser session without a JSON body", async () => {

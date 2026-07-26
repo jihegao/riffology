@@ -182,6 +182,30 @@ export type ConversationRuntimePart = Readonly<{
   summary: string | null;
 }>;
 
+export type AgentGoalDisposition =
+  | "completed"
+  | "needs_user_input"
+  | "failed"
+  | "read_only"
+  | "outcome_unknown"
+  | "budget_exhausted";
+
+export type AgentGoalVerification = Readonly<{
+  disposition: AgentGoalDisposition;
+  reasonCode: string;
+  receiptDigest: string;
+  evidence: Readonly<{
+    openCodeTerminal: "idle" | "not_reached" | "unknown";
+    intentKind: "response_delivery" | "explicit_mutation" | "model_visual";
+    actionCount: number;
+    terminalActionCount: number;
+    committedActionCount: number;
+    affectedResourceCount: number;
+    ownerStateVerified: boolean;
+    partialEffect: boolean;
+  }>;
+}>;
+
 export type ConversationInteraction =
   | Readonly<{
     id: string;
@@ -213,6 +237,7 @@ export type ConversationRuntimeProjection = Readonly<{
   }>;
   parts: readonly ConversationRuntimePart[];
   pendingInteractions: readonly ConversationInteraction[];
+  goalVerification: AgentGoalVerification | null;
   agent: Readonly<{
     selectedName: string | null;
     locked: boolean;
@@ -242,6 +267,7 @@ export type AgentTurnResult = Readonly<{
     assistantMessageId: string | null;
     skillUses: readonly SkillUse[];
     actions: readonly ActionRecord[];
+    goalVerification: AgentGoalVerification | null;
     failure: null | Readonly<{ code: string; retryable: boolean }>;
   }>;
   messages: readonly ConversationMessage[];

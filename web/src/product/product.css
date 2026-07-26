@@ -311,6 +311,31 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 }
 .product-runtime-actions p { margin: .2rem 0 0; color: #65726e; font-size: .75rem; line-height: 1.45; }
 .product-runtime-actions > div:last-child { display: flex; flex-wrap: wrap; gap: .4rem; }
+.product-goal-verification {
+  display: grid;
+  gap: .35rem;
+  border: 1px solid #8fb2a6;
+  border-radius: .7rem;
+  padding: .7rem;
+  color: #284f44;
+  background: #e5f0eb;
+}
+.product-goal-verification div { display: grid; gap: .15rem; }
+.product-goal-verification span,
+.product-goal-verification small { color: inherit; font-size: .75rem; line-height: 1.45; }
+.product-goal-verification-needs_user_input,
+.product-goal-verification-budget_exhausted {
+  color: #6a5022;
+  border-color: #c7a769;
+  background: #f6eedc;
+}
+.product-goal-verification-outcome_unknown,
+.product-goal-verification-failed,
+.product-goal-verification-read_only {
+  color: #7b342e;
+  border-color: #c58a83;
+  background: #f6e6e2;
+}
 .product-interaction-card {
   display: grid;
   gap: .55rem;

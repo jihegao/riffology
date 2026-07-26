@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { verifyAgentGoal } from "../src/agent-goal-verifier.ts";
 import type { AgentSessionRepositoryPort } from "../src/agent-session-manager.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
 
@@ -57,11 +58,29 @@ test("Agent conversation records lock provider, preserve idempotency, bound cont
     assert.deepEqual(store.bindAgentSession({ id: "session_agent_002", conversationId: "conversation_agent", expectedGeneration: 1,
       state: "rebuilding", externalSessionRef: "opaque-new-ref", at: END }), { generation: 2, state: "rebuilding" });
 
+    const goalEvidence = store.agentGoalEvidence("conversation_agent", "request-001");
+    const goalVerification = verifyAgentGoal({
+      phase: "idle",
+      goalText: "Update the model",
+      goalDigest: goalEvidence.goalDigest,
+      intentAuthority: "explicit",
+      ownerKind: goalEvidence.ownerKind,
+      sessionGeneration: 2,
+      assistantDelivered: true,
+      actions: [],
+      ownerEvidence: {
+        stateDigest: goalEvidence.stateDigest,
+        runMode: goalEvidence.runMode,
+        executionDescriptionValid: goalEvidence.executionDescriptionValid,
+        affectedResourcesVerified: goalEvidence.affectedResourcesVerified,
+      },
+      verifiedAt: END,
+    });
     const completed = store.completeAgentTurn({ conversationId: "conversation_agent", requestKey: "request-001", assistantMessageId: "message_assistant_001",
-      assistantText: "Done", assistantContent: { answer: "Done" }, completedAt: END });
+      assistantText: "Done", assistantContent: { answer: "Done" }, goalVerification, completedAt: END });
     assert.equal(completed.state, "complete");
     assert.equal(store.completeAgentTurn({ conversationId: "conversation_agent", requestKey: "request-001", assistantMessageId: "message_assistant_001",
-      assistantText: "Done", assistantContent: { answer: "Done" }, completedAt: END }).assistantMessageId, "message_assistant_001");
+      assistantText: "Done", assistantContent: { answer: "Done" }, goalVerification, completedAt: END }).assistantMessageId, "message_assistant_001");
     assert.deepEqual(store.listConversationMessages("conversation_agent").map((message) => message.ordinal), [0, 1]);
 
     store.advanceConversationSummary({ conversationId: "conversation_agent", expectedCoveredThroughOrdinal: null, coveredThroughOrdinal: 0, content: "User requested a model update.", at: END });

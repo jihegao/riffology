@@ -2,8 +2,8 @@
 
 - Status: active
 - Role: normative contract
-- Scope: implemented Stage 2 through A4-5 HTTP/API, startup/recovery boundaries,
-  and retained legacy API history
+- Scope: implemented Stage 2 through A4-5 HTTP/API, Issue #56 PR 1–5,
+  startup/recovery boundaries, and retained legacy API history
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
 - Last reviewed: 2026-07-26
 
@@ -13,7 +13,7 @@ without exposing credentials, session IDs, paths, or raw tool payloads.
 Merge and the merged-revision rerun remain before Issue closure; see
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
 
-## OpenCode startup, native turn, interaction, and tool contract (Issue #56 PR 1–4)
+## OpenCode startup, native turn, interaction, tool, and goal contract (Issue #56 PR 1–5)
 
 `OPENCODE_WORKDIR` is server-side configuration for the OpenCode server's
 explicit absolute canonical default profile. It is never accepted from the
@@ -139,8 +139,69 @@ immutable human turn and atomically consumes its grant. It does not accept
 caller URLs, raw selectors, scripts, downloads, cross-peer redirects, reused
 browser state, cookies, authorization headers, or returned page artifacts.
 
-PR 5 still owns durable goal-satisfaction verification and the real browser
-exit. This PR 4 contract does not assert that final slice complete.
+Schema v16 requires one immutable goal-verification receipt for every Agent
+turn newly terminalized under schema v16. The receipt and terminal
+assistant/failure state commit atomically; database triggers reject direct
+terminal insertion or terminalization without the matching receipt, and
+startup recovery creates a failure or outcome-unknown receipt only after
+reconciling durable action records. Legacy terminal turns migrated from schema
+v15 remain readable with a null verification rather than fabricated evidence.
+A readback digest mismatch fails closed.
+
+Verification runs after the exact OpenCode turn is terminal. The closed
+dispositions are `completed`, `needs_user_input`, `failed`, `read_only`,
+`outcome_unknown`, and `budget_exhausted`. Proposal-only work completes when
+the bounded assistant response is durably delivered. An explicit mutation
+requires terminal actions, nonempty committed effects, a supported goal/action
+mapping, and current affected-resource bytes matching its mutation transaction.
+A visual Model goal also requires a committed `model_files_mutate` effect, a
+valid execution-protocol-v2 description, and a `visual` or `both` run mode. A
+denied or unverified explicit action needs user input.
+Timeout/interruption after an effect, nonterminal reconciliation, partial
+effect, or owner-state drift cannot be called complete and is not
+automatically retryable. No second Product-layer prompt is submitted after the
+native OpenCode loop.
+
+Terminal `GET /api/conversations/{conversationId}/runtime` responses include
+`goalVerification` with:
+
+```ts
+{
+  disposition:
+    | "completed" | "needs_user_input" | "failed"
+    | "read_only" | "outcome_unknown" | "budget_exhausted";
+  reasonCode: string;
+  receiptDigest: string;
+  evidence: {
+    openCodeTerminal: "idle" | "not_reached" | "unknown";
+    intentKind: "response_delivery" | "explicit_mutation" | "model_visual";
+    actionCount: number;
+    terminalActionCount: number;
+    committedActionCount: number;
+    affectedResourceCount: number;
+    ownerStateVerified: boolean;
+    partialEffect: boolean;
+  };
+}
+```
+
+The receipt digest is opaque integrity evidence. The public projection omits
+the stored goal text and goal digest, owner-state digest, session generation,
+mutation transaction, resource paths, upstream IDs, tool arguments/results, and credentials. The Web
+client consumes the current public `activeTurn`, `parts`,
+`pendingInteractions`, `agent`, and `mcp` shape while retaining a bounded
+legacy-normalization path for existing deterministic tests.
+
+The exact `riff_apply_model_changes` MCP schema publishes every required item
+field (`objectFileId`, `kind`, `relativePath`, `mediaType`, `text`, and nullable
+`expectedPriorSha256`) and rejects additional keys. This is schema precision
+for the existing scoped mutation authority, not a broader file API.
+
+The real browser exit uses one message with
+`zhipuai-coding-plan/glm-5.2`, four ordered scoped Riff tools, and one atomic
+visual Model mutation; the verified receipt survives refresh and backend
+restart. See [`issue-56-pr5-exit-evidence.md`](issue-56-pr5-exit-evidence.md)
+for the evidence and claim limits.
 
 ## Milestone A2 authority and current A3 execution
 
@@ -148,7 +209,7 @@ The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
 implemented Agent/API boundary; the legacy Gate API retained below does not.
-`ProductStoreV2` through schema migration v15, execution
+`ProductStoreV2` through schema migration v16, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or

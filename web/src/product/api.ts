@@ -900,6 +900,7 @@ const normalizeConversationRuntimeProjection = (
     "activeTurn",
     "parts",
     "pendingInteractions",
+    "goalVerification",
     "agent",
     "mcp",
   ]);
@@ -913,6 +914,7 @@ const normalizeConversationRuntimeProjection = (
     : normalizeActiveTurn(record.activeTurn);
   const parts = record.parts.map(normalizeRuntimePart);
   const pendingInteractions = record.pendingInteractions.map(normalizeRuntimeInteraction);
+  const goalVerification = normalizeGoalVerification(record.goalVerification);
   const agent = strictRuntimeRecord(record.agent, ["selectedName", "locked"]);
   const mcp = strictRuntimeRecord(record.mcp, ["state", "label"]);
   if (!(agent.selectedName === null || boundedRuntimeString(agent.selectedName, 500))
@@ -928,6 +930,7 @@ const normalizeConversationRuntimeProjection = (
     activeTurn,
     parts: Object.freeze(parts),
     pendingInteractions: Object.freeze(pendingInteractions),
+    goalVerification,
     agent: Object.freeze({
       selectedName: agent.selectedName as string | null,
       locked: agent.locked,
@@ -1063,6 +1066,77 @@ const boundedRuntimeString = (value: unknown, maximum: number): value is string 
 
 const invalidRuntimeProjection = (): ProductApiError =>
   new ProductApiError(502, "invalid_response", "The Agent runtime response is invalid.");
+
+const normalizeGoalVerification = (
+  value: unknown,
+): ConversationRuntimeProjection["goalVerification"] => {
+  if (value === null || value === undefined) return null;
+  const receipt = objectRecord(value);
+  const evidence = objectRecord(receipt?.evidence);
+  const dispositions = new Set([
+    "completed",
+    "needs_user_input",
+    "failed",
+    "read_only",
+    "outcome_unknown",
+    "budget_exhausted",
+  ]);
+  const terminals = new Set(["idle", "not_reached", "unknown"]);
+  const intentKinds = new Set([
+    "response_delivery",
+    "explicit_mutation",
+    "model_visual",
+  ]);
+  const count = (item: unknown): item is number =>
+    Number.isSafeInteger(item) && Number(item) >= 0 && Number(item) <= 1_000_000;
+  if (!receipt
+    || !evidence
+    || typeof receipt.disposition !== "string"
+    || !dispositions.has(receipt.disposition)
+    || typeof receipt.reasonCode !== "string"
+    || !/^[a-z0-9_]{1,200}$/u.test(receipt.reasonCode)
+    || typeof receipt.receiptDigest !== "string"
+    || !/^[0-9a-f]{64}$/u.test(receipt.receiptDigest)
+    || typeof evidence.openCodeTerminal !== "string"
+    || !terminals.has(evidence.openCodeTerminal)
+    || typeof evidence.intentKind !== "string"
+    || !intentKinds.has(evidence.intentKind)
+    || !count(evidence.actionCount)
+    || !count(evidence.terminalActionCount)
+    || !count(evidence.committedActionCount)
+    || !count(evidence.affectedResourceCount)
+    || Number(evidence.terminalActionCount) > Number(evidence.actionCount)
+    || Number(evidence.committedActionCount) > Number(evidence.terminalActionCount)
+    || typeof evidence.ownerStateVerified !== "boolean"
+    || typeof evidence.partialEffect !== "boolean") {
+    throw new ProductApiError(
+      502,
+      "invalid_response",
+      "The Agent goal verification response is invalid.",
+    );
+  }
+  return Object.freeze({
+    disposition: receipt.disposition as NonNullable<
+      ConversationRuntimeProjection["goalVerification"]
+    >["disposition"],
+    reasonCode: receipt.reasonCode,
+    receiptDigest: receipt.receiptDigest,
+    evidence: Object.freeze({
+      openCodeTerminal: evidence.openCodeTerminal as NonNullable<
+        ConversationRuntimeProjection["goalVerification"]
+      >["evidence"]["openCodeTerminal"],
+      intentKind: evidence.intentKind as NonNullable<
+        ConversationRuntimeProjection["goalVerification"]
+      >["evidence"]["intentKind"],
+      actionCount: evidence.actionCount,
+      terminalActionCount: evidence.terminalActionCount,
+      committedActionCount: evidence.committedActionCount,
+      affectedResourceCount: evidence.affectedResourceCount,
+      ownerStateVerified: evidence.ownerStateVerified,
+      partialEffect: evidence.partialEffect,
+    }),
+  });
+};
 
 const objectRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" ? value as Record<string, unknown> : null;

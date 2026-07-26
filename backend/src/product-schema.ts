@@ -3528,6 +3528,62 @@ export const PRODUCT_SCHEMA_V15_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'conversation provider-binding receipt is immutable'); END;
 `;
 
+export const PRODUCT_SCHEMA_V16_SQL = SQL`
+  CREATE TABLE agent_goal_verification_receipts (
+    turn_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (disposition IN (
+      'completed', 'needs_user_input', 'failed', 'read_only',
+      'outcome_unknown', 'budget_exhausted'
+    )),
+    reason_code TEXT NOT NULL CHECK (
+      length(reason_code) BETWEEN 1 AND 200
+      AND reason_code NOT GLOB '*[^a-z0-9_]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json)
+      AND json_type(receipt_json, '$') = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+      AND json_extract(receipt_json, '$.disposition') = disposition
+      AND json_extract(receipt_json, '$.reasonCode') = reason_code
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64
+      AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+      AND json_extract(receipt_json, '$.receiptDigest') = receipt_sha256
+    ),
+    verified_at TEXT NOT NULL,
+    UNIQUE (turn_id, conversation_id),
+    FOREIGN KEY (turn_id, conversation_id)
+      REFERENCES agent_turns(id, conversation_id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TRIGGER agent_goal_verification_receipts_immutable_update_v16
+  BEFORE UPDATE ON agent_goal_verification_receipts
+  BEGIN SELECT RAISE(ABORT, 'Agent goal verification receipt is immutable'); END;
+
+  CREATE TRIGGER agent_goal_verification_receipts_immutable_delete_v16
+  BEFORE DELETE ON agent_goal_verification_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'Agent goal verification receipt is immutable'); END;
+
+  CREATE TRIGGER agent_turn_terminal_requires_goal_verification_v16
+  BEFORE UPDATE OF state ON agent_turns
+  WHEN NEW.state IN ('complete', 'failed', 'read_only')
+    AND NOT EXISTS (
+      SELECT 1 FROM agent_goal_verification_receipts receipt
+      WHERE receipt.turn_id = NEW.id
+        AND receipt.conversation_id = NEW.conversation_id
+    )
+  BEGIN SELECT RAISE(ABORT, 'terminal Agent turn requires goal verification'); END;
+
+  CREATE TRIGGER agent_turn_terminal_insert_requires_goal_verification_v16
+  BEFORE INSERT ON agent_turns
+  WHEN NEW.state IN ('complete', 'failed', 'read_only')
+  BEGIN SELECT RAISE(ABORT, 'terminal Agent turn requires goal verification'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -3544,4 +3600,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 13, sql: PRODUCT_SCHEMA_V13_SQL }),
   Object.freeze({ version: 14, sql: PRODUCT_SCHEMA_V14_SQL }),
   Object.freeze({ version: 15, sql: PRODUCT_SCHEMA_V15_SQL }),
+  Object.freeze({ version: 16, sql: PRODUCT_SCHEMA_V16_SQL }),
 ]);

@@ -271,6 +271,8 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-13 | 用户可以按 turn 选择已发现的 primary Agent；Agent 选择必须进入 turn intent 与持久消息，active/waiting turn 期间锁定。Provider/model 仍按 Conversation 在首个接受的 message 后锁定。 |
 | FR-CONV-14 | Skill 只能从服务端规范根目录及显式 Riff allowlist 发现，必须固定 catalog version 与 instruction digest，并按需加载、记录实际选择；Skill 文本不能扩大 tool、owner、object、operation、visual 或 credential 权限。OpenCode 的 ambient filesystem-backed `skill` tool 在 Product turn 中必须保持禁用。 |
 | FR-CONV-15 | 每个需要工具的 turn 只能注册一个 opaque loopback Riff MCP，并从同一 owner/session-generation capability 的 sorted exact tool list 逐项启用；`*`、native file/command/Skill built-ins、ambient/plugin MCP 与第三方工具必须 deny-all。唯一 native 例外 `question` 只能经过 FR-CONV-12 的精确当前 turn Resume 边界回答，且不授予 Riff tool/object 权限。bind/prompt MCP 列表不一致、缺失、重复、乱序、伪造、跨 owner 或过期均须在 prompt 或执行前稳定拒绝，capability URL 与 credential 不得进入 prompt、transcript 或 browser DTO。 |
+| FR-CONV-16 | schema v16 下新进入 terminal 的每个 turn 必须具有不可变、digest-bound 的 goal-verification receipt，并与 assistant/failure 和 terminal turn 原子提交；从 v15 迁移的历史 terminal turn 保持可读但不得伪造 receipt。OpenCode `idle` 仅是必要证据；显式修改只有在 action 全部终态、每个 committed action 声明非空 effect、受支持的 goal/action 映射一致、已提交 transaction 的当前 owner 资源一致，且视觉 Model 具有本 turn 的 Model 文件修改并可验证 execution-protocol-v2/run mode 时才能标记 `completed`。 |
+| FR-CONV-17 | Goal disposition 必须是 `completed`、`needs_user_input`、`failed`、`read_only`、`outcome_unknown` 或 `budget_exhausted`。发生部分效果、资源漂移或中断后效果不明时不得自动 Retry；Product 层不得在原生 OpenCode tool loop 后再发第二个外层 prompt。公开 runtime 只投影有界 receipt 证据，不得返回原始 goal、goal digest、路径、上游 ID 或 tool payload。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |

@@ -4,6 +4,7 @@ import type { AgentContextInput } from "./agent-context.ts";
 import { AgentConversationSessionManager, type AgentReadOnlyReason } from "./agent-session-manager.ts";
 import type {
   AgentTurnDto,
+  AgentGoalDisposition,
   ConversationAttachmentDto,
   ConversationDto,
   ConversationMessageDto,
@@ -70,7 +71,16 @@ import {
   PermanentDeleteAdmissionError,
 } from "./permanent-delete-admission.ts";
 import { ModelTechnicalCheckService, type ModelTechnicalCheckerPort, type ModelWorkspaceProjectionDto, type TechnicalCheckDto } from "./model-technical-check-service.ts";
-import { AgentTurnRuntime, type PreparedAgentTurnRuntime } from "./agent-turn-runtime.ts";
+import {
+  AgentTurnRuntime,
+  explicitImperative,
+  type PreparedAgentTurnRuntime,
+} from "./agent-turn-runtime.ts";
+import {
+  goalVerificationIntentAuthority,
+  verifyAgentGoal,
+  type AgentGoalVerificationInput,
+} from "./agent-goal-verifier.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentOperation } from "./agent-visual-authority.ts";
 import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 import { MutationRecoveryError } from "./mutation-coordinator.ts";
@@ -92,6 +102,22 @@ export type AgentDiscoveryDto =
   | { mode: "live"; agents: OpenCodeAgent[] }
   | { mode: "read_only"; reason: "opencode_unavailable" | "opencode_auth_failed"; agents: [] };
 
+export type PublicAgentGoalVerification = Readonly<{
+  disposition: AgentGoalDisposition;
+  reasonCode: string;
+  receiptDigest: string;
+  evidence: Readonly<{
+    openCodeTerminal: "idle" | "not_reached" | "unknown";
+    intentKind: "response_delivery" | "explicit_mutation" | "model_visual";
+    actionCount: number;
+    terminalActionCount: number;
+    committedActionCount: number;
+    affectedResourceCount: number;
+    ownerStateVerified: boolean;
+    partialEffect: boolean;
+  }>;
+}>;
+
 export type ConversationRuntimeDto = Readonly<{
   revision: string;
   status: "busy" | "waiting_for_tool" | "waiting_for_user" | "idle" | "failed";
@@ -101,6 +127,7 @@ export type ConversationRuntimeDto = Readonly<{
   tools: OpenCodeConversationRuntimeSnapshot["tools"];
   interactions: OpenCodeConversationRuntimeSnapshot["interactions"];
   failure: { code: string; retryable: boolean } | null;
+  goalVerification: PublicAgentGoalVerification | null;
   scopedMcp: OpenCodeConversationRuntimeSnapshot["scopedMcp"];
   agent: {
     selected: string | null;
@@ -234,7 +261,7 @@ export type RunCancelDto = FrozenRunCancelReceipt;
 
 export type AgentTurnResult =
   | { mode: "live"; turn: AgentTurnDto; messages: ConversationMessageDto[] }
-  | { mode: "read_only"; reason: AgentReadOnlyReason | "agent_failed"; turn: AgentTurnDto; messages: ConversationMessageDto[] };
+  | { mode: "read_only"; reason: AgentReadOnlyReason | "agent_failed" | "agent_outcome_unknown" | "agent_budget_exhausted"; turn: AgentTurnDto; messages: ConversationMessageDto[] };
 
 export class AgentWorkspaceService {
   readonly #sessions: AgentConversationSessionManager;
@@ -1267,11 +1294,23 @@ export class AgentWorkspaceService {
     if (!active) upstream = this.#runtimeCache.get(conversationId) ?? null;
     const interactions = controlsOpen ? upstream?.interactions ?? [] : [];
     const tools = upstream?.tools ?? [];
+    const goalVerification = active
+      ? null
+      : publicGoalVerification(latestTurn?.goalVerification ?? null);
+    const goalFailure = goalVerification?.disposition === "outcome_unknown"
+      ? { code: "agent_outcome_unknown", retryable: false }
+      : goalVerification?.disposition === "budget_exhausted"
+        ? { code: "agent_budget_exhausted", retryable: false }
+        : goalVerification?.disposition === "failed"
+          ? { code: "agent_failed", retryable: false }
+          : goalVerification?.disposition === "read_only"
+            ? latestTurn?.failure ?? { code: "agent_read_only", retryable: true }
+            : null;
     const failure = active
       ? upstream?.failureCode
         ? { code: upstream.failureCode, retryable: true }
         : null
-      : latestTurn?.failure ?? null;
+      : latestTurn?.failure ?? goalFailure;
     const status: ConversationRuntimeDto["status"] = active
       ? active.controlState === "stopping"
         ? "busy"
@@ -1282,9 +1321,15 @@ export class AgentWorkspaceService {
             : tools.some((tool) => tool.status === "pending" || tool.status === "running")
               ? "waiting_for_tool"
               : "busy"
-      : latestTurn?.state === "failed" || latestTurn?.state === "read_only"
-        ? "failed"
-        : "idle";
+      : goalVerification?.disposition === "needs_user_input"
+        ? "waiting_for_user"
+        : latestTurn?.state === "failed" || latestTurn?.state === "read_only"
+          || goalVerification?.disposition === "outcome_unknown"
+          || goalVerification?.disposition === "budget_exhausted"
+          || goalVerification?.disposition === "failed"
+          || goalVerification?.disposition === "read_only"
+          ? "failed"
+          : "idle";
     const durableAssistant = !active && !upstream?.assistant
       ? [...this.listMessages(conversationId)].reverse().find((message) => message.role === "assistant")
       : undefined;
@@ -1300,6 +1345,7 @@ export class AgentWorkspaceService {
       tools,
       interactions,
       failure,
+      goalVerification,
       scopedMcp: active
         ? upstream?.scopedMcp ?? {
             label: "Riff tools" as const,
@@ -1593,7 +1639,25 @@ export class AgentWorkspaceService {
         this.#contextFor(conversationId, turn.userMessageId),
       );
       if (session.mode === "read_only") {
-        turn = this.store.failAgentTurn(conversationId, requestKey, session.reason, session.retryable, this.#now());
+        const at = this.#now();
+        const verification = this.#verifyGoal({
+          conversationId,
+          requestKey,
+          text,
+          phase: "read_only",
+          intentAuthority: prepared?.intentAuthority ?? goalIntentAuthority(text),
+          sessionGeneration: null,
+          assistantDelivered: false,
+          verifiedAt: at,
+        });
+        turn = this.store.failAgentTurn(
+          conversationId,
+          requestKey,
+          goalFailureCode(session.reason, verification.disposition),
+          goalFailureRetryable(session.retryable, verification.disposition),
+          at,
+          verification,
+        );
         active.controlState = "terminal";
         return { mode: "read_only", reason: session.reason, turn, messages: this.store.listConversationMessages(conversationId) };
       }
@@ -1652,10 +1716,40 @@ export class AgentWorkspaceService {
         );
       }
       if (result.mode === "read_only") {
-        turn = this.store.failAgentTurn(conversationId, requestKey, result.reason, result.retryable, this.#now());
+        const at = this.#now();
+        const verification = this.#verifyGoal({
+          conversationId,
+          requestKey,
+          text,
+          phase: goalFailurePhase(result.reason),
+          intentAuthority: prepared?.intentAuthority ?? goalIntentAuthority(text),
+          sessionGeneration: prepared?.externalSessionGeneration
+            ?? session.generation,
+          assistantDelivered: false,
+          verifiedAt: at,
+        });
+        turn = this.store.failAgentTurn(
+          conversationId,
+          requestKey,
+          goalFailureCode(result.reason, verification.disposition),
+          goalFailureRetryable(result.retryable, verification.disposition),
+          at,
+          verification,
+        );
         active.controlState = "terminal";
-        return { mode: "read_only", reason: result.reason, turn, messages: this.store.listConversationMessages(conversationId) };
+        return { mode: "read_only", reason: asReadOnlyReason(turn.failure?.code), turn, messages: this.store.listConversationMessages(conversationId) };
       }
+      const completedAt = this.#now();
+      const goalVerification = this.#verifyGoal({
+        conversationId,
+        requestKey,
+        text,
+        phase: "idle",
+        intentAuthority: prepared?.intentAuthority ?? goalIntentAuthority(text),
+        sessionGeneration: result.generation,
+        assistantDelivered: true,
+        verifiedAt: completedAt,
+      });
       turn = this.store.completeAgentTurn({
         conversationId,
         requestKey,
@@ -1663,18 +1757,37 @@ export class AgentWorkspaceService {
         assistantText: result.assistant.text,
         assistantContent: result.assistant.content,
         contextDigest: result.context.sha256,
-        completedAt: this.#now(),
+        goalVerification,
+        completedAt,
       });
       active.controlState = "terminal";
       return { mode: "live", turn, messages: this.store.listConversationMessages(conversationId) };
     } catch (error) {
       const code = error instanceof ApiError ? safeFailureCode(error.code) : "agent_failed";
       try {
-        turn = this.store.failAgentTurn(conversationId, requestKey, code, true, this.#now());
+        const at = this.#now();
+        const verification = this.#verifyGoal({
+          conversationId,
+          requestKey,
+          text,
+          phase: goalFailurePhase(code),
+          intentAuthority: prepared?.intentAuthority ?? goalIntentAuthority(text),
+          sessionGeneration: prepared?.externalSessionGeneration ?? null,
+          assistantDelivered: false,
+          verifiedAt: at,
+        });
+        turn = this.store.failAgentTurn(
+          conversationId,
+          requestKey,
+          goalFailureCode(code, verification.disposition),
+          goalFailureRetryable(true, verification.disposition),
+          at,
+          verification,
+        );
         active.controlState = "terminal";
       }
       catch { throw storeApiError(error); }
-      return { mode: "read_only", reason: asReadOnlyReason(code), turn, messages: this.store.listConversationMessages(conversationId) };
+      return { mode: "read_only", reason: asReadOnlyReason(turn.failure?.code), turn, messages: this.store.listConversationMessages(conversationId) };
     } finally {
       if (active.externalSessionRef && active.workspace && this.openCode.runtimeSnapshot) {
         try {
@@ -1720,6 +1833,50 @@ export class AgentWorkspaceService {
     this.#scopedMcpTail = previous.catch(() => undefined).then(() => current);
     await previous.catch(() => undefined);
     return release;
+  }
+
+  #verifyGoal(input: Readonly<{
+    conversationId: string;
+    requestKey: string;
+    text: string;
+    phase: AgentGoalVerificationInput["phase"];
+    intentAuthority: "explicit" | "proposal_only";
+    sessionGeneration: number | null;
+    assistantDelivered: boolean;
+    verifiedAt: string;
+  }>) {
+    const turn = this.store.latestAgentTurn(input.conversationId);
+    if (!turn || turn.requestKey !== input.requestKey) {
+      throw new ApiError(
+        409,
+        "agent_goal_verification_stale",
+        "The durable Agent turn changed before goal verification.",
+      );
+    }
+    const evidence = this.store.agentGoalEvidence(
+      input.conversationId,
+      input.requestKey,
+    );
+    return verifyAgentGoal({
+      phase: input.phase,
+      goalText: input.text,
+      goalDigest: evidence.goalDigest,
+      intentAuthority: goalVerificationIntentAuthority(
+        input.text,
+        input.intentAuthority,
+      ),
+      ownerKind: evidence.ownerKind,
+      sessionGeneration: input.sessionGeneration,
+      assistantDelivered: input.assistantDelivered,
+      actions: turn.actions,
+      ownerEvidence: {
+        stateDigest: evidence.stateDigest,
+        runMode: evidence.runMode,
+        executionDescriptionValid: evidence.executionDescriptionValid,
+        affectedResourcesVerified: evidence.affectedResourcesVerified,
+      },
+      verifiedAt: input.verifiedAt,
+    });
   }
 
   async #acquireTurnControl(active: ActiveConversationTurn): Promise<() => void> {
@@ -2130,7 +2287,80 @@ const assertOwner = (owner: ConversationOwner): void => {
   boundedId(owner.id);
 };
 const safeFailureCode = (code: string): string => /^[a-z0-9_]{1,200}$/u.test(code) ? code : "agent_failed";
-const asReadOnlyReason = (code: string | null | undefined): AgentReadOnlyReason | "agent_failed" => {
+const publicGoalVerification = (
+  receipt: AgentTurnDto["goalVerification"],
+): PublicAgentGoalVerification | null => receipt
+  ? Object.freeze({
+      disposition: receipt.disposition,
+      reasonCode: receipt.reasonCode,
+      receiptDigest: receipt.receiptDigest,
+      evidence: Object.freeze({
+        openCodeTerminal: receipt.evidence.openCodeTerminal,
+        intentKind: receipt.evidence.intentKind,
+        actionCount: receipt.evidence.actionCount,
+        terminalActionCount: receipt.evidence.terminalActionCount,
+        committedActionCount: receipt.evidence.committedActionCount,
+        affectedResourceCount: receipt.evidence.affectedResourceCount,
+        ownerStateVerified: receipt.evidence.ownerStateVerified,
+        partialEffect: receipt.evidence.partialEffect,
+      }),
+    })
+  : null;
+
+const goalIntentAuthority = (
+  text: string,
+): "explicit" | "proposal_only" =>
+  explicitImperative(text) ? "explicit" : "proposal_only";
+
+const goalFailurePhase = (
+  code: string,
+): AgentGoalVerificationInput["phase"] => {
+  if (code === "opencode_prompt_timeout") return "timeout";
+  if (new Set([
+    "opencode_session_aborted",
+    "opencode_session_generation_changed",
+    "interrupted",
+  ]).has(code)) return "interrupted";
+  if (new Set([
+    "opencode_unavailable",
+    "opencode_auth_failed",
+    "provider_unavailable",
+    "model_unavailable",
+    "session_validation_failed",
+    "session_rebuild_failed",
+  ]).has(code)) return "read_only";
+  return "failed";
+};
+
+const goalFailureCode = (
+  fallback: string,
+  disposition: AgentGoalDisposition,
+): string => disposition === "outcome_unknown"
+  ? "agent_outcome_unknown"
+  : disposition === "budget_exhausted"
+    ? "agent_budget_exhausted"
+    : disposition === "read_only"
+      ? safeFailureCode(fallback)
+      : disposition === "failed"
+        ? safeFailureCode(fallback)
+        : "agent_failed";
+
+const goalFailureRetryable = (
+  fallback: boolean,
+  disposition: AgentGoalDisposition,
+): boolean => disposition === "outcome_unknown"
+  ? false
+  : disposition === "budget_exhausted"
+    ? false
+    : disposition === "needs_user_input"
+      ? false
+      : fallback;
+
+const asReadOnlyReason = (
+  code: string | null | undefined,
+): AgentReadOnlyReason | "agent_failed" | "agent_outcome_unknown" | "agent_budget_exhausted" => {
+  if (code === "agent_outcome_unknown"
+    || code === "agent_budget_exhausted") return code;
   const allowed = new Set<AgentReadOnlyReason>([
     "opencode_unavailable", "opencode_auth_failed", "provider_unavailable", "model_unavailable",
     "session_validation_failed", "session_rebuild_failed", "opencode_session_aborted", "opencode_session_error",

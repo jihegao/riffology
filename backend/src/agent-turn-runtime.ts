@@ -595,7 +595,7 @@ export class AgentRuntimeError extends Error { readonly code: string; constructo
 export const explicitImperative = (text: string): boolean => {
   const normalized = text.trim().toLowerCase();
   if (!normalized || /\?|\b(?:if|maybe|might|could|would|should we|discuss|explain|suggest|consider|how|what|why)\b|(?:如果|也许|可能|是否|能否|可以吗|讨论|解释|建议|如何|为什么)/u.test(normalized)) return false;
-  return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|创建|写入|应用|采用|拒绝|取代|删除)/u.test(normalized);
+  return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|采用|拒绝|取代|删除)|^(?:请)?(?:把|将(?!来))[^?？\n]{1,500}(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|采用|拒绝|取代|删除)/u.test(normalized);
 };
 
 const PROJECT_OPERATION_BOUNDARY =

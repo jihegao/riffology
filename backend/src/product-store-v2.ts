@@ -38,6 +38,7 @@ import {
 } from "./generic-batch-supervisor.ts";
 import type {
   ActionRecordDto,
+  AgentGoalVerificationReceipt,
   AgentTurnDto,
   ContextSnapshot,
   ConversationAttachmentDto,
@@ -106,6 +107,11 @@ import type {
 } from "./agent-visual-authority.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment } from "./agent-visual-authority.ts";
 import { parseDiagnosticEventNdjson } from "./diagnostic-events.ts";
+import {
+  AGENT_GOAL_REASON_CODES,
+  goalVerificationIntentAuthority,
+  verifyAgentGoal,
+} from "./agent-goal-verifier.ts";
 
 const DATABASE_NAME = "product.sqlite3";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
@@ -162,6 +168,7 @@ export type CompleteAgentTurnInput = {
   assistantContent: unknown;
   assistantText: string;
   contextDigest?: string | null;
+  goalVerification: AgentGoalVerificationReceipt;
   completedAt: IsoTimestamp;
 };
 
@@ -1297,11 +1304,20 @@ export class ProductStoreV2 {
     this.#assertOpen(); assertId(input.assistantMessageId);
     const turn = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(input.conversationId, input.requestKey) as any;
     if (!turn) throw new ProductStoreV2Error("Agent turn does not exist.");
+    assertAgentGoalVerificationReceipt(
+      input.goalVerification,
+      turn.intent_sha256,
+      new Set(["completed", "needs_user_input", "outcome_unknown"]),
+    );
     const contentJson = json(input.assistantContent);
     if (turn.state === "complete") {
       const message = this.#database.prepare("SELECT text, content_json FROM messages WHERE id = ? AND conversation_id = ?").get(turn.assistant_message_id, input.conversationId) as any;
+      const verification = this.#goalVerification(turn.id);
       if (turn.assistant_message_id !== input.assistantMessageId || message?.text !== input.assistantText || message?.content_json !== contentJson) {
         throw new ProductStoreV2Error("Completed Agent turn retry differs from the durable result.");
+      }
+      if (verification?.receiptDigest !== input.goalVerification.receiptDigest) {
+        throw new ProductStoreV2Error("Completed Agent turn verification retry differs from the durable result.");
       }
       return this.#agentTurn(input.conversationId, input.requestKey);
     }
@@ -1311,6 +1327,7 @@ export class ProductStoreV2 {
       { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
         SELECT ?, ?, count(*), 'assistant', 'complete', ?, ?, ?, ? FROM messages WHERE conversation_id = ?`,
         params: [input.assistantMessageId, input.conversationId, input.assistantText, contentJson, input.completedAt, input.completedAt, input.conversationId], expectedChanges: 1 },
+      goalVerificationInsert(turn.id, input.conversationId, input.goalVerification),
       { sql: `UPDATE agent_turns SET state = 'complete', assistant_message_id = ?, reconstructed_context_sha256 = ?, updated_at = ?
         WHERE conversation_id = ? AND request_key = ? AND state = 'running'`,
         params: [input.assistantMessageId, input.contextDigest ?? null, input.completedAt, input.conversationId, input.requestKey], expectedChanges: 1 },
@@ -1318,15 +1335,34 @@ export class ProductStoreV2 {
     return this.#agentTurn(input.conversationId, input.requestKey);
   }
 
-  failAgentTurn(conversationId: string, requestKey: string, code: string, retryable: boolean, at: IsoTimestamp): AgentTurnDto {
+  failAgentTurn(
+    conversationId: string,
+    requestKey: string,
+    code: string,
+    retryable: boolean,
+    at: IsoTimestamp,
+    goalVerification: AgentGoalVerificationReceipt,
+  ): AgentTurnDto {
     if (!code.trim() || code.length > 200) throw new ProductStoreV2Error("Agent turn failure code is invalid.");
-    const existing = this.#database.prepare("SELECT state, failure_code, failure_retryable FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(conversationId, requestKey) as any;
+    const existing = this.#database.prepare("SELECT id, intent_sha256, state, failure_code, failure_retryable FROM agent_turns WHERE conversation_id = ? AND request_key = ?").get(conversationId, requestKey) as any;
+    if (!existing) throw new ProductStoreV2Error("Agent turn does not exist.");
+    assertAgentGoalVerificationReceipt(
+      goalVerification,
+      existing.intent_sha256,
+      new Set(["failed", "read_only", "outcome_unknown", "budget_exhausted"]),
+    );
     if (existing?.state === "failed") {
       if (existing.failure_code !== code || Boolean(existing.failure_retryable) !== retryable) throw new ProductStoreV2Error("Failed Agent turn retry differs from durable result.");
+      if (this.#goalVerification(existing.id)?.receiptDigest !== goalVerification.receiptDigest) {
+        throw new ProductStoreV2Error("Failed Agent turn verification retry differs from the durable result.");
+      }
       return this.#agentTurn(conversationId, requestKey);
     }
-    this.#databaseMutation([{ sql: `UPDATE agent_turns SET state = 'failed', failure_code = ?, failure_retryable = ?, updated_at = ?
-      WHERE conversation_id = ? AND request_key = ? AND state IN ('queued', 'running')`, params: [code, retryable ? 1 : 0, at, conversationId, requestKey], expectedChanges: 1 }]);
+    this.#databaseMutation([
+      goalVerificationInsert(existing.id, conversationId, goalVerification),
+      { sql: `UPDATE agent_turns SET state = 'failed', failure_code = ?, failure_retryable = ?, updated_at = ?
+        WHERE conversation_id = ? AND request_key = ? AND state IN ('queued', 'running')`, params: [code, retryable ? 1 : 0, at, conversationId, requestKey], expectedChanges: 1 },
+    ]);
     return this.#agentTurn(conversationId, requestKey);
   }
 
@@ -1374,6 +1410,136 @@ export class ProductStoreV2 {
        LIMIT 1`,
     ).get(conversationId) as { request_key: string } | undefined;
     return row ? this.#agentTurn(conversationId, row.request_key) : null;
+  }
+
+  agentGoalEvidence(conversationId: string, requestKey: string): Readonly<{
+    goalDigest: string;
+    ownerKind: "model" | "project";
+    stateDigest: string | null;
+    runMode: ModelRunMode | null;
+    executionDescriptionValid: boolean;
+    affectedResourcesVerified: boolean;
+  }> {
+    this.#assertOpen();
+    const row = this.#database.prepare(
+      `SELECT t.id, t.intent_sha256, c.model_id, c.project_id
+       FROM agent_turns t
+       JOIN conversations c ON c.id = t.conversation_id
+       WHERE t.conversation_id = ? AND t.request_key = ?`,
+    ).get(conversationId, requestKey) as {
+      id: string;
+      intent_sha256: string;
+      model_id: string | null;
+      project_id: string | null;
+    } | undefined;
+    if (!row) throw new ProductStoreV2Error("Agent turn does not exist.");
+    const owner = row.model_id
+      ? { kind: "model" as const, id: row.model_id }
+      : { kind: "project" as const, id: row.project_id! };
+    const actions = this.#actions(row.id);
+    let files: StoredObjectMetadata[] = [];
+    let ownerFilesVerified = true;
+    try {
+      files = this.listObjectFiles(owner);
+    } catch {
+      // Goal finalization must remain available when the owner workspace is
+      // precisely the failing dependency. Missing or drifted bytes can never
+      // prove current state or a committed effect.
+      ownerFilesVerified = false;
+    }
+    const configurations = owner.kind === "project"
+      ? this.listExperimentConfigurations(owner.id)
+      : [];
+    const documents = this.listTemporaryDocuments(conversationId);
+    const affectedResourcesVerified = ownerFilesVerified && actions
+      .filter((action) => action.state === "committed")
+      .every((action) => action.mutationTransactionId !== null
+        && Boolean(this.#database.prepare(
+          "SELECT 1 FROM committed_mutations WHERE transaction_id = ?",
+        ).get(action.mutationTransactionId))
+        && Array.isArray(action.affectedResources)
+        && action.affectedResources.length > 0
+        && action.affectedResources.every((resource) => {
+          if (!isPlainRecord(resource)
+            || typeof resource.kind !== "string"
+            || typeof resource.id !== "string") return false;
+          if (resource.kind === "model_file"
+            || resource.kind === "adopted_attachment") {
+            return typeof resource.sha256 === "string"
+              && files.some((file) =>
+                file.id === resource.id && file.sha256 === resource.sha256);
+          }
+          if (resource.kind === "experiment_configuration") {
+            return typeof resource.sha256 === "string"
+              && configurations.some((configuration) =>
+                configuration.id === resource.id
+                && configuration.contractVersion === 4
+                && configuration.configurationDigest === resource.sha256);
+          }
+          if (resource.kind === "temporary_document") {
+            return documents.some((document) =>
+              document.id === resource.id
+              && document.lifecycleState === "active");
+          }
+          return false;
+        }));
+    if (owner.kind === "model") {
+      const model = this.#model(owner.id);
+      let executionDescriptionValid = false;
+      try {
+        const description = validateExecutionDescriptionV2(
+          model.executionDescription,
+        );
+        executionDescriptionValid = description.runMode === model.runMode;
+      } catch { /* invalid execution descriptions cannot prove a goal */ }
+      return Object.freeze({
+        goalDigest: row.intent_sha256,
+        ownerKind: owner.kind,
+        stateDigest: ownerFilesVerified
+          ? canonicalDigest({
+              id: model.id,
+              lifecycleState: model.lifecycleState,
+              technicalStatus: model.technicalStatus,
+              runMode: model.runMode,
+              executionDescription: model.executionDescription,
+              files: files.map((file) => ({
+                id: file.id,
+                kind: file.kind,
+                sha256: file.sha256,
+              })),
+            })
+          : null,
+        runMode: model.runMode,
+        executionDescriptionValid,
+        affectedResourcesVerified,
+      });
+    }
+    const project = this.#project(owner.id);
+    let executionDescriptionValid = false;
+    try {
+      validateExecutionDescriptionV2(project.executionDescription);
+      executionDescriptionValid = true;
+    } catch { /* invalid Project execution cannot prove a goal */ }
+    return Object.freeze({
+      goalDigest: row.intent_sha256,
+      ownerKind: owner.kind,
+      stateDigest: canonicalDigest({
+        id: project.id,
+        lifecycleState: project.lifecycleState,
+        modelSnapshotDigest: project.modelSnapshotDigest,
+        executionDescription: project.executionDescription,
+        configurations: configurations.map((configuration) => ({
+          id: configuration.id,
+          lifecycleState: configuration.lifecycleState,
+          configurationDigest: configuration.contractVersion === 4
+            ? configuration.configurationDigest
+            : null,
+        })),
+      }),
+      runMode: null,
+      executionDescriptionValid,
+      affectedResourcesVerified,
+    });
   }
 
   createMessage(input: CreateMessageInput): void {
@@ -7274,6 +7440,17 @@ export class ProductStoreV2 {
   mutateModelFiles(input: { modelId: string; files: ModelFileMutation[]; executionDescription?: Record<string, unknown>; updatedAt: IsoTimestamp; transactionId?: string }): StoredObjectMetadata[] {
     this.#assertOpen();
     if (!input.files.length || new Set(input.files.map((file) => file.objectFileId)).size !== input.files.length) throw new ProductStoreV2Error("Model mutation requires unique files.");
+    let executionRunMode: ModelRunMode | null = null;
+    if (input.executionDescription !== undefined) {
+      try {
+        executionRunMode = validateExecutionDescriptionV2(
+          input.executionDescription,
+        ).runMode;
+      } catch {
+        // Preserve the existing Store compatibility boundary for legacy
+        // descriptions. Invalid v2 evidence can never satisfy goal verification.
+      }
+    }
     const plans = input.files.map((file) => {
       assertId(file.objectFileId);
       const relativePath = modelFilePath(file.kind, file.relativePath);
@@ -7292,8 +7469,18 @@ export class ProductStoreV2 {
       params: [file.mediaType, bytes.byteLength, digest, file.objectFileId, input.modelId, file.expectedPriorSha256], expectedChanges: 1,
     }) : objectInsert({ id: file.objectFileId, owner: { kind: "model", id: input.modelId }, kind: file.kind, relativePath,
       mediaType: file.mediaType, sizeBytes: bytes.byteLength, digest, createdAt: input.updatedAt })), {
-      sql: `UPDATE models SET technical_status = 'draft', execution_description_json = coalesce(?, execution_description_json), updated_at = ?
-        WHERE id = ? AND lifecycle_state = 'active'`, params: [input.executionDescription === undefined ? null : json(input.executionDescription), input.updatedAt, input.modelId], expectedChanges: 1,
+      sql: `UPDATE models SET technical_status = 'draft',
+        run_mode = coalesce(?, run_mode),
+        execution_description_json = coalesce(?, execution_description_json),
+        updated_at = ?
+        WHERE id = ? AND lifecycle_state = 'active'`, params: [
+          executionRunMode,
+          input.executionDescription === undefined
+            ? null
+            : json(input.executionDescription),
+          input.updatedAt,
+          input.modelId,
+        ], expectedChanges: 1,
     }];
     this.#coordinator.execute({ transactionId: input.transactionId, files: plans.map(({ target, bytes, file }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: file.expectedPriorSha256 })), statements });
     return plans.map(({ file }) => this.#file(file.objectFileId));
@@ -7470,8 +7657,50 @@ export class ProductStoreV2 {
   #actions(turnId: string): ActionRecordDto[] {
     return (this.#database.prepare("SELECT * FROM action_records WHERE turn_id = ? ORDER BY created_at, id").all(turnId) as any[]).map((row) => ({
       id: row.id, actionKind: row.action_kind, intent: JSON.parse(row.intent_json), permissionDecision: row.permission_decision,
-      state: row.state, affectedResources: JSON.parse(row.affected_resources_json), errorCode: row.error_code,
+      state: row.state, mutationTransactionId: row.mutation_transaction_id,
+      affectedResources: JSON.parse(row.affected_resources_json), errorCode: row.error_code,
     }));
+  }
+
+  #goalVerification(turnId: string): AgentGoalVerificationReceipt | null {
+    const row = this.#database.prepare(
+      `SELECT receipt.receipt_json, receipt.receipt_sha256,
+        turn.intent_sha256
+       FROM agent_goal_verification_receipts receipt
+       JOIN agent_turns turn ON turn.id = receipt.turn_id
+       WHERE receipt.turn_id = ?`,
+    ).get(turnId) as {
+      receipt_json: string;
+      receipt_sha256: string;
+      intent_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    let receipt: AgentGoalVerificationReceipt;
+    try {
+      receipt = JSON.parse(row.receipt_json) as AgentGoalVerificationReceipt;
+    } catch {
+      throw new ProductStoreV2Error(
+        "Agent goal verification receipt is invalid.",
+      );
+    }
+    assertAgentGoalVerificationReceipt(
+      receipt,
+      row.intent_sha256,
+      new Set([
+        "completed",
+        "needs_user_input",
+        "failed",
+        "read_only",
+        "outcome_unknown",
+        "budget_exhausted",
+      ]),
+    );
+    if (receipt.receiptDigest !== row.receipt_sha256) {
+      throw new ProductStoreV2Error(
+        "Agent goal verification receipt digest is invalid.",
+      );
+    }
+    return receipt;
   }
 
   #agentTurn(conversationId: string, requestKey: string): AgentTurnDto {
@@ -7486,6 +7715,7 @@ export class ProductStoreV2 {
       agentName: typeof content.agentName === "string" ? content.agentName : null,
       state: row.state, userMessageId: row.input_message_id, assistantMessageId: row.assistant_message_id,
       skillUses: this.#skillUses(row.id), actions: this.#actions(row.id),
+      goalVerification: this.#goalVerification(row.id),
       failure: row.failure_code ? { code: row.failure_code, retryable: Boolean(row.failure_retryable) } : null,
     };
   }
@@ -7509,6 +7739,12 @@ export class ProductStoreV2 {
       const turns = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[];
       addRows("agent_turns", turns);
       for (const turn of turns) {
+        addRows(
+          "agent_goal_verification_receipts",
+          this.#database.prepare(
+            "SELECT * FROM agent_goal_verification_receipts WHERE turn_id = ?",
+          ).all(turn.id) as any[],
+        );
         for (const audit of this.#database.prepare(
           `SELECT id, run_id FROM visual_agent_audit_facts
            WHERE conversation_id = ? AND turn_id = ? ORDER BY id`,
@@ -8019,13 +8255,61 @@ export class ProductStoreV2 {
       AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = m.id AND t.state = 'running')`).get() as { count: number }).count;
     if (committedActions + rolledBackActions + runningTurns + liveSessions + runningChecks === 0) return;
     const now = new Date().toISOString();
-    this.#databaseMutation([
+    if (committedActions + rolledBackActions > 0) this.#databaseMutation([
       { sql: `UPDATE action_records SET state = 'committed', updated_at = ? WHERE state = 'staging' AND mutation_transaction_id IS NOT NULL
         AND EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = action_records.mutation_transaction_id)`, params: [now], expectedChanges: committedActions },
       { sql: `UPDATE action_records SET state = 'rolled_back', error_code = 'interrupted_before_commit', updated_at = ? WHERE state = 'staging'
         AND (mutation_transaction_id IS NULL OR NOT EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = action_records.mutation_transaction_id))`, params: [now], expectedChanges: rolledBackActions },
-      { sql: `UPDATE agent_turns SET state = 'failed', failure_code = 'interrupted', failure_retryable = 1, updated_at = ?
-        WHERE state IN ('queued', 'running')`, params: [now], expectedChanges: runningTurns },
+    ]);
+    const interruptedTurns = this.#database.prepare(
+      `SELECT t.conversation_id, t.request_key, m.text
+       FROM agent_turns t
+       JOIN messages m ON m.id = t.input_message_id
+       WHERE t.state IN ('queued', 'running')
+       ORDER BY t.created_at, t.id`,
+    ).all() as Array<{
+      conversation_id: string;
+      request_key: string;
+      text: string;
+    }>;
+    for (const interrupted of interruptedTurns) {
+      const turn = this.#agentTurn(
+        interrupted.conversation_id,
+        interrupted.request_key,
+      );
+      const evidence = this.agentGoalEvidence(
+        interrupted.conversation_id,
+        interrupted.request_key,
+      );
+      const receipt = verifyAgentGoal({
+        phase: "interrupted",
+        goalText: interrupted.text,
+        goalDigest: evidence.goalDigest,
+        intentAuthority: goalVerificationIntentAuthority(interrupted.text),
+        ownerKind: evidence.ownerKind,
+        sessionGeneration: null,
+        assistantDelivered: false,
+        actions: turn.actions,
+        ownerEvidence: {
+          stateDigest: evidence.stateDigest,
+          runMode: evidence.runMode,
+          executionDescriptionValid: evidence.executionDescriptionValid,
+          affectedResourcesVerified: evidence.affectedResourcesVerified,
+        },
+        verifiedAt: now,
+      });
+      this.failAgentTurn(
+        interrupted.conversation_id,
+        interrupted.request_key,
+        receipt.disposition === "outcome_unknown"
+          ? "agent_outcome_unknown"
+          : "interrupted",
+        receipt.disposition !== "outcome_unknown",
+        now,
+        receipt,
+      );
+    }
+    this.#databaseMutation([
       { sql: `UPDATE agent_sessions SET state = 'lost', failure_reason = 'process_restarted', updated_at = ? WHERE state != 'closed'`, params: [now], expectedChanges: liveSessions },
       { sql: `UPDATE models SET technical_status = 'failed', updated_at = ? WHERE technical_status = 'checking'
         AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = models.id AND t.state = 'running')`, params: [now], expectedChanges: checkingModels },
@@ -8831,6 +9115,7 @@ const PERMANENT_DELETE_TABLE_PRIORITY = Object.freeze([
   "temporary_document_adoptions",
   "skill_uses",
   "action_records",
+  "agent_goal_verification_receipts",
   "agent_turns",
   "conversation_summaries",
   "agent_sessions",
@@ -8906,6 +9191,92 @@ const compareKindId = (left: { kind: string; id: string }, right: { kind: string
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const visible = (state: LifecycleState, options: { includeArchived?: boolean; includeTrashed?: boolean }): boolean => state === "active" || state === "archived" && Boolean(options.includeArchived) || state === "trashed" && Boolean(options.includeTrashed);
 const json = (value: unknown): string => canonicalJsonV2(value).toString("utf8");
+
+const goalVerificationInsert = (
+  turnId: string,
+  conversationId: string,
+  receipt: AgentGoalVerificationReceipt,
+): DatabaseMutationStatement => ({
+  sql: `INSERT INTO agent_goal_verification_receipts
+    (turn_id, conversation_id, disposition, reason_code, receipt_json,
+      receipt_sha256, verified_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  params: [
+    turnId,
+    conversationId,
+    receipt.disposition,
+    receipt.reasonCode,
+    json(receipt),
+    receipt.receiptDigest,
+    receipt.verifiedAt,
+  ],
+  expectedChanges: 1,
+});
+
+const assertAgentGoalVerificationReceipt = (
+  receipt: AgentGoalVerificationReceipt,
+  expectedGoalDigest: string,
+  allowedDispositions: ReadonlySet<string>,
+): void => {
+  const evidence = receipt?.evidence;
+  const boundedCount = (value: unknown): value is number =>
+    Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1_000_000;
+  if (!receipt || !isPlainRecord(receipt)
+    || Object.keys(receipt).sort().join(",") !== [
+      "disposition",
+      "evidence",
+      "goalDigest",
+      "reasonCode",
+      "receiptDigest",
+      "schemaVersion",
+      "sessionGeneration",
+      "verifiedAt",
+    ].sort().join(",")
+    || receipt.schemaVersion !== 1
+    || !allowedDispositions.has(receipt.disposition)
+    || !(AGENT_GOAL_REASON_CODES as readonly string[]).includes(receipt.reasonCode)
+    || receipt.goalDigest !== expectedGoalDigest
+    || (receipt.sessionGeneration !== null
+      && (!Number.isSafeInteger(receipt.sessionGeneration)
+        || receipt.sessionGeneration < 1))
+    || !isExactIsoTimestamp(receipt.verifiedAt)
+    || !isPlainRecord(evidence)
+    || Object.keys(evidence).sort().join(",") !== [
+      "actionCount",
+      "affectedResourceCount",
+      "committedActionCount",
+      "intentKind",
+      "openCodeTerminal",
+      "ownerStateDigest",
+      "ownerStateVerified",
+      "partialEffect",
+      "terminalActionCount",
+    ].sort().join(",")
+    || !new Set(["idle", "not_reached", "unknown"])
+      .has(evidence.openCodeTerminal)
+    || !new Set(["response_delivery", "explicit_mutation", "model_visual"])
+      .has(evidence.intentKind)
+    || !boundedCount(evidence.actionCount)
+    || !boundedCount(evidence.terminalActionCount)
+    || !boundedCount(evidence.committedActionCount)
+    || !boundedCount(evidence.affectedResourceCount)
+    || evidence.terminalActionCount > evidence.actionCount
+    || evidence.committedActionCount > evidence.terminalActionCount
+    || (evidence.ownerStateDigest !== null
+      && !/^[0-9a-f]{64}$/u.test(evidence.ownerStateDigest))
+    || typeof evidence.ownerStateVerified !== "boolean"
+    || typeof evidence.partialEffect !== "boolean") {
+    throw new ProductStoreV2Error("Agent goal verification receipt is invalid.");
+  }
+  const {
+    receiptDigest: _receiptDigest,
+    ...unsigned
+  } = receipt;
+  if (!/^[0-9a-f]{64}$/u.test(receipt.receiptDigest)
+    || canonicalDigest(unsigned) !== receipt.receiptDigest) {
+    throw new ProductStoreV2Error("Agent goal verification receipt digest is invalid.");
+  }
+};
 const DIGEST = /^[0-9a-f]{64}$/u;
 
 const assertDigest = (value: string, label: string): void => {

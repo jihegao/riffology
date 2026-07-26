@@ -4,6 +4,34 @@ export type ConversationOwner = Extract<ResourceOwner, { kind: "model" | "projec
 export type AgentSessionState = "none" | "connecting" | "available" | "lost" | "read_only";
 export type DurableAgentSessionState = "creating" | "available" | "lost" | "rebuilding" | "closed";
 export type AgentTurnState = "queued" | "running" | "complete" | "failed" | "read_only";
+export type AgentGoalDisposition =
+  | "completed"
+  | "needs_user_input"
+  | "failed"
+  | "read_only"
+  | "outcome_unknown"
+  | "budget_exhausted";
+
+export type AgentGoalVerificationReceipt = Readonly<{
+  schemaVersion: 1;
+  disposition: AgentGoalDisposition;
+  reasonCode: string;
+  goalDigest: Sha256Digest;
+  sessionGeneration: number | null;
+  evidence: Readonly<{
+    openCodeTerminal: "idle" | "not_reached" | "unknown";
+    intentKind: "response_delivery" | "explicit_mutation" | "model_visual";
+    actionCount: number;
+    terminalActionCount: number;
+    committedActionCount: number;
+    affectedResourceCount: number;
+    ownerStateDigest: Sha256Digest | null;
+    ownerStateVerified: boolean;
+    partialEffect: boolean;
+  }>;
+  verifiedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
+}>;
 
 export type ConversationDto = {
   id: ProductId;
@@ -85,6 +113,7 @@ export type ActionRecordDto = {
   intent: unknown;
   permissionDecision: "pending" | "allowed" | "denied";
   state: "proposed" | "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed";
+  mutationTransactionId: string | null;
   affectedResources: unknown;
   errorCode: string | null;
 };
@@ -97,6 +126,7 @@ export type AgentTurnDto = {
   assistantMessageId: ProductId | null;
   skillUses: SkillUseDto[];
   actions: ActionRecordDto[];
+  goalVerification: AgentGoalVerificationReceipt | null;
   failure: { code: string; retryable: boolean } | null;
 };
 

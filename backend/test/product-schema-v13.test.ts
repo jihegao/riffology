@@ -9,6 +9,7 @@ import {
   PRODUCT_SCHEMA_V13_SQL,
   PRODUCT_SCHEMA_V14_SQL,
   PRODUCT_SCHEMA_V15_SQL,
+  PRODUCT_SCHEMA_V16_SQL,
 } from "../src/product-schema.ts";
 
 const installVersion12 = (database: DatabaseSync): void => {
@@ -71,6 +72,7 @@ test("schema v13 migration failure rolls back table and both version markers", (
       },
       { version: 14, sql: PRODUCT_SCHEMA_V14_SQL },
       { version: 15, sql: PRODUCT_SCHEMA_V15_SQL },
+      { version: 16, sql: PRODUCT_SCHEMA_V16_SQL },
     ];
     assert.throws(
       () => initializeProductSchema(database, broken),

@@ -24,7 +24,28 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
   assert.deepEqual(prepared.context.attachments?.map((item) => [item.id, item.preview]), [["attachment_alpha", "bounded input"]]);
   assert.equal(prepared.context.selectedSkills?.[0]?.id, "abm-modeling");
   const listed = await runtime.handle(prepared.capability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-  assert.ok(((listed?.result as any).tools as any[]).some((item) => item.name === "riff_apply_model_changes"));
+  const applyTool = ((listed?.result as any).tools as any[])
+    .find((item) => item.name === "riff_apply_model_changes");
+  assert.ok(applyTool);
+  assert.deepEqual(
+    applyTool.inputSchema.properties.changes.items.required,
+    [
+      "objectFileId",
+      "kind",
+      "relativePath",
+      "mediaType",
+      "text",
+      "expectedPriorSha256",
+    ],
+  );
+  assert.equal(
+    applyTool.inputSchema.properties.changes.items.additionalProperties,
+    false,
+  );
+  assert.deepEqual(
+    applyTool.inputSchema.properties.changes.items.properties.kind.enum,
+    ["model_code", "model_environment", "model_visual_asset"],
+  );
   const modelFile = store.listObjectFiles({ kind: "model", id: "model_alpha" }).find((file) => file.id === "file_model_alpha")!;
   const response = await runtime.handle(prepared.capability, call("riff_apply_model_changes", { requestKey: "change-a", changes: [{
     objectFileId: modelFile.id, kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", text: "value = 2\n", expectedPriorSha256: modelFile.sha256,
@@ -406,6 +427,12 @@ test("Project-only visual observation keeps target authority server-side", async
 test("intent classifier is conservative for questions and conditionals", () => {
   assert.equal(explicitImperative("Update the model file now"), true);
   assert.equal(explicitImperative("请修改模型文件"), true);
+  assert.equal(
+    explicitImperative("将 wind-turbine-visual 建立为可视化仿真模型"),
+    true,
+  );
+  assert.equal(explicitImperative("将来建立可视化模型的风险"), false);
+  assert.equal(explicitImperative("将来建立模型的方案"), false);
   assert.equal(explicitImperative("Could you update the model?"), false);
   assert.equal(explicitImperative("如果修改模型会怎样"), false);
   assert.equal(explicitImperative("Explain the model"), false);
