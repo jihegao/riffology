@@ -12,6 +12,7 @@ import type {
   OpenCodeSession,
   OpenCodeReadiness,
 } from "../src/opencode-adapter.ts";
+import { HttpOpenCodeAdapter } from "../src/opencode-adapter.ts";
 import { BackendApp } from "../src/server.ts";
 
 const NOW = "2026-07-25T10:00:00.000Z";
@@ -197,6 +198,61 @@ const addFixtureData = (app: BackendApp): void => {
     createdAt: NOW,
   });
 };
+
+test("invalid live OpenCode configuration keeps Product health, Home, and direct lifecycle controls available", {
+  timeout: 30_000,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "riff-a4-opencode-read-only-"));
+  const productRoot = join(root, "product");
+  const legacyRoot = join(root, "legacy");
+  await mkdir(legacyRoot, { recursive: true, mode: 0o700 });
+  let serverRequests = 0;
+  const openCode = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir: "relative/workspace",
+    expectedVersion: "1.18.4",
+    fetch: async () => { serverRequests += 1; throw new Error("invalid configuration must not contact OpenCode"); },
+  });
+  const app = new BackendApp({
+    mesa: new ProductApiMesa(),
+    openCode,
+    a2OpenCode: openCode,
+    a2ProductRoot: productRoot,
+    workspaceRoot: legacyRoot,
+    defaultSessionId: "a4-opencode-read-only",
+    a3PythonExecutable: process.execPath,
+  });
+  t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
+
+  await app.initialize();
+  addFixtureData(app);
+  const network = await app.listenBrowserNetwork();
+  const baseUrl = network.app.origin;
+  const health = await fetch(`${baseUrl}/health`);
+  assert.equal(health.status, 200, await health.clone().text());
+  const session = await bootstrap(baseUrl);
+  const homeResponse = await fetch(`${baseUrl}/api/home`, { headers: readHeaders(session) });
+  assert.equal(homeResponse.status, 200, await homeResponse.clone().text());
+  const home = await homeResponse.json() as any;
+  assert.deepEqual(home.providerAvailability, { mode: "read_only", reason: "opencode_unavailable" });
+  assert.equal(home.models.length, 1);
+  assert.equal(home.projects.length, 1);
+
+  const archived = await requestJson(
+    baseUrl,
+    session,
+    "POST",
+    "/api/resources/model/model_a4_api/archive",
+    {
+      commandId: "command_a4_read_only_archive",
+      expectedRecordDigest: app.productStore!.resourceRecordDigest("model", "model_a4_api"),
+    },
+  );
+  assert.equal(archived.status, 200, await archived.clone().text());
+  assert.equal((await archived.json() as any).currentLifecycleState, "archived");
+  assert.equal(serverRequests, 0);
+});
 
 test("A4-1 browser API exposes closed collections and replays confirmed delete after restart", {
   timeout: 30_000,

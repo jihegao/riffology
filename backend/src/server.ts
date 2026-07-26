@@ -443,6 +443,7 @@ export class BackendApp {
   readonly #agentTurnRuntime?: AgentTurnRuntime;
   readonly #authorityDeletionFence = new ProductAuthorityDeletionFence();
   readonly #preinstalledWindInstaller?: PreinstalledWindInstallerPort;
+  readonly #a2OpenCode?: OpenCodeConversationPort;
   readonly #productMode: boolean;
   readonly #repositoryRoot?: string;
   readonly #staticWebRoot?: string;
@@ -490,6 +491,7 @@ export class BackendApp {
       if (!a2OpenCode) {
         throw new Error("Product startup requires an OpenCode conversation adapter.");
       }
+      this.#a2OpenCode = a2OpenCode;
       this.productStore = options.productStore ?? ProductStoreV2.open(options.a2ProductRoot!);
       let diagnosticEventCursorCodec: DiagnosticEventCursorCodec;
       try {
@@ -654,6 +656,14 @@ export class BackendApp {
   async initialize(): Promise<ProjectState | undefined> {
     if (this.#productMode) {
       if (this.#recoveryStatus) return undefined;
+      if (this.#a2OpenCode?.initialize) {
+        try {
+          await this.#a2OpenCode.initialize();
+        } catch {
+          // OpenCode readiness is Agent-only. Product recovery, Home, and
+          // direct lifecycle controls remain available in read-only Agent mode.
+        }
+      }
       try {
         await this.productRunDispatcher?.recoverBeforeStart();
         await this.#preinstalledWindInstaller?.install();

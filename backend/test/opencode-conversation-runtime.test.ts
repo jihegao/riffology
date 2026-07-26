@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { AgentConversationSessionManager, type AgentSessionRepositoryPort, type DurableConversationRuntime } from "../src/agent-session-manager.ts";
 import type { AgentContextInput } from "../src/agent-context.ts";
-import { HttpOpenCodeAdapter, type OpenCodeConversationPort, type OpenCodePrompt, type OpenCodeProviderModel } from "../src/opencode-adapter.ts";
+import { HttpOpenCodeAdapter, type OpenCodeConfig, type OpenCodeConversationPort, type OpenCodePrompt, type OpenCodeProviderModel } from "../src/opencode-adapter.ts";
 
 const context = (conversationId = "conversation-a"): AgentContextInput => ({
   conversationId,
@@ -68,6 +71,34 @@ class FakeConversationOpenCode implements OpenCodeConversationPort {
   async abort(sessionId: string) { this.aborted.push(sessionId); }
 }
 
+const readyAdapter = async (t: any, config: OpenCodeConfig): Promise<HttpOpenCodeAdapter> => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-ready-adapter-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  const behavior = config.fetch ?? fetch;
+  const model = config.model ?? "provider-z/model-2";
+  const adapter = new HttpOpenCodeAdapter({
+    ...config,
+    baseUrl: config.baseUrl ?? "http://127.0.0.1:4096",
+    model,
+    workdir,
+    expectedVersion: "test",
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") return Response.json({ healthy: true, version: "test" });
+      if (path === "/path") return Response.json({ directory: workdir });
+      if (path === "/config/providers") {
+        const slash = model.indexOf("/");
+        const providerId = model.slice(0, slash);
+        const modelId = model.slice(slash + 1);
+        return Response.json({ providers: [{ id: providerId, models: { [modelId]: {} } }] });
+      }
+      return behavior(input, init);
+    },
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  return adapter;
+};
+
 test("adapter accepts only credential-free loopback HTTP base URLs", () => {
   assert.doesNotThrow(() => new HttpOpenCodeAdapter({ baseUrl: "http://127.0.0.1:4096" }));
   assert.doesNotThrow(() => new HttpOpenCodeAdapter({ baseUrl: "http://localhost:4096" }));
@@ -78,31 +109,49 @@ test("adapter accepts only credential-free loopback HTTP base URLs", () => {
   ]) assert.throws(() => new HttpOpenCodeAdapter({ baseUrl: unsafe }), /loopback HTTP URL|unauthenticated|path/u);
 });
 
-test("adapter refuses redirects and never follows a cross-host location", async () => {
+test("ready adapter refuses redirects and never follows a cross-host location", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-redirect-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
   const calls: Array<{ url: string; redirect?: RequestRedirect }> = [];
+  let providerRequests = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "provider-z/model-2",
+    workdir,
+    expectedVersion: "test",
     fetch: async (input, init) => {
       calls.push({ url: String(input), redirect: init?.redirect });
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") return Response.json({ healthy: true, version: "test" });
+      if (path === "/path") return Response.json({ directory: workdir });
+      if (path === "/config/providers" && providerRequests++ === 0) {
+        return Response.json({ providers: [{ id: "provider-z", models: { "model-2": {} } }] });
+      }
       return new Response(null, { status: 302, headers: { location: "http://attacker.example/steal" } });
     },
   });
+  assert.equal((await adapter.initialize()).status, "ready");
   await assert.rejects(() => adapter.discoverProviderModels(), (error: any) => error.code === "opencode_redirect_forbidden");
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].redirect, "manual");
-  assert.match(calls[0].url, /^http:\/\/127\.0\.0\.1:4096\//u);
+  assert.deepEqual(calls.map((call) => new URL(call.url).pathname), ["/global/health", "/path", "/config/providers", "/config/providers"]);
+  assert.equal(calls.every((call) => call.redirect === "manual"), true);
+  assert.equal(calls.every((call) => /^http:\/\/127\.0\.0\.1:4096\//u.test(call.url)), true);
 });
 
-test("provider discovery is stable, deduplicated, allowlisted, and has no first-model fallback", async () => {
+test("provider discovery is stable, deduplicated, allowlisted, and has no first-model fallback", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-provider-discovery-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
   const calls: string[] = [];
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir,
+    expectedVersion: "test",
     allowedProviders: ["provider-z", "provider-a"],
     fetch: async (input) => {
       const path = new URL(String(input)).pathname;
       calls.push(path);
       if (path === "/global/health") return Response.json({ healthy: true, version: "test" });
+      if (path === "/path") return Response.json({ directory: workdir });
       return Response.json({ providers: [
         { id: "provider-z", models: { "model-2": {}, "model-1": {} } },
         { id: "provider-a", models: ["model-x", "model-x"] },
@@ -110,22 +159,32 @@ test("provider discovery is stable, deduplicated, allowlisted, and has no first-
       ] });
     },
   });
+  const readiness = await adapter.initialize();
+  assert.equal(readiness.status, "ready");
   assert.deepEqual(await adapter.discoverProviderModels(), [
     { providerId: "provider-a", modelId: "model-x", qualifiedId: "provider-a/model-x" },
     { providerId: "provider-z", modelId: "model-1", qualifiedId: "provider-z/model-1" },
     { providerId: "provider-z", modelId: "model-2", qualifiedId: "provider-z/model-2" },
   ]);
-  const readiness = await adapter.initialize();
-  assert.equal(readiness.status, "error");
-  assert.equal(readiness.lastError?.code, "opencode_model_unconfigured");
-  assert.equal(calls.filter((path) => path === "/config/providers").length, 1, "initialize must not discover or select a fallback without explicit model");
+  assert.equal(calls.filter((path) => path === "/config/providers").length, 2);
+
+  let noFallbackRequests = 0;
+  const missingModel = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    workdir,
+    expectedVersion: "test",
+    fetch: async () => { noFallbackRequests += 1; throw new Error("missing model must not contact OpenCode"); },
+  });
+  const missingModelReadiness = await missingModel.initialize();
+  assert.equal(missingModelReadiness.status, "error");
+  assert.equal(missingModelReadiness.lastError?.code, "opencode_model_unconfigured");
+  assert.equal(noFallbackRequests, 0, "initialize must not discover or select a fallback without explicit model");
 });
 
-test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async () => {
+test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async (t) => {
   const bodies: any[] = [];
   let prompted = false;
-  const adapter = new HttpOpenCodeAdapter({
-    baseUrl: "http://127.0.0.1:4096",
+  const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
@@ -148,11 +207,10 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
   assert.equal(Object.values(bodies[0].tools).every((value) => value === false), true);
 });
 
-test("adapter reuses one OpenCode session across turns with server-generated user message IDs", async () => {
+test("adapter reuses one OpenCode session across turns with server-generated user message IDs", async (t) => {
   const messages: any[] = [];
   let promptNumber = 0;
-  const adapter = new HttpOpenCodeAdapter({
-    baseUrl: "http://127.0.0.1:4096",
+  const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
@@ -177,11 +235,10 @@ test("adapter reuses one OpenCode session across turns with server-generated use
   assert.equal(second.text, "answer-2");
 });
 
-test("adapter binds one uniquely named scoped MCP and enables only that server for the prompt", async () => {
+test("adapter binds one uniquely named scoped MCP and enables only that server for the prompt", async (t) => {
   const calls: Array<{ path: string; body: any }> = [];
   let prompted = false;
-  const adapter = new HttpOpenCodeAdapter({
-    baseUrl: "http://127.0.0.1:4096",
+  const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
@@ -225,11 +282,10 @@ test("adapter does not persist bounded reconstruction context as a synthetic use
   assert.equal(requests, 0);
 });
 
-test("adapter ignores a stale assistant and waits for the response parented to this prompt", async () => {
+test("adapter ignores a stale assistant and waits for the response parented to this prompt", async (t) => {
   let prompted = false;
   let polls = 0;
-  const adapter = new HttpOpenCodeAdapter({
-    baseUrl: "http://127.0.0.1:4096",
+  const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/prompt_async")) {
@@ -248,11 +304,10 @@ test("adapter ignores a stale assistant and waits for the response parented to t
   assert.equal(polls, 3);
 });
 
-test("adapter waits past a tool-only assistant segment for the final text segment", async () => {
+test("adapter waits past a tool-only assistant segment for the final text segment", async (t) => {
   let prompted = false;
   let polls = 0;
-  const adapter = new HttpOpenCodeAdapter({
-    baseUrl: "http://127.0.0.1:4096",
+  const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     fetch: async (input, init) => {
       if (new URL(String(input)).pathname.endsWith("/prompt_async")) {

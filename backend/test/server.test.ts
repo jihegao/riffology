@@ -393,18 +393,23 @@ test("each live chat creates a fresh OpenCode session, rebinds MCP, and revokes 
   assert.equal((denied as any).error.code, -32001);
 });
 
-test("OpenCode adapter creates a fresh session for every synchronous bounded chat turn", async () => {
+test("OpenCode adapter creates a fresh session for every synchronous bounded chat turn", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "riff-opencode-live-contract-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
   const calls: Array<{ path: string; method: string; body?: any; signal?: AbortSignal | null }> = [];
   let createdSessions = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "deepseek/v4",
+    workdir: workspace,
+    expectedVersion: "1.2.3",
     allowedProviders: ["deepseek"],
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       calls.push({ path, method: init?.method ?? "GET", body, signal: init?.signal });
       if (path === "/global/health") return Response.json({ healthy: true, version: "1.2.3" });
+      if (path === "/path") return Response.json({ directory: workspace });
       if (path === "/config/providers") return Response.json({ providers: [{ id: "deepseek", models: { v4: {} } }] });
       if (path === "/session") return Response.json({ id: `internal-session-${++createdSessions}` });
       if (path === "/session/internal-session-1/message" && init?.method === "POST") return Response.json({ id: "assistant-message" });

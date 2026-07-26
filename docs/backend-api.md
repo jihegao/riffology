@@ -13,6 +13,33 @@ without exposing credentials, session IDs, paths, or raw tool payloads.
 Merge and the merged-revision rerun remain before Issue closure; see
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
 
+## OpenCode startup/readiness contract (Issue #56 PR 1)
+
+`OPENCODE_WORKDIR` is server-side configuration. It names one explicit,
+absolute, canonical directory and is never accepted from the browser or
+returned by an API DTO. The launcher resolves it independently of the shell
+directory from which it was invoked. A developer repo-root profile is limited
+to local developer operation; a normal Product Agent profile must instead bind
+OpenCode to the exact server-owned Model or Project workspace. Selecting the
+former does not authorize a Product Agent to read, write, or run against
+product-source files.
+
+When live OpenCode is enabled, the backend considers the adapter ready only
+after loopback reachability and `/global/health`, an exact health version equal
+to configured `OPENCODE_EXPECTED_VERSION` (the launcher default is `1.18.4`),
+and `/path` whose canonical directory equals configured `OPENCODE_WORKDIR`.
+Credentials, the raw `/path` value, and server process details remain
+backend-only. Any missing path, non-directory, unsafe symlink resolution,
+version mismatch, or path mismatch yields the existing explicit OpenCode
+read-only state; Riff must not infer the caller's cwd, choose a different
+directory, or silently fall back to another provider. Direct Product resource
+and Run controls remain independent of this Agent read-only state.
+
+This contract deliberately does not change turn completion semantics. Native
+session lifecycle/event handling, streamed parts and UI controls, tool-layer
+integration, and durable goal verification are Issue #56 PR 2–5 work and are
+not asserted as implemented here.
+
 ## Milestone A2 authority and current A3 execution
 
 The current product authority is the

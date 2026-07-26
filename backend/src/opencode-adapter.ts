@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { ApiError } from "./errors.ts";
 import type { AgentStatus } from "./types.ts";
 
@@ -43,6 +45,8 @@ export interface OpenCodeAdapter {
 
 /** Narrow A2 port: provider/model is explicit on every prompt. */
 export interface OpenCodeConversationPort {
+  /** Optional for test/fake ports; production adapters use it to establish the live server contract. */
+  initialize?(): Promise<OpenCodeReadiness>;
   discoverProviderModels(): Promise<OpenCodeProviderModel[]>;
   getSession(sessionId: string): Promise<boolean>;
   createSession(conversationId: string): Promise<string>;
@@ -60,6 +64,10 @@ export interface OpenCodeConversationPort {
 
 export type OpenCodeConfig = {
   baseUrl?: string;
+  /** Canonical directory that the separately-started OpenCode Server must report from /path. */
+  workdir?: string;
+  /** Exact server version selected for this local compatibility contract. */
+  expectedVersion?: string;
   serverUsername?: string;
   serverPassword?: string;
   model?: string;
@@ -103,6 +111,14 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     }
     if (!this.#baseUrl) return this.#setReadinessError("opencode_unconfigured", "Set OPENCODE_URL and OPENCODE_MODEL to enable the modelling assistant.");
     if (!this.config.model) return this.#setReadinessError("opencode_model_unconfigured", "Select an explicit provider/model before enabling the modelling assistant.");
+    if (!this.config.workdir) return this.#setReadinessError("opencode_workdir_unconfigured", "Set an explicit OPENCODE_WORKDIR before enabling the modelling assistant.");
+    let workdir: string;
+    try { workdir = normalizeOpenCodeWorkdir(this.config.workdir); }
+    catch { return this.#setReadinessError("opencode_invalid_workdir", "OPENCODE_WORKDIR must be an absolute existing directory."); }
+    if (!this.config.expectedVersion) return this.#setReadinessError("opencode_version_unconfigured", "Set an explicit OPENCODE_EXPECTED_VERSION before enabling the modelling assistant.");
+    let expectedVersion: string;
+    try { expectedVersion = requiredOpenCodeVersion(this.config.expectedVersion); }
+    catch { return this.#setReadinessError("opencode_invalid_version", "OPENCODE_EXPECTED_VERSION must be a non-empty printable version string."); }
     try {
       const binding = splitQualifiedModel(this.config.model);
       const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
@@ -110,10 +126,25 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         return this.#setReadinessError("opencode_provider_not_allowed", "The configured OpenCode provider is not approved.");
       }
       const health = await this.#json("/global/health");
-      const models = await this.discoverProviderModels();
+      const version = openCodeVersion(health);
+      if (health.healthy !== true || !version) {
+        return this.#setReadinessError("opencode_unavailable", "The local OpenCode server did not report a healthy compatible version.");
+      }
+      if (version !== expectedVersion) {
+        return this.#setReadinessError("opencode_version_mismatch", "The local OpenCode server version does not match this Riff deployment.");
+      }
+      const activePath = await this.#json("/path");
+      const activeWorkdir = openCodePath(activePath);
+      if (!activeWorkdir) {
+        return this.#setReadinessError("opencode_unavailable", "The local OpenCode server did not report its active directory.");
+      }
+      if (activeWorkdir !== workdir) {
+        return this.#setReadinessError("opencode_workdir_mismatch", "The local OpenCode server is running from a different directory.");
+      }
+      const models = await this.#discoverProviderModelsUnchecked();
       const candidate = models.find((item) => item.providerId === binding.providerId && item.modelId === binding.modelId);
       if (!candidate) return this.#setReadinessError("opencode_model_unavailable", "The configured OpenCode model was not found in the live provider catalogue.");
-      this.#readiness = { status: "ready", modelId: candidate.qualifiedId, version: typeof health.version === "string" ? health.version : undefined };
+      this.#readiness = { status: "ready", modelId: candidate.qualifiedId, version };
       return this.#readiness;
     } catch (error) {
       return this.#setReadinessError(
@@ -124,6 +155,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   }
 
   async discoverProviderModels(): Promise<OpenCodeProviderModel[]> {
+    this.#requireReady();
+    return this.#discoverProviderModelsUnchecked();
+  }
+
+  async #discoverProviderModelsUnchecked(): Promise<OpenCodeProviderModel[]> {
     this.#requireLiveBaseUrl();
     const payload = await this.#json("/config/providers");
     const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
@@ -131,6 +167,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   }
 
   async getSession(sessionId: string): Promise<boolean> {
+    this.#requireReady();
     this.#requireLiveBaseUrl();
     assertOpaqueId(sessionId, "OpenCode session ID");
     const result = await this.#request(`/session/${encodeURIComponent(sessionId)}`, { method: "GET" });
@@ -141,6 +178,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
   async createSession(projectOrConversationId: string): Promise<string> {
     if (this.config.skipLive) return `dev-${projectOrConversationId}-${randomUUID()}`;
+    this.#requireReady();
     this.#requireLiveBaseUrl();
     const session = await this.#json("/session", {
       method: "POST",
@@ -172,6 +210,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     signal?: AbortSignal,
   ): Promise<OpenCodeAssistantResponse> {
     if (this.config.skipLive) throw new ApiError(503, "opencode_canned_forbidden", "A live OpenCode response is required.");
+    this.#requireReady();
     assertOpaqueId(sessionId, "OpenCode session ID");
     const model = validatedModelReference(binding);
     const allowed = new Set((this.config.allowedProviders ?? []).map((value) => value.trim()).filter(Boolean));
@@ -198,9 +237,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
   async prompt(sessionId: string, prompt: OpenCodePrompt, signal?: AbortSignal): Promise<void> {
     if (this.config.skipLive) return;
-    if (this.#readiness.status !== "ready" || !this.#readiness.modelId) {
-      throw new ApiError(503, "agent_not_ready", this.#readiness.lastError?.message ?? "The modelling assistant is not ready.");
-    }
+    this.#requireReady();
+    if (!this.#readiness.modelId) throw new ApiError(503, "agent_not_ready", "The modelling assistant is not ready.");
     const binding = splitQualifiedModel(this.#readiness.modelId);
     const attachmentText = prompt.attachments.map((attachment) =>
       `- attachment ${safeContextLabel(attachment.id)}: ${safeContextLabel(attachment.mediaType)}, ${safeContextLabel(attachment.workspaceRelativePath)}`,
@@ -226,6 +264,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
   async bindProject(projectId: string, mcpUrl: string): Promise<void> {
     if (this.config.skipLive) return;
+    this.#requireReady();
     this.#requireLiveBaseUrl();
     const safeMcpUrl = loopbackHttpUrl(mcpUrl, "Riff MCP URL").toString();
     if (this.#mcpProjects.get(projectId) === safeMcpUrl) return;
@@ -239,6 +278,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
   async bindScopedMcp(scopeId: string, mcpUrl: string): Promise<void> {
     if (this.config.skipLive) return;
+    this.#requireReady();
     this.#requireLiveBaseUrl();
     assertOpaqueId(scopeId, "Riff MCP scope ID");
     const safeMcpUrl = loopbackMcpUrl(mcpUrl).toString();
@@ -279,11 +319,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   }
 
   async subscribeEvents(listener: (event: OpenCodeRuntimeEvent) => void): Promise<() => void> {
-    if (!this.#baseUrl || this.config.skipLive) return () => undefined;
+    if (this.config.skipLive) return () => undefined;
+    this.#requireReady();
+    const baseUrl = this.#requireLiveBaseUrl();
     const controller = new AbortController();
     let response: Response;
     try {
-      response = await this.#fetch(new URL("/event", this.#baseUrl), {
+      response = await this.#fetch(new URL("/event", baseUrl), {
         headers: this.#authorization(),
         signal: controller.signal,
         redirect: "manual",
@@ -370,6 +412,15 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return this.#baseUrl;
   }
 
+  #requireReady(): void {
+    if (this.#readiness.status === "ready") return;
+    throw new ApiError(
+      503,
+      this.#readiness.lastError?.code ?? "agent_not_ready",
+      this.#readiness.lastError?.message ?? "The local OpenCode server has not passed readiness checks.",
+    );
+  }
+
   #setReadinessError(code: string, message: string): OpenCodeReadiness {
     this.#readiness = { status: "error", modelId: null, lastError: { code, message } };
     return this.#readiness;
@@ -378,6 +429,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
 export const opencodeFromEnvironment = (env: NodeJS.ProcessEnv = process.env): HttpOpenCodeAdapter => new HttpOpenCodeAdapter({
   baseUrl: env.OPENCODE_URL,
+  workdir: env.OPENCODE_WORKDIR,
+  expectedVersion: env.OPENCODE_EXPECTED_VERSION,
   serverUsername: env.OPENCODE_SERVER_USERNAME,
   serverPassword: env.OPENCODE_SERVER_PASSWORD,
   model: env.OPENCODE_MODEL,
@@ -385,6 +438,36 @@ export const opencodeFromEnvironment = (env: NodeJS.ProcessEnv = process.env): H
   requestTimeoutMs: optionalPositiveInteger(env.OPENCODE_REQUEST_TIMEOUT_MS ?? env.OPENCODE_PROMPT_TIMEOUT_MS),
   skipLive: env.RIFF_SKIP_OPENCODE === "true",
 });
+
+/** Resolves a configured workspace once so /path comparisons cannot be bypassed with a symlink. */
+export const normalizeOpenCodeWorkdir = (raw: string): string => {
+  if (!raw || !isAbsolute(raw)) throw new ApiError(503, "opencode_invalid_workdir", "OPENCODE_WORKDIR must be an absolute existing directory.");
+  let resolved: string;
+  try {
+    resolved = realpathSync(raw);
+    if (!statSync(resolved).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new ApiError(503, "opencode_invalid_workdir", "OPENCODE_WORKDIR must be an absolute existing directory.");
+  }
+  return resolved;
+};
+
+const openCodeVersion = (payload: Record<string, any>): string | null => {
+  const value = typeof payload.version === "string" ? payload.version.trim() : "";
+  return value && value.length <= 100 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null;
+};
+
+const requiredOpenCodeVersion = (raw: string): string => {
+  const version = openCodeVersion({ version: raw });
+  if (!version) throw new ApiError(503, "opencode_invalid_version", "OPENCODE_EXPECTED_VERSION must be a non-empty printable version string.");
+  return version;
+};
+
+const openCodePath = (payload: Record<string, any>): string | null => {
+  if (typeof payload.directory !== "string") return null;
+  try { return normalizeOpenCodeWorkdir(payload.directory); }
+  catch { return null; }
+};
 
 const discoveredProviderModels = (payload: Record<string, any>): OpenCodeProviderModel[] => {
   const found = new Map<string, OpenCodeProviderModel>();
