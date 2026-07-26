@@ -1314,10 +1314,28 @@ export class AgentWorkspaceService {
     let mcpBound = false;
     let workspace: OpenCodeWorkspaceBinding | undefined;
     try {
-      workspace = this.#workspaceBinding(
-        this.store.getConversation(conversationId).owner,
+      // Resolve/rebuild the exact external session generation before minting a
+      // capability. A missing prior session must never leave this turn's tool
+      // grant fenced to the retired generation.
+      const session = await this.#sessions.ensureSession(
+        conversationId,
+        this.#contextFor(conversationId, turn.userMessageId),
       );
+      if (session.mode === "read_only") {
+        turn = this.store.failAgentTurn(conversationId, requestKey, session.reason, session.retryable, this.#now());
+        return { mode: "read_only", reason: session.reason, turn, messages: this.store.listConversationMessages(conversationId) };
+      }
+      // Use the exact owner binding that admitted/rebuilt this session. Do not
+      // independently re-derive a lookalike workspace before binding tools.
+      workspace = session.workspace;
       prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
+      if (prepared && prepared.externalSessionGeneration !== session.generation) {
+        throw new ApiError(
+          409,
+          "opencode_session_generation_changed",
+          "The OpenCode session generation changed before capability issuance.",
+        );
+      }
       if (prepared?.requiresMcp) {
         if (!this.#scopedMcpUrl || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
           throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind a scoped MCP server for this Agent turn.");
@@ -1335,7 +1353,15 @@ export class AgentWorkspaceService {
         mcpBound = true;
       }
       const context = this.#contextFor(conversationId, turn.userMessageId, prepared);
-      const result = await this.#sessions.prompt(conversationId, context, text, prepared?.promptAttachments ?? [], mcpBound ? conversationId : undefined);
+      const result = await this.#sessions.prompt(
+        conversationId,
+        context,
+        text,
+        prepared?.promptAttachments ?? [],
+        mcpBound ? conversationId : undefined,
+        undefined,
+        prepared?.externalSessionGeneration ?? session.generation,
+      );
       if (result.mode === "read_only") {
         turn = this.store.failAgentTurn(conversationId, requestKey, result.reason, result.retryable, this.#now());
         return { mode: "read_only", reason: result.reason, turn, messages: this.store.listConversationMessages(conversationId) };
@@ -1761,7 +1787,9 @@ const safeFailureCode = (code: string): string => /^[a-z0-9_]{1,200}$/u.test(cod
 const asReadOnlyReason = (code: string | null | undefined): AgentReadOnlyReason | "agent_failed" => {
   const allowed = new Set<AgentReadOnlyReason>([
     "opencode_unavailable", "opencode_auth_failed", "provider_unavailable", "model_unavailable",
-    "session_validation_failed", "session_rebuild_failed", "empty_assistant_response",
+    "session_validation_failed", "session_rebuild_failed", "opencode_session_aborted", "opencode_session_error",
+    "opencode_session_generation_changed", "opencode_prompt_timeout",
+    "empty_assistant_response",
   ]);
   return code && allowed.has(code as AgentReadOnlyReason) ? code as AgentReadOnlyReason : "agent_failed";
 };

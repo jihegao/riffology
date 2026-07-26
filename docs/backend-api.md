@@ -13,7 +13,7 @@ without exposing credentials, session IDs, paths, or raw tool payloads.
 Merge and the merged-revision rerun remain before Issue closure; see
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
 
-## OpenCode startup/readiness contract (Issue #56 PR 1)
+## OpenCode startup and native turn contract (Issue #56 PR 1–2)
 
 `OPENCODE_WORKDIR` is server-side configuration for the OpenCode server's
 explicit absolute canonical default profile. It is never accepted from the
@@ -39,10 +39,49 @@ yields explicit Agent read-only state. The launcher still starts the Product
 when `OPENCODE_WORKDIR` is invalid, and Home, resource, and direct Run controls
 remain independent of Agent readiness.
 
-This contract deliberately does not change turn completion semantics. Native
-session lifecycle/event handling, streamed parts and UI controls, tool-layer
-integration, and durable goal verification are Issue #56 PR 2–5 work and are
-not asserted as implemented here.
+After the adapter accepts `POST /session/{sessionID}/prompt_async`, Riff treats
+the first assistant text and intermediate tool messages as non-terminal. It
+reconciles the exact target entry in `GET /session/status` with a bounded replay
+of `GET /session/{sessionID}/message`. `busy` and `retry` always keep the turn
+open. An explicit `idle`, or the documented absence of an already-idle target
+from the status map, is accepted only after the new server-generated user
+message exists and every assistant message parented to it carries completion
+evidence. Riff then deduplicates message/part replay, aggregates all non-ignored
+text parts in message order, commits the Riff turn, and only afterward releases
+the scoped MCP binding and capability.
+
+Transient status/message transport failures are replayed against the same
+opaque session until the bounded deadline. Provider authentication failure,
+OpenCode session error, exact-session abort, and prompt timeout become distinct
+redacted durable failure codes; the failed session generation is aborted and
+retired before reuse. No upstream error detail, session ID, capability URL, or
+message payload is projected to the browser. The SSE `/event` adapter remains a
+non-authoritative event source: each Product turn subscribes before prompt
+submission, filters events to the exact opaque session, deduplicates bounded
+event IDs, and reconnects after disconnect. Events may wake canonical
+reconciliation, but same-session event errors are not attributed to the current
+turn because the stream has no prompt/message cursor. Current-user assistant
+messages and target status remain the terminal success/failure authority and
+completion fallback.
+
+The opt-in installed-server integration gate runs OpenCode `1.18.4` with a
+controlled capability-scoped MCP and requires two ordered tool calls before
+idle reconciliation and revocation:
+
+```bash
+cd backend
+RUN_OPENCODE_MULTI_TOOL_SMOKE=true \
+OPENCODE_LIVE_SMOKE_MODEL=provider/model \
+node --experimental-strip-types --test test/opencode-smoke.test.ts
+```
+
+The default suite skips this credentialed provider call.
+
+Issue #56 PR 3 still owns streamed Conversation projection, pending
+permission/question UI, Stop/Retry/Resume, and provider/agent controls. PR 4
+owns the expanded Skill/MCP/Playwright layer, and PR 5 owns durable
+goal-satisfaction verification and the real browser exit; none is asserted as
+implemented by this PR 2 contract.
 
 ## Milestone A2 authority and current A3 execution
 

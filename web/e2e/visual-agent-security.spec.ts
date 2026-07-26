@@ -691,7 +691,7 @@ class FullChainOpenCode {
     return {
       messageId: "assistant-c4",
       text: "The bounded interaction dispatch completed.",
-      content: { source: "opencode", textParts: 1 },
+      content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
     };
   }
   async prompt() {}

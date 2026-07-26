@@ -37,7 +37,7 @@ class A4WorkspaceProvider implements OpenCodeAdapter, OpenCodeConversationPort {
     return {
       messageId: `fixture-a4-4-message-${++this.#sequence}`,
       text: `Fixture retained: ${prompt.text}`,
-      content: { source: "opencode", textParts: 1 },
+      content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
     };
   }
   async prompt(): Promise<void> {}

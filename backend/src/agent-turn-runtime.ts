@@ -24,6 +24,7 @@ const VISUAL_OBSERVATION_OPERATIONS = Object.freeze({
 export type PreparedAgentTurnRuntime = Readonly<{
   capability: string;
   turnId: string;
+  externalSessionGeneration: number;
   intentAuthority: "explicit" | "proposal_only";
   requiresMcp: boolean;
   context: Pick<AgentContextInput, "attachments" | "documents" | "selectedSkills">;
@@ -148,6 +149,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     return Object.freeze({
       capability,
       turnId: input.turnId,
+      externalSessionGeneration: Math.max(1, generation),
       intentAuthority,
       requiresMcp: intentAuthority === "explicit" || Boolean(input.confirmedVisualInteraction)
         || input.attachmentIds.length > 0 || Boolean(loadedSkill)

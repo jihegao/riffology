@@ -34,6 +34,10 @@ export type AgentReadOnlyReason =
   | "model_unavailable"
   | "session_validation_failed"
   | "session_rebuild_failed"
+  | "opencode_session_aborted"
+  | "opencode_session_error"
+  | "opencode_session_generation_changed"
+  | "opencode_prompt_timeout"
   | "empty_assistant_response";
 
 export type PreparedConversationSession =
@@ -96,9 +100,17 @@ export class AgentConversationSessionManager {
     attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }> = [],
     scopedMcpScopeId?: string,
     signal?: AbortSignal,
+    expectedSessionGeneration?: number,
   ): Promise<ConversationPromptResult> {
     const prepared = await this.ensureSession(conversationId, contextInput);
     if (prepared.mode === "read_only") return prepared;
+    if (expectedSessionGeneration !== undefined && prepared.generation !== expectedSessionGeneration) {
+      throw new ApiError(
+        409,
+        "opencode_session_generation_changed",
+        "The OpenCode session generation changed before this turn could be submitted.",
+      );
+    }
     try {
       const assistant = await this.#openCode.promptWithModel(
         prepared.externalSessionRef,
@@ -187,6 +199,9 @@ const stableReason = (error: unknown, fallback: AgentReadOnlyReason): AgentReadO
   if (error.code === "opencode_auth_failed" || error.status === 401) return "opencode_auth_failed";
   if (["opencode_unavailable", "opencode_unconfigured", "agent_not_ready"].includes(error.code)) return "opencode_unavailable";
   if (error.code === "opencode_model_unavailable") return "model_unavailable";
+  if (["opencode_session_aborted", "opencode_session_error", "opencode_session_generation_changed", "opencode_prompt_timeout"].includes(error.code)) {
+    return error.code as AgentReadOnlyReason;
+  }
   if (error.code === "opencode_empty_response") return "empty_assistant_response";
   return fallback;
 };

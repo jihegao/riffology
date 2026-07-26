@@ -25,6 +25,8 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   scopedUrls: string[] = [];
   unboundScopes: string[] = [];
   executeScopedMutation = false;
+  afterScopedMutation?: Promise<void>;
+  scopedMutationObserved?: () => void;
 
   async initialize(): Promise<OpenCodeReadiness> { return { status: "ready", modelId: "provider-a/model-a", version: "test" }; }
   async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding) {
@@ -62,13 +64,19 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
           text: "print('scoped MCP')\n", expectedPriorSha256: code.sha256 }],
       } } });
       assert.equal(changed.result.isError, undefined, JSON.stringify(changed));
+      this.scopedMutationObserved?.();
+      if (this.afterScopedMutation) await this.afterScopedMutation;
     }
     if (!this.assistantText) {
       const error: any = new Error("OpenCode returned no assistant text.");
       error.status = 502; error.code = "opencode_empty_response";
       throw error;
     }
-    return { messageId: `upstream-${this.prompts.length}`, text: this.assistantText, content: { source: "opencode", textParts: 1 } };
+    return {
+      messageId: `upstream-${this.prompts.length}`,
+      text: this.assistantText,
+      content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+    };
   }
   async prompt() {}
   async abort() {}
@@ -334,10 +342,25 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
   const created = await createModel(baseUrl, "scoped-mcp-model");
   openCode.executeScopedMutation = true;
+  let releaseTerminal!: () => void;
+  openCode.afterScopedMutation = new Promise<void>((resolve) => { releaseTerminal = resolve; });
+  let mutationObserved!: () => void;
+  const observed = new Promise<void>((resolve) => { mutationObserved = resolve; });
+  openCode.scopedMutationObserved = mutationObserved;
 
-  const response = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
+  const responsePromise = post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
     requestKey: "scoped-mcp-turn", text: "Update the model file now", attachmentIds: [],
   });
+  await observed;
+  assert.equal(openCode.scopedBindings.size, 1, "the capability must remain bound while the OpenCode turn is non-terminal");
+  assert.equal(openCode.unboundScopes.length, 0);
+  assert.equal(app.productStore!.listConversationActivity(created.conversation.id).actions[0]?.state, "committed",
+    "Riff mutation reconciliation must be durable before terminal release");
+  const stillAuthorized = await post(openCode.scopedUrls[0]!, { jsonrpc: "2.0", id: 4, method: "tools/list" });
+  assert.equal(stillAuthorized.status, 200);
+  assert.ok((await stillAuthorized.json() as any).result.tools.length > 0);
+  releaseTerminal();
+  const response = await responsePromise;
   assert.equal(response.status, 200, await response.clone().text());
   const payload = await response.json() as any;
   assert.equal(payload.mode, "live");
@@ -409,6 +432,34 @@ test("owner-bound conversation provider selection rejects developer-profile-only
     ),
     true,
   );
+});
+
+test("a missing OpenCode session rebuilds before the next scoped capability is minted", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-session-generation-fence-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => { await app.close(); await rm(base, { recursive: true, force: true }); });
+  const created = await createModel(baseUrl, "session-generation-fence-model");
+
+  const first = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
+    requestKey: "generation-warmup", text: "Explain the current model", attachmentIds: [],
+  });
+  assert.equal(first.status, 200, await first.clone().text());
+  assert.equal(openCode.created.length, 1);
+  openCode.sessions.delete(openCode.created[0]!.sessionId);
+
+  openCode.executeScopedMutation = true;
+  const second = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
+    requestKey: "generation-scoped-change", text: "Update the model file now", attachmentIds: [],
+  });
+  assert.equal(second.status, 200, await second.clone().text());
+  const payload = await second.json() as any;
+  assert.equal(payload.mode, "live");
+  assert.equal(payload.turn.state, "complete");
+  assert.equal(openCode.created.length, 2, "the missing opaque session must be rebuilt");
+  assert.equal(payload.turn.actions[0]?.state, "committed",
+    "the scoped capability must be minted for the rebuilt generation");
+  assert.equal(openCode.scopedBindings.size, 0);
 });
 
 test("two conversations keep independent sessions and a missing session rebuilds", async (t) => {
