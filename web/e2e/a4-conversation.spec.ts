@@ -5,6 +5,7 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
 }, testInfo) => {
   const errors: string[] = [];
   const responseBodies: string[] = [];
+  const optionalProjection404s: string[] = [];
   const pendingResponses = new Set<Promise<void>>();
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -12,6 +13,13 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
     if (!response.url().includes("/api/")) return;
+    if (/\/api\/conversations\/[^/]+\/runtime\/events$/u.test(
+      new URL(response.url()).pathname,
+    )) return;
+    if (response.status() === 404
+      && /\/api\/(?:agents|conversations\/[^/]+\/runtime)$/u.test(new URL(response.url()).pathname)) {
+      optionalProjection404s.push(response.url());
+    }
     const pending = response.text()
       .then((body) => { responseBodies.push(body); })
       .catch(() => undefined)
@@ -45,13 +53,15 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
     .getByLabel("samples.json").check();
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("Remember alpha");
   await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Assistant (fixture/model-b) retained: Remember alpha")).toBeVisible();
+  await expect(page.getByLabel("Conversation messages")
+    .getByText("Assistant (fixture/model-b) retained: Remember alpha")).toBeVisible();
   await expect(page.getByText("locked after the first accepted message", { exact: false })).toBeVisible();
 
   await createConversation(page, "Analysis B");
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("Remember beta");
   await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Assistant (fixture/model-a) retained: Remember beta")).toBeVisible();
+  await expect(page.getByLabel("Conversation messages")
+    .getByText("Assistant (fixture/model-a) retained: Remember beta")).toBeVisible();
   await createConversation(page, "Disposable C");
 
   await page.getByRole("link", { name: "Analysis A" }).click();
@@ -94,7 +104,7 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
   await page.getByRole("link", { name: "Analysis B" }).click();
   await expect(page.getByText("Remember beta", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Analysis Alpha" }).click();
-  await expect(page.getByText(
+  await expect(page.getByLabel("Conversation messages").getByText(
     "Assistant (fixture/model-b) retained: Remember alpha",
   )).toBeVisible();
   const assistantCount = await page.getByText(/^Assistant$/u).count();
@@ -137,7 +147,121 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
   ]) {
     expect(publicEvidence, forbidden).not.toContain(forbidden);
   }
-  expect(errors).toEqual([]);
+  let optional404ConsoleBudget = optionalProjection404s.length;
+  const relevantErrors = errors.filter((message) => {
+    if (optional404ConsoleBudget > 0
+      && message === "Failed to load resource: the server responded with a status of 404 (Not Found)") {
+      optional404ConsoleBudget -= 1;
+      return false;
+    }
+    return true;
+  });
+  expect(relevantErrors).toEqual([]);
+});
+
+test("PR3 projects sanitized native Agent activity and structured waiting-user controls", async ({
+  page,
+}, testInfo) => {
+  const submitted: Array<{ url: string; body: unknown }> = [];
+  const chartChoice = `choice_${"a".repeat(32)}`;
+  const tableChoice = `choice_${"b".repeat(32)}`;
+  const publicResponseBodies: Promise<string>[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (!/\/api\/conversations\/[^/]+\/turns\/[^/]+\/(?:resume|stop|retry)$/u
+      .test(path)) return;
+    submitted.push({
+      url: path,
+      body: request.postDataJSON(),
+    });
+  });
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    if (path === "/api/agents"
+      || /\/api\/conversations\/[^/]+\/runtime$/u.test(path)) {
+      publicResponseBodies.push(response.text());
+    }
+  });
+
+  await page.goto("/");
+  await page.getByRole("link", { name: "Open Model" }).first().click();
+  await createConversation(page, "Native Agent controls");
+  await page.getByLabel("Agent for this turn").selectOption("planner");
+  await page.getByRole("textbox", { name: "Message", exact: true })
+    .fill("[fixture:native-controls]");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Agent: waiting for user")).toBeVisible();
+  await expect(page.getByText("Riff inspect workspace")).toBeVisible();
+  await expect(page.getByText("Workspace inspected")).toBeVisible();
+  await expect(page.getByText("MCP: Riff tools")).toBeVisible();
+  await expect(page.getByLabel("Agent for this turn")).toBeDisabled();
+  await page.getByRole("region", { name: "Agent runtime controls" })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath("pr3-native-agent-controls-desktop.png"),
+    fullPage: false,
+  });
+
+  await page.getByRole("button", { name: "Allow once & Resume" }).click();
+  await page.getByRole("checkbox", { name: "Chart" }).check();
+  await page.getByRole("checkbox", { name: "Table" }).check();
+  await page.getByRole("textbox", { name: "Answer 2" }).fill("Keep labels concise.");
+  await page.getByRole("button", { name: "Send answers & Resume" }).click();
+  await expect(page.getByLabel("Conversation messages").getByText(
+    "Native controls completed through the real Product API.",
+  )).toBeVisible();
+
+  await page.getByRole("textbox", { name: "Message", exact: true })
+    .fill("[fixture:stop-and-retry]");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Agent: busy")).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByText("Agent: failed")).toBeVisible();
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByLabel("Conversation messages").getByText(
+    "Retry completed through the durable original intent.",
+  )).toBeVisible();
+
+  await expect.poll(() => submitted.length).toBe(4);
+  expect(submitted[0].body).toMatchObject({
+    interactionId: "permission_public_model_update",
+    kind: "permission",
+    decision: "once",
+  });
+  expect(submitted[1].body).toMatchObject({
+    interactionId: "question_public_output_details",
+    kind: "question",
+    answers: [[chartChoice, tableChoice], ["Keep labels concise."]],
+  });
+  expect(submitted[2].url).toMatch(/\/stop$/u);
+  expect(submitted[3].url).toMatch(/\/retry$/u);
+  expect(submitted[3].body).toMatchObject({ requestKey: expect.any(String) });
+  expect(JSON.stringify(submitted)).not.toContain("sessionID");
+  expect(JSON.stringify(submitted)).not.toContain("capability");
+  const publicEvidence = (await Promise.all(publicResponseBodies)).join("\n");
+  for (const forbidden of [
+    "fixture-session-",
+    "externalSessionRef",
+    "sessionID",
+    "capability",
+    "/Users/",
+    "/private/",
+  ]) {
+    expect(publicEvidence, forbidden).not.toContain(forbidden);
+  }
+
+  await page.setViewportSize({ width: 640, height: 900 });
+  await page.getByTestId("pane-selector").getByRole("button", { name: "Conversation" }).click();
+  await expect(page.getByTestId("pane-conversation")).toBeVisible();
+  const fit = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(fit.scrollWidth).toBeLessThanOrEqual(fit.clientWidth);
+  await page.screenshot({
+    path: testInfo.outputPath("pr3-native-agent-controls-narrow.png"),
+    fullPage: false,
+  });
 });
 
 const createConversation = async (

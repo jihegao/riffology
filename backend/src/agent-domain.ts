@@ -91,6 +91,7 @@ export type ActionRecordDto = {
 
 export type AgentTurnDto = {
   requestKey: string;
+  agentName: string | null;
   state: AgentTurnState;
   userMessageId: ProductId | null;
   assistantMessageId: ProductId | null;
@@ -115,6 +116,7 @@ export type StartAgentTurnIntent = {
   conversationId: ProductId;
   requestKey: string;
   text: string;
+  agentName?: string;
   attachmentIds?: ProductId[];
   visualInteractionMarker?: VisualInteractionMarker | null;
   createdAt: IsoTimestamp;

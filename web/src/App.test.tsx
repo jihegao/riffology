@@ -581,8 +581,218 @@ describe("Stage 4 Product entry", () => {
 
     expect(screen.getByText("Beta remains selected.")).toBeInTheDocument();
     expect(screen.queryByText("Alpha failed late.")).not.toBeInTheDocument();
-    expect(screen.getByText("Agent: live")).toBeInTheDocument();
+    expect(screen.getByText("Agent: idle")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
     expect(screen.getByTestId("workspace-owner-card")).toBe(ownerCard);
+  });
+
+  it("projects sanitized waiting-for-user activity and submits typed permission and multi-question responses", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.agents = vi.fn(async () => ({
+      mode: "live" as const,
+      agents: [{ name: "planner", label: "Planner", description: "Plans scoped work." }],
+    }));
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-digest-4",
+      status: "waiting_for_user" as const,
+      activeTurn: {
+        requestKey: "turn-public-one",
+        canStop: true,
+        canRetry: false,
+      },
+      parts: [{
+        id: "part-tool",
+        kind: "tool_call" as const,
+        state: "complete" as const,
+        title: "Inspect workspace",
+        summary: "Read the current Model structure.",
+      }, {
+        id: "part-result",
+        kind: "tool_result" as const,
+        state: "complete" as const,
+        title: "Workspace inspected",
+        summary: "Three declared files are available.",
+      }, {
+        id: "part-error",
+        kind: "error" as const,
+        state: "failed" as const,
+        title: "A bounded step failed",
+        summary: "Retry is available after confirmation.",
+      }],
+      pendingInteractions: [{
+        id: "permission-public-one",
+        kind: "permission" as const,
+        title: "Allow Model update",
+        prompt: "Allow this scoped change for this turn only?",
+        decisions: ["allow_once", "reject"] as const,
+      }, {
+        id: "question-public-one",
+        kind: "question" as const,
+        title: "Choose output details",
+        questions: [{
+          prompt: "Which views should be enabled?",
+          multiple: true,
+          custom: false,
+          choices: [
+            { value: "chart", label: "Chart" },
+            { value: "table", label: "Table" },
+          ],
+        }, {
+          prompt: "Add a short note",
+          multiple: false,
+          custom: true,
+          choices: [],
+        }],
+      }],
+      agent: { selectedName: "planner", locked: true },
+      mcp: { state: "connected" as const, label: "Scoped Model tools" },
+      rawPayload: "secret-capability-must-not-render",
+    } as any));
+    productClient.subscribeConversationRuntime = vi.fn(async () => () => {});
+    productClient.respondConversationInteraction = vi.fn(async () => ({}));
+    productClient.stopConversation = vi.fn(async () => ({}));
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("Agent: waiting for user")).toBeInTheDocument();
+    expect(screen.getByText("Inspect workspace")).toBeInTheDocument();
+    expect(screen.getByText("Workspace inspected")).toBeInTheDocument();
+    expect(screen.getByText("A bounded step failed")).toBeInTheDocument();
+    expect(screen.getByText("MCP: Scoped Model tools")).toBeInTheDocument();
+    expect(screen.queryByText("secret-capability-must-not-render")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Agent for this turn" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Answer 2" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Allow once & Resume" }));
+    expect(productClient.respondConversationInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-main",
+        interactionId: "permission-public-one",
+        kind: "permission",
+        decision: "allow_once",
+      }),
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Chart" }));
+    await user.click(screen.getByRole("checkbox", { name: "Table" }));
+    await user.type(screen.getByRole("textbox", { name: "Answer 2" }), "Keep labels concise.");
+    await user.click(screen.getByRole("button", { name: "Send answers & Resume" }));
+    expect(productClient.respondConversationInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-main",
+        interactionId: "question-public-one",
+        kind: "question",
+        response: { answers: [["chart", "table"], ["Keep labels concise."]] },
+      }),
+    );
+  });
+
+  it("shows an SSE waiting state while the original send request remains pending", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    let project!: (value: any) => void;
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-stale-failed",
+      status: "failed" as const,
+      activeTurn: { requestKey: "previous-turn", canStop: false, canRetry: true },
+      parts: [],
+      pendingInteractions: [],
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "disconnected" as const, label: "Riff tools" },
+    }));
+    productClient.subscribeConversationRuntime = vi.fn(async (_id, onProjection) => {
+      project = onProjection;
+      return () => {};
+    });
+    productClient.sendTurn = vi.fn(() => new Promise<never>(() => {}));
+    render(<App client={productClient} />);
+
+    await user.type(await screen.findByRole("textbox", { name: "Message" }), "Need approval.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByText("Agent: busy")).toBeInTheDocument();
+
+    project({
+      schemaVersion: 1,
+      revision: "runtime-waiting",
+      status: "waiting_for_user",
+      activeTurn: { requestKey: "turn-pending", canStop: true, canRetry: false },
+      parts: [],
+      pendingInteractions: [{
+        id: "permission-pending",
+        kind: "permission",
+        title: "Allow scoped work",
+        prompt: "Allow this once?",
+        decisions: ["allow_once", "reject"],
+      }],
+      agent: { selectedName: null, locked: true },
+      mcp: { state: "connected", label: "Riff tools" },
+    });
+
+    expect(await screen.findByText("Agent: waiting for user")).toBeInTheDocument();
+    expect(screen.getByText("Allow scoped work")).toBeInTheDocument();
+  });
+
+  it("uses exact active-turn Stop and terminal Retry contracts while replacing full runtime snapshots", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    let project!: (value: any) => void;
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-digest-1",
+      status: "busy" as const,
+      activeTurn: { requestKey: "turn-old", canStop: true, canRetry: false },
+      parts: [{
+        id: "streaming-text",
+        kind: "text" as const,
+        state: "streaming" as const,
+        title: "Assistant response",
+        summary: "Inspecting the Model.",
+      }],
+      pendingInteractions: [],
+      agent: { selectedName: null, locked: true },
+      mcp: { state: "connected" as const, label: "Scoped Model tools" },
+    }));
+    productClient.subscribeConversationRuntime = vi.fn(async (_id, onProjection) => {
+      project = onProjection;
+      return () => {};
+    });
+    productClient.stopConversation = vi.fn(async () => ({}));
+    productClient.retryConversation = vi.fn(async () => ({}));
+    render(<App client={productClient} />);
+
+    await user.click(await screen.findByRole("button", { name: "Stop" }));
+    expect(productClient.stopConversation).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conversation-main",
+      requestKey: "turn-old",
+    }));
+
+    project({
+      schemaVersion: 1,
+      revision: "runtime-digest-2",
+      status: "failed",
+      activeTurn: { requestKey: "turn-old", canStop: false, canRetry: true },
+      parts: [{
+        id: "terminal-error",
+        kind: "error",
+        state: "failed",
+        title: "Provider turn failed",
+        summary: "The turn can be retried.",
+      }],
+      pendingInteractions: [],
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "disconnected", label: "Scoped tools released" },
+    });
+    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(productClient.retryConversation).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conversation-main",
+      oldRequestKey: "turn-old",
+      newRequestKey: expect.any(String),
+    }));
   });
 });

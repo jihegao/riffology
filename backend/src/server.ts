@@ -1290,7 +1290,7 @@ export class BackendApp {
       const runControl = request.method === "POST"
         && /^\/api\/projects\/[^/]+\/runs\/[^/]+\/(?:cancel|trash|restore)$/u
           .test(requestUrl.pathname);
-      const productApi = /^\/api\/(?:health|recovery-status|home|providers|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
+      const productApi = /^\/api\/(?:health|recovery-status|home|providers|agents|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
         .test(requestUrl.pathname);
       const write = gate3
         ? canonicalJson

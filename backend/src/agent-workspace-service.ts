@@ -14,10 +14,13 @@ import type {
   TemporaryDocumentCardDto,
 } from "./agent-domain.ts";
 import { createGenericModelScaffold } from "./model-workspace.ts";
-import type {
-  OpenCodeConversationPort,
-  OpenCodeProviderModel,
-  OpenCodeWorkspaceBinding,
+import {
+  redactPublicRuntimeText,
+  type OpenCodeAgent,
+  type OpenCodeConversationPort,
+  type OpenCodeConversationRuntimeSnapshot,
+  type OpenCodeProviderModel,
+  type OpenCodeWorkspaceBinding,
 } from "./opencode-adapter.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import {
@@ -84,6 +87,41 @@ import {
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
   | { mode: "read_only"; reason: "opencode_unavailable" | "opencode_auth_failed"; providerModels: [] };
+
+export type AgentDiscoveryDto =
+  | { mode: "live"; agents: OpenCodeAgent[] }
+  | { mode: "read_only"; reason: "opencode_unavailable" | "opencode_auth_failed"; agents: [] };
+
+export type ConversationRuntimeDto = Readonly<{
+  revision: string;
+  status: "busy" | "waiting_for_tool" | "waiting_for_user" | "idle" | "failed";
+  turnActive: boolean;
+  activeRequestKey: string | null;
+  assistant: OpenCodeConversationRuntimeSnapshot["assistant"];
+  tools: OpenCodeConversationRuntimeSnapshot["tools"];
+  interactions: OpenCodeConversationRuntimeSnapshot["interactions"];
+  failure: { code: string; retryable: boolean } | null;
+  scopedMcp: OpenCodeConversationRuntimeSnapshot["scopedMcp"];
+  agent: {
+    selected: string | null;
+  };
+  provider: { providerId: string; modelId: string; locked: boolean };
+  activity: {
+    skillUses: PublicSkillUseDto[];
+    actions: PublicActionRecordDto[];
+  };
+}>;
+
+type ActiveConversationTurn = {
+  requestKey: string;
+  agentName: string | null;
+  controller: AbortController;
+  externalSessionRef: string | null;
+  workspace: OpenCodeWorkspaceBinding | null;
+  mcpBound: boolean;
+  controlState: "open" | "stopping" | "terminal";
+  controlTail: Promise<void>;
+};
 
 export type ModelCreationDto = {
   model: Pick<ModelRecord, "id" | "name" | "lifecycleState" | "technicalStatus" | "runMode" | "createdAt" | "updatedAt">;
@@ -203,6 +241,8 @@ export class AgentWorkspaceService {
   readonly #now: () => string;
   readonly #pendingTurns = new Map<string, Promise<AgentTurnResult>>();
   readonly #conversationTurnTails = new Map<string, Promise<void>>();
+  readonly #activeTurns = new Map<string, ActiveConversationTurn>();
+  readonly #runtimeCache = new Map<string, OpenCodeConversationRuntimeSnapshot>();
   #scopedMcpTail: Promise<void> = Promise.resolve();
   readonly #scopedMcpUrl?: (capability: string) => string;
   readonly #onRunQueued?: (runId: string, cancellationRequested: boolean) => void;
@@ -304,6 +344,23 @@ export class AgentWorkspaceService {
     catch (error) {
       const auth = error instanceof ApiError && (error.status === 401 || error.code === "opencode_auth_failed");
       return { mode: "read_only", reason: auth ? "opencode_auth_failed" : "opencode_unavailable", providerModels: [] };
+    }
+  }
+
+  async discoverAgents(owner: ConversationOwner): Promise<AgentDiscoveryDto> {
+    this.#assertOwnerExists(owner);
+    if (!this.openCode.discoverAgents) {
+      return { mode: "read_only", reason: "opencode_unavailable", agents: [] };
+    }
+    try {
+      return {
+        mode: "live",
+        agents: (await this.openCode.discoverAgents(this.#workspaceBinding(owner))).filter((agent) =>
+          agent.mode === "primary" || agent.mode === "all"),
+      };
+    } catch (error) {
+      const auth = error instanceof ApiError && (error.status === 401 || error.code === "opencode_auth_failed");
+      return { mode: "read_only", reason: auth ? "opencode_auth_failed" : "opencode_unavailable", agents: [] };
     }
   }
 
@@ -1186,6 +1243,204 @@ export class AgentWorkspaceService {
     }
   }
 
+  async conversationRuntime(conversationIdInput: string): Promise<ConversationRuntimeDto> {
+    const conversationId = boundedId(conversationIdInput);
+    const conversation = this.getConversation(conversationId);
+    const activeRecord = this.#activeTurns.get(conversationId);
+    const active = activeRecord?.controlState === "terminal" ? undefined : activeRecord;
+    const controlsOpen = active?.controlState === "open";
+    const latestTurn = this.store.latestAgentTurn(conversationId);
+    let upstream: OpenCodeConversationRuntimeSnapshot | null = null;
+    if (controlsOpen && active?.externalSessionRef && active.workspace && this.openCode.runtimeSnapshot) {
+      try {
+        upstream = await this.openCode.runtimeSnapshot(
+          active.externalSessionRef,
+          active.mcpBound ? conversationId : undefined,
+          active.workspace,
+        );
+        this.#runtimeCache.set(conversationId, upstream);
+      } catch {
+        // Durable turn state remains authoritative; an unavailable live
+        // projection is represented without exposing the upstream error.
+      }
+    }
+    if (!active) upstream = this.#runtimeCache.get(conversationId) ?? null;
+    const interactions = controlsOpen ? upstream?.interactions ?? [] : [];
+    const tools = upstream?.tools ?? [];
+    const failure = active
+      ? upstream?.failureCode
+        ? { code: upstream.failureCode, retryable: true }
+        : null
+      : latestTurn?.failure ?? null;
+    const status: ConversationRuntimeDto["status"] = active
+      ? active.controlState === "stopping"
+        ? "busy"
+        : failure
+          ? "failed"
+          : interactions.length
+            ? "waiting_for_user"
+            : tools.some((tool) => tool.status === "pending" || tool.status === "running")
+              ? "waiting_for_tool"
+              : "busy"
+      : latestTurn?.state === "failed" || latestTurn?.state === "read_only"
+        ? "failed"
+        : "idle";
+    const durableAssistant = !active && !upstream?.assistant
+      ? [...this.listMessages(conversationId)].reverse().find((message) => message.role === "assistant")
+      : undefined;
+    const activity = this.listConversationActivity(conversationId);
+    const body = {
+      status,
+      turnActive: Boolean(controlsOpen),
+      activeRequestKey: active?.requestKey ?? latestTurn?.requestKey ?? null,
+      assistant: upstream?.assistant ?? (durableAssistant ? {
+        status: durableAssistant.status === "failed" ? "error" as const : "complete" as const,
+        text: redactRuntimeText(durableAssistant.text),
+      } : null),
+      tools,
+      interactions,
+      failure,
+      scopedMcp: active
+        ? upstream?.scopedMcp ?? {
+            label: "Riff tools" as const,
+            status: active.mcpBound ? "unavailable" as const : "disconnected" as const,
+          }
+        : { label: "Riff tools" as const, status: "disconnected" as const },
+      agent: {
+        selected: active?.agentName ?? latestTurn?.agentName ?? null,
+      },
+      provider: conversation.provider,
+      activity,
+    };
+    return Object.freeze({ revision: canonicalDigest(body), ...body });
+  }
+
+  async stopTurn(conversationIdInput: string, requestKeyInput: string): Promise<ConversationRuntimeDto> {
+    const conversationId = boundedId(conversationIdInput);
+    const requestKey = boundedKey(requestKeyInput, "requestKey");
+    const active = this.#activeTurns.get(conversationId);
+    if (!active || active.requestKey !== requestKey) {
+      throw new ApiError(409, "turn_not_active", "The requested Agent turn is not active.");
+    }
+    const releaseControl = await this.#acquireTurnControl(active);
+    let pending: Promise<AgentTurnResult> | undefined;
+    try {
+      if (this.#activeTurns.get(conversationId) !== active
+        || active.requestKey !== requestKey
+        || active.controlState !== "open") {
+        throw new ApiError(409, "turn_not_active", "The requested Agent turn is not active.");
+      }
+      active.controlState = "stopping";
+      pending = this.#pendingTurns.get(`${conversationId}\u0000${requestKey}`);
+      active.controller.abort(new ApiError(409, "opencode_session_aborted", "The user stopped the target Agent turn."));
+      if (active.externalSessionRef && active.workspace) {
+        void this.openCode.abort(active.externalSessionRef, active.workspace).catch(() => undefined);
+      }
+    } finally {
+      releaseControl();
+    }
+    await pending?.catch(() => undefined);
+    return this.conversationRuntime(conversationId);
+  }
+
+  async retryTurn(input: {
+    conversationId: string;
+    sourceRequestKey: string;
+    requestKey: string;
+  }): Promise<AgentTurnResult> {
+    const conversationId = boundedId(input.conversationId);
+    const sourceRequestKey = boundedKey(input.sourceRequestKey, "sourceRequestKey");
+    const requestKey = boundedKey(input.requestKey, "requestKey");
+    if (sourceRequestKey === requestKey) {
+      throw new ApiError(409, "retry_request_key_reused", "Retry requires a new requestKey.");
+    }
+    let durable;
+    try {
+      durable = this.store.retryableAgentTurnInput(conversationId, sourceRequestKey);
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error && /does not exist/u.test(error.message)) {
+        throw new ApiError(404, "turn_not_found", "The source Agent turn does not exist.");
+      }
+      if (error instanceof ProductStoreV2Error) {
+        throw new ApiError(409, "turn_not_retryable", "The source Agent turn is not safely retryable.");
+      }
+      throw storeApiError(error);
+    }
+    return this.runTurn({
+      conversationId,
+      requestKey,
+      text: durable.text,
+      attachmentIds: durable.attachmentIds,
+      ...(durable.agentName ? { agentName: durable.agentName } : {}),
+    });
+  }
+
+  async resumeTurn(input: {
+    conversationId: string;
+    requestKey: string;
+    interactionId: string;
+    response:
+      | { kind: "permission"; decision: "once" | "reject" }
+      | { kind: "question"; answers: string[][] }
+      | { kind: "question"; reject: true };
+  }): Promise<ConversationRuntimeDto> {
+    const conversationId = boundedId(input.conversationId);
+    const requestKey = boundedKey(input.requestKey, "requestKey");
+    const interactionId = boundedKey(input.interactionId, "interactionId");
+    const active = this.#activeTurns.get(conversationId);
+    if (!active || active.requestKey !== requestKey || !active.externalSessionRef || !active.workspace) {
+      throw new ApiError(409, "turn_not_waiting", "The requested Agent turn is not waiting for this response.");
+    }
+    const releaseControl = await this.#acquireTurnControl(active);
+    try {
+      if (this.#activeTurns.get(conversationId) !== active
+        || active.requestKey !== requestKey
+        || active.controlState !== "open"
+        || active.controller.signal.aborted
+        || !active.externalSessionRef
+        || !active.workspace) {
+        throw new ApiError(409, "turn_not_waiting", "The requested Agent turn is not waiting for this response.");
+      }
+      if (!this.openCode.runtimeSnapshot) {
+        throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode interaction controls are unavailable.");
+      }
+      const snapshot = await this.openCode.runtimeSnapshot(
+        active.externalSessionRef,
+        active.mcpBound ? conversationId : undefined,
+        active.workspace,
+      );
+      if (this.#activeTurns.get(conversationId) !== active
+        || active.controlState !== "open"
+        || active.controller.signal.aborted) {
+        throw new ApiError(409, "turn_not_waiting", "The requested Agent turn is not waiting for this response.");
+      }
+      const pending = snapshot.interactions.find((interaction) => interaction.id === interactionId);
+      if (!pending || pending.kind !== input.response.kind) {
+        throw new ApiError(409, "interaction_not_pending", "The requested interaction is not pending for this turn.");
+      }
+      if (input.response.kind === "permission") {
+        if (!this.openCode.respondPermission) throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode permission controls are unavailable.");
+        await this.openCode.respondPermission(
+          active.externalSessionRef,
+          interactionId,
+          input.response.decision,
+          active.workspace,
+        );
+      } else {
+        if (!this.openCode.respondQuestion) throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode question controls are unavailable.");
+        await this.openCode.respondQuestion(
+          active.externalSessionRef,
+          interactionId,
+          "reject" in input.response ? { reject: true } : { answers: input.response.answers },
+          active.workspace,
+        );
+      }
+    } finally {
+      releaseControl();
+    }
+    return this.conversationRuntime(conversationId);
+  }
+
   createAttachment(input: { commandId: string; conversationId: string; originalName: string; mediaType: string; bytes: Uint8Array; purpose?: string | null }): ConversationAttachmentDto {
     const commandId = boundedKey(input.commandId, "commandId"); const conversationId = boundedId(input.conversationId);
     this.store.getConversation(conversationId);
@@ -1246,7 +1501,7 @@ export class AgentWorkspaceService {
     catch (error) { throw storeApiError(error); }
   }
 
-  runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
+  runTurn(input: { conversationId: string; requestKey: string; text: string; agentName?: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
     const key = `${input.conversationId}\u0000${input.requestKey}`;
     const pending = this.#pendingTurns.get(key);
     if (pending) return pending;
@@ -1268,10 +1523,13 @@ export class AgentWorkspaceService {
     if (this.#conversationTurnTails.get(conversationId) === tail) this.#conversationTurnTails.delete(conversationId);
   }
 
-  async #runTurn(input: { conversationId: string; requestKey: string; text: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
+  async #runTurn(input: { conversationId: string; requestKey: string; text: string; agentName?: string; attachmentIds?: string[]; visualInteractionConfirmation?: VisualAgentOperation }): Promise<AgentTurnResult> {
     const conversationId = boundedId(input.conversationId);
     const requestKey = boundedKey(input.requestKey, "requestKey");
     const text = boundedText(input.text);
+    const agentName = input.agentName === undefined ? null : boundedProviderPart(input.agentName, "agentName");
+    const conversation = this.getConversation(conversationId);
+    if (agentName) await this.#requireAgent(agentName, conversation.owner);
     const attachmentIds = input.attachmentIds ?? [];
     let confirmedOperation: VisualAgentOperation | undefined;
     let visualInteractionMarker: import("./agent-domain.ts").VisualInteractionMarker | undefined;
@@ -1299,6 +1557,7 @@ export class AgentWorkspaceService {
         conversationId,
         requestKey,
         text,
+        ...(agentName ? { agentName } : {}),
         attachmentIds: attachmentIds.map(boundedId),
         ...(visualInteractionMarker ? { visualInteractionMarker } : {}),
         createdAt: this.#now(),
@@ -1309,6 +1568,18 @@ export class AgentWorkspaceService {
       return { mode: "read_only", reason: asReadOnlyReason(turn.failure?.code), turn, messages: this.store.listConversationMessages(conversationId) };
     }
 
+    const active = {
+      requestKey,
+      agentName,
+      controller: new AbortController(),
+      externalSessionRef: null as string | null,
+      workspace: null as OpenCodeWorkspaceBinding | null,
+      mcpBound: false,
+      controlState: "open" as ActiveConversationTurn["controlState"],
+      controlTail: Promise.resolve(),
+    };
+    this.#activeTurns.set(conversationId, active);
+    this.#runtimeCache.delete(conversationId);
     let prepared: PreparedAgentTurnRuntime | undefined;
     let scopedRelease: (() => void) | undefined;
     let mcpBound = false;
@@ -1323,12 +1594,17 @@ export class AgentWorkspaceService {
       );
       if (session.mode === "read_only") {
         turn = this.store.failAgentTurn(conversationId, requestKey, session.reason, session.retryable, this.#now());
+        active.controlState = "terminal";
         return { mode: "read_only", reason: session.reason, turn, messages: this.store.listConversationMessages(conversationId) };
       }
       // Use the exact owner binding that admitted/rebuilt this session. Do not
       // independently re-derive a lookalike workspace before binding tools.
       workspace = session.workspace;
+      active.externalSessionRef = session.externalSessionRef;
+      active.workspace = session.workspace;
+      this.#assertTurnControlOpen(conversationId, active);
       prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
+      this.#assertTurnControlOpen(conversationId, active);
       if (prepared && prepared.externalSessionGeneration !== session.generation) {
         throw new ApiError(
           409,
@@ -1341,6 +1617,7 @@ export class AgentWorkspaceService {
           throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind a scoped MCP server for this Agent turn.");
         }
         scopedRelease = await this.#acquireScopedMcpTurn();
+        this.#assertTurnControlOpen(conversationId, active);
         // Keep the OpenCode MCP server name stable for the durable conversation.
         // Only its short-lived capability URL rotates per turn. Some OpenCode
         // runtimes stop advancing a reused session when every turn introduces
@@ -1351,19 +1628,30 @@ export class AgentWorkspaceService {
           workspace,
         );
         mcpBound = true;
+        active.mcpBound = true;
       }
       const context = this.#contextFor(conversationId, turn.userMessageId, prepared);
+      this.#assertTurnControlOpen(conversationId, active);
       const result = await this.#sessions.prompt(
         conversationId,
         context,
         text,
         prepared?.promptAttachments ?? [],
         mcpBound ? conversationId : undefined,
-        undefined,
+        active.controller.signal,
         prepared?.externalSessionGeneration ?? session.generation,
+        agentName ?? undefined,
       );
+      if (active.controlState !== "open" || active.controller.signal.aborted) {
+        throw new ApiError(
+          409,
+          "opencode_session_aborted",
+          "The user stopped the target Agent turn before durable completion.",
+        );
+      }
       if (result.mode === "read_only") {
         turn = this.store.failAgentTurn(conversationId, requestKey, result.reason, result.retryable, this.#now());
+        active.controlState = "terminal";
         return { mode: "read_only", reason: result.reason, turn, messages: this.store.listConversationMessages(conversationId) };
       }
       turn = this.store.completeAgentTurn({
@@ -1375,19 +1663,39 @@ export class AgentWorkspaceService {
         contextDigest: result.context.sha256,
         completedAt: this.#now(),
       });
+      active.controlState = "terminal";
       return { mode: "live", turn, messages: this.store.listConversationMessages(conversationId) };
     } catch (error) {
       const code = error instanceof ApiError ? safeFailureCode(error.code) : "agent_failed";
-      try { turn = this.store.failAgentTurn(conversationId, requestKey, code, true, this.#now()); }
+      try {
+        turn = this.store.failAgentTurn(conversationId, requestKey, code, true, this.#now());
+        active.controlState = "terminal";
+      }
       catch { throw storeApiError(error); }
       return { mode: "read_only", reason: asReadOnlyReason(code), turn, messages: this.store.listConversationMessages(conversationId) };
     } finally {
+      if (active.externalSessionRef && active.workspace && this.openCode.runtimeSnapshot) {
+        try {
+          this.#runtimeCache.set(
+            conversationId,
+            await this.openCode.runtimeSnapshot(
+              active.externalSessionRef,
+              active.mcpBound ? conversationId : undefined,
+              active.workspace,
+            ),
+          );
+        } catch { /* durable terminal state remains authoritative */ }
+      }
       prepared?.release();
       if (mcpBound && prepared && workspace) {
         await this.openCode.unbindScopedMcp?.(conversationId, workspace)
           .catch(() => undefined);
       }
       scopedRelease?.();
+      if (active.externalSessionRef && active.workspace) {
+        this.openCode.releaseRuntimeBoundary?.(active.externalSessionRef, active.workspace);
+      }
+      if (this.#activeTurns.get(conversationId) === active) this.#activeTurns.delete(conversationId);
     }
   }
 
@@ -1408,6 +1716,15 @@ export class AgentWorkspaceService {
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
     this.#scopedMcpTail = previous.catch(() => undefined).then(() => current);
+    await previous.catch(() => undefined);
+    return release;
+  }
+
+  async #acquireTurnControl(active: ActiveConversationTurn): Promise<() => void> {
+    const previous = active.controlTail;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    active.controlTail = previous.catch(() => undefined).then(() => current);
     await previous.catch(() => undefined);
     return release;
   }
@@ -1470,6 +1787,31 @@ export class AgentWorkspaceService {
     const providerExists = models.some((item) => item.providerId === providerId);
     if (!providerExists) throw new ApiError(409, "provider_unavailable", "The selected provider is unavailable.");
     if (!models.some((item) => item.providerId === providerId && item.modelId === modelId)) throw new ApiError(409, "model_unavailable", "The selected provider/model is unavailable.");
+  }
+
+  #assertTurnControlOpen(
+    conversationId: string,
+    active: ActiveConversationTurn,
+  ): void {
+    if (this.#activeTurns.get(conversationId) !== active
+      || active.controlState !== "open"
+      || active.controller.signal.aborted) {
+      throw new ApiError(
+        409,
+        "opencode_session_aborted",
+        "The user stopped the target Agent turn before the next side effect.",
+      );
+    }
+  }
+
+  async #requireAgent(agentName: string, owner: ConversationOwner): Promise<void> {
+    const discovery = await this.discoverAgents(owner);
+    if (discovery.mode !== "live") {
+      throw new ApiError(503, discovery.reason, "OpenCode Agent discovery is unavailable.");
+    }
+    if (!discovery.agents.some((agent) => agent.name === agentName)) {
+      throw new ApiError(409, "agent_unavailable", "The selected OpenCode Agent is unavailable.");
+    }
   }
 }
 
@@ -1749,6 +2091,8 @@ const boundedText = (value: string): string => {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 64_000) throw new ApiError(422, "invalid_turn", "Turn text is empty or too large.");
   return value.trim();
 };
+const redactRuntimeText = (value: string): string =>
+  redactPublicRuntimeText(value).slice(0, 64_000);
 const boundedPurpose = (value: string): string => {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 2_000 || value.includes("\0")) {
     throw new ApiError(422, "invalid_attachment", "Attachment purpose is invalid.");

@@ -1,7 +1,7 @@
 html:has(body > #root > .product-app) { min-width: 320px; background: #f3f0e9; }
 body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 0; }
 .product-app, .product-app * { box-sizing: border-box; }
-.product-app button, .product-app input, .product-app select { font: inherit; }
+.product-app button, .product-app input, .product-app select, .product-app textarea { font: inherit; }
 .product-app button, .product-app a { -webkit-tap-highlight-color: transparent; }
 .product-app a { color: inherit; }
 
@@ -237,21 +237,30 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 .product-conversation-list span[aria-current="page"] { color: #163d36; background: #dce8e1; }
 .product-conversation-list a[aria-current="page"] span { color: #163d36; background: #dce8e1; }
 .product-agent-status {
-  width: fit-content;
+  display: grid;
+  width: 100%;
+  gap: .12rem;
   margin: 0;
-  border-radius: 999px;
-  padding: .35rem .65rem;
+  border-left: 3px solid #3d7b6b;
+  border-radius: .65rem;
+  padding: .55rem .7rem;
   color: #315249;
   background: #dce8e1;
-  font-size: .75rem;
-  font-weight: 800;
-  text-transform: capitalize;
+  font-size: .72rem;
 }
-.product-agent-status-connecting { color: #725625; background: #f4ecd9; }
-.product-agent-status-lost, .product-agent-status-read_only { color: #823630; background: #f6e6e2; }
+.product-agent-status strong { font-size: .76rem; text-transform: capitalize; }
+.product-agent-status span { line-height: 1.4; }
+.product-agent-status-busy, .product-agent-status-waiting_for_tool,
+.product-agent-status-connecting { color: #725625; background: #f4ecd9; border-color: #b88a37; }
+.product-agent-status-waiting_for_user { color: #594488; background: #eee9f8; border-color: #7d61b0; }
+.product-agent-status-failed, .product-agent-status-read_only {
+  color: #823630;
+  background: #f6e6e2;
+  border-color: #a94c43;
+}
 .product-new-conversation { justify-self: start; }
 .product-conversation-form, .product-attachment-form, .product-composer,
-.product-conversation-controls {
+.product-conversation-controls, .product-runtime-controls {
   display: grid;
   gap: .7rem;
   border: 1px solid #d2ccc0;
@@ -269,6 +278,7 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 }
 .product-conversation-form input, .product-conversation-form select,
 .product-attachment-form input, .product-composer textarea,
+.product-composer select,
 .product-conversation-controls input, .product-conversation-controls select {
   width: 100%;
   min-width: 0;
@@ -292,6 +302,41 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 .product-conversation-controls details[open] summary { margin-bottom: .75rem; }
 .product-provider-binding { display: grid; gap: .35rem; }
 .product-provider-binding p { margin: 0; color: #65726e; font-size: .78rem; line-height: 1.45; }
+.product-runtime-controls { gap: .8rem; border-color: #c8d4cf; background: rgba(245,249,246,.86); }
+.product-runtime-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+}
+.product-runtime-actions p { margin: .2rem 0 0; color: #65726e; font-size: .75rem; line-height: 1.45; }
+.product-runtime-actions > div:last-child { display: flex; flex-wrap: wrap; gap: .4rem; }
+.product-interaction-card {
+  display: grid;
+  gap: .55rem;
+  border: 1px solid #cdbfe6;
+  border-radius: .7rem;
+  padding: .75rem;
+  background: #f5f1fb;
+}
+.product-interaction-card p { margin: 0; color: #584e67; font-size: .8rem; line-height: 1.5; }
+.product-interaction-card fieldset { display: grid; gap: .35rem; margin: 0; border: 0; padding: 0; }
+.product-interaction-card fieldset label { display: flex; align-items: center; gap: .4rem; font-size: .78rem; }
+.product-interaction-card textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #a99aba;
+  border-radius: .42rem;
+  padding: .5rem;
+  background: #fff;
+}
+.product-interaction-kind {
+  color: #6d4f9a;
+  font-size: .68rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
 .product-message-list { gap: .65rem; }
 .product-message {
   border: 1px solid #d5d0c6;
@@ -302,6 +347,50 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 .product-message-user { margin-left: 1.25rem; background: #e7eee9; }
 .product-message p { margin: .35rem 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.48; }
 .product-message small { color: #71807b; }
+.product-runtime-parts {
+  display: grid;
+  gap: .55rem;
+  border: 1px solid #ccd5d1;
+  border-radius: .8rem;
+  padding: .75rem;
+  background: rgba(250,251,248,.82);
+}
+.product-runtime-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.product-runtime-heading h3 { margin: 0; font-size: .92rem; }
+.product-runtime-mcp {
+  border-radius: 999px;
+  padding: .25rem .5rem;
+  color: #36564e;
+  background: #e2ece7;
+  font-size: .68rem;
+  font-weight: 800;
+}
+.product-runtime-mcp-disconnected, .product-runtime-mcp-unavailable { color: #775c2d; background: #f1e9d8; }
+.product-runtime-parts ol { display: grid; gap: .4rem; margin: 0; padding: 0; list-style: none; }
+.product-runtime-part {
+  display: grid;
+  grid-template-columns: 1.7rem minmax(0, 1fr);
+  gap: .55rem;
+  padding: .55rem;
+  border-radius: .55rem;
+  background: #f0f2ee;
+}
+.product-runtime-part-icon {
+  display: grid;
+  width: 1.7rem;
+  height: 1.7rem;
+  place-items: center;
+  border-radius: .42rem;
+  color: #fff;
+  background: #42685e;
+  font-size: .72rem;
+  font-weight: 900;
+}
+.product-runtime-part-tool_call .product-runtime-part-icon,
+.product-runtime-part-command .product-runtime-part-icon { background: #82652f; }
+.product-runtime-part-error .product-runtime-part-icon { background: #9a4138; }
+.product-runtime-part p { margin: .2rem 0; color: #5f6d69; font-size: .76rem; line-height: 1.45; }
+.product-runtime-part small { color: #71807b; }
 .product-conversation-records {
   display: grid;
   gap: .55rem;
@@ -451,7 +540,7 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 .product-state-page { min-height: 60vh; }
 .product-state-page h1 { max-width: 20ch; font-family: Georgia, serif; font-size: 3rem; font-weight: 500; }
 
-.product-app :where(a, button, input, select):focus-visible {
+.product-app :where(a, button, input, select, textarea):focus-visible {
   outline: 3px solid #c67f32;
   outline-offset: 3px;
 }
@@ -488,6 +577,7 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
   .product-status { align-self: flex-start; }
   .product-create-form, .product-create-form input, .product-create-form select { width: 100%; max-width: none; }
   .product-resource-card .product-action-link { align-self: flex-start; }
+  .product-runtime-actions, .product-runtime-heading { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

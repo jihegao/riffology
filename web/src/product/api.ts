@@ -1,7 +1,9 @@
 import type {
   AgentTurnResult,
+  AgentDiscovery,
   ConversationAttachment,
   ConversationBundle,
+  ConversationRuntimeProjection,
   ConversationMessage,
   ConversationSummary,
   HomeDto,
@@ -49,6 +51,7 @@ export interface ProductClient {
   recoveryStatus(): Promise<ProductRecoveryStatus>;
   home(): Promise<HomeDto>;
   providers(): Promise<ProviderDiscovery>;
+  agents?(ownerKind: OwnerKind, ownerId: string): Promise<AgentDiscovery>;
   createModel(input: Readonly<{
     commandId: string;
     name: string;
@@ -133,6 +136,37 @@ export interface ProductClient {
     modelId: string;
   }>): Promise<ConversationSummary>;
   conversationBundle(conversationId: string): Promise<ConversationBundle>;
+  conversationRuntime?(conversationId: string): Promise<ConversationRuntimeProjection>;
+  subscribeConversationRuntime?(
+    conversationId: string,
+    onProjection: (projection: ConversationRuntimeProjection) => void,
+    onError: () => void,
+  ): Promise<() => void>;
+  stopConversation?(input: Readonly<{
+    conversationId: string;
+    requestKey: string;
+  }>): Promise<unknown>;
+  retryConversation?(input: Readonly<{
+    conversationId: string;
+    oldRequestKey: string;
+    newRequestKey: string;
+  }>): Promise<unknown>;
+  respondConversationInteraction?(input:
+    | Readonly<{
+      conversationId: string;
+      requestKey: string;
+      interactionId: string;
+      kind: "permission";
+      decision: "allow_once" | "reject";
+    }>
+    | Readonly<{
+      conversationId: string;
+      requestKey: string;
+      interactionId: string;
+      kind: "question";
+      response: Readonly<{ answers: readonly (readonly string[])[] } | { reject: true }>;
+    }>
+  ): Promise<unknown>;
   changeConversationProvider(input: Readonly<{
     commandId: string;
     conversationId: string;
@@ -153,6 +187,7 @@ export interface ProductClient {
     conversationId: string;
     text: string;
     attachmentIds: readonly string[];
+    agentName?: string;
   }>): Promise<AgentTurnResult>;
   renameConversation(input: Readonly<{
     commandId: string;
@@ -200,6 +235,25 @@ export class HttpProductClient implements ProductClient {
 
   providers(): Promise<ProviderDiscovery> {
     return this.#request<ProviderDiscovery>("/api/providers");
+  }
+
+  async agents(ownerKind: OwnerKind, ownerId: string): Promise<AgentDiscovery> {
+    const query = new URLSearchParams({ ownerKind, ownerId });
+    const value = await this.#request<any>(`/api/agents?${query.toString()}`);
+    if (value?.mode === "read_only") {
+      return { mode: "read_only", reason: String(value.reason ?? "opencode_unavailable"), agents: [] };
+    }
+    const agents = Array.isArray(value?.agents) ? value.agents : [];
+    return {
+      mode: "live",
+      agents: agents
+        .filter((agent: any) => typeof agent?.name === "string")
+        .map((agent: any) => ({
+          name: agent.name,
+          label: agent.name,
+          description: typeof agent.description === "string" ? agent.description : null,
+        })),
+    };
   }
 
   createModel(input: Readonly<{
@@ -546,6 +600,94 @@ export class HttpProductClient implements ProductClient {
     });
   }
 
+  async conversationRuntime(conversationId: string): Promise<ConversationRuntimeProjection> {
+    return normalizeConversationRuntimeProjection(await this.#request(
+      `/api/conversations/${encodeURIComponent(conversationId)}/runtime`,
+    ));
+  }
+
+  async subscribeConversationRuntime(
+    conversationId: string,
+    onProjection: (projection: ConversationRuntimeProjection) => void,
+    onError: () => void,
+  ): Promise<() => void> {
+    await this.#browserSession();
+    const source = new EventSource(
+      `/api/conversations/${encodeURIComponent(conversationId)}/runtime/events`,
+      { withCredentials: true },
+    );
+    const receive = (event: MessageEvent<string>) => {
+      try {
+        onProjection(normalizeConversationRuntimeProjection(JSON.parse(event.data)));
+      } catch {
+        onError();
+      }
+    };
+    source.addEventListener("snapshot", receive as EventListener);
+    source.onmessage = receive;
+    source.onerror = onError;
+    return () => source.close();
+  }
+
+  stopConversation(input: Readonly<{
+    conversationId: string;
+    requestKey: string;
+  }>): Promise<unknown> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/turns/${encodeURIComponent(input.requestKey)}/stop`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  retryConversation(input: Readonly<{
+    conversationId: string;
+    oldRequestKey: string;
+    newRequestKey: string;
+  }>): Promise<unknown> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/turns/${encodeURIComponent(input.oldRequestKey)}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          requestKey: input.newRequestKey,
+        }),
+      },
+    );
+  }
+
+  respondConversationInteraction(input:
+    | Readonly<{
+      conversationId: string;
+      requestKey: string;
+      interactionId: string;
+      kind: "permission";
+      decision: "allow_once" | "reject";
+    }>
+    | Readonly<{
+      conversationId: string;
+      requestKey: string;
+      interactionId: string;
+      kind: "question";
+      response: Readonly<{ answers: readonly (readonly string[])[] } | { reject: true }>;
+    }>
+  ): Promise<unknown> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/turns/${encodeURIComponent(input.requestKey)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          interactionId: input.interactionId,
+          kind: input.kind,
+          ...(input.kind === "permission"
+            ? { decision: input.decision === "allow_once" ? "once" : "reject" }
+            : "reject" in input.response
+              ? { reject: true }
+              : { answers: input.response.answers }),
+        }),
+      },
+    );
+  }
+
   changeConversationProvider(input: Readonly<{
     commandId: string;
     conversationId: string;
@@ -595,6 +737,7 @@ export class HttpProductClient implements ProductClient {
     conversationId: string;
     text: string;
     attachmentIds: readonly string[];
+    agentName?: string;
   }>): Promise<AgentTurnResult> {
     return this.#request(
       `/api/conversations/${encodeURIComponent(input.conversationId)}/turns`,
@@ -604,6 +747,7 @@ export class HttpProductClient implements ProductClient {
           requestKey: input.requestKey,
           text: input.text,
           attachmentIds: input.attachmentIds,
+          ...(input.agentName ? { agentName: input.agentName } : {}),
         }),
       },
     );
@@ -744,6 +888,198 @@ const responseJson = async <T>(
     );
   }
   return body as T;
+};
+
+const normalizeConversationRuntimeProjection = (
+  value: unknown,
+): ConversationRuntimeProjection => {
+  const record = strictRuntimeRecord(value, [
+    "schemaVersion",
+    "revision",
+    "status",
+    "activeTurn",
+    "parts",
+    "pendingInteractions",
+    "agent",
+    "mcp",
+  ]);
+  const status = normalizeRuntimeStatus(record.status);
+  if (record.schemaVersion !== 1 || !boundedRuntimeString(record.revision, 256) || !status
+    || !Array.isArray(record.parts) || !Array.isArray(record.pendingInteractions)) {
+    throw invalidRuntimeProjection();
+  }
+  const activeTurn = record.activeTurn === null
+    ? null
+    : normalizeActiveTurn(record.activeTurn);
+  const parts = record.parts.map(normalizeRuntimePart);
+  const pendingInteractions = record.pendingInteractions.map(normalizeRuntimeInteraction);
+  const agent = strictRuntimeRecord(record.agent, ["selectedName", "locked"]);
+  const mcp = strictRuntimeRecord(record.mcp, ["state", "label"]);
+  if (!(agent.selectedName === null || boundedRuntimeString(agent.selectedName, 500))
+    || typeof agent.locked !== "boolean"
+    || !["connected", "disconnected", "unavailable"].includes(String(mcp.state))
+    || !boundedRuntimeString(mcp.label, 500)) {
+    throw invalidRuntimeProjection();
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    revision: record.revision,
+    status,
+    activeTurn,
+    parts: Object.freeze(parts),
+    pendingInteractions: Object.freeze(pendingInteractions),
+    agent: Object.freeze({
+      selectedName: agent.selectedName as string | null,
+      locked: agent.locked,
+    }),
+    mcp: Object.freeze({
+      state: mcp.state as ConversationRuntimeProjection["mcp"]["state"],
+      label: mcp.label,
+    }),
+  });
+};
+
+const normalizeActiveTurn = (
+  value: unknown,
+): NonNullable<ConversationRuntimeProjection["activeTurn"]> => {
+  const record = strictRuntimeRecord(value, ["requestKey", "canStop", "canRetry"]);
+  if (!boundedRuntimeString(record.requestKey, 500)
+    || typeof record.canStop !== "boolean"
+    || typeof record.canRetry !== "boolean") {
+    throw invalidRuntimeProjection();
+  }
+  return Object.freeze({
+    requestKey: record.requestKey,
+    canStop: record.canStop,
+    canRetry: record.canRetry,
+  });
+};
+
+const normalizeRuntimePart = (
+  value: unknown,
+): ConversationRuntimeProjection["parts"][number] => {
+  const record = strictRuntimeRecord(value, ["id", "kind", "state", "title", "summary"]);
+  if (!boundedRuntimeString(record.id, 500)
+    || !["text", "tool_call", "tool_result", "error", "command", "skill", "mcp"].includes(String(record.kind))
+    || !["streaming", "pending", "complete", "failed"].includes(String(record.state))
+    || !boundedRuntimeString(record.title, 1_000)
+    || !(record.summary === null || boundedRuntimeString(record.summary, 64_000))) {
+    throw invalidRuntimeProjection();
+  }
+  return Object.freeze({
+    id: record.id,
+    kind: record.kind as ConversationRuntimeProjection["parts"][number]["kind"],
+    state: record.state as ConversationRuntimeProjection["parts"][number]["state"],
+    title: record.title,
+    summary: record.summary as string | null,
+  });
+};
+
+const normalizeRuntimeInteraction = (
+  value: unknown,
+): ConversationRuntimeProjection["pendingInteractions"][number] => {
+  const base = objectRecord(value);
+  if (!base || !boundedRuntimeString(base.id, 500) || !boundedRuntimeString(base.title, 1_000)) {
+    throw invalidRuntimeProjection();
+  }
+  if (base.kind === "permission") {
+    const record = strictRuntimeRecord(value, ["id", "kind", "title", "prompt", "decisions"]);
+    if (!boundedRuntimeString(record.prompt, 4_000)
+      || !Array.isArray(record.decisions)
+      || record.decisions.length !== 2
+      || record.decisions[0] !== "allow_once"
+      || record.decisions[1] !== "reject") {
+      throw invalidRuntimeProjection();
+    }
+    return Object.freeze({
+      id: record.id as string,
+      kind: "permission",
+      title: record.title as string,
+      prompt: record.prompt,
+      decisions: Object.freeze(["allow_once", "reject"] as const),
+    });
+  }
+  if (base.kind !== "question") throw invalidRuntimeProjection();
+  const record = strictRuntimeRecord(value, ["id", "kind", "title", "questions"]);
+  if (!Array.isArray(record.questions) || record.questions.length < 1 || record.questions.length > 16) {
+    throw invalidRuntimeProjection();
+  }
+  const questions = record.questions.map((rawQuestion) => {
+    const question = strictRuntimeRecord(rawQuestion, [
+      "prompt",
+      "multiple",
+      "custom",
+      "choices",
+    ]);
+    if (!boundedRuntimeString(question.prompt, 4_000)
+      || typeof question.multiple !== "boolean"
+      || typeof question.custom !== "boolean"
+      || !Array.isArray(question.choices)
+      || question.choices.length > 32) {
+      throw invalidRuntimeProjection();
+    }
+    const choices = question.choices.map((rawChoice) => {
+      const choice = strictRuntimeRecord(rawChoice, ["value", "label"]);
+      if (!boundedRuntimeString(choice.value, 500)
+        || !/^choice_[0-9a-f]{32}$/u.test(choice.value)
+        || !boundedRuntimeString(choice.label, 500)) {
+        throw invalidRuntimeProjection();
+      }
+      return Object.freeze({ value: choice.value, label: choice.label });
+    });
+    if (new Set(choices.map((choice) => choice.value)).size !== choices.length) {
+      throw invalidRuntimeProjection();
+    }
+    return Object.freeze({
+      prompt: question.prompt,
+      multiple: question.multiple,
+      custom: question.custom,
+      choices: Object.freeze(choices),
+    });
+  });
+  return Object.freeze({
+    id: record.id as string,
+    kind: "question",
+    title: record.title as string,
+    questions: Object.freeze(questions),
+  });
+};
+
+const strictRuntimeRecord = (
+  value: unknown,
+  keys: readonly string[],
+): Record<string, any> => {
+  const record = objectRecord(value);
+  if (!record || Object.keys(record).length !== keys.length
+    || Object.keys(record).some((key) => !keys.includes(key))) {
+    throw invalidRuntimeProjection();
+  }
+  return record;
+};
+
+const boundedRuntimeString = (value: unknown, maximum: number): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= maximum
+  && !/[\u0000-\u001f\u007f]/u.test(value);
+
+const invalidRuntimeProjection = (): ProductApiError =>
+  new ProductApiError(502, "invalid_response", "The Agent runtime response is invalid.");
+
+const objectRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" ? value as Record<string, unknown> : null;
+
+const publicRuntimeText = (value: unknown): string | null =>
+  typeof value === "string" ? value.slice(0, 4_000) : null;
+
+const normalizeRuntimeStatus = (
+  value: unknown,
+): ConversationRuntimeProjection["status"] | null => {
+  return value === "busy"
+    || value === "waiting_for_tool"
+    || value === "waiting_for_user"
+    || value === "idle"
+    || value === "failed"
+    ? value
+    : null;
 };
 
 const normalizeWorkspace = (

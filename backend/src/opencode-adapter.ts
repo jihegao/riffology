@@ -15,6 +15,8 @@ export type OpenCodePrompt = {
   text: string;
   system: string;
   attachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }>;
+  /** Exact discovered primary/all Agent name. Never inferred from assistant text. */
+  agentName?: string;
   /** Backend-only binding for one short-lived, capability-scoped Riff MCP server. */
   scopedMcpScopeId?: string;
 };
@@ -23,6 +25,51 @@ export type OpenCodeProviderModel = {
   providerId: string;
   modelId: string;
   qualifiedId: string;
+};
+
+export type OpenCodeAgent = {
+  name: string;
+  description: string | null;
+  mode: "primary" | "all";
+  native: boolean;
+};
+
+export type OpenCodeRuntimeTool = {
+  id: string;
+  tool: string;
+  title: string | null;
+  status: "pending" | "running" | "completed" | "error";
+};
+
+export type OpenCodeRuntimeInteraction =
+  | {
+      id: string;
+      kind: "permission";
+      title: string;
+      permission: string;
+    }
+  | {
+      id: string;
+      kind: "question";
+      questions: Array<{
+        header: string;
+        question: string;
+        multiple: boolean;
+        custom: boolean;
+        options: Array<{ id: string; label: string; description: string }>;
+      }>;
+    };
+
+export type OpenCodeConversationRuntimeSnapshot = {
+  status: "busy" | "retry" | "idle";
+  assistant: {
+    status: "streaming" | "complete" | "error";
+    text: string;
+  } | null;
+  tools: OpenCodeRuntimeTool[];
+  interactions: OpenCodeRuntimeInteraction[];
+  failureCode: "opencode_auth_failed" | "opencode_session_aborted" | "opencode_session_error" | null;
+  scopedMcp: { label: "Riff tools"; status: "connected" | "disconnected" | "unavailable" };
 };
 
 export type OpenCodeAssistantResponse = {
@@ -66,6 +113,7 @@ export interface OpenCodeConversationPort {
   /** Optional for test/fake ports; production adapters use it to establish the live server contract. */
   initialize?(): Promise<OpenCodeReadiness>;
   discoverProviderModels(workspace?: OpenCodeWorkspaceBinding): Promise<OpenCodeProviderModel[]>;
+  discoverAgents?(workspace: OpenCodeWorkspaceBinding): Promise<OpenCodeAgent[]>;
   getSession(sessionId: string, workspace: OpenCodeWorkspaceBinding): Promise<boolean>;
   createSession(conversationId: string, workspace: OpenCodeWorkspaceBinding): Promise<string>;
   injectContext(
@@ -82,6 +130,24 @@ export interface OpenCodeConversationPort {
     workspace: OpenCodeWorkspaceBinding,
   ): Promise<OpenCodeAssistantResponse>;
   abort(sessionId: string, workspace: OpenCodeWorkspaceBinding): Promise<void>;
+  runtimeSnapshot?(
+    sessionId: string,
+    scopedMcpScopeId: string | undefined,
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<OpenCodeConversationRuntimeSnapshot>;
+  respondPermission?(
+    sessionId: string,
+    publicRequestId: string,
+    response: "once" | "reject",
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<void>;
+  respondQuestion?(
+    sessionId: string,
+    publicRequestId: string,
+    response: { answers: string[][] } | { reject: true },
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<void>;
+  releaseRuntimeBoundary?(sessionId: string, workspace: OpenCodeWorkspaceBinding): void;
   bindScopedMcp?(scopeId: string, mcpUrl: string, workspace: OpenCodeWorkspaceBinding): Promise<void>;
   unbindScopedMcp?(scopeId: string, workspace: OpenCodeWorkspaceBinding): Promise<void>;
 }
@@ -112,6 +178,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   private readonly config: OpenCodeConfig;
   readonly #mcpProjects = new Map<string, string>();
   readonly #scopedMcp = new Map<string, { name: string; url: string; directory: string }>();
+  readonly #runtimeBoundaries = new Map<string, {
+    priorMessageIds: Set<string>;
+    userMessageId: string | null;
+    workspace: OpenCodeWorkspaceBinding | undefined;
+    failureBoundaryId: string | null;
+    scopedMcpScopeId: string | undefined;
+  }>();
   readonly #baseUrl?: URL;
   readonly #requestTimeoutMs: number;
   readonly #maxResponseBytes: number;
@@ -202,6 +275,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding): Promise<OpenCodeProviderModel[]> {
     await this.#ensureReady(workspace);
     return this.#discoverProviderModelsUnchecked(this.#workspaceDirectory(workspace));
+  }
+
+  async discoverAgents(workspace: OpenCodeWorkspaceBinding): Promise<OpenCodeAgent[]> {
+    await this.#ensureReady(workspace);
+    const directory = this.#workspaceDirectory(workspace);
+    const payload = await this.#list("/agent", undefined, directory);
+    return discoveredAgents(payload);
   }
 
   async #discoverProviderModelsUnchecked(
@@ -296,6 +376,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
       const before = await this.#sessionMessages(sessionId, deadlineSignal, directory);
       const priorMessageIds = new Set(before.map(messageId).filter((id): id is string => Boolean(id)));
+      this.#runtimeBoundaries.set(sessionId, {
+        priorMessageIds,
+        userMessageId: null,
+        workspace,
+        failureBoundaryId: null,
+        scopedMcpScopeId: prompt.scopedMcpScopeId,
+      });
       lifecycle = this.#startTurnEventSupervisor(
         sessionId,
         deadlineSignal,
@@ -309,6 +396,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         signal: deadlineSignal,
         body: JSON.stringify({
           model,
+          ...(prompt.agentName ? { agent: validatedAgentName(prompt.agentName) } : {}),
           system: prompt.system,
           parts,
           tools: this.#promptTools(prompt.scopedMcpScopeId, directory),
@@ -367,6 +455,154 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       { method: "POST" },
       directory,
     );
+  }
+
+  async runtimeSnapshot(
+    sessionId: string,
+    scopedMcpScopeId: string | undefined,
+    workspace?: OpenCodeWorkspaceBinding,
+  ): Promise<OpenCodeConversationRuntimeSnapshot> {
+    await this.#ensureReady(workspace);
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    const signal = AbortSignal.timeout(this.#requestTimeoutMs);
+    const boundary = this.#runtimeBoundaries.get(sessionId);
+    if (!boundary || workspace && !sameWorkspace(boundary.workspace, workspace)) {
+      throw new ApiError(
+        409,
+        "opencode_session_workspace_mismatch",
+        "The OpenCode runtime boundary belongs to a different Product workspace.",
+      );
+    }
+    const directory = this.#workspaceDirectory(workspace ?? boundary.workspace);
+    await this.#assertSessionWorkspace(sessionId, directory, signal);
+    const effectiveScopeId = scopedMcpScopeId ?? boundary.scopedMcpScopeId;
+    const [status, messages, permissions, questions, scopedMcp] = await Promise.all([
+      this.#sessionStatus(sessionId, signal, directory),
+      this.#sessionMessages(sessionId, signal, directory),
+      this.#list("/permission", signal, directory),
+      this.#list("/question", signal, directory),
+      this.#scopedMcpStatus(effectiveScopeId, signal, directory),
+    ]);
+    await this.#assertSessionWorkspace(sessionId, directory, signal);
+    const assistants = currentRuntimeAttempt(
+      messages,
+      boundary.userMessageId,
+      boundary,
+    );
+    const assistantMessageIds = new Set(
+      assistants.map(messageId).filter((id): id is string => Boolean(id)),
+    );
+    const scopedBinding = effectiveScopeId ? this.#scopedMcp.get(effectiveScopeId) : undefined;
+    const sensitiveValues = [
+      sessionId,
+      boundary.userMessageId ?? "",
+      scopedBinding?.url ?? "",
+      scopedCapabilityValue(scopedBinding?.url),
+      ...assistants.flatMap((assistant) => [
+        messageId(assistant) ?? "",
+        ...assistantParts(assistant).flatMap((part) => [
+          boundedOpaqueRuntimeValue(part?.id, 500) ?? "",
+          boundedOpaqueRuntimeValue(part?.callID ?? part?.callId, 500) ?? "",
+        ]),
+      ]),
+      ...permissions.map(runtimeUpstreamId).filter((id): id is string => Boolean(id)),
+      ...questions.map(runtimeUpstreamId).filter((id): id is string => Boolean(id)),
+    ].filter((value): value is string => Boolean(value));
+    const interactions = [
+      ...runtimePermissions(
+        permissions,
+        sessionId,
+        assistantMessageIds,
+        assistants,
+        scopedBinding?.name,
+        sensitiveValues,
+      ),
+      ...runtimeQuestions(
+        questions,
+        sessionId,
+        assistantMessageIds,
+        assistants,
+        sensitiveValues,
+      ),
+    ];
+    return {
+      status,
+      assistant: runtimeAssistant(assistants, sensitiveValues),
+      tools: runtimeTools(assistants, sessionId, scopedBinding?.name),
+      interactions,
+      failureCode: assistantFailureCode(assistants),
+      scopedMcp: { label: "Riff tools", status: scopedMcp },
+    };
+  }
+
+  releaseRuntimeBoundary(sessionId: string, workspace?: OpenCodeWorkspaceBinding): void {
+    const boundary = this.#runtimeBoundaries.get(sessionId);
+    if (boundary && (!workspace || sameWorkspace(boundary.workspace, workspace))) {
+      this.#runtimeBoundaries.delete(sessionId);
+    }
+  }
+
+  async respondPermission(
+    sessionId: string,
+    publicRequestId: string,
+    response: "once" | "reject",
+    workspace?: OpenCodeWorkspaceBinding,
+  ): Promise<void> {
+    await this.#ensureReady(workspace);
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    if (response !== "once" && response !== "reject") {
+      throw new ApiError(422, "invalid_interaction_response", "The permission response is invalid.");
+    }
+    const directory = this.#workspaceDirectory(workspace);
+    const visible = await this.runtimeSnapshot(sessionId, undefined, workspace);
+    if (!visible.interactions.some((interaction) =>
+      interaction.kind === "permission" && interaction.id === publicRequestId)) {
+      throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+    }
+    const requests = await this.#list("/permission", undefined, directory);
+    const upstream = upstreamRuntimeRequest(requests, "permission", sessionId, publicRequestId);
+    if (!upstream) throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+    await this.#assertSessionWorkspace(sessionId, directory);
+    await this.#json(`/permission/${encodeURIComponent(upstream)}/reply`, {
+      method: "POST",
+      body: JSON.stringify({ reply: response }),
+    }, directory);
+  }
+
+  async respondQuestion(
+    sessionId: string,
+    publicRequestId: string,
+    response: { answers: string[][] } | { reject: true },
+    workspace?: OpenCodeWorkspaceBinding,
+  ): Promise<void> {
+    await this.#ensureReady(workspace);
+    assertOpaqueId(sessionId, "OpenCode session ID");
+    const directory = this.#workspaceDirectory(workspace);
+    const visible = await this.runtimeSnapshot(sessionId, undefined, workspace);
+    if (!visible.interactions.some((interaction) =>
+      interaction.kind === "question" && interaction.id === publicRequestId)) {
+      throw new ApiError(409, "interaction_not_pending", "The question request is no longer pending for this turn.");
+    }
+    const requests = await this.#list("/question", undefined, directory);
+    const upstream = upstreamRuntimeRequest(requests, "question", sessionId, publicRequestId);
+    if (!upstream) throw new ApiError(409, "interaction_not_pending", "The question request is no longer pending for this turn.");
+    const pending = requests.find((item) => runtimeUpstreamId(item) === upstream && item?.sessionID === sessionId);
+    await this.#assertSessionWorkspace(sessionId, directory);
+    if ("reject" in response) {
+      await this.#json(`/question/${encodeURIComponent(upstream)}/reject`, { method: "POST" }, directory);
+      return;
+    }
+    await this.#json(`/question/${encodeURIComponent(upstream)}/reply`, {
+      method: "POST",
+      body: JSON.stringify({
+        answers: validatedQuestionAnswers(
+          response.answers,
+          pending?.questions,
+          sessionId,
+          upstream,
+        ),
+      }),
+    }, directory);
   }
 
   async bindProject(projectId: string, mcpUrl: string): Promise<void> {
@@ -454,7 +690,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     // Deny every tool first, then enable only this turn's opaque Riff scope.
     // The explicit built-in map is retained for compatibility with versions
     // that merge exact names after wildcard rules.
-    const tools = { "*": false, ...disabledBuiltInTools() };
+    const tools = { "*": false, ...disabledBuiltInTools(), question: true };
     if (!scopeId) return tools;
     const binding = this.#scopedMcp.get(scopeId);
     if (!binding) throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");
@@ -550,6 +786,49 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return Array.isArray(result.payload) ? result.payload : [];
   }
 
+  async #list(path: string, signal?: AbortSignal, directory?: string): Promise<any[]> {
+    const result = await this.#request(
+      path,
+      { method: "GET", ...(signal ? { signal } : {}) },
+      directory,
+    );
+    if (!result.response.ok) throw apiErrorFromResponse(result.response, result.payload);
+    if (!Array.isArray(result.payload)) {
+      throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an unexpected list payload.");
+    }
+    return result.payload;
+  }
+
+  async #scopedMcpStatus(
+    scopeId: string | undefined,
+    signal: AbortSignal,
+    directory: string,
+  ): Promise<"connected" | "disconnected" | "unavailable"> {
+    if (!scopeId) return "disconnected";
+    const binding = this.#scopedMcp.get(scopeId);
+    if (!binding) return "disconnected";
+    if (binding.directory !== directory) {
+      throw new ApiError(
+        409,
+        "opencode_mcp_workspace_mismatch",
+        "The scoped Riff MCP binding belongs to a different Product workspace.",
+      );
+    }
+    try {
+      const result = await this.#request("/mcp", { method: "GET", signal }, directory);
+      if (!result.response.ok) return "unavailable";
+      const payload = result.payload;
+      const value = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? payload[binding.name]
+        : undefined;
+      return value?.status === "connected" ? "connected"
+        : value?.status === "disabled" ? "disconnected"
+          : "unavailable";
+    } catch {
+      return "unavailable";
+    }
+  }
+
   async #sessionStatus(
     sessionId: string,
     signal: AbortSignal,
@@ -602,6 +881,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         await lifecycle.wait(50, deadlineSignal);
         continue;
       }
+      const boundary = this.#runtimeBoundaries.get(sessionId);
+      if (boundary && !boundary.userMessageId) boundary.userMessageId = userMessageId;
+      if (boundary?.failureBoundaryId
+        && boundary.failureBoundaryId !== failureBoundaryId) {
+        failureBoundaryId = boundary.failureBoundaryId;
+        toolEvidence.clear();
+      }
       lifecycle.observeUser();
       const assistants = uniqueMessages(messages.filter((entry: any) => entry?.info?.role === "assistant" && entry.info.parentID === userMessageId));
       const lastFailureIndex = assistants.findLastIndex(
@@ -619,6 +905,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         }
         if (observedBoundary !== failureBoundaryId) {
           failureBoundaryId = observedBoundary;
+          if (boundary) boundary.failureBoundaryId = observedBoundary;
           toolEvidence.clear();
         }
       }
@@ -984,9 +1271,33 @@ const discoveredProviderModels = (payload: Record<string, any>): OpenCodeProvide
   return [...found.values()].sort((left, right) => left.qualifiedId.localeCompare(right.qualifiedId, "en"));
 };
 
+const discoveredAgents = (payload: any[]): OpenCodeAgent[] => {
+  const found = new Map<string, OpenCodeAgent>();
+  for (const item of payload) {
+    if (!item || typeof item !== "object" || item.hidden === true
+      || (item.mode !== "primary" && item.mode !== "all")) continue;
+    const name = validIdentifier(String(item.name ?? ""));
+    if (!name) continue;
+    const description = safeOptionalPublicText(item.description, 500);
+    found.set(name, {
+      name,
+      description,
+      mode: item.mode,
+      native: item.native === true,
+    });
+  }
+  return [...found.values()].sort((left, right) => left.name.localeCompare(right.name, "en"));
+};
+
 const splitQualifiedModel = (qualifiedId: string): { providerId: string; modelId: string } => {
   const result = splitQualifiedModelOrNull(qualifiedId);
   if (!result) throw new ApiError(503, "opencode_invalid_model", "OpenCode returned an invalid provider/model ID.");
+  return result;
+};
+
+const validatedAgentName = (value: string): string => {
+  const result = validIdentifier(value);
+  if (!result) throw new ApiError(422, "opencode_invalid_agent", "The selected OpenCode Agent is invalid.");
   return result;
 };
 
@@ -1215,6 +1526,422 @@ const safeToolName = (value: unknown): string =>
   typeof value === "string" && /^[A-Za-z0-9_.:-]{1,120}$/u.test(value)
     ? value
     : "tool";
+
+const runtimeRequestId = (
+  kind: "permission" | "question",
+  sessionId: string,
+  upstreamId: string,
+  item: any,
+): string => `${kind}_${createHash("sha256")
+  .update(`${kind}\u0000${sessionId}\u0000${upstreamId}\u0000${runtimeRequestCommitment(kind, item)}`)
+  .digest("hex")
+  .slice(0, 32)}`;
+
+const upstreamRuntimeRequest = (
+  payload: any[],
+  kind: "permission" | "question",
+  sessionId: string,
+  publicRequestId: string,
+): string | null => {
+  if (!/^(?:permission|question)_[0-9a-f]{32}$/u.test(publicRequestId)) return null;
+  for (const item of payload) {
+    const upstreamId = runtimeUpstreamId(item);
+    if (item?.sessionID !== sessionId || !upstreamId) continue;
+    if (runtimeRequestId(kind, sessionId, upstreamId, item) === publicRequestId) return upstreamId;
+  }
+  return null;
+};
+
+const runtimePermissions = (
+  payload: any[],
+  sessionId: string,
+  assistantMessageIds: Set<string>,
+  assistants: any[],
+  scopedMcpName: string | undefined,
+  sensitiveValues: readonly string[],
+): OpenCodeRuntimeInteraction[] => {
+  if (!scopedMcpName) return [];
+  const allowedCalls = assistantToolCalls(assistants);
+  const result: OpenCodeRuntimeInteraction[] = [];
+  for (const item of payload) {
+    const upstreamId = runtimeUpstreamId(item);
+    const ownerMessageId = String(item?.tool?.messageID ?? "");
+    const callId = String(item?.tool?.callID ?? "");
+    const tool = allowedCalls.get(`${ownerMessageId}\u0000${callId}`);
+    if (item?.sessionID !== sessionId || !upstreamId || !assistantMessageIds.has(ownerMessageId)
+      || !tool?.startsWith(`${scopedMcpName}_`) || !validPermissionRequest(item)) continue;
+    const label = publicToolLabel(tool, scopedMcpName) ?? "Riff tool";
+    result.push({
+      id: runtimeRequestId("permission", sessionId, upstreamId, item),
+      kind: "permission",
+      title: "Permission required",
+      permission: safeOptionalPublicText(
+        `Allow ${label} once for the current turn?`,
+        500,
+        sensitiveValues,
+      ) ?? "Allow this Riff tool once for the current turn?",
+    });
+    if (result.length >= 32) break;
+  }
+  return result;
+};
+
+const runtimeQuestions = (
+  payload: any[],
+  sessionId: string,
+  assistantMessageIds: Set<string>,
+  assistants: any[],
+  sensitiveValues: readonly string[],
+): OpenCodeRuntimeInteraction[] => {
+  const allowedCalls = assistantToolCalls(assistants);
+  const result: OpenCodeRuntimeInteraction[] = [];
+  for (const item of payload) {
+    const upstreamId = runtimeUpstreamId(item);
+    const ownerMessageId = String(item?.tool?.messageID ?? "");
+    const callId = String(item?.tool?.callID ?? "");
+    if (item?.sessionID !== sessionId || !upstreamId || !Array.isArray(item.questions)
+      || !assistantMessageIds.has(ownerMessageId)
+      || allowedCalls.get(`${ownerMessageId}\u0000${callId}`) !== "question") continue;
+    const questions = item.questions.slice(0, 16).flatMap((question: any, questionIndex: number) => {
+      const header = safeOptionalPublicText(question?.header, 100, sensitiveValues);
+      const text = safeOptionalPublicText(question?.question, 2_000, sensitiveValues);
+      if (!header || !text || !Array.isArray(question.options)) return [];
+      const options = question.options.slice(0, 32).flatMap((option: any, optionIndex: number) => {
+        const label = safeOptionalPublicText(option?.label, 200, sensitiveValues);
+        const description = safeOptionalPublicText(option?.description, 1_000, sensitiveValues);
+        return label && description ? [{
+          id: runtimeQuestionChoiceId(
+            sessionId,
+            upstreamId,
+            questionIndex,
+            optionIndex,
+            option.label,
+          ),
+          label,
+          description,
+        }] : [];
+      });
+      return [{
+        header,
+        question: text,
+        multiple: question.multiple === true,
+        custom: question.custom !== false,
+        options,
+      }];
+    });
+    if (!questions.length) continue;
+    result.push({
+      id: runtimeRequestId("question", sessionId, upstreamId, item),
+      kind: "question",
+      questions,
+    });
+    if (result.length >= 32) break;
+  }
+  return result;
+};
+
+const runtimeTools = (
+  assistants: any[],
+  sessionId: string,
+  scopedMcpName: string | undefined,
+): OpenCodeRuntimeTool[] => {
+  const latest = new Map<string, OpenCodeRuntimeTool>();
+  for (const message of assistants) {
+    if (message?.info?.sessionID !== sessionId && message?.info?.sessionID !== undefined) continue;
+    if (!Array.isArray(message.parts)) continue;
+    for (const part of message.parts) {
+      if (!part || part.type !== "tool") continue;
+      const upstreamId = boundedOpaqueRuntimeValue(part.callID ?? part.id, 500);
+      const tool = publicToolLabel(part.tool, scopedMcpName);
+      const status = part.state?.status;
+      if (!upstreamId || !tool || !["pending", "running", "completed", "error"].includes(status)) continue;
+      latest.set(upstreamId, {
+        id: `tool_${createHash("sha256").update(`tool\u0000${sessionId}\u0000${upstreamId}`).digest("hex").slice(0, 32)}`,
+        tool,
+        title: null,
+        status,
+      });
+      if (latest.size > 256) throw new ApiError(502, "opencode_response_too_large", "OpenCode returned too many tool parts.");
+    }
+  }
+  return [...latest.values()];
+};
+
+const currentRuntimeAttempt = (
+  messages: any[],
+  userMessageId: string | null,
+  boundary: { failureBoundaryId: string | null },
+): any[] => {
+  if (!userMessageId) return [];
+  const assistants = uniqueMessages(messages.filter((message: any) =>
+    message?.info?.role === "assistant" && message.info.parentID === userMessageId));
+  const priorBoundaryIndex = boundary.failureBoundaryId === null
+    ? -1
+    : assistants.findIndex((assistant) => messageId(assistant) === boundary.failureBoundaryId);
+  const latestFailureIndex = assistants.findLastIndex((assistant) => Boolean(assistant.info?.error));
+  if (latestFailureIndex >= 0
+    && (boundary.failureBoundaryId === null
+      || priorBoundaryIndex >= 0 && latestFailureIndex > priorBoundaryIndex)) {
+    const observedBoundary = messageId(assistants[latestFailureIndex]);
+    if (!observedBoundary) {
+      throw new ApiError(
+        502,
+        "opencode_invalid_response",
+        "OpenCode returned an assistant error without a stable message ID.",
+      );
+    }
+    boundary.failureBoundaryId = observedBoundary;
+  }
+  if (!boundary.failureBoundaryId) return assistants;
+  const boundaryIndex = assistants.findIndex((assistant) =>
+    messageId(assistant) === boundary.failureBoundaryId);
+  return boundaryIndex < 0 ? [] : assistants.slice(boundaryIndex + 1);
+};
+
+const runtimeAssistant = (
+  assistants: any[],
+  sensitiveValues: readonly string[],
+): OpenCodeConversationRuntimeSnapshot["assistant"] => {
+  if (!assistants.length) return null;
+  const text: string[] = [];
+  for (const assistant of assistants) {
+    for (const part of Array.isArray(assistant.parts) ? assistant.parts : []) {
+      if (part?.type !== "text" || part.ignored === true || typeof part.text !== "string") continue;
+      const value = safeOptionalPublicText(part.text, 64_000, sensitiveValues);
+      if (value) text.push(value);
+    }
+  }
+  const failed = assistants.some((assistant) => assistant.info?.error);
+  const complete = assistants.every(completedAssistant);
+  return {
+    status: failed ? "error" : complete ? "complete" : "streaming",
+    text: text.join("\n").slice(0, 64_000),
+  };
+};
+
+const assistantFailureCode = (
+  assistants: any[],
+): OpenCodeConversationRuntimeSnapshot["failureCode"] => {
+  for (const message of assistants) {
+    const name = message?.info?.error?.name;
+    if (name === "ProviderAuthError") return "opencode_auth_failed";
+    if (name === "MessageAbortedError") return "opencode_session_aborted";
+    if (typeof name === "string" && name) return "opencode_session_error";
+  }
+  return null;
+};
+
+const runtimeUpstreamId = (item: any): string | null =>
+  boundedOpaqueRuntimeValue(item?.id ?? item?.requestID, 500);
+
+const safeOptionalPublicText = (
+  value: unknown,
+  maximum: number,
+  sensitiveValues: readonly string[] = [],
+): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = redactPublicRuntimeText(value, sensitiveValues)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ")
+    .trim();
+  return trimmed ? trimmed.slice(0, maximum) : null;
+};
+
+const validatedQuestionAnswers = (
+  answers: unknown,
+  questions: unknown,
+  sessionId: string,
+  upstreamId: string,
+): string[][] => {
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > 16
+    || !Array.isArray(answers) || answers.length !== questions.length) {
+    throw new ApiError(422, "invalid_interaction_response", "Question answers must be a bounded array.");
+  }
+  return answers.map((answer, index) => {
+    const question = questions[index] as any;
+    if (!Array.isArray(answer) || answer.length < 1 || answer.length > 32
+      || question?.multiple !== true && answer.length !== 1) {
+      throw new ApiError(422, "invalid_interaction_response", "Each question answer must be a bounded string array.");
+    }
+    const normalized = answer.map((value) => {
+      const text = boundedInteractionAnswer(value);
+      if (!text) throw new ApiError(422, "invalid_interaction_response", "Question answers must contain non-empty text.");
+      return text;
+    });
+    if (new Set(normalized).size !== normalized.length) {
+      throw new ApiError(422, "invalid_interaction_response", "Question answers must be unique.");
+    }
+    const allowed = new Map<string, string>(
+      Array.isArray(question?.options)
+        ? question.options.flatMap((option: any, optionIndex: number) => {
+            if (typeof option?.label !== "string") return [];
+            return [[runtimeQuestionChoiceId(
+              sessionId,
+              upstreamId,
+              index,
+              optionIndex,
+              option.label,
+            ), option.label] as const];
+          })
+        : [],
+    );
+    return normalized.map((answerText) => {
+      const upstreamLabel = allowed.get(answerText);
+      if (upstreamLabel !== undefined) return upstreamLabel;
+      if (/^choice_[0-9a-f]{32}$/u.test(answerText)) {
+        throw new ApiError(422, "invalid_interaction_response", "The selected question choice is no longer available.");
+      }
+      if (question?.custom === false) {
+        throw new ApiError(422, "invalid_interaction_response", "Question answers must use an offered option.");
+      }
+      return answerText;
+    });
+  });
+};
+
+const boundedInteractionAnswer = (value: unknown): string | null => {
+  if (typeof value !== "string" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= 1_000 ? trimmed : null;
+};
+
+const publicToolLabel = (value: unknown, scopedMcpName: string | undefined): string | null => {
+  if (typeof value !== "string") return null;
+  if (scopedMcpName && value.startsWith(`${scopedMcpName}_`)) {
+    const suffix = value.slice(scopedMcpName.length + 1).replace(/[_-]+/gu, " ").trim();
+    return suffix ? `Riff ${suffix}`.slice(0, 300) : "Riff tool";
+  }
+  if (value === "question") return "Question";
+  return "Agent tool";
+};
+
+const assistantToolCalls = (assistants: any[]): Map<string, string> => {
+  const result = new Map<string, string>();
+  for (const assistant of assistants) {
+    const ownerMessageId = messageId(assistant);
+    if (!ownerMessageId || !Array.isArray(assistant.parts)) continue;
+    for (const part of assistant.parts) {
+      const callId = boundedOpaqueRuntimeValue(part?.callID ?? part?.callId, 500);
+      const tool = boundedOpaqueRuntimeValue(part?.tool, 500);
+      if (part?.type === "tool" && callId && tool) {
+        result.set(`${ownerMessageId}\u0000${callId}`, tool);
+      }
+    }
+  }
+  return result;
+};
+
+const runtimeRequestCommitment = (
+  kind: "permission" | "question",
+  item: any,
+): string => JSON.stringify(kind === "permission"
+  ? {
+      permission: typeof item?.permission === "string" ? item.permission : null,
+      patterns: item?.patterns,
+      always: item?.always,
+      tool: {
+        messageID: typeof item?.tool?.messageID === "string" ? item.tool.messageID : null,
+        callID: typeof item?.tool?.callID === "string" ? item.tool.callID : null,
+      },
+    }
+  : {
+      tool: {
+        messageID: typeof item?.tool?.messageID === "string" ? item.tool.messageID : null,
+        callID: typeof item?.tool?.callID === "string" ? item.tool.callID : null,
+      },
+      questions: Array.isArray(item?.questions)
+        ? item.questions.slice(0, 16).map((question: any) => ({
+            header: typeof question?.header === "string" ? question.header : null,
+            question: typeof question?.question === "string" ? question.question : null,
+            multiple: question?.multiple === true,
+            custom: question?.custom !== false,
+            options: Array.isArray(question?.options)
+              ? question.options.slice(0, 32).map((option: any) => ({
+                  label: typeof option?.label === "string" ? option.label : null,
+                  description: typeof option?.description === "string" ? option.description : null,
+                }))
+              : [],
+          }))
+        : [],
+    });
+
+const validPermissionRequest = (item: any): boolean =>
+  boundedOpaqueRuntimeValue(item?.permission, 500) !== null
+  && boundedStringArray(item?.patterns, 256, 4_000)
+  && boundedStringArray(item?.always, 256, 4_000);
+
+const boundedStringArray = (
+  value: unknown,
+  maximumItems: number,
+  maximumItemLength: number,
+): boolean => Array.isArray(value)
+  && value.length <= maximumItems
+  && value.every((item) => typeof item === "string"
+    && item.length <= maximumItemLength
+    && !/[\u0000-\u001f\u007f]/u.test(item));
+
+const runtimeQuestionChoiceId = (
+  sessionId: string,
+  upstreamId: string,
+  questionIndex: number,
+  optionIndex: number,
+  upstreamLabel: unknown,
+): string => `choice_${createHash("sha256")
+  .update(`choice\u0000${sessionId}\u0000${upstreamId}\u0000${questionIndex}\u0000${optionIndex}\u0000${String(upstreamLabel)}`)
+  .digest("hex")
+  .slice(0, 32)}`;
+
+const boundedOpaqueRuntimeValue = (value: unknown, maximum: number): string | null =>
+  typeof value === "string" && value.length > 0 && value.length <= maximum
+    && !/[\u0000-\u001f\u007f]/u.test(value)
+    ? value
+    : null;
+
+const sameWorkspace = (
+  left: OpenCodeWorkspaceBinding | undefined,
+  right: OpenCodeWorkspaceBinding | undefined,
+): boolean => left?.directory === right?.directory
+  && left?.owner.kind === right?.owner.kind
+  && left?.owner.id === right?.owner.id;
+
+const scopedCapabilityValue = (url: string | undefined): string => {
+  if (!url) return "";
+  try {
+    return new URL(url).searchParams.get("cap") ?? "";
+  } catch {
+    return "";
+  }
+};
+
+const replaceSensitiveValues = (value: string, sensitiveValues: readonly string[]): string => {
+  const unique = [...new Set(sensitiveValues)].filter(Boolean);
+  if (unique.some((item) => item.length < 4 && value.includes(item))) {
+    return "[runtime text redacted]";
+  }
+  let redacted = value;
+  for (const sensitive of unique
+    .sort((left, right) => right.length - left.length)) {
+    redacted = redacted.split(sensitive).join("[sensitive value]");
+  }
+  return redacted;
+};
+
+export const redactPublicRuntimeText = (
+  value: string,
+  sensitiveValues: readonly string[] = [],
+): string => replaceSensitiveValues(value, sensitiveValues)
+  .replace(/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/giu, "[credential redacted]")
+  .replace(/\b(?:authorization\s*:\s*bearer|bearer)\s+[^\s]+/giu, "[credential redacted]")
+  .replace(/\b(?:api[_-]?key|access[_-]?token|token|secret|password)\s*[:=]\s*[^\s,;]+/giu, "[credential redacted]")
+  .replace(/\b(?:sk|rk|api)[-_][A-Za-z0-9_-]{12,}\b/gu, "[credential redacted]")
+  .replace(/file:\/\/[^\s)"'`,;}\]>]+/giu, "[local path]")
+  .replace(/(?<![\w:/.])\/(?!\/)[^\s)"'`,;}\]>]+/gu, "[local path]")
+  .replace(/(?<![\w/])(?:\.\.?\/)+[^\s)"'`,;}\]>]+/gu, "[local path]")
+  .replace(/\b(?:workspace|code|environment|outputs?|private|secrets?)\/[^\s)"'`,;}\]>]+/giu, "[local path]")
+  .replace(/\b(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,16}\b/gu, "[local path]")
+  .replace(/\b[A-Za-z]:\\[^\s)"'`,;]+/gu, "[local path]")
+  .replace(/\\\\[A-Za-z0-9._-]+\\[^\s)"'`,;]+/gu, "[local path]")
+  .replace(/\bhttps?:\/\/(?:127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?[^\s)"'`,;}\]>]*/giu, "[local service]")
+  .replace(/([?&]cap=)[^&\s)"'`,;}\]>]+/giu, "$1[capability redacted]");
 
 const assistantFailure = (error: unknown): ApiError => {
   const name = error && typeof error === "object" && typeof (error as any).name === "string" ? (error as any).name : "";

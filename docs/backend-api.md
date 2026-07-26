@@ -13,7 +13,7 @@ without exposing credentials, session IDs, paths, or raw tool payloads.
 Merge and the merged-revision rerun remain before Issue closure; see
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
 
-## OpenCode startup and native turn contract (Issue #56 PR 1–2)
+## OpenCode startup, native turn, and interaction contract (Issue #56 PR 1–3)
 
 `OPENCODE_WORKDIR` is server-side configuration for the OpenCode server's
 explicit absolute canonical default profile. It is never accepted from the
@@ -77,11 +77,42 @@ node --experimental-strip-types --test test/opencode-smoke.test.ts
 
 The default suite skips this credentialed provider call.
 
-Issue #56 PR 3 still owns streamed Conversation projection, pending
-permission/question UI, Stop/Retry/Resume, and provider/agent controls. PR 4
-owns the expanded Skill/MCP/Playwright layer, and PR 5 owns durable
-goal-satisfaction verification and the real browser exit; none is asserted as
-implemented by this PR 2 contract.
+PR 3 adds a browser-safe Conversation runtime projection and native interaction
+controls without making OpenCode authoritative. `GET
+/api/conversations/{conversationId}/runtime` is the recovery authority;
+`GET /api/conversations/{conversationId}/runtime/events` is an SSE convenience
+that emits the same revisioned DTO and may reconnect or fall back to GET.
+Statuses are the closed set `busy`, `waiting_for_tool`, `waiting_for_user`,
+`idle`, and `failed`. Runtime parts contain only a public ID, allowlisted kind
+and state, a friendly title, and a redacted summary. They never include
+OpenCode session/message/request identifiers, tool input/output, raw metadata,
+credentials, capabilities, commands, or paths.
+
+The browser can stop only the exact active `requestKey`, retry only a durable
+retryable failed turn under a fresh `requestKey`, and resume only a pending
+permission/question associated with that exact active turn. Stop aborts local
+work first, asks OpenCode to abort that exact opaque session, and waits for a
+durable terminal state. Retry reconstructs text, attachments, and the selected
+agent from Riff-owned state; a visual-confirmation turn is not automatically
+retryable. Permission supports `allow_once` or `reject`, never persistent
+allow. Question answers are validated against the public single/multiple/custom
+shape before the adapter maps server-minted choices back to the current
+upstream request. Public choices carry opaque `choice_*` IDs, so two
+different upstream values that redact to the same label cannot be confused;
+custom answers are limited to 1,000 characters. Resume never submits a second
+prompt.
+
+`GET /api/agents?ownerKind={model|project}&ownerId={id}` derives the exact
+owner workspace on the backend and exposes only selectable primary OpenCode
+agents with name, redacted description, and the native flag. A selected agent
+is per-turn input, is covered by the turn intent digest, and is locked together
+with the composer while the turn is active or waiting for user input.
+Provider/model keeps its existing conversation-level lock after the first
+accepted message.
+
+PR 4 still owns the expanded Skill/MCP/Playwright layer, and PR 5 owns durable
+goal-satisfaction verification and the real browser exit. This PR 3 contract
+does not assert either later slice complete.
 
 ## Milestone A2 authority and current A3 execution
 
@@ -100,6 +131,7 @@ The implemented Stage 2 and Stage 3 routes are:
 | Route family | Current implemented contract |
 | --- | --- |
 | `GET /api/providers` | Discover backend-validated OpenCode provider/model pairs; return no credentials or upstream session IDs. |
+| `GET /api/agents?ownerKind={model\|project}&ownerId={id}` | Discover selectable primary Agents inside the backend-derived owner workspace; return only name, redacted description, and native status. |
 | `POST /api/models` | Accept a name and initial provider/model, then atomically create a generic Model, its first conversation, and server-owned scaffold. |
 | `GET /api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
 | `POST /api/models/{modelId}/technical-checks` | Start or idempotently return a digest-bound thin technical check using a `commandId`. |
@@ -112,7 +144,12 @@ The implemented Stage 2 and Stage 3 routes are:
 | `GET /api/conversations/{conversationId}/documents` | Return persistent temporary-document cards separately from committed owner files. |
 | `GET /api/conversations/{conversationId}/actions` | Return redacted skill/action cards without rationale, intent, affected resources, or raw tool payloads. |
 | `POST /api/conversations/{conversationId}/attachments` | Store a bounded canonical-base64 upload under the conversation with server-derived path and digest. |
-| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn and return HTTP 200 with live or structured durable read-only state, messages, skill uses, and action records. A read-only result contains the accepted user message and no fabricated assistant message. Its optional structured `visualInteractionConfirmation` is the only request-level candidate for A3-2c3 visual interaction authority; ordinary `explicitImperative` is insufficient. |
+| `POST /api/conversations/{conversationId}/turns` | Run an idempotent durable turn with optional discovered `agentName`; return HTTP 200 with live or structured durable read-only state, messages, skill uses, and action records. A read-only result contains the accepted user message and no fabricated assistant message. Its optional structured `visualInteractionConfirmation` is the only request-level candidate for A3-2c3 visual interaction authority; ordinary `explicitImperative` is insufficient. |
+| `GET /api/conversations/{conversationId}/runtime` | Return the current revisioned, allowlisted runtime projection; this GET is authoritative after SSE loss. |
+| `GET /api/conversations/{conversationId}/runtime/events` | Stream changed instances of the same public runtime DTO over reconnectable SSE; no upstream event or payload crosses this boundary. |
+| `POST /api/conversations/{conversationId}/turns/{requestKey}/stop` | Abort only that exact active turn and return after durable terminalization. |
+| `POST /api/conversations/{conversationId}/turns/{sourceRequestKey}/retry` | Require a fresh `requestKey` and replay only Riff-owned durable text, attachments, and agent from a retryable failed turn. |
+| `POST /api/conversations/{conversationId}/turns/{requestKey}/resume` | Answer or reject one public pending interaction on that exact active turn; never starts another prompt. |
 | `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
 | `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |

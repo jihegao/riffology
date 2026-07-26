@@ -6,7 +6,11 @@ import type {
   ConversationMessageDto,
   ConversationOwner,
 } from "./agent-domain.ts";
-import { AgentWorkspaceService } from "./agent-workspace-service.ts";
+import {
+  AgentWorkspaceService,
+  type ConversationRuntimeDto,
+} from "./agent-workspace-service.ts";
+import { redactPublicRuntimeText } from "./opencode-adapter.ts";
 import type {
   PermanentDeleteReceipt,
   PermanentDeletePreview,
@@ -104,6 +108,27 @@ export class MilestoneA2Api {
     }
     if (request.method === "GET" && parts.length === 2 && parts[1] === "providers") {
       privateJson(response, 200, await this.service.discoverProviders());
+      return true;
+    }
+    if (request.method === "GET" && parts.length === 2 && parts[1] === "agents") {
+      exactQuery(url, ["ownerKind", "ownerId"]);
+      const ownerKind = url.searchParams.get("ownerKind");
+      const ownerId = url.searchParams.get("ownerId");
+      if (!ownerKind || !ownerId) {
+        throw new ApiError(422, "invalid_product_query", "Agent discovery requires one Product owner.");
+      }
+      const discovery = await this.service.discoverAgents(
+        ownerFromRoute(ownerKind, ownerId),
+      );
+      privateJson(response, 200, {
+        mode: discovery.mode,
+        ...(discovery.mode === "read_only" ? { reason: discovery.reason } : {}),
+        agents: discovery.agents.map((agent) => ({
+          name: agent.name,
+          label: agent.name,
+          description: agent.description,
+        })),
+      });
       return true;
     }
     if (request.method === "POST" && parts.length === 2 && parts[1] === "models") {
@@ -462,6 +487,18 @@ export class MilestoneA2Api {
         json(response, 200, this.service.listConversationActivity(conversationId));
         return true;
       }
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "runtime") {
+        privateJson(response, 200, publicConversationRuntime(
+          await this.service.conversationRuntime(conversationId),
+        ));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 5
+        && parts[3] === "runtime" && parts[4] === "events") {
+        this.service.getConversation(conversationId);
+        this.#streamConversationRuntime(request, response, conversationId);
+        return true;
+      }
       if (request.method === "PATCH" && parts.length === 4
         && parts[3] === "provider-binding") {
         const body = await strictJsonBody(request, [
@@ -495,11 +532,12 @@ export class MilestoneA2Api {
         return true;
       }
       if (request.method === "POST" && parts.length === 4 && parts[3] === "turns") {
-        const body = await strictJsonBody(request, ["requestKey", "text", "attachmentIds", "visualInteractionConfirmation"], ["attachmentIds", "visualInteractionConfirmation"]);
+        const body = await strictJsonBody(request, ["requestKey", "text", "agentName", "attachmentIds", "visualInteractionConfirmation"], ["agentName", "attachmentIds", "visualInteractionConfirmation"]);
         const result = await this.service.runTurn({
           conversationId,
           requestKey: requiredString(body.requestKey, "requestKey"),
           text: requiredString(body.text, "text"),
+          ...(body.agentName === undefined ? {} : { agentName: requiredString(body.agentName, "agentName") }),
           ...(body.attachmentIds === undefined ? {} : { attachmentIds: stringArray(body.attachmentIds, "attachmentIds") }),
           ...(body.visualInteractionConfirmation === undefined ? {} : { visualInteractionConfirmation: visualInteractionConfirmation(body.visualInteractionConfirmation) }),
         });
@@ -514,8 +552,84 @@ export class MilestoneA2Api {
         );
         return true;
       }
+      if (request.method === "POST" && parts.length === 6
+        && parts[3] === "turns" && parts[5] === "stop") {
+        const body = await strictJsonBody(request, ["commandId"], ["commandId"]);
+        if (body.commandId !== undefined) requiredString(body.commandId, "commandId");
+        privateJson(response, 200, await this.service.stopTurn(conversationId, parts[4]));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6
+        && parts[3] === "turns" && parts[5] === "retry") {
+        const body = await strictJsonBody(request, ["commandId", "requestKey"], ["commandId"]);
+        if (body.commandId !== undefined) requiredString(body.commandId, "commandId");
+        const result = await this.service.retryTurn({
+          conversationId,
+          sourceRequestKey: parts[4],
+          requestKey: requiredString(body.requestKey, "requestKey"),
+        });
+        privateJson(response, 200, {
+          ...result,
+          turn: publicAgentTurn(result.turn),
+          messages: result.messages.map(publicConversationMessage),
+        });
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6
+        && parts[3] === "turns" && parts[5] === "resume") {
+        const body = await strictJsonBody(
+          request,
+          ["interactionId", "kind", "decision", "answers", "reject"],
+          ["decision", "answers", "reject"],
+        );
+        privateJson(response, 200, await this.service.resumeTurn({
+          conversationId,
+          requestKey: parts[4],
+          interactionId: requiredString(body.interactionId, "interactionId"),
+          response: interactionResponse(body),
+        }));
+        return true;
+      }
     }
     return false;
+  }
+
+  #streamConversationRuntime(
+    request: IncomingMessage,
+    response: ServerResponse,
+    conversationId: string,
+  ): void {
+    response.writeHead(200, {
+      "cache-control": "private, no-store",
+      "content-type": "text/event-stream; charset=utf-8",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+      "x-content-type-options": "nosniff",
+    });
+    let closed = false;
+    let timer: NodeJS.Timeout | undefined;
+    let lastRevision: string | null = null;
+    const close = () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+    };
+    request.once("aborted", close);
+    response.once("close", close);
+    const poll = async (): Promise<void> => {
+      if (closed) return;
+      try {
+        const snapshot = await this.service.conversationRuntime(conversationId);
+        if (snapshot.revision !== lastRevision) {
+          lastRevision = snapshot.revision;
+          response.write(`id: ${snapshot.revision}\ndata: ${JSON.stringify(publicConversationRuntime(snapshot))}\n\n`);
+        }
+      } catch {
+        // A normal GET snapshot is the recovery authority. The stream never
+        // forwards raw upstream errors.
+      }
+      if (!closed) timer = setTimeout(() => { void poll(); }, 250);
+    };
+    void poll();
   }
 
   #authorizeProductApi(request: IncomingMessage, url: URL): number {
@@ -527,7 +641,8 @@ export class MilestoneA2Api {
             .test(url.pathname));
       const eventQuery = method === "GET"
         && /\/diagnostic-events$/u.test(url.pathname);
-      if (url.search !== "" && !collectionQuery && !eventQuery) {
+      const agentQuery = method === "GET" && url.pathname === "/api/agents";
+      if (url.search !== "" && !collectionQuery && !eventQuery && !agentQuery) {
         throw new ApiError(
           422,
           "invalid_product_query",
@@ -1178,7 +1293,7 @@ const privateJson = (
 const productRoute = (method: string, parts: string[]): boolean => {
   if (parts[0] !== "api") return false;
   if (method === "GET" && parts.length === 2
-    && ["home", "models", "projects", "providers"].includes(parts[1]!)) {
+    && ["home", "models", "projects", "providers", "agents"].includes(parts[1]!)) {
     return true;
   }
   if (method === "POST" && parts.length === 2
@@ -1428,7 +1543,9 @@ const publicConversationMessage = (
     role: message.role,
     status: message.status,
     messageKind: message.messageKind,
-    text: message.role === "tool" ? "Tool activity recorded." : message.text,
+    text: message.role === "tool"
+      ? "Tool activity recorded."
+      : message.role === "assistant" ? redactPublicRuntimeText(message.text) : message.text,
     ...(platformCard ? { platformCard } : {}),
     ...(visualInteractionMarker ? { visualInteractionMarker } : {}),
     createdAt: message.createdAt,
@@ -1492,6 +1609,7 @@ const publicAgentTurn = (
   turn: AgentTurnDto,
 ): Readonly<Record<string, unknown>> => Object.freeze({
   requestKey: turn.requestKey,
+  agentName: turn.agentName,
   state: turn.state,
   userMessageId: turn.userMessageId,
   assistantMessageId: turn.assistantMessageId,
@@ -1511,6 +1629,157 @@ const publicAgentTurn = (
   })),
   failure: turn.failure,
 });
+
+const publicConversationRuntime = (
+  runtime: ConversationRuntimeDto,
+): Readonly<Record<string, unknown>> => {
+  const parts: Array<Readonly<Record<string, unknown>>> = [];
+  if (runtime.assistant) {
+    parts.push(Object.freeze({
+      id: `text_${runtime.revision.slice(0, 32)}`,
+      kind: runtime.assistant.status === "error" ? "error" : "text",
+      state: runtime.assistant.status === "complete"
+        ? "complete"
+        : runtime.assistant.status === "error" ? "failed" : "streaming",
+      title: runtime.assistant.status === "error" ? "Assistant error" : "Assistant",
+      summary: runtime.assistant.text || null,
+    }));
+  }
+  for (const tool of runtime.tools) {
+    parts.push(Object.freeze({
+      id: tool.id,
+      kind: tool.status === "completed" || tool.status === "error"
+        ? "tool_result"
+        : "tool_call",
+      state: tool.status === "pending"
+        ? "pending"
+        : tool.status === "running" ? "streaming"
+          : tool.status === "completed" ? "complete" : "failed",
+      title: tool.tool,
+      summary: tool.title,
+    }));
+  }
+  for (const skill of runtime.activity.skillUses) {
+    parts.push(Object.freeze({
+      id: skill.id,
+      kind: "skill",
+      state: skill.loadState === "failed" ? "failed"
+        : skill.loadState === "loaded" ? "complete" : "pending",
+      title: skill.skillId,
+      summary: `${skill.routingMode} · ${skill.skillVersion}`,
+    }));
+  }
+  for (const action of runtime.activity.actions) {
+    parts.push(Object.freeze({
+      id: action.id,
+      kind: "command",
+      state: action.state === "failed" || action.state === "denied"
+        || action.state === "rolled_back" ? "failed"
+        : action.state === "committed" ? "complete" : "pending",
+      title: action.actionKind,
+      summary: action.errorCode,
+    }));
+  }
+  if (runtime.failure && !runtime.assistant) {
+    parts.push(Object.freeze({
+      id: `error_${runtime.revision.slice(0, 32)}`,
+      kind: "error",
+      state: "failed",
+      title: "Agent turn failed",
+      summary: runtime.failure.code,
+    }));
+  }
+  parts.push(Object.freeze({
+    id: `mcp_${runtime.revision.slice(0, 32)}`,
+    kind: "mcp",
+    state: runtime.scopedMcp.status === "unavailable" ? "failed" : "complete",
+    title: runtime.scopedMcp.label,
+    summary: runtime.scopedMcp.status,
+  }));
+  const activeTurn = runtime.activeRequestKey
+    ? Object.freeze({
+        requestKey: runtime.activeRequestKey,
+        canStop: runtime.turnActive && (runtime.status === "busy"
+          || runtime.status === "waiting_for_tool"
+          || runtime.status === "waiting_for_user"),
+        canRetry: !runtime.turnActive
+          && runtime.status === "failed"
+          && runtime.failure?.retryable === true,
+      })
+    : null;
+  return Object.freeze({
+    schemaVersion: 1,
+    revision: runtime.revision,
+    status: runtime.status,
+    activeTurn,
+    parts: Object.freeze(parts),
+    pendingInteractions: Object.freeze(runtime.interactions.map((interaction) =>
+      interaction.kind === "permission"
+        ? Object.freeze({
+            id: interaction.id,
+            kind: "permission",
+            title: interaction.title,
+            prompt: interaction.permission,
+            decisions: Object.freeze(["allow_once", "reject"]),
+          })
+        : Object.freeze({
+            id: interaction.id,
+            kind: "question",
+            title: interaction.questions[0]?.header ?? "Question",
+            questions: Object.freeze(interaction.questions.map((question) => Object.freeze({
+              prompt: question.question,
+              multiple: question.multiple,
+              custom: question.custom,
+              choices: Object.freeze(question.options.map((option) => Object.freeze({
+                value: option.id,
+                label: option.label,
+              }))),
+            }))),
+          }))),
+    agent: Object.freeze({
+      selectedName: runtime.agent.selected,
+      locked: runtime.status === "busy"
+        || runtime.status === "waiting_for_tool"
+        || runtime.status === "waiting_for_user",
+    }),
+    mcp: Object.freeze({
+      state: runtime.scopedMcp.status,
+      label: runtime.scopedMcp.label,
+    }),
+  });
+};
+
+const interactionResponse = (
+  body: Record<string, unknown>,
+):
+  | { kind: "permission"; decision: "once" | "reject" }
+  | { kind: "question"; answers: string[][] }
+  | { kind: "question"; reject: true } => {
+  const keys = Object.keys(body).sort().join("\n");
+  if (body.kind === "permission"
+    && keys === ["decision", "interactionId", "kind"].join("\n")
+    && (body.decision === "once" || body.decision === "allow_once" || body.decision === "reject")) {
+    return { kind: "permission", decision: body.decision === "allow_once" ? "once" : body.decision };
+  }
+  if (body.kind === "question"
+    && keys === ["interactionId", "kind", "reject"].join("\n")
+    && body.reject === true) {
+    return { kind: "question", reject: true };
+  }
+  if (body.kind === "question"
+    && keys === ["answers", "interactionId", "kind"].join("\n")
+    && Array.isArray(body.answers)
+    && body.answers.length >= 1
+    && body.answers.length <= 16
+    && body.answers.every((answer) => Array.isArray(answer)
+      && answer.length >= 1
+      && answer.length <= 32
+      && answer.every((value) => typeof value === "string"))) {
+    return { kind: "question", answers: body.answers as string[][] };
+  }
+  throw new ApiError(422, "invalid_interaction_response", "The interaction response is invalid.");
+};
+
 
 const json = (response: ServerResponse, status: number, payload: unknown): void => {
   const body = JSON.stringify(payload);

@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentWorkspaceService } from "../src/agent-workspace-service.ts";
-import type { OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel } from "../src/opencode-adapter.ts";
+import type {
+  OpenCodeAssistantResponse,
+  OpenCodeConversationPort,
+  OpenCodeConversationRuntimeSnapshot,
+  OpenCodePrompt,
+  OpenCodeProviderModel,
+  OpenCodeWorkspaceBinding,
+} from "../src/opencode-adapter.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
 
 type Deferred = { promise: Promise<void>; resolve: () => void };
@@ -18,29 +25,88 @@ class ControlledOpenCode implements OpenCodeConversationPort {
   readonly sessions = new Map<string, string>();
   readonly starts: Array<{ conversationId: string; text: string }> = [];
   readonly holds = new Map<string, Deferred>();
+  readonly aborted: string[] = [];
+  readonly permissionResponses: string[] = [];
+  readonly returned = new Set<string>();
+  readonly creating: string[] = [];
+  readonly controlWorkspaces: OpenCodeWorkspaceBinding[] = [];
+  cleanupHold?: Deferred;
+  createHold?: Deferred;
   #nextSession = 0;
 
   hold(text: string): Deferred { const value = deferred(); this.holds.set(text, value); return value; }
   async discoverProviderModels(): Promise<OpenCodeProviderModel[]> { return this.catalogue; }
   async getSession(sessionId: string): Promise<boolean> { return this.sessions.has(sessionId); }
   async createSession(conversationId: string): Promise<string> {
+    this.creating.push(conversationId);
+    if (this.createHold) await this.createHold.promise;
     const id = `opaque-session-${++this.#nextSession}`;
     this.sessions.set(id, conversationId);
     return id;
   }
   async injectContext(): Promise<void> {}
-  async promptWithModel(sessionId: string, _binding: { providerId: string; modelId: string }, prompt: OpenCodePrompt): Promise<OpenCodeAssistantResponse> {
+  async promptWithModel(
+    sessionId: string,
+    _binding: { providerId: string; modelId: string },
+    prompt: OpenCodePrompt,
+    signal?: AbortSignal,
+  ): Promise<OpenCodeAssistantResponse> {
     const conversationId = this.sessions.get(sessionId);
     if (!conversationId) throw new Error("unknown test session");
     this.starts.push({ conversationId, text: prompt.text });
-    await this.holds.get(prompt.text)?.promise;
+    const hold = this.holds.get(prompt.text);
+    if (hold) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => reject(signal?.reason ?? new Error("aborted"));
+        if (signal?.aborted) return onAbort();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        void hold.promise.then(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        });
+      });
+    }
+    this.returned.add(sessionId);
     return {
       messageId: `upstream-${this.starts.length}`,
       text: `answer:${prompt.text}`,
       content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
     };
   }
-  async abort(): Promise<void> {}
+  async abort(sessionId: string, workspace: OpenCodeWorkspaceBinding): Promise<void> {
+    this.controlWorkspaces.push(workspace);
+    this.aborted.push(sessionId);
+  }
+  async runtimeSnapshot(
+    sessionId: string,
+    _scopeId: string | undefined,
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<OpenCodeConversationRuntimeSnapshot> {
+    this.controlWorkspaces.push(workspace);
+    if (this.returned.has(sessionId) && this.cleanupHold) await this.cleanupHold.promise;
+    return {
+      status: "busy",
+      assistant: { status: "streaming", text: "Waiting for a scoped answer." },
+      tools: [],
+      interactions: [{
+        id: "permission_public",
+        kind: "permission",
+        title: "Permission required",
+        permission: "Allow this scoped Agent tool for the current turn?",
+      }],
+      failureCode: null,
+      scopedMcp: { label: "Riff tools", status: "disconnected" },
+    };
+  }
+  async respondPermission(
+    _sessionId: string,
+    publicRequestId: string,
+    _response: "once" | "reject",
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<void> {
+    this.controlWorkspaces.push(workspace);
+    this.permissionResponses.push(publicRequestId);
+  }
 }
 
 const waitFor = async (predicate: () => boolean): Promise<void> => {
@@ -95,5 +161,102 @@ test("runTurn merges one request key, serializes different keys per conversation
     await waitFor(() => openCode.starts.some((item) => item.text === "after-invalid"));
     recoveryHold.resolve();
     assert.equal((await afterInvalid).turn.state, "complete", "a rejected queue head must not poison later keys");
+  } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("turn controls close at durable terminal state and serialize Stop ahead of Resume", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-agent-turn-control-"));
+  const store = ProductStoreV2.open(join(parent, "store"));
+  const openCode = new ControlledOpenCode();
+  const service = new AgentWorkspaceService(store, openCode, () => "2026-07-22T09:00:00.000Z");
+  try {
+    const created = await service.createModel({
+      commandId: "control-model-command",
+      name: "Turn controls",
+      providerId: "provider",
+      modelId: "model",
+    });
+
+    const cleanupHold = deferred();
+    openCode.cleanupHold = cleanupHold;
+    const completeHold = openCode.hold("complete-before-cleanup");
+    const completing = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-complete-before-cleanup",
+      text: "complete-before-cleanup",
+    });
+    await waitFor(() => openCode.starts.some((item) => item.text === "complete-before-cleanup"));
+    completeHold.resolve();
+    await waitFor(() =>
+      store.latestAgentTurn(created.conversation.id)?.state === "complete");
+    await assert.rejects(
+      () => service.stopTurn(created.conversation.id, "request-complete-before-cleanup"),
+      (error: any) => error.code === "turn_not_active",
+    );
+    assert.deepEqual(openCode.aborted, []);
+    assert.equal((await service.conversationRuntime(created.conversation.id)).status, "idle");
+    cleanupHold.resolve();
+    assert.equal((await completing).turn.state, "complete");
+    openCode.cleanupHold = undefined;
+
+    const stopHold = openCode.hold("stop-before-resume");
+    const running = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-stop-before-resume",
+      text: "stop-before-resume",
+    });
+    await waitFor(() => openCode.starts.some((item) => item.text === "stop-before-resume"));
+    const stopping = service.stopTurn(
+      created.conversation.id,
+      "request-stop-before-resume",
+    );
+    const resuming = service.resumeTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-stop-before-resume",
+      interactionId: "permission_public",
+      response: { kind: "permission", decision: "once" },
+    });
+    await assert.rejects(
+      resuming,
+      (error: any) => error.code === "turn_not_waiting",
+    );
+    const stoppedRuntime = await stopping;
+    assert.equal(stoppedRuntime.status, "failed");
+    assert.equal(stoppedRuntime.turnActive, false);
+    assert.deepEqual(openCode.permissionResponses, []);
+    assert.ok(openCode.aborted.length >= 1);
+    assert.equal(openCode.controlWorkspaces.every((workspace) =>
+      workspace.owner.kind === "model"
+      && workspace.owner.id === created.model.id), true);
+    assert.equal((await running).turn.state, "failed");
+    assert.equal(
+      service.getConversation(created.conversation.id).sessionState,
+      "lost",
+      "a user Stop is retryable turn failure, not persistent provider read-only state",
+    );
+    stopHold.resolve();
+
+    const setupHold = deferred();
+    openCode.createHold = setupHold;
+    openCode.sessions.clear();
+    const stoppedDuringSetup = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-stop-during-session-setup",
+      text: "must-not-prompt-after-stop",
+    });
+    await waitFor(() => openCode.creating.length >= 2);
+    const stoppingDuringSetup = service.stopTurn(
+      created.conversation.id,
+      "request-stop-during-session-setup",
+    );
+    setupHold.resolve();
+    const setupRuntime = await stoppingDuringSetup;
+    assert.equal(setupRuntime.turnActive, false);
+    assert.equal(
+      openCode.starts.some((item) => item.text === "must-not-prompt-after-stop"),
+      false,
+      "Stop during session setup must close the turn before prepare, MCP binding, or prompt",
+    );
+    assert.equal((await stoppedDuringSetup).turn.state, "failed");
   } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
 });

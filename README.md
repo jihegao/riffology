@@ -308,7 +308,7 @@ interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 `RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
 deterministic mode.
 
-### OpenCode server and native turn lifecycle (Issue #56, PR 1–2)
+### OpenCode server, native turn lifecycle, and controls (Issue #56, PR 1–3)
 
 `OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
 separately managed OpenCode server, not a browser path and not a permission
@@ -365,11 +365,25 @@ capability-scoped MCP, and requires two ordered tool calls before terminal
 reconciliation and revocation. The default test suite skips this credentialed
 case.
 
-This is the Issue #56 PR 1–2 server and premature-completion contract. Streamed
-Conversation controls and permission/question interaction, expanded
-Skill/MCP/Playwright integration, and durable target-completion verification
-remain the separately ordered PR 3–5 work; this document does not claim them
-complete.
+PR 3 adds the revisioned, browser-safe Conversation runtime GET/SSE projection,
+visible `busy`/tool/user/idle/failed states, redacted assistant/tool/result/error
+activity, per-turn Agent selection, and exact-turn Stop/Retry/Resume. Native
+permission requests allow once or reject; native questions support validated
+single, multiple, and custom answers. The main composer and Agent selector lock
+while a turn is active or waiting, but the pending interaction form remains
+usable. If runtime projection is unavailable, durable Conversation reads remain
+available and the UI reports the reduced capability.
+
+The runtime API never returns OpenCode session/message/request identifiers,
+tool input/output, raw metadata, credentials, paths, or capability material.
+Stop targets only the active request key and waits for durable terminalization;
+Retry uses a fresh request key and reconstructs only Riff-owned intent; Resume
+answers one pending interaction without submitting another prompt. Provider
+locking remains conversation-level, while Agent choice is persisted per turn.
+
+This is the Issue #56 PR 1–3 contract. Expanded Skill/MCP/Playwright integration
+and durable target-completion verification remain the separately ordered PR 4–5
+work; this document does not claim them complete.
 
 ## Verification
 
