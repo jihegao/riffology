@@ -13,7 +13,7 @@ without exposing credentials, session IDs, paths, or raw tool payloads.
 Merge and the merged-revision rerun remain before Issue closure; see
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md).
 
-## OpenCode startup, native turn, and interaction contract (Issue #56 PR 1–3)
+## OpenCode startup, native turn, interaction, and tool contract (Issue #56 PR 1–4)
 
 `OPENCODE_WORKDIR` is server-side configuration for the OpenCode server's
 explicit absolute canonical default profile. It is never accepted from the
@@ -110,9 +110,37 @@ with the composer while the turn is active or waiting for user input.
 Provider/model keeps its existing conversation-level lock after the first
 accepted message.
 
-PR 4 still owns the expanded Skill/MCP/Playwright layer, and PR 5 owns durable
-goal-satisfaction verification and the real browser exit. This PR 3 contract
-does not assert either later slice complete.
+PR 4 preserves OpenCode Skill compatibility without authorizing ambient Skill
+discovery. The OpenCode-native filesystem-backed `skill` tool remains denied.
+Riff lists only the configured `RIFF_ALLOWED_SKILLS` under the canonical
+`RIFF_SKILL_ROOT`, pins catalog version and instruction digest, loads the full
+instruction on demand into bounded context, and audits actual selection. A
+Skill instruction is untrusted guidance for authorization purposes: it cannot
+add a tool, owner, object, operation, browser target, or credential.
+
+For a turn that needs tools, Riff mints an owner/session-generation-scoped MCP
+capability and binds one opaque loopback MCP server. The adapter sends an
+explicit deny-all map for `*`, native file/command/Skill built-ins, and
+ambient/plugin MCP servers; it enables only
+`${opaqueServerName}_${exactRiffToolName}` for the sorted tool names in that
+capability. The only native exception is `question`, whose answer is mapped
+through PR 3's exact current-turn Resume boundary and grants no Riff tool or
+object authority. Bind and prompt must carry identical non-empty exact MCP
+lists. Missing scope, stale binding, duplicated or unsorted names, any non-Riff
+tool name, and list drift all fail closed before OpenCode receives the prompt.
+Tool input is schema-checked and recursively rejects server-owned scope fields
+such as owner, session, URL, path, and capability. Capability URLs and MCP
+credentials are never public DTO or prompt content.
+
+Playwright remains an isolated backend worker for the exact current healthy
+Project visual attempt. Observation performs bounded read-only inspection;
+interaction accepts only the pre-authorized structured operation from the
+immutable human turn and atomically consumes its grant. It does not accept
+caller URLs, raw selectors, scripts, downloads, cross-peer redirects, reused
+browser state, cookies, authorization headers, or returned page artifacts.
+
+PR 5 still owns durable goal-satisfaction verification and the real browser
+exit. This PR 4 contract does not assert that final slice complete.
 
 ## Milestone A2 authority and current A3 execution
 

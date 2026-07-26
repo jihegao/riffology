@@ -343,7 +343,7 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
           ].join(" "),
         },
         {
-          type: "tool", callID: "new-tool", tool: `${mcpName}_edit`,
+          type: "tool", callID: "new-tool", tool: `${mcpName}_riff_apply_model_changes`,
           state: {
             status: terminal ? "completed" : "running",
             title: "raw input={path:/var/private.txt} output=relative/result.json",
@@ -433,9 +433,11 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
     /\/Users\/|\/tmp\/|\/var\/|file:\/\/|workspace\/|relative\//u,
   );
   assert.match(agents[0].description ?? "", /provider\/model-b/u);
+  const exactRuntimeTools = ["riff_apply_model_changes"] as const;
   await adapter.bindScopedMcp(
     scopeId,
     "http://127.0.0.1:8787/a2/mcp?cap=runtime-secret-capability",
+    exactRuntimeTools,
   );
   const operation = adapter.promptWithModel(
     "opaque-session",
@@ -446,6 +448,7 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
       attachments: [],
       agentName: "build",
       scopedMcpScopeId: scopeId,
+      scopedMcpTools: exactRuntimeTools,
     },
   );
   await waitUntil(() => prompted, "prompt dispatch");
@@ -464,7 +467,7 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
     /api-secret-value|runtime-secret-capability|opaque-session|new-user|new-assistant|new-tool|q1|\/Users\/|\/tmp\/|\/var\/|file:\/\/|(?:^|\s)(?:\.{1,2}\/|relative\/|workspace\/)/u,
   );
   assert.deepEqual(active.tools.map((tool) => [tool.tool, tool.status]), [
-    ["Riff edit", "running"],
+    ["Riff apply model changes", "running"],
     ["Question", "running"],
   ]);
   assert.equal(active.tools[0].title, null);
@@ -478,7 +481,7 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
     id: permission.id,
     kind: "permission",
     title: "Permission required",
-    permission: "Allow Riff edit once for the current turn?",
+    permission: "Allow Riff apply model changes once for the current turn?",
   });
   mutatePermissionDuringResponse = true;
   await assert.rejects(
@@ -561,23 +564,159 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
     },
   });
   const scopeId = "turn_scoped_binding";
-  await adapter.bindScopedMcp(scopeId, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
+  const exactTools = [
+    "riff_list_model_workspace",
+    "riff_read_owner_summary",
+  ] as const;
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    exactTools,
+  );
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
-    text: "change", system: "bounded", attachments: [], scopedMcpScopeId: scopeId,
+    text: "change",
+    system: "bounded",
+    attachments: [],
+    scopedMcpScopeId: scopeId,
+    scopedMcpTools: exactTools,
   });
-  await adapter.unbindScopedMcp(scopeId);
 
   const registration = calls.find((call) => call.path === "/mcp")!;
   assert.match(registration.body.name, /^riffa2[0-9a-f]{24}$/u);
   assert.equal(registration.body.config.url, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
   const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
   assert.equal(prompt.tools["*"], false);
-  assert.equal(prompt.tools[`${registration.body.name}_*`], true);
+  assert.equal(prompt.tools[`${registration.body.name}_*`], undefined);
+  assert.equal(prompt.tools[`${registration.body.name}_riff_list_model_workspace`], true);
+  assert.equal(prompt.tools[`${registration.body.name}_riff_read_owner_summary`], true);
+  const mcpPostsBeforeDrift = calls.filter((call) => call.path === "/mcp").length;
+  await assert.rejects(
+    () => adapter.bindScopedMcp(
+      scopeId,
+      "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+      ["riff_read_owner_summary"],
+    ),
+    (error: any) => error.code === "opencode_mcp_binding_changed",
+  );
+  assert.equal(calls.filter((call) => call.path === "/mcp").length, mcpPostsBeforeDrift);
+  const promptsBeforeDrift = calls.filter((call) => call.path.endsWith("/prompt_async")).length;
+  for (const invalidTools of [
+    ["riff_read_owner_summary"],
+    ["riff_read_owner_summary", "riff_read_owner_summary"],
+    ["riff_read_owner_summary", "riff_list_model_workspace"],
+    ["riff_read_owner_summary", "third_party_search"],
+  ]) {
+    await assert.rejects(
+      () => adapter.promptWithModel(
+        "opaque-session",
+        { providerId: "provider-z", modelId: "model-2" },
+        {
+          text: "must not dispatch",
+          system: "bounded",
+          attachments: [],
+          scopedMcpScopeId: scopeId,
+          scopedMcpTools: invalidTools as any,
+        },
+      ),
+      (error: any) => error.code === "opencode_mcp_tools_invalid",
+    );
+  }
+  assert.equal(
+    calls.filter((call) => call.path.endsWith("/prompt_async")).length,
+    promptsBeforeDrift,
+  );
+  await adapter.unbindScopedMcp(scopeId);
   assert.ok(calls.some((call) => call.path === `/mcp/${registration.body.name}/disconnect`));
   await assert.rejects(() => adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
     text: "stale", system: "bounded", attachments: [], scopedMcpScopeId: scopeId,
   }), (error: any) => error.code === "opencode_mcp_unbound");
   await assert.rejects(() => adapter.bindScopedMcp("turn_external", "http://example.com/a2/mcp?cap=x"), /capability-scoped local/u);
+});
+
+test("a scoped turn rejects a completed tool outside its exact grant", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let scopedName = "";
+  let messageReads = 0;
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/mcp" && init?.method === "POST") {
+        scopedName = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (path.includes("/mcp/")) return Response.json({});
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        messageReads += 1;
+        if (!prompted) return Response.json([]);
+        const user = {
+          info: { id: "server-user", sessionID: "opaque-session", role: "user" },
+          parts: [{ type: "text", text: "inspect" }],
+        };
+        if (messageReads === 2) return Response.json([user]);
+        return Response.json([user, {
+          info: {
+            id: "assistant",
+            sessionID: "opaque-session",
+            role: "assistant",
+            parentID: "server-user",
+            time: { completed: 1 },
+          },
+          parts: [{
+            type: "tool",
+            callID: "forged-call",
+            tool: `${scopedName}_riff_apply_model_changes`,
+            state: { status: "completed" },
+          }],
+        },
+        ]);
+      }
+      if (path === "/permission") return Response.json(prompted ? [{
+        id: "forged-permission",
+        sessionID: "opaque-session",
+        permission: "edit",
+        patterns: [],
+        always: [],
+        tool: { messageID: "assistant", callID: "forged-call" },
+      }] : []);
+      if (path === "/question") return Response.json([]);
+      return Response.json({});
+    },
+  }, async () => Response.json(prompted
+    ? { "opaque-session": { type: terminal ? "idle" : "busy" } }
+    : {}));
+  const scopeId = "turn_exact_tool_replay";
+  const exactTools = ["riff_read_owner_summary"] as const;
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    exactTools,
+  );
+  const operation = adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      {
+        text: "inspect",
+        system: "bounded",
+        attachments: [],
+        scopedMcpScopeId: scopeId,
+        scopedMcpTools: exactTools,
+      },
+    );
+  await waitUntil(() => messageReads >= 2, "forged scoped tool user boundary");
+  const projection = await adapter.runtimeSnapshot("opaque-session", scopeId);
+  assert.deepEqual(projection.tools, []);
+  assert.deepEqual(projection.interactions, []);
+  terminal = true;
+  await assert.rejects(
+    operation,
+    (error: any) => error.code === "opencode_tool_not_allowed",
+  );
 });
 
 test("adapter does not persist bounded reconstruction context as a synthetic user message", async () => {
@@ -1669,6 +1808,7 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
   await adapter.bindScopedMcp(
     "conversation-model",
     "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    ["riff_read_owner_summary"],
     modelWorkspace,
   );
   await adapter.unbindScopedMcp("conversation-model", modelWorkspace);

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { ApiError } from "./errors.ts";
+import { isAgentToolName, type AgentToolName } from "./agent-tools.ts";
 import type { AgentStatus } from "./types.ts";
 
 export type OpenCodeReadiness = {
@@ -19,6 +20,8 @@ export type OpenCodePrompt = {
   agentName?: string;
   /** Backend-only binding for one short-lived, capability-scoped Riff MCP server. */
   scopedMcpScopeId?: string;
+  /** Exact, sorted tools from the matching Riff capability grant. */
+  scopedMcpTools?: readonly AgentToolName[];
 };
 
 export type OpenCodeProviderModel = {
@@ -148,7 +151,12 @@ export interface OpenCodeConversationPort {
     workspace: OpenCodeWorkspaceBinding,
   ): Promise<void>;
   releaseRuntimeBoundary?(sessionId: string, workspace: OpenCodeWorkspaceBinding): void;
-  bindScopedMcp?(scopeId: string, mcpUrl: string, workspace: OpenCodeWorkspaceBinding): Promise<void>;
+  bindScopedMcp?(
+    scopeId: string,
+    mcpUrl: string,
+    allowedTools: readonly AgentToolName[],
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<void>;
   unbindScopedMcp?(scopeId: string, workspace: OpenCodeWorkspaceBinding): Promise<void>;
 }
 
@@ -177,7 +185,12 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   readonly #fetch: typeof fetch;
   private readonly config: OpenCodeConfig;
   readonly #mcpProjects = new Map<string, string>();
-  readonly #scopedMcp = new Map<string, { name: string; url: string; directory: string }>();
+  readonly #scopedMcp = new Map<string, {
+    name: string;
+    url: string;
+    directory: string;
+    allowedTools: readonly AgentToolName[];
+  }>();
   readonly #runtimeBoundaries = new Map<string, {
     priorMessageIds: Set<string>;
     userMessageId: string | null;
@@ -391,6 +404,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       // OpenCode treats `directory` as routing context rather than an ownership
       // boundary, so revalidate immediately before the prompt side effect.
       await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+      const promptTools = this.#promptTools(
+        prompt.scopedMcpScopeId,
+        prompt.scopedMcpTools,
+        directory,
+      );
       await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
         method: "POST",
         signal: deadlineSignal,
@@ -399,7 +417,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
           ...(prompt.agentName ? { agent: validatedAgentName(prompt.agentName) } : {}),
           system: prompt.system,
           parts,
-          tools: this.#promptTools(prompt.scopedMcpScopeId, directory),
+          tools: promptTools,
         }),
       }, directory);
       lifecycle.arm();
@@ -409,6 +427,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         deadlineSignal,
         lifecycle,
         directory,
+        prompt.scopedMcpScopeId
+          ? new Set(Object.entries(promptTools)
+              .filter(([, enabled]) => enabled)
+              .map(([name]) => name))
+          : undefined,
         workspace,
       );
     } catch (error) {
@@ -515,6 +538,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         assistantMessageIds,
         assistants,
         scopedBinding?.name,
+        scopedBinding?.allowedTools ?? [],
         sensitiveValues,
       ),
       ...runtimeQuestions(
@@ -528,7 +552,12 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     return {
       status,
       assistant: runtimeAssistant(assistants, sensitiveValues),
-      tools: runtimeTools(assistants, sessionId, scopedBinding?.name),
+      tools: runtimeTools(
+        assistants,
+        sessionId,
+        scopedBinding?.name,
+        scopedBinding?.allowedTools ?? [],
+      ),
       interactions,
       failureCode: assistantFailureCode(assistants),
       scopedMcp: { label: "Riff tools", status: scopedMcp },
@@ -623,6 +652,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   async bindScopedMcp(
     scopeId: string,
     mcpUrl: string,
+    allowedTools: readonly AgentToolName[],
     workspace?: OpenCodeWorkspaceBinding,
   ): Promise<void> {
     if (this.config.skipLive) return;
@@ -631,14 +661,21 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     assertOpaqueId(scopeId, "Riff MCP scope ID");
     const directory = this.#workspaceDirectory(workspace);
     const safeMcpUrl = loopbackMcpUrl(mcpUrl).toString();
+    const exactAllowedTools = validatedScopedMcpTools(allowedTools);
     const name = scopedMcpName(scopeId);
     const existing = this.#scopedMcp.get(scopeId);
-    if (existing?.url === safeMcpUrl && existing.directory === directory) return;
-    if (existing && existing.directory !== directory) {
+    if (existing?.url === safeMcpUrl
+      && existing.directory === directory
+      && sameAgentTools(existing.allowedTools, exactAllowedTools)) return;
+    if (existing) {
       throw new ApiError(
         409,
-        "opencode_mcp_workspace_mismatch",
-        "The scoped Riff MCP binding belongs to a different Product workspace.",
+        existing.directory !== directory
+          ? "opencode_mcp_workspace_mismatch"
+          : "opencode_mcp_binding_changed",
+        existing.directory !== directory
+          ? "The scoped Riff MCP binding belongs to a different Product workspace."
+          : "The active scoped Riff MCP binding cannot change its capability or tool grant.",
       );
     }
     await this.#json("/mcp", {
@@ -651,7 +688,12 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       directory,
     );
     if (!connected.response.ok) throw apiErrorFromResponse(connected.response, connected.payload);
-    this.#scopedMcp.set(scopeId, { name, url: safeMcpUrl, directory });
+    this.#scopedMcp.set(scopeId, {
+      name,
+      url: safeMcpUrl,
+      directory,
+      allowedTools: exactAllowedTools,
+    });
   }
 
   async unbindScopedMcp(
@@ -684,14 +726,22 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
 
   #promptTools(
     scopeId: string | undefined,
+    allowedTools: readonly AgentToolName[] | undefined,
     directory: string,
   ): Record<string, boolean> {
     // OpenCode may have unrelated local or plugin MCP servers configured.
-    // Deny every tool first, then enable only this turn's opaque Riff scope.
+    // Deny every tool first, then enable only the exact tools in this turn's
+    // opaque Riff capability. Riff loads allowlisted skills into bounded
+    // context; OpenCode's ambient filesystem-backed `skill` tool stays denied.
     // The explicit built-in map is retained for compatibility with versions
     // that merge exact names after wildcard rules.
     const tools = { "*": false, ...disabledBuiltInTools(), question: true };
-    if (!scopeId) return tools;
+    if (!scopeId) {
+      if (allowedTools !== undefined) {
+        throw new ApiError(503, "opencode_mcp_unbound", "Riff MCP tools require a bound turn scope.");
+      }
+      return tools;
+    }
     const binding = this.#scopedMcp.get(scopeId);
     if (!binding) throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");
     if (binding.directory !== directory) {
@@ -701,7 +751,14 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         "The scoped Riff MCP binding belongs to a different Product workspace.",
       );
     }
-    return { ...tools, [`${binding.name}_*`]: true };
+    const exact = validatedScopedMcpTools(allowedTools);
+    if (!sameAgentTools(binding.allowedTools, exact)) {
+      throw new ApiError(503, "opencode_mcp_tools_invalid", "The scoped Riff MCP tool grant is invalid.");
+    }
+    return Object.fromEntries([
+      ...Object.entries(tools),
+      ...exact.map((tool) => [`${binding.name}_${tool}`, true] as const),
+    ]);
   }
 
   async subscribeEvents(
@@ -858,6 +915,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     deadlineSignal: AbortSignal,
     lifecycle: OpenCodeTurnEventSupervisor,
     directory: string,
+    allowedToolNames: ReadonlySet<string> | undefined,
     workspace?: OpenCodeWorkspaceBinding,
   ): Promise<OpenCodeAssistantResponse> {
     let userMessageId: string | null = null;
@@ -919,6 +977,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       const currentAttempt = replayHasFailureBoundary
         ? assistants.slice(boundaryIndex + 1)
         : [];
+      assertObservedToolsAllowed(currentAttempt, allowedToolNames);
       toolEvidence.observe(currentAttempt);
       // Text is only a streaming observation while the target session remains
       // busy/retrying. Idle (including an absent status-map entry) is terminal
@@ -1384,6 +1443,28 @@ type CompletedToolEvidence = Readonly<{
   toolName: string;
 }>;
 
+const assertObservedToolsAllowed = (
+  payloads: Array<Record<string, any>>,
+  allowedToolNames: ReadonlySet<string> | undefined,
+): void => {
+  if (!allowedToolNames) return;
+  for (const payload of payloads) {
+    for (const part of assistantParts(payload)) {
+      if (!part || part.type !== "tool") continue;
+      const toolName = typeof part.tool === "string"
+        ? part.tool
+        : typeof part.name === "string" ? part.name : "";
+      if (!allowedToolNames.has(toolName)) {
+        throw new ApiError(
+          502,
+          "opencode_tool_not_allowed",
+          "OpenCode returned a tool call outside the exact turn grant.",
+        );
+      }
+    }
+  }
+};
+
 class AssistantToolEvidenceTracker {
   readonly #tools = new Map<string, { toolName: string; state: "pending" | "complete" | "failed" }>();
 
@@ -1558,6 +1639,7 @@ const runtimePermissions = (
   assistantMessageIds: Set<string>,
   assistants: any[],
   scopedMcpName: string | undefined,
+  allowedTools: readonly AgentToolName[],
   sensitiveValues: readonly string[],
 ): OpenCodeRuntimeInteraction[] => {
   if (!scopedMcpName) return [];
@@ -1569,7 +1651,8 @@ const runtimePermissions = (
     const callId = String(item?.tool?.callID ?? "");
     const tool = allowedCalls.get(`${ownerMessageId}\u0000${callId}`);
     if (item?.sessionID !== sessionId || !upstreamId || !assistantMessageIds.has(ownerMessageId)
-      || !tool?.startsWith(`${scopedMcpName}_`) || !validPermissionRequest(item)) continue;
+      || !isExactScopedTool(tool, scopedMcpName, allowedTools)
+      || !validPermissionRequest(item)) continue;
     const label = publicToolLabel(tool, scopedMcpName) ?? "Riff tool";
     result.push({
       id: runtimeRequestId("permission", sessionId, upstreamId, item),
@@ -1644,6 +1727,7 @@ const runtimeTools = (
   assistants: any[],
   sessionId: string,
   scopedMcpName: string | undefined,
+  allowedTools: readonly AgentToolName[],
 ): OpenCodeRuntimeTool[] => {
   const latest = new Map<string, OpenCodeRuntimeTool>();
   for (const message of assistants) {
@@ -1652,6 +1736,9 @@ const runtimeTools = (
     for (const part of message.parts) {
       if (!part || part.type !== "tool") continue;
       const upstreamId = boundedOpaqueRuntimeValue(part.callID ?? part.id, 500);
+      const rawTool = boundedOpaqueRuntimeValue(part.tool, 500);
+      if (rawTool !== "question"
+        && !isExactScopedTool(rawTool, scopedMcpName, allowedTools)) continue;
       const tool = publicToolLabel(part.tool, scopedMcpName);
       const status = part.state?.status;
       if (!upstreamId || !tool || !["pending", "running", "completed", "error"].includes(status)) continue;
@@ -1666,6 +1753,13 @@ const runtimeTools = (
   }
   return [...latest.values()];
 };
+
+const isExactScopedTool = (
+  value: string | null | undefined,
+  scopedMcpName: string | undefined,
+  allowedTools: readonly AgentToolName[],
+): boolean => Boolean(scopedMcpName && value
+  && allowedTools.some((tool) => value === `${scopedMcpName}_${tool}`));
 
 const currentRuntimeAttempt = (
   messages: any[],
@@ -1807,7 +1901,10 @@ const boundedInteractionAnswer = (value: unknown): string | null => {
 const publicToolLabel = (value: unknown, scopedMcpName: string | undefined): string | null => {
   if (typeof value !== "string") return null;
   if (scopedMcpName && value.startsWith(`${scopedMcpName}_`)) {
-    const suffix = value.slice(scopedMcpName.length + 1).replace(/[_-]+/gu, " ").trim();
+    const suffix = value.slice(scopedMcpName.length + 1)
+      .replace(/^riff_/u, "")
+      .replace(/[_-]+/gu, " ")
+      .trim();
     return suffix ? `Riff ${suffix}`.slice(0, 300) : "Riff tool";
   }
   if (value === "question") return "Question";
@@ -2012,6 +2109,23 @@ const disabledBuiltInTools = () => ({
   skill: false,
   apply_patch: false,
 });
+
+const validatedScopedMcpTools = (raw: unknown): readonly AgentToolName[] => {
+  if (!Array.isArray(raw) || !raw.length
+    || raw.some((tool) => typeof tool !== "string" || !isAgentToolName(tool))
+    || new Set(raw).size !== raw.length
+    || raw.some((tool, index) =>
+      index > 0 && String(raw[index - 1]).localeCompare(String(tool), "en") >= 0)) {
+    throw new ApiError(503, "opencode_mcp_tools_invalid", "The scoped Riff MCP tool grant is invalid.");
+  }
+  return Object.freeze([...raw] as AgentToolName[]);
+};
+
+const sameAgentTools = (
+  left: readonly AgentToolName[],
+  right: readonly AgentToolName[],
+): boolean => left.length === right.length
+  && left.every((tool, index) => tool === right[index]);
 
 const consumeSse = async (
   stream: ReadableStream<Uint8Array>,

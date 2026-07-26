@@ -132,16 +132,16 @@ test("the published BackendApp turn chain performs one real interaction without 
         {
           id: "file_c4_chain",
           kind: "model_code",
-          relativePath: "code/model.py",
+          relativePath: "model.py",
           mediaType: "text/x-python",
           bytes: Buffer.from("print('visual')\n"),
         },
         {
           id: "environment_c4_chain",
           kind: "model_environment",
-          relativePath: "environment/requirements.txt",
+          relativePath: "requirements.txt",
           mediaType: "text/plain",
-          bytes: Buffer.from(""),
+          bytes: Buffer.from("# no external dependencies\n"),
         },
       ],
     });
@@ -353,13 +353,18 @@ test("the published BackendApp turn chain performs one real interaction without 
       "SELECT * FROM visual_agent_audit_facts ORDER BY created_at, id",
     ).all();
     database.close();
-    expect(openCode.toolResult?.result?.isError, JSON.stringify({
+    const toolEvidence = JSON.stringify({
+      publicTurn,
       toolResult: openCode.toolResult,
       toolList: openCode.toolList,
       denials: openCode.denials,
+      bindCalls: openCode.bindCalls,
+      promptCalls: openCode.promptCalls,
       childRequests: child.requests,
       auditFacts,
-    })).toBeUndefined();
+    });
+    expect(openCode.toolResult, toolEvidence).toBeDefined();
+    expect(openCode.toolResult?.result?.isError, toolEvidence).toBeUndefined();
     expect(JSON.parse(openCode.toolResult!.result.content[0].text)).toEqual({
       schemaVersion: 1,
       kind: "type",
@@ -634,6 +639,8 @@ class FullChainOpenCode {
   toolList: string[] = [];
   toolResult?: any;
   denials: any[] = [];
+  bindCalls = 0;
+  promptCalls = 0;
 
   async initialize() {
     return { status: "ready" as const, modelId: "provider-c4/model-c4", version: "c4" };
@@ -652,13 +659,17 @@ class FullChainOpenCode {
     return sessionId;
   }
   async injectContext() {}
-  async bindScopedMcp(scopeId: string, url: string) { this.scoped.set(scopeId, url); }
+  async bindScopedMcp(scopeId: string, url: string) {
+    this.bindCalls += 1;
+    this.scoped.set(scopeId, url);
+  }
   async unbindScopedMcp(scopeId: string) { this.scoped.delete(scopeId); }
   async promptWithModel(
     _sessionId: string,
     _binding: unknown,
     prompt: { scopedMcpScopeId?: string },
   ) {
+    this.promptCalls += 1;
     const url = prompt.scopedMcpScopeId
       ? this.scoped.get(prompt.scopedMcpScopeId)
       : undefined;

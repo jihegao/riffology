@@ -1,5 +1,6 @@
 import { ApiError } from "./errors.ts";
 import { buildBoundedAgentContext, type AgentContextInput, type AgentContextLimits, type BoundedAgentContext } from "./agent-context.ts";
+import type { AgentToolName } from "./agent-tools.ts";
 import type {
   OpenCodeAssistantResponse,
   OpenCodeConversationPort,
@@ -102,6 +103,7 @@ export class AgentConversationSessionManager {
     signal?: AbortSignal,
     expectedSessionGeneration?: number,
     agentName?: string,
+    scopedMcpTools?: readonly AgentToolName[],
   ): Promise<ConversationPromptResult> {
     const prepared = await this.ensureSession(conversationId, contextInput);
     if (prepared.mode === "read_only") return prepared;
@@ -122,6 +124,7 @@ export class AgentConversationSessionManager {
           attachments,
           ...(agentName ? { agentName } : {}),
           ...(scopedMcpScopeId ? { scopedMcpScopeId } : {}),
+          ...(scopedMcpTools ? { scopedMcpTools } : {}),
         },
         signal,
         prepared.workspace,

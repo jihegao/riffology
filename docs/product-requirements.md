@@ -269,6 +269,8 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-11 | Conversation 必须以可恢复的 revisioned public runtime DTO 投影当前 Agent 状态、脱敏 activity 和等待中的 permission/question；SSE 只是便利通道，普通 GET 是断线后的恢复权威。浏览器不得接收上游 session/message/request ID、tool input/output、raw metadata、credential、path 或 capability。 |
 | FR-CONV-12 | Stop、Retry、Resume 必须绑定精确 turn：Stop 仅中止当前 requestKey 并等待持久终态；Retry 使用新 requestKey 且只恢复 Riff 持久化的原始 intent；Resume 只回答该 turn 当前等待的 interaction，不得发起第二个 prompt。 |
 | FR-CONV-13 | 用户可以按 turn 选择已发现的 primary Agent；Agent 选择必须进入 turn intent 与持久消息，active/waiting turn 期间锁定。Provider/model 仍按 Conversation 在首个接受的 message 后锁定。 |
+| FR-CONV-14 | Skill 只能从服务端规范根目录及显式 Riff allowlist 发现，必须固定 catalog version 与 instruction digest，并按需加载、记录实际选择；Skill 文本不能扩大 tool、owner、object、operation、visual 或 credential 权限。OpenCode 的 ambient filesystem-backed `skill` tool 在 Product turn 中必须保持禁用。 |
+| FR-CONV-15 | 每个需要工具的 turn 只能注册一个 opaque loopback Riff MCP，并从同一 owner/session-generation capability 的 sorted exact tool list 逐项启用；`*`、native file/command/Skill built-ins、ambient/plugin MCP 与第三方工具必须 deny-all。唯一 native 例外 `question` 只能经过 FR-CONV-12 的精确当前 turn Resume 边界回答，且不授予 Riff tool/object 权限。bind/prompt MCP 列表不一致、缺失、重复、乱序、伪造、跨 owner 或过期均须在 prompt 或执行前稳定拒绝，capability URL 与 credential 不得进入 prompt、transcript 或 browser DTO。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |
@@ -456,6 +458,7 @@ MVP 在本地 macOS 运行：
 | NFR-FAIL-01 | 缺失、冲突、过期或不支持的权威证据必须 fail closed，并返回明确可见错误。 |
 | NFR-SEC-01 | Provider credential、ambient credential、OpenCode session ID、process identity、任意 path 和 child port 不得投影给 browser。 |
 | NFR-SEC-02 | Model/Run 进程必须获得最小 path 权限、清理环境、默认无网络、取消能力和有限 resource/output/time。 |
+| NFR-SEC-03 | Playwright 必须在全新隔离 browser context 中仅连接当前健康 Project visual peer；不得接受 caller URL、raw selector、script、download、跨 peer redirect 或共享 browser state，不得发送 credential/cookie/authorization，也不得把页面 artifact 作为工具结果投影。 |
 | NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.4`）；Product backend 必须从 durable Conversation owner 派生精确 Model workspace 或 Project `model-snapshot/`，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
 | NFR-SCOPE-01 | Conversations、documents、attachments、tools、Runs、outputs、visual capabilities 和 Playwright 必须 owner-scoped，并拒绝跨对象使用。 |
 | NFR-IDEM-01 | 重试 create/start/cancel/finalize command 不得产生重复持久副作用。 |

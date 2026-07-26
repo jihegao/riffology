@@ -308,7 +308,7 @@ interpreter. Skill instructions are loaded only from `RIFF_SKILL_ROOT` and the
 `RIFF_ALLOWED_SKILLS` allowlist. The live acceptance gate is not satisfied by
 deterministic mode.
 
-### OpenCode server, native turn lifecycle, and controls (Issue #56, PR 1–3)
+### OpenCode server, native turn, controls, and scoped tools (Issue #56, PR 1–4)
 
 `OPENCODE_WORKDIR` is the absolute, canonical default profile directory for the
 separately managed OpenCode server, not a browser path and not a permission
@@ -381,9 +381,34 @@ Retry uses a fresh request key and reconstructs only Riff-owned intent; Resume
 answers one pending interaction without submitting another prompt. Provider
 locking remains conversation-level, while Agent choice is persisted per turn.
 
-This is the Issue #56 PR 1–3 contract. Expanded Skill/MCP/Playwright integration
-and durable target-completion verification remain the separately ordered PR 4–5
-work; this document does not claim them complete.
+PR 4 keeps OpenCode's ambient filesystem-backed `skill` tool disabled. Riff
+instead discovers only `RIFF_ALLOWED_SKILLS` beneath the canonical
+`RIFF_SKILL_ROOT`, pins catalog version and instruction digests, loads full
+instructions on demand into bounded context, and records the selected skill.
+Skill text can guide the Agent, but cannot add tools or widen owner, object, or
+operation authority.
+
+Each turn's Riff-owned MCP grant is the sole tool registry for that turn. The
+backend registers one opaque loopback MCP server, denies `*`, native built-ins,
+ambient/plugin MCP tools, and the native `skill` tool, then enables only the
+sorted exact tool names present in the matching capability. The sole native
+exception is `question`, whose answers remain bound to PR 3's exact current-turn
+Resume contract and do not grant Riff tool or object authority. The same exact
+MCP list must match at bind and prompt time. Missing, stale, reordered,
+duplicated, or caller-forged scope/tool material fails before prompt submission.
+Capability URLs and third-party credentials remain backend-only and are never
+included in the OpenCode prompt or public runtime/transcript.
+
+The Playwright worker remains limited to the current healthy Project visual
+attempt. Observation is read-only; interaction requires one immutable,
+structured human confirmation and consumes its matching grant. Caller URLs,
+selectors, scripts, downloads, redirects outside the inspected loopback peer,
+shared browser state, cookies, authorization headers, and page artifacts are
+not accepted or projected.
+
+This is the Issue #56 PR 1–4 contract. Durable target-completion verification
+and the real browser exit remain the separately ordered PR 5 work; this
+document does not claim them complete.
 
 ## Verification
 

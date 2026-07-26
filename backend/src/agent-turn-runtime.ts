@@ -27,6 +27,8 @@ export type PreparedAgentTurnRuntime = Readonly<{
   externalSessionGeneration: number;
   intentAuthority: "explicit" | "proposal_only";
   requiresMcp: boolean;
+  /** Exact, sorted Riff tool names projected into this turn's OpenCode prompt. */
+  allowedTools: readonly AgentToolName[];
   context: Pick<AgentContextInput, "attachments" | "documents" | "selectedSkills">;
   promptAttachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }>;
   release(): void;
@@ -146,6 +148,9 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       attachmentIds: new Set(input.attachmentIds),
       ...(allowedTools.has("riff_interact_current_visual") ? { confirmedVisualInteraction: input.confirmedVisualInteraction } : {}),
     });
+    const exactAllowedTools = Object.freeze(
+      [...allowedTools].sort((left, right) => left.localeCompare(right, "en")),
+    );
     return Object.freeze({
       capability,
       turnId: input.turnId,
@@ -154,6 +159,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       requiresMcp: intentAuthority === "explicit" || Boolean(input.confirmedVisualInteraction)
         || input.attachmentIds.length > 0 || Boolean(loadedSkill)
         || /\b(?:model|workspace|file|document|attachment|schema|dependency|visual|observe|screenshot)\b|(?:模型|工作区|文件|文档|附件|模式|依赖|可视化|观察|截图)/iu.test(intentText),
+      allowedTools: exactAllowedTools,
       context: {
         attachments: attachments.map(({ metadata, preview }) => ({ id: metadata.id, conversationId: input.conversationId, mediaType: metadata.mediaType, preview, relevant: true })),
         documents: this.store.listTemporaryDocuments(input.conversationId).filter((document) => document.lifecycleState === "active")
