@@ -59,6 +59,7 @@ implementation claim.
 | How do Agent/OpenCode sessions work? | [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md) and [`opencode-bridge.md`](opencode-bridge.md) | Agent/API tests |
 | What runtime/security boundary is intended? | PRD plus merged implementation, implemented Stage 3 design, and the A4-0 target design | [`architecture.md`](architecture.md) and [`adr/`](adr/README.md) |
 | What evidence passed? | [`test-plan.md`](test-plan.md) for its named revision | Test output and PR checks |
+| What visual prototypes supplement the UI design? | PRD and active stage documents | [`prototypes/`](prototypes/README.md), as non-normative visual material |
 | How should Gate/legacy documents be read? | Their historical labels | PRD for every current product decision |
 
 ## Current delivery snapshot
@@ -170,6 +171,9 @@ A4-6 revision-scoped evidence is retained through the stable
   legacy test history.
 - [`adr/README.md`](adr/README.md): Stage 3 ADR review checklist and decision
   maturity.
+- [`prototypes/`](prototypes/README.md): non-normative interface prototypes
+  supplementing information architecture, user stories, and interaction
+  review.
 
 ## Historical product and Gate records
 

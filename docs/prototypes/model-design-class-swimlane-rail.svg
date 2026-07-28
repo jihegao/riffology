@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1180" viewBox="0 0 1800 1180">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#17352f" flood-opacity=".11"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#697a75"/>
+    </marker>
+    <marker id="diamond" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 6L6 1L11 6L6 11Z" fill="#fff" stroke="#697a75" stroke-width="1.5"/>
+    </marker>
+    <style>
+      .sans{font-family:Inter,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+      .mono{font-family:"SFMono-Regular",Consolas,Menlo,monospace}
+      .serif{font-family:Georgia,"Songti SC",serif}
+      .ink{fill:#182b27}.muted{fill:#65736f}.soft{fill:#899590}.white{fill:#fff}
+      .t10{font-size:10px}.t11{font-size:11px}.t12{font-size:12px}.t13{font-size:13px}.t14{font-size:14px}.t15{font-size:15px}.t16{font-size:16px}
+      .h1{font-size:31px;font-weight:750}.h2{font-size:23px;font-weight:750}.h3{font-size:17px;font-weight:750}
+      .label{font-size:11px;font-weight:750;letter-spacing:.11em}
+      .line{stroke:#d5dbd6;stroke-width:1}.line2{stroke:#bfc9c4;stroke-width:1.2}
+      .card{fill:#fff;stroke:#d1d8d3;stroke-width:1}.softcard{fill:#f5f3ed;stroke:#d9ddd8;stroke-width:1}
+      .green{fill:#173f37}.green2{fill:#2d7a66}.pale{fill:#e5f0eb}.amber{fill:#f6ecd6}.redpale{fill:#f7e7e4}
+      .relation{stroke:#697a75;stroke-width:1.5;fill:none}
+      .flow{stroke:#697a75;stroke-width:1.5;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#71817c;stroke-width:1.3;stroke-dasharray:6 5;fill:none}
+      .add{fill:#dff0e7}.del{fill:#f6dfdc}.ctx{fill:#f5f4f0}
+    </style>
+  </defs>
+  <rect width="1800" height="1180" fill="#eeeae2"/>
+  <text x="52" y="54" class="sans ink h1">对话建模 · LLM 动态结构视图 + OpenCode 风格附加栏</text>
+  <text x="52" y="82" class="sans muted t16">LLM 根据当前 Model 生成适合的结构视图；文件与变更审阅按需进入右侧可折叠栏。</text>
+
+  <rect x="52" y="108" width="1500" height="1010" rx="24" fill="#fbfaf6" stroke="#cbd3ce" filter="url(#shadow)"/>
+  <!-- header -->
+  <rect x="52" y="108" width="1500" height="58" rx="24" fill="#fbfaf6"/>
+  <line x1="52" y1="166" x2="1552" y2="166" class="line"/>
+  <rect x="74" y="123" width="29" height="29" rx="8" class="green"/>
+  <text x="88.5" y="143" text-anchor="middle" class="sans white t13" font-weight="800">R</text>
+  <text x="114" y="144" class="sans ink t15" font-weight="750">Riffology</text>
+  <text x="246" y="144" class="sans soft t13">MODEL WORKSPACE</text>
+  <rect x="1350" y="122" width="78" height="31" rx="8" fill="#fff" stroke="#c4cdc8"/>
+  <text x="1389" y="142" text-anchor="middle" class="sans ink t11">技术检查</text>
+  <rect x="1440" y="122" width="88" height="31" rx="8" class="green"/>
+  <text x="1484" y="142" text-anchor="middle" class="sans white t11" font-weight="700">创建 Project</text>
+
+  <!-- left conversation -->
+  <rect x="52" y="166" width="365" height="952" fill="#f2f0e9"/>
+  <line x1="417" y1="166" x2="417" y2="1118" class="line"/>
+  <rect x="76" y="184" width="316" height="54" rx="11" class="pale"/>
+  <circle cx="97" cy="211" r="7" class="green2"/>
+  <text x="113" y="208" class="sans ink t11" font-weight="750">Agent 空闲</text>
+  <text x="113" y="226" class="sans muted t10">上下文已恢复 · build agent</text>
+  <rect x="136" y="262" width="256" height="70" rx="13" fill="#dceae5"/>
+  <text x="152" y="285" class="sans muted t10" font-weight="700">你</text>
+  <text x="152" y="306" class="sans ink t11">增加一个优先队列；VIP 顾客</text>
+  <text x="152" y="323" class="sans ink t11">优先进入空闲服务台。</text>
+  <rect x="76" y="352" width="286" height="104" rx="13" class="card"/>
+  <text x="92" y="376" class="sans muted t10" font-weight="700">RIFF AGENT</text>
+  <text x="92" y="400" class="sans ink t11">已形成结构化变更建议。</text>
+  <text x="92" y="421" class="sans muted t10">类图：新增 PriorityQueue</text>
+  <text x="92" y="440" class="sans muted t10">泳道：新增 VIP 分流步骤</text>
+  <rect x="76" y="476" width="316" height="76" rx="12" class="amber" stroke="#d4aa60"/>
+  <text x="92" y="502" class="sans ink t11" font-weight="750">等待确认</text>
+  <text x="92" y="523" class="sans muted t10">右侧附加栏有 3 个文件 diff</text>
+  <text x="92" y="539" class="sans green2 t10" font-weight="700">打开变更审阅 ›</text>
+  <rect x="76" y="573" width="316" height="54" rx="11" class="card"/>
+  <circle cx="98" cy="600" r="11" fill="#e7ece9"/>
+  <text x="98" y="604" text-anchor="middle" class="sans ink t10" font-weight="800">3</text>
+  <text x="119" y="597" class="sans ink t11" font-weight="750">建议变更尚未提交</text>
+  <text x="119" y="615" class="sans muted t10">生成视图已显示预览差异</text>
+  <!-- composer -->
+  <line x1="76" y1="928" x2="392" y2="928" class="line"/>
+  <rect x="76" y="950" width="316" height="122" rx="13" fill="#fff" stroke="#aebbb6"/>
+  <text x="93" y="980" class="sans soft t11">继续描述模型，或明确确认变更…</text>
+  <rect x="92" y="1025" width="29" height="29" rx="8" fill="#edf0ed"/><text x="106.5" y="1045" text-anchor="middle" class="sans muted t16">＋</text>
+  <rect x="291" y="1017" width="84" height="40" rx="9" class="green"/><text x="333" y="1042" text-anchor="middle" class="sans white t11" font-weight="700">发送</text>
+  <text x="77" y="1098" class="sans muted t10">Enter 发送 · Shift+Enter 换行</text>
+
+  <!-- central canvas -->
+  <rect x="417" y="166" width="746" height="952" fill="#fff"/>
+  <line x1="1163" y1="166" x2="1163" y2="1118" class="line"/>
+  <rect x="417" y="166" width="746" height="58" fill="#fbfaf7"/>
+  <text x="445" y="201" class="sans ink t13" font-weight="750">模型设计</text>
+  <text x="532" y="201" class="sans muted t13">执行契约</text>
+  <text x="619" y="201" class="sans muted t13">技术检查</text>
+  <line x1="440" y1="222" x2="504" y2="222" stroke="#2d7a66" stroke-width="3"/>
+  <!-- canvas header -->
+  <text x="445" y="260" class="sans muted label">LLM-GENERATED VIEW</text>
+  <text x="445" y="292" class="sans ink h2">模型结构</text>
+  <rect x="830" y="248" width="88" height="36" rx="9" class="green"/>
+  <text x="874" y="271" text-anchor="middle" class="sans white t11" font-weight="700">类图</text>
+  <rect x="927" y="248" width="88" height="36" rx="9" fill="#fff" stroke="#c6cfca"/>
+  <text x="971" y="271" text-anchor="middle" class="sans ink t11">泳道图</text>
+  <rect x="1024" y="248" width="112" height="36" rx="9" fill="#fff" stroke="#c6cfca"/>
+  <text x="1080" y="271" text-anchor="middle" class="sans ink t11">数据流</text>
+  <rect x="445" y="312" width="691" height="48" rx="11" class="softcard"/>
+  <text x="459" y="333" class="sans ink t11" font-weight="750">LLM 根据当前 Model 动态生成结构化视图</text>
+  <text x="459" y="350" class="sans muted t10">类图 / 泳道图 / 数据流图不是固定栏目，可按模型内容新增、改名或省略</text>
+
+  <!-- class diagram canvas -->
+  <rect x="445" y="378" width="691" height="555" rx="14" fill="#fafaf8" stroke="#d5dbd6"/>
+  <text x="463" y="404" class="sans muted t10">CLASS DIAGRAM · 可平移缩放 · 1 个建议节点</text>
+  <!-- QueueModel -->
+  <rect x="674" y="430" width="230" height="112" rx="10" class="card"/>
+  <rect x="674" y="430" width="230" height="33" rx="10" class="green"/>
+  <text x="789" y="451" text-anchor="middle" class="sans white t12" font-weight="750">QueueModel</text>
+  <line x1="674" y1="463" x2="904" y2="463" class="line"/>
+  <text x="687" y="485" class="mono ink t10">+ clock: SimTime</text>
+  <text x="687" y="504" class="mono ink t10">+ customers: Customer[*]</text>
+  <text x="687" y="523" class="mono ink t10">+ step(): void</text>
+  <!-- customer -->
+  <rect x="478" y="600" width="190" height="130" rx="10" class="card"/>
+  <rect x="478" y="600" width="190" height="33" rx="10" fill="#e6ece8"/>
+  <text x="573" y="621" text-anchor="middle" class="sans ink t12" font-weight="750">CustomerAgent</text>
+  <text x="491" y="655" class="mono ink t10">+ kind: regular | vip</text>
+  <text x="491" y="674" class="mono ink t10">+ state: waiting | served</text>
+  <line x1="478" y1="690" x2="668" y2="690" class="line"/>
+  <text x="491" y="712" class="mono ink t10">+ arrive()</text>
+  <!-- queue -->
+  <rect x="694" y="614" width="190" height="116" rx="10" class="card"/>
+  <rect x="694" y="614" width="190" height="33" rx="10" fill="#e6ece8"/>
+  <text x="789" y="635" text-anchor="middle" class="sans ink t12" font-weight="750">QueueResource</text>
+  <text x="707" y="669" class="mono ink t10">+ capacity: 20</text>
+  <text x="707" y="688" class="mono ink t10">+ discipline: FIFO</text>
+  <line x1="694" y1="703" x2="884" y2="703" class="line"/>
+  <text x="707" y="722" class="mono ink t10">+ enqueue(customer)</text>
+  <!-- server -->
+  <rect x="910" y="600" width="190" height="130" rx="10" class="card"/>
+  <rect x="910" y="600" width="190" height="33" rx="10" fill="#e6ece8"/>
+  <text x="1005" y="621" text-anchor="middle" class="sans ink t12" font-weight="750">ServerResource</text>
+  <text x="923" y="655" class="mono ink t10">+ count: 2</text>
+  <text x="923" y="674" class="mono ink t10">+ state: idle | busy</text>
+  <line x1="910" y1="690" x2="1100" y2="690" class="line"/>
+  <text x="923" y="712" class="mono ink t10">+ serve(customer)</text>
+  <!-- suggested priority queue -->
+  <rect x="694" y="788" width="190" height="112" rx="10" class="amber" stroke="#c99438"/>
+  <rect x="694" y="788" width="190" height="33" rx="10" fill="#eabf70"/>
+  <text x="789" y="809" text-anchor="middle" class="sans ink t12" font-weight="750">PriorityQueue</text>
+  <text x="707" y="844" class="mono ink t10">+ vipFirst: true</text>
+  <line x1="694" y1="859" x2="884" y2="859" stroke="#d2aa62"/>
+  <text x="707" y="881" class="mono ink t10">+ dequeueNext()</text>
+  <!-- relations -->
+  <path d="M742 542 L630 600" class="relation" marker-end="url(#diamond)"/>
+  <text x="650" y="570" class="sans muted t10">owns 0..*</text>
+  <path d="M789 542 V614" class="relation" marker-end="url(#diamond)"/>
+  <text x="798" y="580" class="sans muted t10">owns 1</text>
+  <path d="M836 542 L952 600" class="relation" marker-end="url(#diamond)"/>
+  <text x="885" y="570" class="sans muted t10">owns 1..*</text>
+  <path d="M789 788 V730" class="dash"/>
+  <path d="M884 844 H1005 V730" class="flow"/>
+  <text x="912" y="833" class="sans muted t10">selects next</text>
+  <!-- bottom info -->
+  <rect x="445" y="950" width="691" height="110" rx="12" class="pale"/>
+  <text x="462" y="978" class="sans ink t12" font-weight="750">泳道图模式</text>
+  <text x="462" y="999" class="sans muted t10">按 Agent / Queue / Server / Metrics 分泳道，展示事件顺序、状态迁移和关键消息。</text>
+  <line x1="462" y1="1022" x2="1116" y2="1022" stroke="#b8ccc3"/>
+  <text x="462" y="1044" class="sans muted t10">顾客到达 → VIP 分流 → 入队 → 调度服务台 → 完成服务 → 指标更新</text>
+
+  <!-- right collapsible rail -->
+  <rect x="1163" y="166" width="389" height="952" fill="#f8f8f6"/>
+  <rect x="1163" y="166" width="389" height="58" fill="#f3f3f0"/>
+  <text x="1183" y="201" class="sans ink t13" font-weight="750">附加栏</text>
+  <text x="1518" y="201" text-anchor="end" class="sans muted t16">›</text>
+  <line x1="1163" y1="224" x2="1552" y2="224" class="line"/>
+  <!-- rail tabs -->
+  <text x="1190" y="258" class="sans muted t12">文件</text>
+  <text x="1254" y="258" class="sans ink t12" font-weight="750">变更 3</text>
+  <line x1="1246" y1="274" x2="1308" y2="274" stroke="#2d7a66" stroke-width="3"/>
+  <text x="1518" y="258" text-anchor="end" class="sans muted t10">宽度可拖动</text>
+  <!-- file tree -->
+  <rect x="1180" y="292" width="355" height="170" rx="11" class="card"/>
+  <text x="1195" y="317" class="sans muted label">CHANGED FILES</text>
+  <rect x="1192" y="328" width="331" height="38" rx="7" class="pale"/>
+  <text x="1205" y="352" class="mono ink t10">M  model-spec.json</text>
+  <text x="1508" y="352" text-anchor="end" class="mono green2 t10">+18 −2</text>
+  <text x="1205" y="390" class="mono ink t10">M  code/model.py</text>
+  <text x="1508" y="390" text-anchor="end" class="mono green2 t10">+24 −4</text>
+  <text x="1205" y="426" class="mono ink t10">M  docs/model.md</text>
+  <text x="1508" y="426" text-anchor="end" class="mono green2 t10">+9 −1</text>
+  <text x="1205" y="450" class="sans muted t10">点击文件切换预览 · 支持折叠和已读标记</text>
+  <!-- preview header -->
+  <rect x="1180" y="478" width="355" height="50" rx="10" class="softcard"/>
+  <text x="1194" y="500" class="mono ink t10" font-weight="750">model-spec.json</text>
+  <text x="1194" y="518" class="sans muted t10">Unified</text>
+  <rect x="1422" y="489" width="44" height="27" rx="7" fill="#fff" stroke="#c8d0cb"/><text x="1444" y="507" text-anchor="middle" class="sans ink t10">Split</text>
+  <rect x="1474" y="489" width="47" height="27" rx="7" class="green"/><text x="1497.5" y="507" text-anchor="middle" class="sans white t10">Unified</text>
+  <!-- diff body -->
+  <rect x="1180" y="540" width="355" height="390" rx="11" fill="#202522"/>
+  <rect x="1180" y="540" width="355" height="27" rx="11" fill="#2a302c"/>
+  <text x="1193" y="558" class="mono soft t10">@@ entities / queues @@</text>
+  <rect x="1180" y="578" width="355" height="26" class="ctx"/>
+  <text x="1193" y="596" class="mono muted t10">  18  "queues": [</text>
+  <rect x="1180" y="604" width="355" height="26" class="del"/>
+  <text x="1193" y="622" class="mono" font-size="10" fill="#8e3f38">− 19    {"kind": "fifo"}</text>
+  <rect x="1180" y="630" width="355" height="26" class="add"/>
+  <text x="1193" y="648" class="mono" font-size="10" fill="#23654f">+ 19    {"id": "regular",</text>
+  <rect x="1180" y="656" width="355" height="26" class="add"/>
+  <text x="1193" y="674" class="mono" font-size="10" fill="#23654f">+ 20     "discipline": "fifo"},</text>
+  <rect x="1180" y="682" width="355" height="26" class="add"/>
+  <text x="1193" y="700" class="mono" font-size="10" fill="#23654f">+ 21    {"id": "priority",</text>
+  <rect x="1180" y="708" width="355" height="26" class="add"/>
+  <text x="1193" y="726" class="mono" font-size="10" fill="#23654f">+ 22     "vipFirst": true}</text>
+  <rect x="1180" y="734" width="355" height="26" class="ctx"/>
+  <text x="1193" y="752" class="mono muted t10">  23  ]</text>
+  <rect x="1194" y="784" width="327" height="92" rx="9" fill="#2a302c"/>
+  <text x="1207" y="807" class="sans" font-size="10" fill="#c8d0cb" font-weight="750">结构影响</text>
+  <text x="1207" y="829" class="sans" font-size="10" fill="#aeb9b4">类图新增 PriorityQueue</text>
+  <text x="1207" y="848" class="sans" font-size="10" fill="#aeb9b4">泳道新增 VIP 分流事件</text>
+  <text x="1207" y="867" class="sans" font-size="10" fill="#aeb9b4">需同步 code/model.py 与测试</text>
+  <!-- review footer -->
+  <rect x="1180" y="946" width="355" height="136" rx="12" class="card"/>
+  <text x="1195" y="971" class="sans ink t11" font-weight="750">Review progress</text>
+  <text x="1518" y="971" text-anchor="end" class="sans muted t10">1 / 3 files</text>
+  <rect x="1195" y="987" width="323" height="8" rx="4" fill="#dce2de"/><rect x="1195" y="987" width="108" height="8" rx="4" class="green2"/>
+  <rect x="1195" y="1011" width="108" height="34" rx="8" fill="#fff" stroke="#c7cfca"/>
+  <text x="1249" y="1033" text-anchor="middle" class="sans ink t10">标记已查看</text>
+  <rect x="1312" y="1011" width="93" height="34" rx="8" fill="#fff" stroke="#d7b4ae"/>
+  <text x="1358.5" y="1033" text-anchor="middle" class="sans" font-size="10" fill="#8a4038">排除此文件</text>
+  <rect x="1412" y="1011" width="106" height="34" rx="8" class="green"/>
+  <text x="1465" y="1033" text-anchor="middle" class="sans white t10" font-weight="700">确认变更集</text>
+  <text x="1195" y="1068" class="sans muted t10">最终确认仍产生一个原子 Model 变更回执</text>
+
+  <!-- collapsed rail hint -->
+  <rect x="1572" y="238" width="52" height="152" rx="14" fill="#fbfaf6" stroke="#cbd3ce"/>
+  <rect x="1583" y="254" width="30" height="30" rx="8" class="pale"/>
+  <text x="1598" y="274" text-anchor="middle" class="sans ink t14">⌘</text>
+  <text x="1598" y="315" text-anchor="middle" class="sans muted t10">文件</text>
+  <circle cx="1609" cy="336" r="9" class="green"/><text x="1609" y="340" text-anchor="middle" class="sans white t10" font-weight="800">3</text>
+  <text x="1598" y="369" text-anchor="middle" class="sans muted t10">变更</text>
+  <path d="M1552 314 H1572" class="dash"/>
+
+  <!-- annotations -->
+  <path d="M1646 475 H1552" class="dash"/>
+  <circle cx="1670" cy="475" r="17" class="green"/><text x="1670" y="480" text-anchor="middle" class="sans white t12" font-weight="800">1</text>
+  <text x="1696" y="470" class="sans ink t13" font-weight="750">右栏可折叠</text>
+  <text x="1696" y="490" class="sans muted t10">关闭后主画布扩展。</text>
+  <path d="M1646 620 H1552" class="dash"/>
+  <circle cx="1670" cy="620" r="17" class="green"/><text x="1670" y="625" text-anchor="middle" class="sans white t12" font-weight="800">2</text>
+  <text x="1696" y="615" class="sans ink t13" font-weight="750">预览 / Diff 共用</text>
+  <text x="1696" y="635" class="sans muted t10">Files 与 Changes 切换。</text>
+  <path d="M1646 810 H1552" class="dash"/>
+  <circle cx="1670" cy="810" r="17" class="green"/><text x="1670" y="815" text-anchor="middle" class="sans white t12" font-weight="800">3</text>
+  <text x="1696" y="805" class="sans ink t13" font-weight="750">图与文件联动</text>
+  <text x="1696" y="825" class="sans muted t10">选中节点定位来源与 diff。</text>
+
+  <text x="52" y="1150" class="sans muted t11">低保真交互草图 · 主结构视图由模型规格和事件生成；附加栏只负责查看实现与审阅变更。</text>
+</svg>

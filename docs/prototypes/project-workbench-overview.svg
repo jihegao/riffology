@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#17352f" flood-opacity=".10"/>
+    </filter>
+    <style>
+      .sans{font-family:Inter,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+      .serif{font-family:Georgia,"Songti SC",serif}
+      .ink{fill:#182b27}.muted{fill:#66736f}.soft{fill:#8a9692}
+      .tiny{font-size:12px}.small{font-size:14px}.body{font-size:16px}.label{font-size:13px;font-weight:700;letter-spacing:.08em}
+      .h1{font-size:29px;font-weight:700}.h2{font-size:23px;font-weight:700}.h3{font-size:18px;font-weight:700}
+      .line{stroke:#d8ddd8;stroke-width:1}.dash{stroke:#95a29e;stroke-width:1.5;stroke-dasharray:6 6;fill:none}
+    </style>
+  </defs>
+  <rect width="1600" height="1050" fill="#eeeae2"/>
+
+  <text x="60" y="54" class="sans ink h1">Riffology UX 草图 · 对话驱动的 Project 工作台</text>
+  <text x="60" y="82" class="sans muted body">目标：高频任务常驻，技术证据按需展开；始终保留左侧对话与右侧工作区。</text>
+
+  <!-- Desktop frame -->
+  <rect x="60" y="110" width="1180" height="870" rx="24" fill="#fbfaf6" stroke="#cfd5d0" filter="url(#shadow)"/>
+  <rect x="60" y="110" width="1180" height="66" rx="24" fill="#fbfaf6"/>
+  <line x1="60" y1="176" x2="1240" y2="176" class="line"/>
+  <rect x="84" y="128" width="32" height="32" rx="9" fill="#173f37"/>
+  <text x="100" y="150" text-anchor="middle" class="sans" font-size="16" font-weight="800" fill="#fff">R</text>
+  <text x="128" y="150" class="sans ink h3">Riffology</text>
+  <text x="266" y="150" class="sans soft small">Projects</text>
+  <text x="330" y="150" class="sans soft small">/</text>
+  <text x="349" y="150" class="sans ink small">风机维护仿真</text>
+  <rect x="1088" y="128" width="125" height="32" rx="16" fill="#e8f1ed" stroke="#bfd3ca"/>
+  <circle cx="1108" cy="144" r="5" fill="#2f7b66"/>
+  <text x="1121" y="149" class="sans ink small">服务正常</text>
+
+  <!-- Context bar -->
+  <rect x="60" y="176" width="1180" height="88" fill="#f6f4ee"/>
+  <text x="88" y="205" class="sans muted label">PROJECT · 固定模型副本</text>
+  <text x="88" y="238" class="serif ink h1">风机维护仿真</text>
+  <rect x="1050" y="195" width="162" height="42" rx="10" fill="#173f37"/>
+  <text x="1131" y="221" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#fff">启动可视化运行</text>
+
+  <!-- Left conversation -->
+  <rect x="60" y="264" width="412" height="716" fill="#f3f1eb"/>
+  <line x1="472" y1="264" x2="472" y2="980" class="line"/>
+  <text x="86" y="299" class="sans muted label">持续上下文</text>
+  <text x="86" y="331" class="serif ink h2">对话</text>
+  <rect x="318" y="294" width="124" height="36" rx="9" fill="#fff" stroke="#cbd2cd"/>
+  <text x="380" y="317" text-anchor="middle" class="sans ink small">模型讨论  ▾</text>
+
+  <rect x="84" y="351" width="360" height="56" rx="12" fill="#e4efe9"/>
+  <circle cx="106" cy="379" r="7" fill="#2f7b66"/>
+  <text x="122" y="376" class="sans ink small" font-weight="700">Agent 空闲</text>
+  <text x="122" y="395" class="sans muted tiny">已连接 · GLM-5.2 · 可以继续输入</text>
+
+  <rect x="146" y="431" width="298" height="68" rx="14" fill="#dceae5"/>
+  <text x="164" y="456" class="sans muted tiny" font-weight="700">你</text>
+  <text x="164" y="479" class="sans ink small">把维修班组数量改为 4，并说明影响。</text>
+
+  <rect x="84" y="517" width="326" height="108" rx="14" fill="#fff" stroke="#d5dbd6"/>
+  <text x="102" y="542" class="sans muted tiny" font-weight="700">RIFF AGENT</text>
+  <text x="102" y="568" class="sans ink small">已更新当前 Project 配置。</text>
+  <text x="102" y="591" class="sans muted small">班组 3 → 4；预计队列等待将下降。</text>
+  <rect x="102" y="603" width="190" height="10" rx="5" fill="#dfe5e1"/>
+
+  <rect x="84" y="641" width="360" height="58" rx="12" fill="#faf9f5" stroke="#d8ddd8"/>
+  <circle cx="106" cy="670" r="12" fill="#e6ece8"/>
+  <text x="106" y="675" text-anchor="middle" class="sans ink tiny" font-weight="800">✓</text>
+  <text x="128" y="666" class="sans ink small" font-weight="700">1 项修改已提交</text>
+  <text x="128" y="685" class="sans muted tiny">查看操作记录与差异  ›</text>
+
+  <rect x="84" y="716" width="360" height="38" rx="9" fill="none" stroke="#cfd5d0"/>
+  <text x="102" y="740" class="sans muted small">活动与工具调用（3）</text>
+  <text x="420" y="740" text-anchor="end" class="sans muted small">展开  ▾</text>
+
+  <!-- Sticky composer -->
+  <rect x="60" y="788" width="412" height="192" fill="#f3f1eb"/>
+  <line x1="84" y1="788" x2="444" y2="788" class="line"/>
+  <rect x="84" y="812" width="360" height="92" rx="13" fill="#fff" stroke="#aebbb6"/>
+  <text x="102" y="841" class="sans soft small">继续讨论，或明确要求修改当前 Project…</text>
+  <rect x="100" y="866" width="30" height="28" rx="8" fill="#eef1ee"/>
+  <text x="115" y="885" text-anchor="middle" class="sans muted body">＋</text>
+  <rect x="340" y="856" width="88" height="36" rx="9" fill="#173f37"/>
+  <text x="384" y="879" text-anchor="middle" class="sans" font-size="14" font-weight="700" fill="#fff">发送</text>
+  <text x="86" y="930" class="sans muted tiny">Enter 发送 · Shift+Enter 换行</text>
+  <text x="442" y="930" text-anchor="end" class="sans muted tiny">build agent ▾</text>
+
+  <!-- Right workspace -->
+  <rect x="472" y="264" width="768" height="716" fill="#fff"/>
+  <rect x="472" y="264" width="768" height="58" fill="#fbfaf7"/>
+  <text x="502" y="299" class="sans ink small" font-weight="700">概览</text>
+  <text x="572" y="299" class="sans muted small">配置</text>
+  <text x="638" y="299" class="sans muted small">运行</text>
+  <text x="704" y="299" class="sans muted small">结果</text>
+  <text x="770" y="299" class="sans muted small">技术详情</text>
+  <line x1="492" y1="320" x2="542" y2="320" stroke="#2f7b66" stroke-width="3"/>
+  <line x1="472" y1="322" x2="1240" y2="322" class="line"/>
+
+  <text x="502" y="360" class="sans muted label">当前实验</text>
+  <text x="502" y="394" class="sans ink h2">交互式单种子基线</text>
+  <text x="502" y="420" class="sans muted small">可视化 · seed 2 · 64 台风机 · 4 个维修班组</text>
+  <rect x="1076" y="358" width="134" height="38" rx="9" fill="#fff" stroke="#b9c5c0"/>
+  <text x="1143" y="382" text-anchor="middle" class="sans ink small">编辑配置</text>
+
+  <!-- Summary cards -->
+  <rect x="502" y="451" width="214" height="112" rx="14" fill="#f5f3ed" stroke="#dde1dc"/>
+  <text x="520" y="480" class="sans muted tiny" font-weight="700">模型副本</text>
+  <text x="520" y="508" class="sans ink body" font-weight="700">Wind Turbine Visual</text>
+  <text x="520" y="535" class="sans muted tiny">4 个文件 · 技术检查通过</text>
+  <circle cx="694" cy="480" r="6" fill="#2f7b66"/>
+
+  <rect x="730" y="451" width="214" height="112" rx="14" fill="#f5f3ed" stroke="#dde1dc"/>
+  <text x="748" y="480" class="sans muted tiny" font-weight="700">最近运行</text>
+  <text x="748" y="510" class="sans ink body" font-weight="700">已取消</text>
+  <text x="748" y="535" class="sans muted tiny">2 分钟前 · 无持久输出</text>
+  <circle cx="922" cy="480" r="6" fill="#b58a3a"/>
+
+  <rect x="958" y="451" width="252" height="112" rx="14" fill="#e9f2ee" stroke="#cbdcd4"/>
+  <text x="976" y="480" class="sans muted tiny" font-weight="700">下一步建议</text>
+  <text x="976" y="510" class="sans ink body" font-weight="700">启动可视化运行</text>
+  <text x="976" y="535" class="sans muted tiny">配置有效 · 1 个确定性样本</text>
+
+  <!-- Recent run panel -->
+  <rect x="502" y="584" width="708" height="190" rx="16" fill="#fbfaf7" stroke="#d7ddd8"/>
+  <text x="524" y="618" class="sans ink h3">最近运行</text>
+  <rect x="1080" y="600" width="108" height="34" rx="8" fill="#fff" stroke="#cbd2cd"/>
+  <text x="1134" y="622" text-anchor="middle" class="sans ink small">查看全部</text>
+  <line x1="524" y1="647" x2="1188" y2="647" class="line"/>
+  <text x="524" y="680" class="sans muted tiny">状态</text>
+  <text x="664" y="680" class="sans muted tiny">类型</text>
+  <text x="780" y="680" class="sans muted tiny">样本</text>
+  <text x="890" y="680" class="sans muted tiny">输出</text>
+  <text x="1014" y="680" class="sans muted tiny">时间</text>
+  <rect x="524" y="700" width="76" height="28" rx="14" fill="#f5ead6"/>
+  <text x="562" y="719" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#74561d">已取消</text>
+  <text x="664" y="719" class="sans ink small">可视化</text>
+  <text x="780" y="719" class="sans ink small">1</text>
+  <text x="890" y="719" class="sans ink small">0</text>
+  <text x="1014" y="719" class="sans ink small">2 分钟前</text>
+  <text x="1188" y="719" text-anchor="end" class="sans ink small" font-weight="700">查看详情 ›</text>
+
+  <!-- Progressive disclosure -->
+  <rect x="502" y="794" width="708" height="112" rx="14" fill="#fff" stroke="#d7ddd8"/>
+  <text x="524" y="828" class="sans ink h3">证据与技术详情</text>
+  <text x="524" y="853" class="sans muted small">输入 Schema、文件哈希、执行结构、输出契约</text>
+  <rect x="1065" y="817" width="123" height="38" rx="9" fill="#f5f3ed" stroke="#ccd3ce"/>
+  <text x="1126" y="841" text-anchor="middle" class="sans ink small">按需展开 ▾</text>
+  <rect x="524" y="875" width="640" height="9" rx="4" fill="#e7e9e5"/>
+
+  <!-- Annotations -->
+  <path d="M1280 214 H1240" class="dash"/>
+  <circle cx="1300" cy="214" r="18" fill="#173f37"/>
+  <text x="1300" y="220" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#fff">1</text>
+  <text x="1330" y="208" class="sans ink body" font-weight="700">对象与主操作同屏</text>
+  <text x="1330" y="232" class="sans muted small">用户进入页面即可知道“在哪、能做什么”。</text>
+
+  <path d="M1280 392 H1210" class="dash"/>
+  <circle cx="1300" cy="392" r="18" fill="#173f37"/>
+  <text x="1300" y="398" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#fff">2</text>
+  <text x="1330" y="386" class="sans ink body" font-weight="700">任务型标签导航</text>
+  <text x="1330" y="410" class="sans muted small">概览 → 配置 → 运行 → 结果；技术信息后置。</text>
+
+  <path d="M1280 620 H1210" class="dash"/>
+  <circle cx="1300" cy="620" r="18" fill="#173f37"/>
+  <text x="1300" y="626" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#fff">3</text>
+  <text x="1330" y="614" class="sans ink body" font-weight="700">对话结果可核验</text>
+  <text x="1330" y="638" class="sans muted small">Agent 文本与已提交操作分层，减少“说了算”的错觉。</text>
+
+  <path d="M1280 850 H1210" class="dash"/>
+  <circle cx="1300" cy="850" r="18" fill="#173f37"/>
+  <text x="1300" y="856" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#fff">4</text>
+  <text x="1330" y="844" class="sans ink body" font-weight="700">证据渐进展开</text>
+  <text x="1330" y="868" class="sans muted small">Schema/哈希仍可访问，但不阻塞日常操作。</text>
+
+  <path d="M1280 942 H472" class="dash"/>
+  <circle cx="1300" cy="942" r="18" fill="#173f37"/>
+  <text x="1300" y="948" text-anchor="middle" class="sans" font-size="15" font-weight="800" fill="#fff">5</text>
+  <text x="1330" y="936" class="sans ink body" font-weight="700">输入框固定在左栏底部</text>
+  <text x="1330" y="960" class="sans muted small">无论消息多长，都能持续对话，无需滚到底部寻找。</text>
+
+  <text x="60" y="1018" class="sans muted tiny">低保真交互草图 · 建议先验证任务顺序与状态反馈，再进入高保真视觉设计。</text>
+</svg>
