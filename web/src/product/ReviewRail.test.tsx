@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelChangeSet, ModelMutationReceipt } from "./types";
@@ -184,5 +184,45 @@ describe("capability-driven review rail", () => {
     expect(screen.getByTestId("owner-header")).not.toHaveAttribute("inert");
     expect(screen.getByTestId("pane-selector")).not.toHaveAttribute("inert");
     expect(screen.getByTestId("conversation-pane")).not.toHaveAttribute("inert");
+  });
+
+  it("closes an open desktop rail on a narrow transition without transiently inerting or losing focus", async () => {
+    let narrow = false;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      get matches() { return narrow; },
+      media: "(max-width: 959px)",
+      onchange: null,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    render(<div className="product-app">
+      <button type="button">Pane selector control</button>
+      <ReviewRail
+        ownerKey="model:model-one:digest-one"
+        files={files}
+        loadFile={vi.fn(async () => ({
+          kind: "code" as const,
+          title: "code/model.py",
+          language: "python",
+          text: "print('current')",
+        }))}
+      />
+    </div>);
+
+    const control = screen.getByRole("button", { name: "Pane selector control" });
+    control.focus();
+    narrow = true;
+    act(() => listeners.forEach((listener) => listener()));
+
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: "Open file and change review",
+    })).toBeInTheDocument());
+    expect(control).toHaveFocus();
+    expect(control).not.toHaveAttribute("inert");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

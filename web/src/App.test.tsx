@@ -253,6 +253,25 @@ describe("Stage 4 Product entry", () => {
     expect(productClient.workspace).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps focus on the pane selector control activated by the user", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    render(<App client={client()} />);
+
+    await screen.findByTestId("workspace-owner-card");
+    const workspaceControl = screen.getByRole("button", { name: "Workspace" });
+    workspaceControl.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(workspaceControl).toHaveFocus());
+    expect(workspaceControl).toHaveAttribute("aria-pressed", "true");
+
+    const conversationControl = screen.getByRole("button", { name: "Conversation" });
+    conversationControl.focus();
+    await user.keyboard(" ");
+    await waitFor(() => expect(conversationControl).toHaveFocus());
+    expect(conversationControl).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("refreshes the right workspace after a committed Agent owner mutation without remounting it", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/models/model-one?conversation=conversation-main");

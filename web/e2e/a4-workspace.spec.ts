@@ -10,6 +10,11 @@ test("A4-4 renders an ordinary Model and completes one real Project batch Run", 
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      errors.push(`${response.status()} ${new URL(response.url()).pathname}`);
+    }
+  });
 
   await page.goto("/");
   const csp = await page.request.get("/").then((response) =>
@@ -22,11 +27,12 @@ test("A4-4 renders an ordinary Model and completes one real Project batch Run", 
   });
   await windModel.getByRole("link", { name: "Open Model" }).click();
   await expect(page.getByTestId("model-workspace")).toBeVisible();
+  await expect.poll(() => visibleExactTextCount(page, "Wind Turbine Maintenance")).toBe(1);
   await expect(page.getByText(/thin execution contract passed/u)).toBeVisible();
   await page.getByTestId("pane-workspace").getByRole("button", {
-    name: /Render .*README\.md/u,
+    name: /visuals\/README\.md/u,
   }).click();
-  await expect(page.getByRole("heading", { name: /README\.md/u })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "visuals/README.md" })).toBeVisible();
   await expect(page.getByText(/behavioral reproduction/u)).toBeVisible();
 
   await page.getByRole("link", { name: "Home" }).click();
@@ -37,7 +43,15 @@ test("A4-4 renders an ordinary Model and completes one real Project batch Run", 
     }),
   });
   await windProject.getByRole("link", { name: "Open Project" }).click();
-  await expect(page.getByTestId("project-workspace")).toBeVisible();
+  const projectWorkspace = page.getByTestId("project-workspace");
+  await expect(projectWorkspace).toBeVisible();
+  await expect.poll(() =>
+    visibleExactTextCount(page, "Wind Turbine Maintenance — Synthetic Baseline")).toBe(1);
+  await projectWorkspace.evaluate((node) => {
+    node.setAttribute("data-continuity", "retained");
+  });
+  await page.getByTestId("pane-workspace").getByText("Technical details", { exact: true })
+    .click();
   await expect(page.getByText(/immutable Model copy/u)).toBeVisible();
   await expect(page.getByText(/Deterministic preview:/u)).toBeVisible();
   const configurationField = page.getByRole("textbox", { name: "Configuration JSON" });
@@ -52,6 +66,7 @@ test("A4-4 renders an ordinary Model and completes one real Project batch Run", 
     timeout: 180_000,
   });
   await expect(page.getByRole("table", { name: /Digest-checked outputs/u })).toBeVisible();
+  await expect(projectWorkspace).toHaveAttribute("data-continuity", "retained");
   await expect(page.getByText(/never creates an analysis document automatically/u)).toBeVisible();
 
   await page.getByRole("textbox", { name: "Sample index" }).fill("0");
@@ -136,3 +151,12 @@ test("A4-4 renders an ordinary Model and completes one real Project batch Run", 
   });
   expect(errors).toEqual([]);
 });
+
+const visibleExactTextCount = (page: import("@playwright/test").Page, text: string) =>
+  page.getByText(text, { exact: true }).evaluateAll((elements) =>
+    elements.filter((element) => {
+      const style = getComputedStyle(element);
+      return style.visibility !== "hidden"
+        && style.display !== "none"
+        && element.getClientRects().length > 0;
+    }).length);
