@@ -231,7 +231,20 @@ describe("Stage 4 Product entry", () => {
 
     await waitFor(() => expect(screen.getByTestId("shell-owner-heading"))
       .toHaveTextContent("General maintenance"));
+    expect(screen.getAllByRole("heading", { name: "General maintenance" })).toHaveLength(1);
+    expect(screen.queryByText("PERSISTENT CONTEXT")).not.toBeInTheDocument();
+    expect(screen.queryByText("CURRENT OBJECT")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Workspace$/u }))
+      .not.toBeInTheDocument();
+    const toolbar = screen.getByTestId("conversation-toolbar");
+    const scrollRegion = screen.getByTestId("conversation-scroll-region");
+    const composerDock = await screen.findByTestId("conversation-composer-dock");
+    expect(toolbar).toBeInTheDocument();
+    expect(scrollRegion).toHaveAccessibleName("Conversation activity");
+    expect(scrollRegion.compareDocumentPosition(composerDock)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const ownerCard = screen.getByTestId("workspace-owner-card");
+    expect(ownerCard).not.toHaveTextContent("General maintenance");
     screen.getByRole("link", { name: "Review" }).click();
 
     expect(window.location.pathname).toBe("/models/model-one");

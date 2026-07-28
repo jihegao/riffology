@@ -63,6 +63,44 @@ test("A4-3 Conversations persist independently and fail read-only without fabric
   await expect(page.getByLabel("Conversation messages")
     .getByText("Assistant (fixture/model-a) retained: Remember beta")).toBeVisible();
   await createConversation(page, "Disposable C");
+  await expect(page.getByRole("navigation", { name: "Conversations" })
+    .getByRole("link")).toHaveCount(3);
+  await page.setViewportSize({ width: 640, height: 450 });
+  await page.getByTestId("pane-selector")
+    .getByRole("button", { name: "Conversation" }).click();
+  const compactFit = await page.evaluate(() => {
+    const pane = document.querySelector<HTMLElement>(".product-conversation-pane")!;
+    const middle = document.querySelector<HTMLElement>(
+      ".product-conversation-scroll-region",
+    )!;
+    const dock = document.querySelector<HTMLElement>(".product-composer-dock")!;
+    const paneRect = pane.getBoundingClientRect();
+    const dockRect = dock.getBoundingClientRect();
+    return {
+      paneBottom: paneRect.bottom,
+      dockBottom: dockRect.bottom,
+      middleClientHeight: middle.clientHeight,
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(compactFit.dockBottom).toBeLessThanOrEqual(compactFit.paneBottom + 1);
+  expect(compactFit.middleClientHeight).toBeGreaterThan(0);
+  expect(compactFit.scrollWidth).toBeLessThanOrEqual(compactFit.clientWidth);
+  const compactMessage = page.getByRole("textbox", { name: "Message", exact: true });
+  const compactSend = page.getByRole("button", { name: "Send" });
+  await expect(compactMessage).toBeEnabled();
+  await compactMessage.focus();
+  await expect(compactMessage).toBeFocused();
+  await compactMessage.fill("Short viewport draft");
+  await expect(compactSend).toBeEnabled();
+  await compactSend.focus();
+  await expect(compactSend).toBeFocused();
+  await page.screenshot({
+    path: testInfo.outputPath("a4-3-conversation-short-active.png"),
+    fullPage: false,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   await page.getByRole("link", { name: "Analysis A" }).click();
   await expect(page.getByText("Remember alpha", { exact: true })).toBeVisible();
@@ -273,6 +311,7 @@ const createConversation = async (
     .getByLabel("Name").fill(name);
   await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("link", { name })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name })).toBeFocused();
   await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
 };
 

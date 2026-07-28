@@ -405,9 +405,6 @@ test("A4-6 continuous real-provider Product exit", async ({
       .toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("pane-workspace")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Workspace", exact: true }))
-      .toBeFocused();
-    await page.keyboard.press("Shift+Tab");
     await expect(paneSelector.getByRole("button", { name: "Workspace" }))
       .toBeFocused();
     await page.keyboard.press("Shift+Tab");
@@ -415,7 +412,7 @@ test("A4-6 continuous real-provider Product exit", async ({
       .toBeFocused();
     await page.keyboard.press("Space");
     await expect(page.getByTestId("pane-conversation")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Conversation", exact: true }))
+    await expect(paneSelector.getByRole("button", { name: "Conversation" }))
       .toBeFocused();
     const fit = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,

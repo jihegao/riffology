@@ -3,6 +3,8 @@ set -euo pipefail
 
 A4_3_E2E_ROOT="$(mktemp -d -t riff-a4-3-e2e-XXXXXX)"
 A4_3_E2E_ROOT="$(cd "$A4_3_E2E_ROOT" && pwd -P)"
+A4_3_PLATFORM_PORT="${A4_3_PLATFORM_PORT:-8787}"
+A4_3_WEB_PORT="${A4_3_WEB_PORT:-5173}"
 PIDS=()
 
 cleanup() {
@@ -18,15 +20,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-WORKSPACE_ROOT="$A4_3_E2E_ROOT" PORT=8787 \
+WORKSPACE_ROOT="$A4_3_E2E_ROOT" PORT="$A4_3_PLATFORM_PORT" \
   node --experimental-strip-types e2e/a4-3-backend.ts &
 PIDS+=("$!")
 for _ in $(seq 1 160); do
-  curl --noproxy '*' -fsS 'http://[::1]:8787/health' -H 'Host: localhost:8787' >/dev/null 2>&1 && break
+  curl --noproxy '*' -fsS "http://[::1]:${A4_3_PLATFORM_PORT}/health" \
+    -H "Host: localhost:${A4_3_PLATFORM_PORT}" >/dev/null 2>&1 && break
   sleep 0.25
 done
 
-npm run dev -- --host 127.0.0.1 --port 5173 &
+RIFF_PLATFORM_APP_PORT="$A4_3_PLATFORM_PORT" \
+  npm run dev -- --host 127.0.0.1 --port "$A4_3_WEB_PORT" --strictPort &
 WEB_PID="$!"
 PIDS+=("$WEB_PID")
 wait "$WEB_PID"
