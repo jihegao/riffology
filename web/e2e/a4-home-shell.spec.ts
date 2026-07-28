@@ -33,9 +33,39 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Conversation" })).toBeVisible();
+  await expect(page.getByRole("region", {
+    name: "Workspace",
+    exact: true,
+  })).toBeVisible();
   await expect(page.getByTestId("workspace-owner-card")).toContainText(
     "Technically executable",
   );
+  const ownerName = (await page.getByTestId("shell-owner-heading").textContent())!.trim();
+  await expect(page.getByRole("heading", { name: ownerName, exact: true })).toHaveCount(1);
+  await expect(page.getByText("PERSISTENT CONTEXT", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("CURRENT OBJECT", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toHaveCount(0);
+  const shellLayout = await page.evaluate(() => {
+    const workspace = document.querySelector<HTMLElement>(".product-workspace")!;
+    const conversation = document.querySelector<HTMLElement>(".product-conversation-pane")!;
+    const scrollRegion = document.querySelector<HTMLElement>(
+      ".product-conversation-scroll-region",
+    )!;
+    const workspaceRect = workspace.getBoundingClientRect();
+    const conversationRect = conversation.getBoundingClientRect();
+    return {
+      viewportHeight: window.innerHeight,
+      workspaceBottom: workspaceRect.bottom,
+      conversationBottom: conversationRect.bottom,
+      conversationOverflow: getComputedStyle(conversation).overflowY,
+      scrollOverflow: getComputedStyle(scrollRegion).overflowY,
+    };
+  });
+  expect(Math.abs(shellLayout.workspaceBottom - shellLayout.viewportHeight)).toBeLessThanOrEqual(1);
+  expect(Math.abs(shellLayout.conversationBottom - shellLayout.viewportHeight)).toBeLessThanOrEqual(1);
+  expect(shellLayout.conversationOverflow).toBe("hidden");
+  expect(shellLayout.scrollOverflow).toBe("auto");
   const ownerCard = await page.getByTestId("workspace-owner-card").elementHandle();
   expect(ownerCard).not.toBeNull();
   await page.evaluate(() => {
@@ -57,8 +87,14 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
   await expect(page.getByTestId("workspace-owner-card")).toContainText("fixed copy");
+  const projectOwnerName =
+    (await page.getByTestId("shell-owner-heading").textContent())!.trim();
+  await expect(page.getByRole("heading", {
+    name: projectOwnerName,
+    exact: true,
+  })).toHaveCount(1);
 
-  await page.getByRole("heading", { name: "Workspace", exact: true }).focus();
+  await page.getByTestId("pane-workspace").focus();
   await page.setViewportSize({ width: 640, height: 900 });
   const selector = page.getByTestId("pane-selector");
   await expect(selector).toBeVisible();
@@ -69,19 +105,36 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("pane-conversation")).toBeHidden();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toBeFocused();
+  await expect(selector.getByRole("button", { name: "Workspace" })).toBeFocused();
   await selector.getByRole("button", { name: "Conversation" }).focus();
   await page.keyboard.press("Space");
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeHidden();
-  await page.getByRole("button", { name: "Workspace" }).click();
+  const conversationSelector = selector.getByRole("button", { name: "Conversation" });
+  await expect(conversationSelector).toBeFocused();
+  const focusedSelectorStyle = await conversationSelector.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+  });
+  expect(focusedSelectorStyle.outlineStyle).not.toBe("none");
+  expect(focusedSelectorStyle.outlineWidth).not.toBe("0px");
 
-  await page.setViewportSize({ width: 720, height: 450 });
+  await page.getByRole("link", { name: "Home" }).click();
+  await page.getByRole("link", { name: "Open Model" }).first().click();
+  await page.setViewportSize({ width: 640, height: 450 });
   await expect(selector).toBeVisible();
-  const fit = await page.evaluate(() => ({
-    clientWidth: document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth,
-    overflowing: Array.from(document.querySelectorAll<HTMLElement>("body *"))
+  const fit = await page.evaluate(() => {
+    const pane = document.querySelector<HTMLElement>(".product-conversation-pane")!;
+    const middle = document.querySelector<HTMLElement>(
+      ".product-conversation-scroll-region",
+    )!;
+    const paneRect = pane.getBoundingClientRect();
+    return {
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      paneBottom: paneRect.bottom,
+      middleClientHeight: middle.clientHeight,
+      overflowing: Array.from(document.querySelectorAll<HTMLElement>("body *"))
       .map((element) => ({
         name: element.tagName.toLowerCase(),
         className: element.className,
@@ -93,8 +146,10 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
       .filter((element) => element.right > document.documentElement.clientWidth + 1
         || element.scrollWidth > element.clientWidth + 1)
       .slice(0, 8),
-  }));
+    };
+  });
   expect(fit.scrollWidth, JSON.stringify(fit)).toBeLessThanOrEqual(fit.clientWidth);
+  expect(fit.middleClientHeight).toBeGreaterThan(0);
 
   await page.screenshot({ path: testInfo.outputPath("a4-2-home-shell.png"), fullPage: true });
   expect(errors).toEqual([]);

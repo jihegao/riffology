@@ -64,12 +64,9 @@ function ModelWorkspace({
     <div className="product-dynamic-workspace" data-testid="model-workspace">
       <section className="product-workspace-card" data-testid="workspace-owner-card">
         <div className="product-section-heading">
-          <div>
-            <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
-              {workspace.owner.technicalStatus}
-            </span>
-            <h3>{workspace.owner.name}</h3>
-          </div>
+          <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
+            {workspace.owner.technicalStatus}
+          </span>
           <button type="button" className="product-primary" disabled={pending} onClick={() => void check()}>
             {pending ? "Checking…" : "Run technical check"}
           </button>
@@ -216,7 +213,6 @@ function ProjectWorkspace({
     <div className="product-dynamic-workspace" data-testid="project-workspace">
       <section className="product-workspace-card" data-testid="workspace-owner-card">
         <span className="product-badge">fixed copy</span>
-        <h3>{workspace.owner.name}</h3>
         <p>
           This Project owns an immutable Model copy. It offers no active Model switch
           or Model-version browser.

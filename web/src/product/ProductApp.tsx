@@ -61,8 +61,12 @@ export function ProductApp({
     void checkRecovery();
   }, [checkRecovery]);
 
+  const workspaceReady = recovery !== "checking"
+    && recovery.state === "ready"
+    && route.page === "workspace";
+
   return (
-    <div className="product-app">
+    <div className={`product-app${workspaceReady ? " product-app-workspace" : ""}`}>
       <a className="product-skip-link" href="#product-main">Skip to main content</a>
       <header className="product-header">
         <a
@@ -458,8 +462,6 @@ function SharedShell({
   const [error, setError] = useState<string>();
   const [pane, setPane] = useState<Pane>("conversation");
   const ownerHeadingRef = useRef<HTMLHeadingElement>(null);
-  const conversationHeadingRef = useRef<HTMLHeadingElement>(null);
-  const workspaceHeadingRef = useRef<HTMLHeadingElement>(null);
   const conversationButtonRef = useRef<HTMLButtonElement>(null);
   const workspaceButtonRef = useRef<HTMLButtonElement>(null);
   const conversationPaneRef = useRef<HTMLElement>(null);
@@ -522,15 +524,12 @@ function SharedShell({
 
   const selectPane = (next: Pane) => {
     setPane(next);
-    requestAnimationFrame(() => {
-      (next === "conversation" ? conversationHeadingRef : workspaceHeadingRef).current?.focus();
-    });
   };
   return (
     <main id="product-main" className="product-shell" tabIndex={-1}>
       <header className="product-owner-header">
-        <div>
-          <p className="product-eyebrow">{route.kind.toUpperCase()} WORKSPACE</p>
+        <div className="product-owner-identity">
+          <span className="product-owner-kind">{route.kind}</span>
           <h1 ref={ownerHeadingRef} tabIndex={-1} data-testid="shell-owner-heading">
             {workspace?.owner.name ?? "Loading workspace…"}
           </h1>
@@ -567,14 +566,11 @@ function SharedShell({
         <aside
           ref={conversationPaneRef}
           className="product-conversation-pane"
-          aria-labelledby="conversation-heading"
+          aria-label="Conversation"
+          tabIndex={-1}
           data-testid="pane-conversation"
           data-active={pane === "conversation"}
         >
-          <div>
-            <p className="product-eyebrow">PERSISTENT CONTEXT</p>
-            <h2 id="conversation-heading" ref={conversationHeadingRef} tabIndex={-1}>Conversation</h2>
-          </div>
           <ConversationPane
             client={client}
             ownerKind={route.kind}
@@ -586,14 +582,11 @@ function SharedShell({
         <section
           ref={workspacePaneRef}
           className="product-workbench-pane"
-          aria-labelledby="workspace-heading"
+          aria-label="Workspace"
+          tabIndex={-1}
           data-testid="pane-workspace"
           data-active={pane === "workspace"}
         >
-          <div>
-            <p className="product-eyebrow">CURRENT OBJECT</p>
-            <h2 id="workspace-heading" ref={workspaceHeadingRef} tabIndex={-1}>Workspace</h2>
-          </div>
           {!workspace && !error && <p className="product-empty" role="status">Loading dynamic workspace…</p>}
           {workspace && (
             <WorkspacePane

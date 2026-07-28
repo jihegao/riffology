@@ -182,11 +182,21 @@ export function ConversationPane({
     setReadOnlyReason(undefined);
     navigateProduct(workspaceHref(ownerKind, ownerId, conversationId));
   };
-  const focusConversationNavigation = () => {
+  const focusConversationNavigation = (conversationId?: string) => {
     requestAnimationFrame(() => {
-      paneRef.current?.querySelector<HTMLElement>(
-        ".product-conversation-list a, .product-new-conversation",
-      )?.focus();
+      const conversationLinks = Array.from(
+        paneRef.current?.querySelectorAll<HTMLAnchorElement>(
+          ".product-conversation-list a",
+        ) ?? [],
+      );
+      const requested = conversationId
+        ? conversationLinks.find((link) =>
+          new URL(link.href).searchParams.get("conversation") === conversationId)
+        : undefined;
+      (requested
+        ?? conversationLinks[0]
+        ?? paneRef.current?.querySelector<HTMLElement>(".product-new-conversation"))
+        ?.focus();
     });
   };
 
@@ -199,42 +209,57 @@ export function ConversationPane({
     runtime,
     sending,
   );
+  const activeBundle = bundle?.conversation.lifecycleState === "active"
+    ? bundle
+    : undefined;
 
   return (
     <div className="product-conversation-content" ref={paneRef}>
-      <div className={`product-agent-status product-agent-status-${status}`} role="status">
-        <strong>Agent: {status.replaceAll("_", " ")}</strong>
-        <span>{statusDescription(status)}</span>
+      <div className="product-conversation-toolbar" data-testid="conversation-toolbar">
+        <div className={`product-agent-status product-agent-status-${status}`} role="status">
+          <strong>Agent: {status.replaceAll("_", " ")}</strong>
+          <span>{statusDescription(status)}</span>
+        </div>
+        {error && <p className="product-form-error" role="alert">{error}</p>}
+        {selectedConversationId && !loading && !selected && (
+          <p className="product-form-error" role="alert">
+            That Conversation does not belong to this workspace.
+          </p>
+        )}
+        <ConversationList
+          conversations={collections.active}
+          selectedId={selected?.id}
+          onSelect={selectConversation}
+        />
+        <NewConversationForm
+          client={client}
+          ownerKind={ownerKind}
+          ownerId={ownerId}
+          providers={providers}
+          onCreated={(conversation) => {
+            void refreshCollections().then(() => {
+              selectConversation(conversation.id);
+              focusConversationNavigation(conversation.id);
+            });
+          }}
+        />
       </div>
-      {error && <p className="product-form-error" role="alert">{error}</p>}
-      {selectedConversationId && !loading && !selected && (
-        <p className="product-form-error" role="alert">
-          That Conversation does not belong to this workspace.
-        </p>
-      )}
-      <ConversationList
-        conversations={collections.active}
-        selectedId={selected?.id}
-        onSelect={selectConversation}
-      />
-      <NewConversationForm
-        client={client}
-        ownerKind={ownerKind}
-        ownerId={ownerId}
-        providers={providers}
-        onCreated={(conversation) => {
-          void refreshCollections().then(() => selectConversation(conversation.id));
-        }}
-      />
-      {bundle && bundle.conversation.lifecycleState === "active" && (
-        <>
+      <div
+        className="product-conversation-scroll-region"
+        data-testid="conversation-scroll-region"
+        role="region"
+        aria-label="Conversation activity"
+        tabIndex={0}
+      >
+        {activeBundle && (
+          <>
           <ConversationControls
             client={client}
-            conversation={bundle.conversation}
+            conversation={activeBundle.conversation}
             providers={providers}
             onChanged={async (removed) => {
               await refreshCollections();
-              if (selectedIdRef.current !== bundle.conversation.id) return;
+              if (selectedIdRef.current !== activeBundle.conversation.id) return;
               if (removed) {
                 selectedIdRef.current = undefined;
                 setBundle(undefined);
@@ -242,27 +267,27 @@ export function ConversationPane({
                 navigateProduct(workspaceHref(ownerKind, ownerId));
                 focusConversationNavigation();
               } else {
-                await refreshConversation(bundle.conversation.id);
+                await refreshConversation(activeBundle.conversation.id);
               }
             }}
             onError={(message) => {
-              if (selectedIdRef.current === bundle.conversation.id) setError(message);
+              if (selectedIdRef.current === activeBundle.conversation.id) setError(message);
             }}
           />
           <RuntimeControls
             client={client}
-            conversationId={bundle.conversation.id}
+            conversationId={activeBundle.conversation.id}
             runtime={runtime}
             unavailable={runtimeUnavailable}
-            onChanged={() => refreshConversation(bundle.conversation.id)}
+            onChanged={() => refreshConversation(activeBundle.conversation.id)}
             onError={setError}
           />
-          <Transcript bundle={bundle} runtime={runtime} />
+          <Transcript bundle={activeBundle} runtime={runtime} />
           <AttachmentForm
             client={client}
-            conversationId={bundle.conversation.id}
+            conversationId={activeBundle.conversation.id}
             onUploaded={() => {
-              const conversationId = bundle.conversation.id;
+              const conversationId = activeBundle.conversation.id;
               void refreshConversation(conversationId).catch((cause) => {
                 if (selectedIdRef.current === conversationId) {
                   setError(messageOf(cause, "Attachments could not be refreshed."));
@@ -270,6 +295,21 @@ export function ConversationPane({
               });
             }}
           />
+          </>
+        )}
+        <RecoveryLists
+          client={client}
+          collections={collections}
+          onRestore={() => {
+            void refreshCollections().then(() => focusConversationNavigation()).catch((cause) =>
+              setError(messageOf(cause, "Conversations could not be refreshed.")));
+          }}
+          onError={setError}
+        />
+        {loading && <p className="product-empty" role="status">Loading Conversation…</p>}
+      </div>
+      {activeBundle && (
+        <div className="product-composer-dock" data-testid="conversation-composer-dock">
           <Composer
             disabled={status === "read_only"
               || status === "busy"
@@ -281,11 +321,11 @@ export function ConversationPane({
               ? undefined
               : "Respond to, stop, or finish the active turn before starting another message."}
             sending={sending}
-            bundle={bundle}
+            bundle={activeBundle}
             agents={agents}
             runtime={runtime}
             onSend={async (text, attachmentIds, agentName) => {
-              const conversationId = bundle.conversation.id;
+              const conversationId = activeBundle.conversation.id;
               setSendingConversationId(conversationId);
               setError(undefined);
               try {
@@ -312,18 +352,8 @@ export function ConversationPane({
               }
             }}
           />
-        </>
+        </div>
       )}
-      <RecoveryLists
-        client={client}
-        collections={collections}
-        onRestore={() => {
-          void refreshCollections().then(focusConversationNavigation).catch((cause) =>
-            setError(messageOf(cause, "Conversations could not be refreshed.")));
-        }}
-        onError={setError}
-      />
-      {loading && <p className="product-empty" role="status">Loading Conversation…</p>}
     </div>
   );
 }
@@ -393,21 +423,16 @@ function NewConversationForm({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const titleId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const options = providers?.mode === "live" ? providers.providerModels : [];
   const selected = options.find((provider) => provider.qualifiedId === qualifiedId)
     ?? options[0];
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="product-secondary product-new-conversation"
-        onClick={() => setOpen(true)}
-      >
-        New Conversation
-      </button>
-    );
-  }
+  const close = () => {
+    setOpen(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!selected || !name.trim()) return;
@@ -433,42 +458,112 @@ function NewConversationForm({
     }
   };
   return (
-    <form className="product-conversation-form" aria-labelledby={titleId} onSubmit={(event) => void submit(event)}>
-      <strong id={titleId}>New Conversation</strong>
-      <label>Name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>
-        Provider / model
-        <select
-          required
-          disabled={options.length === 0}
-          value={qualifiedId || selected?.qualifiedId || ""}
-          onChange={(event) => setQualifiedId(event.target.value)}
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="product-secondary product-new-conversation"
+        onClick={() => setOpen(true)}
+      >
+        New Conversation
+      </button>
+      {open && (
+        <div
+          className="product-dialog-backdrop"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !pending) close();
+            if (event.key !== "Tab") return;
+            const focusable = Array.from(
+              dialogRef.current?.querySelectorAll<HTMLElement>(
+                "button:not(:disabled), input:not(:disabled), select:not(:disabled), "
+                + "textarea:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])",
+              ) ?? [],
+            );
+            if (focusable.length === 0) {
+              event.preventDefault();
+              return;
+            }
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
         >
-          {options.map((provider) => (
-            <option key={provider.qualifiedId} value={provider.qualifiedId}>
-              {provider.qualifiedId}
-            </option>
-          ))}
-        </select>
-      </label>
-      {providers?.mode === "read_only" && (
-        <p className="product-form-note" role="status">
-          OpenCode is unavailable. Existing resources and lifecycle controls remain available.
-        </p>
+          <section
+            ref={dialogRef}
+            className="product-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+          >
+            <form
+              className="product-conversation-form"
+              onSubmit={(event) => void submit(event)}
+            >
+              <strong id={titleId}>New Conversation</strong>
+              <label>
+                Name
+                <input
+                  autoFocus
+                  required
+                  maxLength={120}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </label>
+              <label>
+                Provider / model
+                <select
+                  required
+                  disabled={options.length === 0}
+                  value={qualifiedId || selected?.qualifiedId || ""}
+                  onChange={(event) => setQualifiedId(event.target.value)}
+                >
+                  {options.map((provider) => (
+                    <option key={provider.qualifiedId} value={provider.qualifiedId}>
+                      {provider.qualifiedId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {providers?.mode === "read_only" && (
+                <p className="product-form-note" role="status">
+                  OpenCode is unavailable. Existing resources and lifecycle controls remain available.
+                </p>
+              )}
+              {!providers && (
+                <p className="product-form-note" role="status">
+                  Loading provider options…
+                </p>
+              )}
+              {error && <p className="product-form-error" role="alert">{error}</p>}
+              <div>
+                <button
+                  type="submit"
+                  className="product-primary"
+                  disabled={pending || !selected || !name.trim()}
+                >
+                  {pending ? "Creating…" : "Create"}
+                </button>
+                <button
+                  type="button"
+                  className="product-secondary"
+                  onClick={close}
+                  disabled={pending}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
       )}
-      {!providers && (
-        <p className="product-form-note" role="status">
-          Loading provider options…
-        </p>
-      )}
-      {error && <p className="product-form-error" role="alert">{error}</p>}
-      <div>
-        <button type="submit" className="product-primary" disabled={pending || !selected || !name.trim()}>
-          {pending ? "Creating…" : "Create"}
-        </button>
-        <button type="button" className="product-secondary" onClick={() => setOpen(false)} disabled={pending}>Cancel</button>
-      </div>
-    </form>
+    </>
   );
 }
 
