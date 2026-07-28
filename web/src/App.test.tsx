@@ -447,6 +447,7 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByText("Skill: generic-model-edit")).toBeInTheDocument();
     expect(screen.getByText("temporary_document_create")).toBeInTheDocument();
     expect(screen.queryByText("objectFileId")).not.toBeInTheDocument();
+    expect(screen.queryByText("Applied")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Update provider" }));
     expect(productClient.changeConversationProvider).toHaveBeenCalledWith({
@@ -468,6 +469,45 @@ describe("Stage 4 Product entry", () => {
       expectedRecordDigest: "c".repeat(64),
       name: "Renamed thread",
     });
+  });
+
+  it("shows Applied only for a committed sanitized direct mutation receipt", async () => {
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.conversationBundle = vi.fn(async () => ({
+      conversation: workspace.conversations[0],
+      messages: [],
+      attachments: [],
+      documents: [],
+      skillUses: [],
+      actions: [{
+        id: "action-direct-apply",
+        actionKind: "model_files_mutate",
+        permissionDecision: "allowed" as const,
+        state: "committed" as const,
+        errorCode: null,
+        mutationReceipt: {
+          operation: "direct_apply" as const,
+          receiptDigest: "9".repeat(64),
+          beforeWorkspaceDigest: "8".repeat(64),
+          afterWorkspaceDigest: "7".repeat(64),
+          committedAt: "2026-07-28T00:00:00.000Z",
+          files: [{
+            relativePath: "code/model.py",
+            priorSha256: "6".repeat(64),
+            proposedSha256: "5".repeat(64),
+          }],
+        },
+      }],
+    }));
+    render(<App client={productClient} />);
+
+    const applied = (await screen.findByText("Applied")).closest("[role='status']")!;
+    expect(applied).toHaveTextContent("Applied");
+    expect(applied).toHaveTextContent("9".repeat(64));
+    expect(applied).toHaveTextContent("1 file committed");
+    expect(applied).not.toHaveTextContent("itemId");
+    expect(applied).not.toHaveTextContent("objectFileId");
   });
 
   it("shows connecting then durable read-only without fabricating an assistant reply", async () => {

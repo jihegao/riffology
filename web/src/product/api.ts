@@ -7,6 +7,9 @@ import type {
   ConversationMessage,
   ConversationSummary,
   HomeDto,
+  GeneratedViewSet,
+  ModelChangeSet,
+  ModelMutationReceipt,
   ModelCreationDto,
   OwnerKind,
   ProductLifecycleReceipt,
@@ -66,6 +69,26 @@ export interface ProductClient {
   workspace(kind: OwnerKind, id: string): Promise<WorkspaceDto>;
   startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheck>;
   modelRenderable(modelId: string, fileId: string): Promise<RendererResource>;
+  generatedViews?(modelId: string): Promise<GeneratedViewSet | null>;
+  generatedViewRenderable?(modelId: string, viewId: string): Promise<RendererResource>;
+  modelChangeSets?(
+    modelId: string,
+    state?: ModelChangeSet["state"],
+  ): Promise<readonly ModelChangeSet[]>;
+  applyModelChangeSet?(input: Readonly<{
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+    expectedWorkspaceDigest: string;
+  }>): Promise<ModelMutationReceipt>;
+  rejectModelChangeSet?(input: Readonly<{
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+  }>): Promise<ModelMutationReceipt>;
+  projectFileRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   downloadModelFile(modelId: string, fileId: string): Promise<void>;
   createExperiment(input: Readonly<{
     projectId: string;
@@ -301,6 +324,73 @@ export class HttpProductClient implements ProductClient {
   modelRenderable(modelId: string, fileId: string): Promise<RendererResource> {
     return this.#request(
       `/api/models/${encodeURIComponent(modelId)}/renderables/${encodeURIComponent(fileId)}`,
+    );
+  }
+
+  generatedViews(modelId: string): Promise<GeneratedViewSet | null> {
+    return this.#request(
+      `/api/models/${encodeURIComponent(modelId)}/generated-views`,
+    );
+  }
+
+  generatedViewRenderable(modelId: string, viewId: string): Promise<RendererResource> {
+    return this.#request(
+      `/api/models/${encodeURIComponent(modelId)}/generated-views/${encodeURIComponent(viewId)}/renderable`,
+    );
+  }
+
+  async modelChangeSets(
+    modelId: string,
+    state?: ModelChangeSet["state"],
+  ): Promise<readonly ModelChangeSet[]> {
+    const query = state ? `?state=${encodeURIComponent(state)}` : "";
+    const result = await this.#request<{ changeSets: ModelChangeSet[] }>(
+      `/api/models/${encodeURIComponent(modelId)}/change-sets${query}`,
+    );
+    return result.changeSets;
+  }
+
+  applyModelChangeSet(input: Readonly<{
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+    expectedWorkspaceDigest: string;
+  }>): Promise<ModelMutationReceipt> {
+    return this.#request(
+      `/api/models/${encodeURIComponent(input.modelId)}/change-sets/${encodeURIComponent(input.changeSetId)}/apply`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          expectedChangeSetDigest: input.expectedChangeSetDigest,
+          expectedWorkspaceDigest: input.expectedWorkspaceDigest,
+        }),
+      },
+    );
+  }
+
+  rejectModelChangeSet(input: Readonly<{
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+  }>): Promise<ModelMutationReceipt> {
+    return this.#request(
+      `/api/models/${encodeURIComponent(input.modelId)}/change-sets/${encodeURIComponent(input.changeSetId)}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          expectedChangeSetDigest: input.expectedChangeSetDigest,
+        }),
+      },
+    );
+  }
+
+  projectFileRenderable(projectId: string, fileRef: string): Promise<RendererResource> {
+    return this.#request(
+      `/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fileRef)}/renderable`,
     );
   }
 

@@ -85,6 +85,75 @@ describe("Product browser client", () => {
     });
   });
 
+  it("uses dynamic generated-view, review, and Project file routes without fixed view names", async () => {
+    const calls: Array<{ input: string; method?: string; body?: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        input: String(input),
+        method: init?.method,
+        body: typeof init?.body === "string" ? init.body : undefined,
+      });
+      if (String(input).endsWith("/bootstrap")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 });
+      }
+      if (String(input).endsWith("/change-sets")) {
+        return new Response(JSON.stringify({ changeSets: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        kind: "json",
+        title: "fixture",
+        value: {},
+        schemaVersion: 1,
+        operation: "apply",
+        files: [],
+      }), { status: 200 });
+    }));
+    const client = new HttpProductClient();
+
+    await client.generatedViews("model / one");
+    await client.generatedViewRenderable("model / one", "agent view");
+    await client.modelChangeSets("model / one");
+    await client.applyModelChangeSet({
+      modelId: "model / one",
+      changeSetId: "change / one",
+      commandId: "apply-command",
+      expectedChangeSetDigest: "a".repeat(64),
+      expectedWorkspaceDigest: "b".repeat(64),
+    });
+    await client.rejectModelChangeSet({
+      modelId: "model / one",
+      changeSetId: "change / one",
+      commandId: "reject-command",
+      expectedChangeSetDigest: "a".repeat(64),
+    });
+    await client.projectFileRenderable("project / one", "file / ref");
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/browser-session/bootstrap",
+      "/api/models/model%20%2F%20one/generated-views",
+      "/api/models/model%20%2F%20one/generated-views/agent%20view/renderable",
+      "/api/models/model%20%2F%20one/change-sets",
+      "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/apply",
+      "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/reject",
+      "/api/projects/project%20%2F%20one/files/file%20%2F%20ref/renderable",
+    ]);
+    expect(JSON.parse(calls[4]?.body ?? "{}")).toEqual({
+      commandId: "apply-command",
+      expectedChangeSetDigest: "a".repeat(64),
+      expectedWorkspaceDigest: "b".repeat(64),
+    });
+    expect(JSON.parse(calls[5]?.body ?? "{}")).toEqual({
+      commandId: "reject-command",
+      expectedChangeSetDigest: "a".repeat(64),
+    });
+  });
+
   it("treats a structured turn result as durable read-only without a transport error", async () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

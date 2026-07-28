@@ -84,7 +84,22 @@ export type PublicSkillUseDto = Pick<
 export type PublicActionRecordDto = Pick<
   ActionRecordDto,
   "id" | "actionKind" | "permissionDecision" | "state" | "errorCode"
->;
+> & {
+  mutationReceipt?: PublicDirectModelMutationReceiptDto;
+};
+
+export type PublicDirectModelMutationReceiptDto = Readonly<{
+  operation: "direct_apply";
+  receiptDigest: string;
+  beforeWorkspaceDigest: string;
+  afterWorkspaceDigest: string;
+  committedAt: string;
+  files: readonly Readonly<{
+    relativePath: string;
+    priorSha256: string | null;
+    proposedSha256: string;
+  }>[];
+}>;
 
 export type ConversationMessageDto = {
   id: ProductId;

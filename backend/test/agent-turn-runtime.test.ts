@@ -67,6 +67,64 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
   );
   assert.equal((response?.result as any).content[0].text.includes("intent"), false);
   assert.equal(store.readObjectFile(modelFile.id).toString("utf8"), "value = 2\n");
+  const directAction = store.getActionRecord(
+    "turn_explicit",
+    (JSON.parse((response?.result as any).content[0].text) as any).id,
+  )!;
+  const publicReceipt = store.publicDirectModelMutationReceipt(directAction.id);
+  assert.deepEqual(Object.keys(publicReceipt!).sort(), [
+    "afterWorkspaceDigest",
+    "beforeWorkspaceDigest",
+    "committedAt",
+    "files",
+    "operation",
+    "receiptDigest",
+  ]);
+  assert.deepEqual(Object.keys(publicReceipt!.files[0]!).sort(), [
+    "priorSha256",
+    "proposedSha256",
+    "relativePath",
+  ]);
+  assert.equal(publicReceipt!.files[0]?.relativePath, "model.py");
+  assert.doesNotMatch(
+    JSON.stringify(publicReceipt),
+    /itemId|objectFileId|expectedPriorSha256|modelId|changeSetId|commandId|\/Users\//u,
+  );
+  store.recordAction({
+    id: "action_ordinary_committed",
+    conversationId: "conversation_model",
+    turnId: "turn_explicit",
+    actionKind: "inspect",
+    intent: { requestKey: "ordinary" },
+    permissionDecision: "pending",
+    state: "proposed",
+    createdAt: NOW,
+  });
+  store.transitionActionRecord({
+    id: "action_ordinary_committed",
+    expectedState: "proposed",
+    state: "authorized",
+    at: NOW,
+  });
+  store.transitionActionRecord({
+    id: "action_ordinary_committed",
+    expectedState: "authorized",
+    state: "staging",
+    mutationTransactionId: directAction.mutationTransactionId!,
+    at: NOW,
+  });
+  store.transitionActionRecord({
+    id: "action_ordinary_committed",
+    expectedState: "staging",
+    state: "committed",
+    mutationTransactionId: directAction.mutationTransactionId!,
+    affectedResources: [],
+    at: NOW,
+  });
+  assert.equal(
+    store.publicDirectModelMutationReceipt("action_ordinary_committed"),
+    null,
+  );
   const replay = store.startAgentTurn({ turnId: "turn_explicit", userMessageId: "message_explicit", conversationId: "conversation_model", requestKey: "explicit", text: "$abm-modeling update the model file", attachmentIds: ["attachment_alpha"], createdAt: NOW });
   assert.equal(replay.skillUses[0]?.loadState, "loaded");
   assert.equal(replay.actions[0]?.state, "committed");
@@ -74,6 +132,80 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
   store.bindAgentSession({ id: "session_model_2", conversationId: "conversation_model", expectedGeneration: 1, state: "available", externalSessionRef: "opaque-model-2", at: NOW });
   const stale = await runtime.handle(prepared.capability, call("riff_read_owner_summary"));
   assert.equal((stale?.result as any).isError, true, "a generation change must invalidate the outstanding capability");
+});
+
+test("public direct-apply receipt projection fails closed on receipt corruption and owner mismatch", async (t) => {
+  const { root, store, runtime } = setup(t);
+  store.startAgentTurn({
+    turnId: "turn_public_receipt",
+    userMessageId: "message_public_receipt",
+    conversationId: "conversation_model",
+    requestKey: "public-receipt",
+    text: "Update the model file now",
+    createdAt: NOW,
+  });
+  store.bindAgentSession({
+    id: "session_public_receipt",
+    conversationId: "conversation_model",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-public-receipt",
+    at: NOW,
+  });
+  const prepared = await runtime.prepare({
+    conversationId: "conversation_model",
+    turnId: "turn_public_receipt",
+    text: "Update the model file now",
+    attachmentIds: [],
+  });
+  t.after(() => prepared.release());
+  const modelFile = store.listObjectFiles({
+    kind: "model",
+    id: "model_alpha",
+  }).find((file) => file.id === "file_model_alpha")!;
+  const response = await runtime.handle(
+    prepared.capability,
+    call("riff_apply_model_changes", {
+      requestKey: "public-receipt-change",
+      changes: [{
+        objectFileId: modelFile.id,
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        text: "value = 3\n",
+        expectedPriorSha256: modelFile.sha256,
+      }],
+    }),
+  );
+  const actionId = (JSON.parse(
+    (response?.result as any).content[0].text,
+  ) as any).id as string;
+  const valid = store.publicDirectModelMutationReceipt(actionId)!;
+  assert.equal(valid.operation, "direct_apply");
+
+  const database = new DatabaseSync(join(root, "product.sqlite3"), {
+    allowExtension: false,
+  });
+  t.after(() => database.close());
+  configureProductDatabase(database);
+  database.exec(
+    "DROP TRIGGER model_change_set_receipts_immutable_update_v17",
+  );
+  database.exec("PRAGMA ignore_check_constraints = ON");
+  database.prepare(
+    "UPDATE model_change_set_receipts SET receipt_sha256 = ?",
+  ).run("f".repeat(64));
+  assert.equal(store.publicDirectModelMutationReceipt(actionId), null);
+
+  database.prepare(
+    "UPDATE model_change_set_receipts SET receipt_sha256 = ?",
+  ).run(valid.receiptDigest);
+  database.exec("PRAGMA foreign_keys = OFF");
+  database.exec("DROP TRIGGER conversation_owner_immutable");
+  database.prepare(
+    "UPDATE conversations SET model_id = ? WHERE id = ?",
+  ).run("model_foreign_owner", "conversation_model");
+  assert.equal(store.publicDirectModelMutationReceipt(actionId), null);
 });
 
 test("ambiguous discussion has proposal-only capability and can persist a draft without mutating Model state", async (t) => {

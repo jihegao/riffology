@@ -1457,17 +1457,29 @@ export class AgentWorkspaceService {
           routingMode: skill.routingMode,
           loadState: skill.loadState,
         })),
-        actions: activity.actions.map((action) => Object.freeze({
-          id: action.id,
-          actionKind: action.actionKind,
-          permissionDecision: action.permissionDecision,
-          state: action.state,
-          errorCode: action.errorCode,
-        })),
+        actions: this.publicActionRecords(activity.actions),
       });
     } catch (error) {
       throw storeApiError(error);
     }
+  }
+
+  publicActionRecords(
+    actions: ReadonlyArray<AgentTurnDto["actions"][number]>,
+  ): PublicActionRecordDto[] {
+    return actions.map((action) => {
+      const mutationReceipt = this.store.publicDirectModelMutationReceipt(
+        action.id,
+      );
+      return Object.freeze({
+        id: action.id,
+        actionKind: action.actionKind,
+        permissionDecision: action.permissionDecision,
+        state: action.state,
+        errorCode: action.errorCode,
+        ...(mutationReceipt ? { mutationReceipt } : {}),
+      });
+    });
   }
 
   async conversationRuntime(conversationIdInput: string): Promise<ConversationRuntimeDto> {

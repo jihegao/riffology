@@ -1,9 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
+import { ReviewRail, type ReviewFile } from "./ReviewRail";
 import type {
   DiagnosticEventPage,
   ExperimentConfiguration,
+  GeneratedViewSet,
+  ModelChangeSet,
+  ModelMutationReceipt,
   ModelWorkspaceDto,
   ProjectRun,
   ProjectWorkspaceDto,
@@ -45,8 +56,84 @@ function ModelWorkspace({
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<string>();
   const [error, setError] = useState<string>();
-  const [rendered, setRendered] = useState<RendererResource>();
-  const [renderedFileId, setRenderedFileId] = useState<string>();
+  const capabilityKey = `${workspace.owner.id}:${workspace.digest}`;
+  const [generatedState, setGeneratedState] = useState<Readonly<{
+    key: string;
+    loading: boolean;
+    value: GeneratedViewSet | null;
+    error?: string;
+  }>>({ key: capabilityKey, loading: true, value: null });
+  const [changeState, setChangeState] = useState<Readonly<{
+    key: string;
+    loading: boolean;
+    value: readonly ModelChangeSet[];
+    error?: string;
+  }>>({ key: capabilityKey, loading: true, value: [] });
+  const [sourceTarget, setSourceTarget] =
+    useState<Readonly<{ relativePath: string; requestId: number }>>();
+  const auxiliaryRequest = useRef(0);
+  const modelFiles = useMemo<readonly ReviewFile[]>(() => workspace.files.map((file) => ({
+    key: file.id,
+    relativePath: file.relativePath ?? file.id,
+    mediaType: file.mediaType,
+    sizeBytes: file.sizeBytes,
+    sha256: file.sha256,
+  })), [workspace.files]);
+
+  const loadAuxiliary = useCallback(async () => {
+    const request = ++auxiliaryRequest.current;
+    setGeneratedState({ key: capabilityKey, loading: true, value: null });
+    setChangeState({ key: capabilityKey, loading: true, value: [] });
+    const viewsPromise =
+      client.generatedViews?.(workspace.owner.id) ?? Promise.resolve(null);
+    const changesPromise =
+      client.modelChangeSets?.(workspace.owner.id) ?? Promise.resolve([]);
+    void viewsPromise.then((value) => {
+      if (auxiliaryRequest.current === request) {
+        setGeneratedState({ key: capabilityKey, loading: false, value });
+      }
+    }).catch((cause) => {
+      if (auxiliaryRequest.current === request) {
+        setGeneratedState({
+          key: capabilityKey,
+          loading: false,
+          value: null,
+          error: messageOf(cause, "Generated views are unavailable."),
+        });
+      }
+    });
+    void changesPromise.then((value) => {
+      if (auxiliaryRequest.current === request) {
+        setChangeState({ key: capabilityKey, loading: false, value });
+      }
+    }).catch((cause) => {
+      if (auxiliaryRequest.current === request) {
+        setChangeState({
+          key: capabilityKey,
+          loading: false,
+          value: [],
+          error: messageOf(cause, "Change review is unavailable."),
+        });
+      }
+    });
+    await Promise.allSettled([viewsPromise, changesPromise]);
+  }, [capabilityKey, client, workspace.owner.id]);
+
+  useEffect(() => {
+    void loadAuxiliary();
+    return () => { auxiliaryRequest.current += 1; };
+  }, [loadAuxiliary, workspace.digest]);
+
+  const generatedViews = generatedState.key === capabilityKey
+    ? generatedState.value
+    : null;
+  const generatedLoading = generatedState.key !== capabilityKey || generatedState.loading;
+  const generatedError = generatedState.key === capabilityKey
+    ? generatedState.error
+    : undefined;
+  const changeSets = changeState.key === capabilityKey ? changeState.value : [];
+  const changeError = changeState.key === capabilityKey ? changeState.error : undefined;
+
   const check = async () => {
     setPending(true);
     setError(undefined);
@@ -60,102 +147,223 @@ function ModelWorkspace({
       setPending(false);
     }
   };
+
+  const applyChangeSet = async (
+    changeSet: ModelChangeSet,
+  ): Promise<ModelMutationReceipt> => {
+    if (!client.applyModelChangeSet) throw new Error("Change-set apply is unavailable.");
+    const receipt = await client.applyModelChangeSet({
+      modelId: workspace.owner.id,
+      changeSetId: changeSet.id,
+      commandId: crypto.randomUUID(),
+      expectedChangeSetDigest: changeSet.changeSetDigest,
+      expectedWorkspaceDigest: changeSet.currentWorkspaceDigest,
+    });
+    await refresh();
+    await loadAuxiliary();
+    return receipt;
+  };
+
+  const rejectChangeSet = async (
+    changeSet: ModelChangeSet,
+  ): Promise<ModelMutationReceipt> => {
+    if (!client.rejectModelChangeSet) throw new Error("Change-set reject is unavailable.");
+    const receipt = await client.rejectModelChangeSet({
+      modelId: workspace.owner.id,
+      changeSetId: changeSet.id,
+      commandId: crypto.randomUUID(),
+      expectedChangeSetDigest: changeSet.changeSetDigest,
+    });
+    await loadAuxiliary();
+    return receipt;
+  };
+
   return (
-    <div className="product-dynamic-workspace" data-testid="model-workspace">
-      <section className="product-workspace-card" data-testid="workspace-owner-card">
-        <div className="product-section-heading">
-          <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
-            {workspace.owner.technicalStatus}
-          </span>
-          <button type="button" className="product-primary" disabled={pending} onClick={() => void check()}>
-            {pending ? "Checking…" : "Run technical check"}
-          </button>
-        </div>
-        <p>
-          “Technically executable” means only that the thin execution contract passed.
-          It is not evidence of correctness, calibration, trust, or fitness for a decision.
-        </p>
-        {result && <p role="status">{result}</p>}
-        {error && <p role="alert" className="product-form-error">{error}</p>}
+    <div className="product-workbench-layout" data-testid="model-workspace">
+      <div className="product-workbench-canvas product-dynamic-workspace">
+        <section className="product-workspace-card" data-testid="workspace-owner-card">
+          <div className="product-section-heading">
+            <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
+              {workspace.owner.technicalStatus}
+            </span>
+            <button type="button" className="product-primary" disabled={pending} onClick={() => void check()}>
+              {pending ? "Checking…" : "Run technical check"}
+            </button>
+          </div>
+          <p>
+            “Technically executable” means only that the thin execution contract passed.
+            It is not evidence of correctness, calibration, trust, or fitness for a decision.
+          </p>
+          {result && <p role="status">{result}</p>}
+          {error && <p role="alert" className="product-form-error">{error}</p>}
+        </section>
+        <GeneratedViewsPanel
+          client={client}
+          modelId={workspace.owner.id}
+          viewSet={generatedViews}
+          loading={generatedLoading}
+          unavailable={generatedError}
+          onSourceReference={(relativePath) => setSourceTarget({
+            relativePath,
+            requestId: Date.now(),
+          })}
+        />
+        {changeError && (
+          <section className="product-workspace-card product-generated-empty" role="status">
+            <h3>Change review unavailable</h3>
+            <p>{changeError}</p>
+          </section>
+        )}
+        <details className="product-workspace-card product-technical-details">
+          <summary>Technical details</summary>
+          <RendererRegistry resource={{
+            kind: "json",
+            title: "Input schema",
+            value: workspace.execution.inputs.schema,
+          }} />
+          <RendererRegistry resource={{
+            kind: "table",
+            title: "Declared outputs",
+            caption: `Output contract for ${workspace.owner.name}`,
+            columns: ["Logical name", "Role", "Media type", "Required"],
+            rows: workspace.execution.outputs.map((output) => [
+              output.logicalName,
+              output.role,
+              output.mediaType,
+              output.required ? "yes" : "no",
+            ]),
+          }} />
+        </details>
+      </div>
+      <ReviewRail
+        ownerKey={`model:${workspace.owner.id}:${workspace.digest}`}
+        files={modelFiles}
+        changeSets={changeSets}
+        sourceTarget={sourceTarget}
+        loadFile={(file) => client.modelRenderable(workspace.owner.id, file.key)}
+        onApply={client.applyModelChangeSet ? applyChangeSet : undefined}
+        onReject={client.rejectModelChangeSet ? rejectChangeSet : undefined}
+      />
+    </div>
+  );
+}
+
+function GeneratedViewsPanel({
+  client,
+  modelId,
+  viewSet,
+  loading,
+  unavailable,
+  onSourceReference,
+}: Readonly<{
+  client: ProductClient;
+  modelId: string;
+  viewSet?: GeneratedViewSet | null;
+  loading: boolean;
+  unavailable?: string;
+  onSourceReference: (relativePath: string) => void;
+}>) {
+  const orderedViews = useMemo(() => [...(viewSet?.views ?? [])].sort(
+    (left, right) => left.position - right.position,
+  ), [viewSet]);
+  const [selectedViewId, setSelectedViewId] = useState("");
+  const [renderable, setRenderable] = useState<unknown>();
+  const [error, setError] = useState<string>();
+  const requestGeneration = useRef(0);
+  const selectedView = orderedViews.find((view) => view.id === selectedViewId)
+    ?? orderedViews[0];
+
+  useEffect(() => {
+    if (!orderedViews.some((view) => view.id === selectedViewId)) {
+      setSelectedViewId(orderedViews[0]?.id ?? "");
+    }
+  }, [orderedViews, selectedViewId]);
+
+  useEffect(() => {
+    const request = ++requestGeneration.current;
+    setRenderable(undefined);
+    setError(undefined);
+    if (!selectedView || !client.generatedViewRenderable) return;
+    void client.generatedViewRenderable(modelId, selectedView.id).then((resource) => {
+      if (requestGeneration.current === request) setRenderable(resource);
+    }).catch((cause) => {
+      if (requestGeneration.current === request) {
+        setError(messageOf(cause, "This generated view could not be rendered."));
+      }
+    });
+  }, [client, modelId, selectedView?.id, viewSet?.setDigest]);
+
+  if (loading) {
+    return <p className="product-empty" role="status">Loading generated views…</p>;
+  }
+  if (unavailable) {
+    return (
+      <section className="product-workspace-card product-generated-empty" role="status">
+        <h3>Generated views unavailable</h3>
+        <p>{unavailable}</p>
       </section>
-      <RendererRegistry resource={{
-        kind: "diagram",
-        title: "Execution structure",
-        summary: `A ${workspace.execution.runMode} Python Model with declared inputs, outputs, and cancellation.`,
-        nodes: [
-          { id: "inputs", label: "Declared inputs" },
-          { id: "entry", label: workspace.execution.batch?.entryPoint ?? workspace.execution.visual?.entryPoint ?? "Entry point" },
-          { id: "outputs", label: "Checked outputs" },
-        ],
-        edges: [
-          { from: "inputs", to: "entry", label: "frozen envelope" },
-          { from: "entry", to: "outputs", label: "declared files" },
-        ],
-      }} />
-      <section className="product-workspace-card">
-        <h3>Declared resources</h3>
-        <p>Renderer choice comes from the server-declared kind and validated media type.</p>
-        <div className="product-downloads">
-          {workspace.files.map((file) => (
+    );
+  }
+  if (!viewSet || orderedViews.length === 0) {
+    return (
+      <section className="product-workspace-card product-generated-empty" role="status">
+        <h3>No generated views</h3>
+        <p>
+          This Model has no current Agent-published structural view. Files and technical
+          evidence remain available without requiring a particular view.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="product-generated-views" aria-label="Generated Model views">
+      <div className="product-generated-view-heading">
+        <div>
+          <span className={`product-badge product-badge-${viewSet.freshness}`}>
+            {viewSet.freshness}
+          </span>
+          <p>
+            {viewSet.freshness === "stale"
+              ? "These views were captured from an earlier Model workspace and are read-only."
+              : "Agent-generated projections for the current Model workspace."}
+          </p>
+        </div>
+        <div className="product-generated-view-selector" role="group" aria-label="Generated view">
+          {orderedViews.map((view) => (
             <button
               type="button"
-              className="product-secondary"
-              key={file.id}
-              onClick={() => void client.modelRenderable(workspace.owner.id, file.id)
-                .then((resource) => {
-                  setRendered(resource);
-                  setRenderedFileId(file.id);
-                })
-                .catch((cause) => setError(messageOf(cause, "The declared resource could not be rendered.")))}
+              key={view.id}
+              aria-pressed={view.id === selectedView?.id}
+              onClick={() => setSelectedViewId(view.id)}
             >
-              Render {file.relativePath ?? file.id}
+              {view.title}
             </button>
           ))}
         </div>
-      </section>
-      {rendered && (
-        <>
-          <RendererRegistry resource={rendered} />
-          {rendered.kind === "attachment" && renderedFileId && (
-            <button type="button" className="product-secondary" onClick={() =>
-              void client.downloadModelFile(workspace.owner.id, renderedFileId)
-                .catch((cause) => setError(messageOf(cause, "The opaque resource could not be downloaded.")))}>
-              Download opaque resource
+      </div>
+      {selectedView?.sourceFileRefs.length ? (
+        <div className="product-generated-view-sources">
+          <strong>Sources</strong>
+          {selectedView.sourceFileRefs.map((reference) => (
+            <button
+              type="button"
+              className="product-link-button"
+              key={reference}
+              onClick={() => onSourceReference(reference)}
+            >
+              {reference}
             </button>
-          )}
-        </>
+          ))}
+        </div>
+      ) : null}
+      {error && <p className="product-form-error" role="alert">{error}</p>}
+      {renderable !== undefined && (
+        <RendererRegistry
+          resource={renderable}
+          onSourceReference={onSourceReference}
+        />
       )}
-      <RendererRegistry resource={{
-        kind: "json",
-        title: "Input schema",
-        value: workspace.execution.inputs.schema,
-      }} />
-      <RendererRegistry resource={{
-        kind: "table",
-        title: "Declared outputs",
-        caption: `Output contract for ${workspace.owner.name}`,
-        columns: ["Logical name", "Role", "Media type", "Required"],
-        rows: workspace.execution.outputs.map((output) => [
-          output.logicalName,
-          output.role,
-          output.mediaType,
-          output.required ? "yes" : "no",
-        ]),
-      }} />
-      <RendererRegistry resource={{
-        kind: "table",
-        title: "Workspace files",
-        caption: `Safe file metadata for ${workspace.owner.name}`,
-        columns: ["File", "Kind", "Media type", "Bytes", "SHA-256"],
-        rows: workspace.files.map((file) => [
-          file.relativePath ?? file.id,
-          file.kind ?? "model file",
-          file.mediaType,
-          file.sizeBytes,
-          file.sha256,
-        ]),
-      }} />
-    </div>
+    </section>
   );
 }
 
@@ -180,6 +388,20 @@ function ProjectWorkspace({
     (item) => item.id === selectedExperimentId,
   );
   const selectedRun = workspace.runs.find((item) => item.id === selectedRunId);
+  const runPriority = selectedRun
+    ? ["queued", "running", "cancelling"].includes(selectedRun.status)
+      ? "active"
+      : selectedRun.terminalStatus || selectedRun.status === "trashed"
+        ? "terminal"
+        : "planning"
+    : "planning";
+  const projectFiles = useMemo<readonly ReviewFile[]>(() => workspace.files.map((file) => ({
+    key: file.fileRef,
+    relativePath: file.relativePath,
+    mediaType: file.mediaType,
+    sizeBytes: file.sizeBytes,
+    sha256: file.sha256,
+  })), [workspace.files]);
 
   useEffect(() => {
     if (!selectedExperimentId && workspace.experimentConfigurations[0]) {
@@ -210,40 +432,95 @@ function ProjectWorkspace({
   };
 
   return (
-    <div className="product-dynamic-workspace" data-testid="project-workspace">
-      <section className="product-workspace-card" data-testid="workspace-owner-card">
-        <span className="product-badge">fixed copy</span>
-        <p>
-          This Project owns an immutable Model copy. It offers no active Model switch
-          or Model-version browser.
-        </p>
-        <dl className="product-facts">
-          <div><dt>Snapshot</dt><dd><code>{workspace.modelSnapshotDigest}</code></dd></div>
-          <div><dt>Execution</dt><dd>{workspace.execution.runMode}</dd></div>
-          <div><dt>Files</dt><dd>{workspace.files.length}</dd></div>
-        </dl>
-      </section>
-      {error && <p role="alert" className="product-form-error">{error}</p>}
-      <ExperimentEditor
-        client={client}
-        workspace={workspace}
-        selected={selectedExperiment}
-        selectedId={selectedExperimentId}
-        setSelectedId={setSelectedExperimentId}
-        pending={pending}
-        act={act}
-      />
-      <RunWorkspace
-        client={client}
-        workspace={workspace}
-        experiment={selectedExperiment}
-        selectedConversationId={selectedConversationId}
-        selectedRun={selectedRun}
-        selectedRunId={selectedRunId}
-        setSelectedRunId={setSelectedRunId}
-        pending={pending}
-        act={act}
-      />
+    <div className="product-workbench-layout" data-testid="project-workspace">
+      <div className="product-workbench-canvas product-dynamic-workspace">
+        <section
+          className={`product-workspace-card product-project-priority product-project-priority-${runPriority}`}
+          data-testid="workspace-owner-card"
+        >
+          <span className="product-badge">
+            {runPriority === "active"
+              ? `${selectedRun?.status} Run`
+              : runPriority === "terminal"
+                ? `${selectedRun?.status} result`
+                : "plan experiment"}
+          </span>
+          <p>
+            {runPriority === "active"
+              ? "The current Run is active. Direct status and cancellation controls remain available without the Agent."
+              : runPriority === "terminal"
+                ? "The latest selected Run is terminal. Review outputs and diagnostics before starting another Run."
+                : "Create or select an Experiment configuration before starting a frozen Run."}
+          </p>
+        </section>
+        {error && <p role="alert" className="product-form-error">{error}</p>}
+        {runPriority === "planning" ? (
+          <>
+            <ExperimentEditor
+              client={client}
+              workspace={workspace}
+              selected={selectedExperiment}
+              selectedId={selectedExperimentId}
+              setSelectedId={setSelectedExperimentId}
+              pending={pending}
+              act={act}
+            />
+            <RunWorkspace
+              client={client}
+              workspace={workspace}
+              experiment={selectedExperiment}
+              selectedConversationId={selectedConversationId}
+              selectedRun={selectedRun}
+              selectedRunId={selectedRunId}
+              setSelectedRunId={setSelectedRunId}
+              pending={pending}
+              act={act}
+            />
+          </>
+        ) : (
+          <>
+            <RunWorkspace
+              client={client}
+              workspace={workspace}
+              experiment={selectedExperiment}
+              selectedConversationId={selectedConversationId}
+              selectedRun={selectedRun}
+              selectedRunId={selectedRunId}
+              setSelectedRunId={setSelectedRunId}
+              pending={pending}
+              act={act}
+            />
+            <ExperimentEditor
+              client={client}
+              workspace={workspace}
+              selected={selectedExperiment}
+              selectedId={selectedExperimentId}
+              setSelectedId={setSelectedExperimentId}
+              pending={pending}
+              act={act}
+            />
+          </>
+        )}
+        <details className="product-workspace-card product-technical-details">
+          <summary>Technical details</summary>
+          <p>
+            This Project owns an immutable Model copy. It offers no active Model switch
+            or Model-version browser.
+          </p>
+          <dl className="product-facts">
+            <div><dt>Snapshot</dt><dd><code>{workspace.modelSnapshotDigest}</code></dd></div>
+            <div><dt>Execution</dt><dd>{workspace.execution.runMode}</dd></div>
+            <div><dt>Files</dt><dd>{workspace.files.length}</dd></div>
+          </dl>
+        </details>
+      </div>
+      {client.projectFileRenderable && (
+        <ReviewRail
+          ownerKey={`project:${workspace.owner.id}:${workspace.modelSnapshotDigest}`}
+          files={projectFiles}
+          loadFile={(file) => client.projectFileRenderable!(workspace.owner.id, file.key)}
+        />
+      )}
     </div>
   );
 }
@@ -431,6 +708,12 @@ function RunWorkspace({
             <div><dt>Metrics</dt><dd>{workspace.execution.overview?.metricNames?.length ?? 0}</dd></div>
             <div><dt>Duration</dt><dd>{selectedRun.durationMs === null ? "pending" : `${selectedRun.durationMs} ms`}</dd></div>
             <div><dt>Outputs</dt><dd>{selectedRun.outputs.length}</dd></div>
+            {terminal && (
+              <>
+                <div><dt>Terminal status</dt><dd>{selectedRun.terminalStatus ?? selectedRun.status}</dd></div>
+                <div><dt>Terminal code</dt><dd><code>{selectedRun.terminalCode ?? "not provided"}</code></dd></div>
+              </>
+            )}
           </dl>
           {selectedRun.resourceOverview && (
             <RendererRegistry resource={{
@@ -457,7 +740,9 @@ function RunWorkspace({
               Restore Run
             </button>
           )}
-          {selectedRun.status === "succeeded" && selectedRun.runKind === "batch" && (
+          {terminal
+            && selectedRun.runKind === "batch"
+            && selectedRun.outputs.length > 0 && (
             <>
               <RendererRegistry resource={{
                 kind: "table",
@@ -585,6 +870,70 @@ function RunWorkspace({
                 </button>
               )}
               <p>To analyze outputs, ask in the selected Conversation. Riff never creates an analysis document automatically.</p>
+            </>
+          )}
+          {terminal
+            && selectedRun.runKind === "batch"
+            && selectedRun.outputs.length === 0
+            && typeof client.diagnosticEvents === "function" && (
+            <>
+              <p className="product-empty" role="status">
+                This terminal Run published no outputs. Diagnostic events may still explain
+                its terminal state.
+              </p>
+              <div className="product-event-filters" aria-label="Diagnostic event filters">
+                <label>
+                  Event type
+                  <input value={eventType} onChange={(event) => setEventType(event.target.value)} />
+                </label>
+                <label>
+                  Sample index
+                  <input
+                    inputMode="numeric"
+                    value={eventSample}
+                    onChange={(event) => setEventSample(event.target.value)}
+                  />
+                </label>
+                <button type="button" className="product-secondary" disabled={eventsPending} onClick={() => {
+                  const sampleIndex = eventSample === "" ? undefined : Number(eventSample);
+                  if (sampleIndex !== undefined && (!Number.isSafeInteger(sampleIndex) || sampleIndex < 0)) {
+                    setDetailError("Sample index must be a non-negative integer.");
+                    return;
+                  }
+                  setDetailError(undefined);
+                  setEventsPending(true);
+                  const epoch = requestEpoch.current;
+                  const runId = selectedRun.id;
+                  void client.diagnosticEvents(workspace.owner.id, runId, {
+                    ...(eventType ? { type: eventType } : {}),
+                    ...(sampleIndex === undefined ? {} : { sampleIndex }),
+                  }).then((page) => {
+                    if (currentRequest(epoch, runId)) setEvents(page);
+                  }).catch((cause) => {
+                    if (currentRequest(epoch, runId)) {
+                      setDetailError(messageOf(cause, "Diagnostic events could not be loaded."));
+                    }
+                  }).finally(() => {
+                    if (currentRequest(epoch, runId)) setEventsPending(false);
+                  });
+                }}>
+                  {eventsPending ? "Loading diagnostic events…" : "Load diagnostic events"}
+                </button>
+              </div>
+              {events && <RendererRegistry resource={{
+                kind: "table",
+                title: "Diagnostic events",
+                caption: `Bounded diagnostic events for Run ${selectedRun.id}`,
+                columns: ["Sequence", "Sample", "Type", "Occurred at", "Payload"],
+                rows: events.items.map((event) => [
+                  event.sequence,
+                  event.sampleIndex,
+                  event.type,
+                  event.occurredAt ?? "model time only",
+                  event.payload,
+                ]),
+              }} />}
+              <p>To analyze a failed or interrupted Run, ask in the selected Conversation. Riff never creates an analysis document automatically.</p>
             </>
           )}
           {selectedRun.runKind === "visual" && ["running", "cancelling"].includes(selectedRun.status) && (

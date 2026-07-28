@@ -23,8 +23,23 @@ export type RendererResource =
       kind: "diagram";
       title: string;
       summary: string;
-      nodes: readonly Readonly<{ id: string; label: string }>[];
-      edges: readonly Readonly<{ from: string; to: string; label?: string }>[];
+      nodes: readonly Readonly<{
+        id: string;
+        label: string;
+        groupId?: string;
+        sourceRefs?: readonly string[];
+      }>[];
+      edges: readonly Readonly<{
+        from: string;
+        to: string;
+        label?: string;
+        sourceRefs?: readonly string[];
+      }>[];
+      groups?: readonly Readonly<{
+        id: string;
+        label: string;
+        sourceRefs?: readonly string[];
+      }>[];
     }>
   | Readonly<{
       kind: "attachment";
@@ -35,7 +50,21 @@ export type RendererResource =
       reason: "active_content" | "unsupported_media";
     }>;
 
-export function RendererRegistry({ resource }: Readonly<{ resource: RendererResource }>) {
+export function RendererRegistry({
+  resource,
+  onSourceReference,
+}: Readonly<{
+  resource: RendererResource | unknown;
+  onSourceReference?: (reference: string) => void;
+}>) {
+  if (!rendererShape(resource)) {
+    return (
+      <section className="product-renderer product-renderer-error" role="status">
+        <h3>{rendererTitle(resource)}</h3>
+        <p>renderer_invalid: this resource cannot be rendered safely.</p>
+      </section>
+    );
+  }
   const issue = rendererIssue(resource);
   if (issue) {
     return (
@@ -67,7 +96,12 @@ export function RendererRegistry({ resource }: Readonly<{ resource: RendererReso
     case "chart":
       return <ChartRenderer resource={resource} />;
     case "diagram":
-      return <DiagramRenderer resource={resource} />;
+      return (
+        <DiagramRenderer
+          resource={resource}
+          onSourceReference={onSourceReference}
+        />
+      );
     case "attachment":
       return (
         <section className="product-renderer" role="status">
@@ -158,12 +192,69 @@ const ChartRenderer = ({
 
 const DiagramRenderer = ({
   resource,
-}: Readonly<{ resource: Extract<RendererResource, { kind: "diagram" }> }>) => {
+  onSourceReference,
+}: Readonly<{
+  resource: Extract<RendererResource, { kind: "diagram" }>;
+  onSourceReference?: (reference: string) => void;
+}>) => {
   const labels = new Map(resource.nodes.map((node) => [node.id, node.label]));
+  const groupLabels = new Map(resource.groups?.map((group) => [group.id, group.label]) ?? []);
   return (
     <section className="product-renderer">
       <h3>{resource.title}</h3>
       <p>{resource.summary}</p>
+      <div className="product-diagram-canvas" role="group" aria-label={resource.summary}>
+        {(resource.groups ?? []).map((group) => (
+          <section className="product-diagram-group" key={group.id} aria-label={group.label}>
+            <strong>{group.label}</strong>
+            <SourceReferences
+              references={group.sourceRefs}
+              onSourceReference={onSourceReference}
+            />
+            <div>
+              {resource.nodes.filter((node) => node.groupId === group.id).map((node) => (
+                <DiagramNode
+                  key={node.id}
+                  node={node}
+                  onSourceReference={onSourceReference}
+                />
+              ))}
+            </div>
+          </section>
+        ))}
+        <div className="product-diagram-ungrouped">
+          {resource.nodes.filter((node) =>
+            !node.groupId || !groupLabels.has(node.groupId)).map((node) => (
+              <DiagramNode
+                key={node.id}
+                node={node}
+                onSourceReference={onSourceReference}
+              />
+            ))}
+        </div>
+      </div>
+      <TableRenderer resource={{
+        kind: "table",
+        title: `${resource.title} elements`,
+        caption: `Accessible nodes and groups for ${resource.title}`,
+        columns: ["Element type", "ID", "Label", "Group", "Sources"],
+        rows: [
+          ...(resource.groups ?? []).map((group) => [
+            "group",
+            group.id,
+            group.label,
+            "",
+            group.sourceRefs?.join(", ") ?? "",
+          ]),
+          ...resource.nodes.map((node) => [
+            "node",
+            node.id,
+            node.label,
+            node.groupId ? (groupLabels.get(node.groupId) ?? node.groupId) : "ungrouped",
+            node.sourceRefs?.join(", ") ?? "",
+          ]),
+        ],
+      }} />
       <TableRenderer resource={{
         kind: "table",
         title: `${resource.title} connections`,
@@ -175,9 +266,145 @@ const DiagramRenderer = ({
           labels.get(edge.to) ?? edge.to,
         ]),
       }} />
+      {resource.edges.some((edge) => edge.sourceRefs?.length) && (
+        <div className="product-diagram-sources">
+          <strong>Relationship sources</strong>
+          {resource.edges.map((edge, index) => edge.sourceRefs?.length ? (
+            <div key={`${edge.from}:${edge.to}:${index}`}>
+              <span>{labels.get(edge.from) ?? edge.from} → {labels.get(edge.to) ?? edge.to}</span>
+              <SourceReferences
+                references={edge.sourceRefs}
+                onSourceReference={onSourceReference}
+              />
+            </div>
+          ) : null)}
+        </div>
+      )}
     </section>
   );
 };
+
+const DiagramNode = ({
+  node,
+  onSourceReference,
+}: Readonly<{
+  node: Extract<RendererResource, { kind: "diagram" }>["nodes"][number];
+  onSourceReference?: (reference: string) => void;
+}>) => (
+  <article className="product-diagram-node">
+    <span>{node.label}</span>
+    <SourceReferences
+      references={node.sourceRefs}
+      onSourceReference={onSourceReference}
+    />
+  </article>
+);
+
+const SourceReferences = ({
+  references,
+  onSourceReference,
+}: Readonly<{
+  references?: readonly string[];
+  onSourceReference?: (reference: string) => void;
+}>) => references?.length ? (
+  <span className="product-source-references">
+    {references.map((reference) => onSourceReference
+      ? (
+        <button
+          type="button"
+          className="product-link-button"
+          key={reference}
+          onClick={() => onSourceReference(reference)}
+        >
+          {reference}
+        </button>
+        )
+      : <code key={reference}>{reference}</code>)}
+  </span>
+) : null;
+
+const rendererShape = (value: unknown): value is RendererResource => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const resource = value as Record<string, unknown>;
+  if (typeof resource.kind !== "string" || typeof resource.title !== "string") return false;
+  switch (resource.kind) {
+    case "markdown":
+      return typeof resource.text === "string";
+    case "code":
+      return typeof resource.language === "string" && typeof resource.text === "string";
+    case "json":
+      return Object.hasOwn(resource, "value");
+    case "table":
+      return typeof resource.caption === "string"
+        && stringArray(resource.columns)
+        && Array.isArray(resource.rows)
+        && resource.rows.every(Array.isArray);
+    case "chart":
+      return typeof resource.summary === "string"
+        && typeof resource.categoryLabel === "string"
+        && typeof resource.valueLabel === "string"
+        && Array.isArray(resource.rows)
+        && resource.rows.every((row) => objectWith(row, {
+          category: "string",
+          value: "number",
+        }));
+    case "diagram":
+      return typeof resource.summary === "string"
+        && Array.isArray(resource.nodes)
+        && resource.nodes.every((node) => objectWith(node, {
+          id: "string",
+          label: "string",
+        }) && optionalString(node, "groupId") && optionalStringArray(node, "sourceRefs"))
+        && Array.isArray(resource.edges)
+        && resource.edges.every((edge) => objectWith(edge, {
+          from: "string",
+          to: "string",
+        }) && optionalString(edge, "label") && optionalStringArray(edge, "sourceRefs"))
+        && (resource.groups === undefined
+          || (Array.isArray(resource.groups)
+            && resource.groups.every((group) => objectWith(group, {
+              id: "string",
+              label: "string",
+            }) && optionalStringArray(group, "sourceRefs"))));
+    case "attachment":
+      return typeof resource.mediaType === "string"
+        && typeof resource.sizeBytes === "number"
+        && typeof resource.sha256 === "string"
+        && (resource.reason === "active_content" || resource.reason === "unsupported_media");
+    default:
+      return false;
+  }
+};
+
+const stringArray = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const objectWith = (
+  value: unknown,
+  fields: Readonly<Record<string, "string" | "number">>,
+): value is Record<string, unknown> => Boolean(
+  value
+  && typeof value === "object"
+  && !Array.isArray(value)
+  && Object.entries(fields).every(([field, type]) =>
+    typeof (value as Record<string, unknown>)[field] === type),
+);
+
+const optionalString = (value: unknown, field: string): boolean =>
+  !value || typeof value !== "object"
+    || (value as Record<string, unknown>)[field] === undefined
+    || typeof (value as Record<string, unknown>)[field] === "string";
+
+const optionalStringArray = (value: unknown, field: string): boolean =>
+  !value || typeof value !== "object"
+    || (value as Record<string, unknown>)[field] === undefined
+    || stringArray((value as Record<string, unknown>)[field]);
+
+const rendererTitle = (value: unknown): string =>
+  value && typeof value === "object" && !Array.isArray(value)
+    && typeof (value as { title?: unknown }).title === "string"
+    ? (value as { title: string }).title
+    : "Unavailable view";
 
 const rendererIssue = (resource: RendererResource): string | null => {
   if (resource.kind === "markdown" || resource.kind === "code") {
@@ -205,7 +432,8 @@ const rendererIssue = (resource: RendererResource): string | null => {
     return "renderer_limit_exceeded: this chart exceeds the safe mark limit.";
   }
   if (resource.kind === "diagram"
-    && (resource.nodes.length > 2_000 || resource.edges.length > 4_000)) {
+    && (resource.nodes.length > 2_000 || resource.edges.length > 4_000
+      || (resource.groups?.length ?? 0) > 500)) {
     return "renderer_limit_exceeded: this diagram exceeds the safe graph limit.";
   }
   try {
