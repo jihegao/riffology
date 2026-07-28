@@ -473,7 +473,9 @@ export class MilestoneA2Api {
           200,
           this.service.listModelChangeSets(
             modelId,
-            state as "pending" | "applied" | "rejected" | undefined,
+            state === null
+              ? undefined
+              : state as "pending" | "applied" | "rejected",
           ),
         );
         return true;
@@ -643,7 +645,7 @@ export class MilestoneA2Api {
           200,
           {
             ...result,
-            turn: publicAgentTurn(result.turn),
+            turn: publicAgentTurn(result.turn, this.service),
             messages: result.messages.map(publicConversationMessage),
           },
         );
@@ -667,7 +669,7 @@ export class MilestoneA2Api {
         });
         privateJson(response, 200, {
           ...result,
-          turn: publicAgentTurn(result.turn),
+          turn: publicAgentTurn(result.turn, this.service),
           messages: result.messages.map(publicConversationMessage),
         });
         return true;
@@ -1707,6 +1709,7 @@ const publicPlatformCard = (
 
 const publicAgentTurn = (
   turn: AgentTurnDto,
+  service: AgentWorkspaceService,
 ): Readonly<Record<string, unknown>> => Object.freeze({
   requestKey: turn.requestKey,
   agentName: turn.agentName,
@@ -1720,13 +1723,7 @@ const publicAgentTurn = (
     routingMode: skill.routingMode,
     loadState: skill.loadState,
   })),
-  actions: turn.actions.map((action) => Object.freeze({
-    id: action.id,
-    actionKind: action.actionKind,
-    permissionDecision: action.permissionDecision,
-    state: action.state,
-    errorCode: action.errorCode,
-  })),
+  actions: service.publicActionRecords(turn.actions),
   goalVerification: publicGoalVerification(turn.goalVerification),
   failure: turn.failure,
 });

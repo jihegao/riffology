@@ -86,7 +86,10 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await expect(page.getByTestId("shell-owner-heading")).not.toHaveText("Loading workspace…");
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeVisible();
-  await expect(page.getByTestId("workspace-owner-card")).toContainText("fixed copy");
+  await expect(page.getByTestId("workspace-owner-card")).toContainText("plan experiment");
+  await expect(page.getByTestId("workspace-owner-card")).toContainText(
+    "Create or select an Experiment configuration",
+  );
   const projectOwnerName =
     (await page.getByTestId("shell-owner-heading").textContent())!.trim();
   await expect(page.getByRole("heading", {
@@ -98,6 +101,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await page.setViewportSize({ width: 640, height: 900 });
   const selector = page.getByTestId("pane-selector");
   await expect(selector).toBeVisible();
+  await selector.getByRole("button", { name: "Conversation" }).focus();
   await expect(selector.getByRole("button", { name: "Conversation" })).toBeFocused();
   await expect(page.getByTestId("pane-conversation")).toBeVisible();
   await expect(page.getByTestId("pane-workspace")).toBeHidden();

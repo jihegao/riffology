@@ -159,12 +159,26 @@ export type SkillUse = Readonly<{
   loadState: "selected" | "loaded" | "failed";
 }>;
 
+export type DirectMutationReceipt = Readonly<{
+  operation: "direct_apply";
+  receiptDigest: string;
+  beforeWorkspaceDigest: string;
+  afterWorkspaceDigest: string;
+  committedAt: string;
+  files: readonly Readonly<{
+    relativePath: string;
+    priorSha256: string | null;
+    proposedSha256: string;
+  }>[];
+}>;
+
 export type ActionRecord = Readonly<{
   id: string;
   actionKind: string;
   permissionDecision: "pending" | "allowed" | "denied";
   state: "proposed" | "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed";
   errorCode: string | null;
+  mutationReceipt?: DirectMutationReceipt;
 }>;
 
 export type ConversationRuntimeStatus =
@@ -362,6 +376,72 @@ export type WorkspaceFile = Readonly<{
   createdAt?: string;
 }>;
 
+export type ProjectWorkspaceFile = Readonly<{
+  fileRef: string;
+  relativePath: string;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+  readOnly: true;
+}>;
+
+export type GeneratedViewSet = Readonly<{
+  sourceWorkspaceDigest: string;
+  currentWorkspaceDigest: string;
+  setDigest: string;
+  freshness: "fresh" | "stale";
+  publishedAt: string;
+  views: readonly Readonly<{
+    id: string;
+    title: string;
+    position: number;
+    rendererKind: string;
+    mediaType: string;
+    payloadDigest: string;
+    sourceFileRefs: readonly string[];
+  }>[];
+}>;
+
+export type ModelChangeSet = Readonly<{
+  id: string;
+  baseWorkspaceDigest: string;
+  currentWorkspaceDigest: string;
+  changeSetDigest: string;
+  freshness: "fresh" | "stale";
+  state: "pending" | "applied" | "rejected";
+  createdAt: string;
+  resolvedAt: string | null;
+  files: readonly Readonly<{
+    itemId: string;
+    kind: string;
+    relativePath: string;
+    mediaType: string;
+    priorSha256: string | null;
+    proposedSha256: string;
+    proposedText: string;
+  }>[];
+}>;
+
+export type ModelMutationReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: string;
+  operation: "apply" | "reject" | "direct_apply";
+  modelId: string;
+  changeSetId: string | null;
+  changeSetDigest: string;
+  beforeWorkspaceDigest: string;
+  afterWorkspaceDigest: string;
+  files: readonly Readonly<{
+    itemId: string;
+    relativePath: string;
+    priorSha256: string | null;
+    proposedSha256: string;
+  }>[];
+  committedAt: string;
+  receiptDigest: string;
+}>;
+
 export type TechnicalCheck = Readonly<{
   id: string;
   modelId: string;
@@ -480,7 +560,7 @@ export type ProjectWorkspaceDto = WorkspaceBase<"project"> & Readonly<{
   modelSnapshotDigest: string;
   execution: ExecutionDescription;
   executionDescriptionDigest: string;
-  files: readonly WorkspaceFile[];
+  files: readonly ProjectWorkspaceFile[];
   experimentConfigurations: readonly ExperimentConfiguration[];
   runs: readonly ProjectRun[];
 }>;

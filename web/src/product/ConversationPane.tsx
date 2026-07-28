@@ -1054,6 +1054,19 @@ function Transcript({
               <li key={action.id}>
                 <strong>{action.actionKind}</strong>
                 <span>{action.permissionDecision} · {action.state}</span>
+                {action.state === "committed"
+                  && action.mutationReceipt?.operation === "direct_apply" && (
+                  <div className="product-action-receipt" role="status">
+                    <strong>Applied</strong>
+                    <span>
+                      Receipt <code>{action.mutationReceipt.receiptDigest}</code>
+                    </span>
+                    <span>
+                      {action.mutationReceipt.files.length} file
+                      {action.mutationReceipt.files.length === 1 ? "" : "s"} committed
+                    </span>
+                  </div>
+                )}
               </li>
             ))}
           </ul>

@@ -370,6 +370,10 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   const response = await responsePromise;
   assert.equal(response.status, 200, await response.clone().text());
   const payload = await response.json() as any;
+  const code = app.productStore!.listObjectFiles({
+    kind: "model",
+    id: created.model.id,
+  }).find((file) => file.kind === "model_code")!;
   assert.equal(payload.mode, "live");
   assert.equal(openCode.scopedBindings.size, 0);
   assert.equal(openCode.unboundScopes.length, 1);
@@ -377,11 +381,49 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   assert.doesNotMatch(JSON.stringify(payload), /cap=|capability|externalSessionRef|workspacePath|opaque-session/u);
   assert.doesNotMatch(
     JSON.stringify(payload),
-    /mutationReceipt|itemId|objectFileId|expectedPriorSha256/u,
-    "capability-scoped direct-apply receipt details must not enter browser projections",
+    /itemId|objectFileId|expectedPriorSha256|modelId|changeSetId|commandId|workspacePath|\/Users\//u,
+    "capability-scoped direct-apply receipt must expose no internal identity or workspace authority",
+  );
+  const publicReceipt = payload.turn.actions[0]?.mutationReceipt;
+  assert.deepEqual(Object.keys(publicReceipt).sort(), [
+    "afterWorkspaceDigest",
+    "beforeWorkspaceDigest",
+    "committedAt",
+    "files",
+    "operation",
+    "receiptDigest",
+  ]);
+  assert.equal(publicReceipt.operation, "direct_apply");
+  assert.deepEqual(Object.keys(publicReceipt.files[0]).sort(), [
+    "priorSha256",
+    "proposedSha256",
+    "relativePath",
+  ]);
+  assert.equal(publicReceipt.files[0].relativePath, code.relativePath.replace(/^code\//u, ""));
+
+  const activityResponse = await apiFetch(
+    `${baseUrl}/api/conversations/${created.conversation.id}/actions`,
+  );
+  assert.equal(activityResponse.status, 200);
+  const activity = await activityResponse.json() as any;
+  assert.deepEqual(activity.actions[0]?.mutationReceipt, publicReceipt);
+  assert.doesNotMatch(
+    JSON.stringify(activity),
+    /itemId|objectFileId|expectedPriorSha256|modelId|changeSetId|commandId|workspacePath|\/Users\//u,
   );
 
-  const code = app.productStore!.listObjectFiles({ kind: "model", id: created.model.id }).find((file) => file.kind === "model_code")!;
+  const retry = await post(
+    `${baseUrl}/api/conversations/${created.conversation.id}/turns`,
+    {
+      requestKey: "scoped-mcp-turn",
+      text: "Update the model file now",
+      attachmentIds: [],
+    },
+  );
+  assert.equal(retry.status, 200);
+  const retryPayload = await retry.json() as any;
+  assert.deepEqual(retryPayload.turn.actions[0]?.mutationReceipt, publicReceipt);
+
   assert.equal(app.productStore!.readObjectFile(code.id).toString("utf8"), "print('scoped MCP')\n");
   assert.equal(payload.turn.actions[0]?.state, "committed");
 
@@ -437,6 +479,12 @@ test("scoped MCP admits the reachable 8 MiB proposal ceiling without widening Pr
     },
   );
   assert.equal(response.status, 200, await response.clone().text());
+  const proposalTurn = await response.json() as any;
+  assert.equal(
+    proposalTurn.turn.actions[0]?.mutationReceipt,
+    undefined,
+    "committed proposal actions must not project a direct-apply receipt",
+  );
   const changeSets = app.productStore!.listModelChangeSets(created.model.id);
   assert.equal(changeSets.length, 1);
   assert.equal(
@@ -772,6 +820,14 @@ test("generated-view and change-set APIs are digest-bound and redact Store ident
   assert.equal(listResponse.status, 200);
   const listed = await listResponse.json() as any;
   assert.equal(listed.changeSets[0].id, changeSet.id);
+  const unfilteredListResponse = await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/change-sets`,
+  );
+  assert.equal(unfilteredListResponse.status, 200);
+  assert.equal(
+    (await unfilteredListResponse.json() as any).changeSets[0].id,
+    changeSet.id,
+  );
   const detailResponse = await apiFetch(
     `${baseUrl}/api/models/${created.model.id}/change-sets/${changeSet.id}`,
   );

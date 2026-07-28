@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -45,6 +45,7 @@ import type {
   ConversationDto,
   ConversationMessageDto,
   ConversationProviderBindingReceipt,
+  PublicDirectModelMutationReceiptDto,
   VisualInteractionMarker,
   DurableAgentSessionState,
   ModelFileMutation,
@@ -1808,6 +1809,136 @@ export class ProductStoreV2 {
     assertId(turnId);
     assertId(actionId);
     return this.#actions(turnId).find((row) => row.id === actionId) ?? null;
+  }
+
+  publicDirectModelMutationReceipt(
+    actionId: string,
+  ): PublicDirectModelMutationReceiptDto | null {
+    this.#assertOpen();
+    assertId(actionId);
+    const action = this.#database.prepare(
+      `SELECT action.id, action.turn_id, action.action_kind,
+        action.intent_json, action.state, action.affected_resources_json,
+        action.updated_at, conversation.model_id, conversation.project_id
+       FROM action_records action
+       JOIN agent_turns turn ON turn.id = action.turn_id
+         AND turn.conversation_id = action.conversation_id
+       JOIN conversations conversation
+         ON conversation.id = action.conversation_id
+       WHERE action.id = ?`,
+    ).get(actionId) as {
+      id: string;
+      turn_id: string;
+      action_kind: string;
+      intent_json: string;
+      state: string;
+      affected_resources_json: string;
+      updated_at: string;
+      model_id: string | null;
+      project_id: string | null;
+    } | undefined;
+    if (!action
+      || action.state !== "committed"
+      || action.action_kind !== "model_files_mutate"
+      || action.model_id === null
+      || action.project_id !== null) {
+      return null;
+    }
+    try {
+      const intent = JSON.parse(action.intent_json) as unknown;
+      if (!isPlainRecord(intent)
+        || !closedKeys(intent, [
+          "changeCount",
+          "changesDigest",
+          "executionDescriptionDigest",
+          "requestKey",
+          "schemaVersion",
+        ])
+        || intent.schemaVersion !== 1
+        || !SAFE_ID.test(String(intent.requestKey))
+        || !Number.isSafeInteger(intent.changeCount)
+        || (intent.changeCount as number) < 1
+        || (intent.changeCount as number) > 64
+        || !/^[0-9a-f]{64}$/u.test(String(intent.changesDigest))
+        || (intent.executionDescriptionDigest !== null
+          && !/^[0-9a-f]{64}$/u.test(
+            String(intent.executionDescriptionDigest),
+          ))) {
+        return null;
+      }
+      const requestKey = intent.requestKey as string;
+      if (action.id !== stableAgentId(
+        "action",
+        `${action.turn_id}:apply:${requestKey}`,
+      )) {
+        return null;
+      }
+      const commandId = stableAgentId(
+        "model_command",
+        `${action.turn_id}:${requestKey}`,
+      );
+      const receiptRow = this.#database.prepare(
+        `SELECT model_id, change_set_id, operation,
+          canonical_intent_sha256, receipt_json, receipt_sha256, committed_at
+         FROM model_change_set_receipts WHERE command_id = ?`,
+      ).get(commandId) as {
+        model_id: string;
+        change_set_id: string | null;
+        operation: string;
+        canonical_intent_sha256: string;
+        receipt_json: string;
+        receipt_sha256: string;
+        committed_at: string;
+      } | undefined;
+      if (!receiptRow
+        || receiptRow.operation !== "direct_apply"
+        || receiptRow.change_set_id !== null
+        || receiptRow.model_id !== action.model_id) {
+        return null;
+      }
+      const receipt = assertModelMutationReceipt(
+        JSON.parse(receiptRow.receipt_json),
+      );
+      if (receipt.commandId !== commandId
+        || receipt.operation !== "direct_apply"
+        || receipt.changeSetId !== null
+        || receipt.modelId !== action.model_id
+        || receipt.receiptDigest !== receiptRow.receipt_sha256
+        || receipt.committedAt !== receiptRow.committed_at
+        || receipt.committedAt !== action.updated_at
+        || receipt.files.length !== intent.changeCount
+        || receiptRow.canonical_intent_sha256 !== canonicalDigest({
+          operation: "direct_apply",
+          modelId: receipt.modelId,
+          changeSetDigest: receipt.changeSetDigest,
+        })) {
+        return null;
+      }
+      const affected = JSON.parse(action.affected_resources_json) as unknown;
+      const expectedAffected = receipt.files.map((file) => ({
+        kind: "model_file",
+        id: file.itemId,
+        sha256: file.proposedSha256,
+      }));
+      if (!Array.isArray(affected)
+        || canonicalDigest(affected) !== canonicalDigest(expectedAffected)) {
+        return null;
+      }
+      return Object.freeze({
+        operation: "direct_apply" as const,
+        receiptDigest: receipt.receiptDigest,
+        beforeWorkspaceDigest: receipt.beforeWorkspaceDigest,
+        afterWorkspaceDigest: receipt.afterWorkspaceDigest,
+        committedAt: receipt.committedAt,
+        files: Object.freeze(receipt.files.map((file) => Object.freeze({
+          relativePath: file.relativePath,
+          priorSha256: file.priorSha256,
+          proposedSha256: file.proposedSha256,
+        }))),
+      });
+    } catch {
+      return null;
+    }
   }
 
   commitActionWithToolResult(input: {
@@ -10320,6 +10451,9 @@ const assertModelMutationReceipt = (value: unknown): ModelMutationReceipt => {
 
 const closedKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).sort().join("\u0000") === [...keys].sort().join("\u0000");
+
+const stableAgentId = (prefix: string, input: string): string =>
+  `${prefix}_${createHash("sha256").update(input).digest("hex").slice(0, 32)}`;
 
 const modelMutationReceiptInsert = (
   receipt: ModelMutationReceipt,
