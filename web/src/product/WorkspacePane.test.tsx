@@ -204,6 +204,35 @@ describe("dynamic Project workspace", () => {
       expect(productClient.visualHostUrl).toHaveBeenCalledWith("project-one", "run-visual"));
   });
 
+  it("embeds one issued visual frame and lets the user close it", async () => {
+    const productClient = client();
+    render(<WorkspacePane
+      client={productClient}
+      workspace={workspace("visual")}
+      refresh={vi.fn(async () => {})}
+    />);
+
+    await userEvent.click(screen.getByRole("button", {
+      name: "Embed visual simulation",
+    }));
+    const frame = await screen.findByTitle("Embedded Project visual simulation");
+    expect(frame).toHaveAttribute(
+      "src",
+      "http://localhost:8788/frame/redeem/opaque",
+    );
+    expect(frame).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-same-origin",
+    );
+    expect(productClient.issueVisualFrame).toHaveBeenCalledWith(
+      "project-one",
+      "run-visual",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByTitle("Embedded Project visual simulation")).toBeNull();
+  });
+
   it("keeps a trashed Run selectable so the user can restore it", async () => {
     const productClient = client();
     const base = workspace();

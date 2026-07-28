@@ -37,6 +37,10 @@ import {
   PreinstalledWindInstaller,
   type PreinstalledWindInstallerPort,
 } from "./preinstalled-wind-installer.ts";
+import {
+  PreinstalledWindVisualInstaller,
+  type PreinstalledWindVisualInstallerPort,
+} from "./preinstalled-wind-visual-installer.ts";
 import { ProductStoreV2, type HealthyVisualFrameTarget } from "./product-store-v2.ts";
 import {
   authorityScopeForPermanentDelete,
@@ -238,8 +242,10 @@ export type BackendOptions = {
   a3DispatcherLeaseMs?: number;
   a3DiagnosticEventCursorSecret?: Uint8Array;
   a3InstallPreinstalledWind?: boolean;
+  a3InstallPreinstalledWindVisual?: boolean;
   a3PreinstalledWindRepositoryRoot?: string;
   a3PreinstalledWindInstaller?: PreinstalledWindInstallerPort;
+  a3PreinstalledWindVisualInstaller?: PreinstalledWindVisualInstallerPort;
   legacyCloseDrainTimeoutMs?: number;
   browserFrameTargetResolver?: BrowserFrameTargetResolver;
   productOnly?: boolean;
@@ -443,6 +449,7 @@ export class BackendApp {
   readonly #agentTurnRuntime?: AgentTurnRuntime;
   readonly #authorityDeletionFence = new ProductAuthorityDeletionFence();
   readonly #preinstalledWindInstaller?: PreinstalledWindInstallerPort;
+  readonly #preinstalledWindVisualInstaller?: PreinstalledWindVisualInstallerPort;
   readonly #a2OpenCode?: OpenCodeConversationPort;
   readonly #productMode: boolean;
   readonly #repositoryRoot?: string;
@@ -523,8 +530,23 @@ export class BackendApp {
           technicalChecker: options.a2TechnicalChecker
             ?? new ModelTechnicalChecker({
               pythonExecutable: pythonExecutable(),
-            }),
+          }),
         });
+      }
+      if (options.a3PreinstalledWindVisualInstaller) {
+        this.#preinstalledWindVisualInstaller =
+          options.a3PreinstalledWindVisualInstaller;
+      } else if (options.a3InstallPreinstalledWindVisual) {
+        this.#preinstalledWindVisualInstaller =
+          new PreinstalledWindVisualInstaller({
+            store: this.productStore,
+            repositoryRoot: options.a3PreinstalledWindRepositoryRoot
+              ?? resolve(import.meta.dirname, "../.."),
+            technicalChecker: options.a2TechnicalChecker
+              ?? new ModelTechnicalChecker({
+                pythonExecutable: pythonExecutable(),
+              }),
+          });
       }
       const batchSupervisor = options.a3BatchSupervisor ?? new GenericBatchSupervisor({
         pythonExecutable: pythonExecutable(),
@@ -667,6 +689,7 @@ export class BackendApp {
       try {
         await this.productRunDispatcher?.recoverBeforeStart();
         await this.#preinstalledWindInstaller?.install();
+        await this.#preinstalledWindVisualInstaller?.install();
         if (this.#repositoryRoot) {
           this.#legacyPreflight = runLegacyStatePreflight(this.#repositoryRoot);
         }

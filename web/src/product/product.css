@@ -557,10 +557,21 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
 }
 .product-visual-frame {
   width: 100%;
-  min-height: 30rem;
+  min-height: 42rem;
   border: 1px solid #d2ccc0;
   border-radius: .75rem;
   background: #fff;
+}
+.product-embedded-visual {
+  display: grid;
+  gap: .6rem;
+  padding-top: .35rem;
+}
+.product-embedded-visual > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 .product-state-page { min-height: 60vh; }
 .product-state-page h1 { max-width: 20ch; font-family: Georgia, serif; font-size: 3rem; font-weight: 500; }

@@ -261,6 +261,17 @@ OpenCode evidence.
 bash scripts/start-local-demo.sh
 ```
 
+To restart the local Product app, and the loopback OpenCode service when live
+mode is enabled, use:
+
+```sh
+bash scripts/restart-local-demo.sh
+```
+
+The restart script refuses to stop a listener unless its process command matches
+the expected local Riff or OpenCode service. It preserves Product data and logs
+to `/tmp/riff-demo-backend.log` and `/tmp/riff-demo-opencode.log`.
+
 Open [http://localhost:8787](http://localhost:8787). The backend exact-binds
 `[::1]:8787`, serves the built Product shell and APIs from that authority, and
 uses a second server-owned `[::1]:8788` visual-broker port. The default Product

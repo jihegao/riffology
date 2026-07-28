@@ -261,6 +261,7 @@ const MAX_TREE_BYTES = 512 * 1024 * 1024;
  * into a shared internal module once both supervisors have stabilized.
  */
 export class GenericVisualSupervisor {
+  readonly #requestedPython: string;
   readonly #python: string;
   readonly #runtimeReadRoots: readonly string[];
   readonly #pythonImportRoots: readonly string[];
@@ -270,6 +271,7 @@ export class GenericVisualSupervisor {
   readonly #leases = new Map<string, ScratchLease>();
 
   constructor(options: GenericVisualSupervisorOptions) {
+    this.#requestedPython = options.pythonExecutable;
     this.#python = canonicalRestrictedExecutable(options.pythonExecutable);
     this.#runtimeReadRoots = Object.freeze(
       trustedPythonRuntimeRoots(options.pythonExecutable, this.#python),
@@ -492,7 +494,7 @@ export class GenericVisualSupervisor {
         scratchRoot: scratchPath,
         tempRoot: tempDirectory,
         launchReceiptPath: receiptPath,
-        executable: this.#python,
+        executable: this.#requestedPython,
         runtimeReadRoots: this.#runtimeReadRoots,
         assignedHost: VISUAL_LOOPBACK_HOST,
         assignedPort: loopbackPort,

@@ -372,6 +372,7 @@ function RunWorkspace({
   const [eventsPending, setEventsPending] = useState(false);
   const [renderedOutput, setRenderedOutput] = useState<RendererResource>();
   const [visualHostUrl, setVisualHostUrl] = useState<string>();
+  const [visualFrameUrl, setVisualFrameUrl] = useState<string>();
   const [detailError, setDetailError] = useState<string>();
   const requestEpoch = useRef(0);
   const selectedRunIdRef = useRef(selectedRunId);
@@ -416,6 +417,7 @@ function RunWorkspace({
         setEventsPending(false);
         setRenderedOutput(undefined);
         setVisualHostUrl(undefined);
+        setVisualFrameUrl(undefined);
         setDetailError(undefined);
       }}>
         <option value="">Select a Run</option>
@@ -591,6 +593,29 @@ function RunWorkspace({
           )}
           {selectedRun.runKind === "visual" && ["running", "cancelling"].includes(selectedRun.status) && (
             <>
+              <button type="button" className="product-primary" onClick={() =>
+                {
+                  const epoch = requestEpoch.current;
+                  const runId = selectedRun.id;
+                  setDetailError(undefined);
+                  setVisualFrameUrl(undefined);
+                  void client.issueVisualFrame(workspace.owner.id, runId)
+                    .then((issued) => {
+                      if (currentRequest(epoch, runId)) {
+                        setVisualFrameUrl(issued.frameUrl);
+                      }
+                    })
+                    .catch((cause) => {
+                      if (currentRequest(epoch, runId)) {
+                        setDetailError(messageOf(
+                          cause,
+                          "The embedded visual simulation is unavailable.",
+                        ));
+                      }
+                    });
+                }}>
+                Embed visual simulation
+              </button>
               <button type="button" className="product-secondary" onClick={() =>
                 {
                   const epoch = requestEpoch.current;
@@ -618,6 +643,27 @@ function RunWorkspace({
                 }}>
                 Open restricted visual frame
               </button>
+              {visualFrameUrl && (
+                <div className="product-embedded-visual">
+                  <div>
+                    <strong>Embedded visual simulation</strong>
+                    <button
+                      type="button"
+                      className="product-link-button"
+                      onClick={() => setVisualFrameUrl(undefined)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <iframe
+                    className="product-visual-frame"
+                    title="Embedded Project visual simulation"
+                    src={visualFrameUrl}
+                    sandbox="allow-scripts allow-same-origin"
+                    referrerPolicy="no-referrer"
+                  />
+                </div>
+              )}
               {visualHostUrl && (
                 window.location.origin === new URL(visualHostUrl).origin
                   ? (

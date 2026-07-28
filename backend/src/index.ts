@@ -24,6 +24,7 @@ try {
     ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
     a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     a3InstallPreinstalledWind: true,
+    a3InstallPreinstalledWindVisual: true,
     a3PreinstalledWindRepositoryRoot: repositoryRoot,
     repositoryRoot,
     staticWebRoot,
