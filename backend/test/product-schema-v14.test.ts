@@ -24,7 +24,7 @@ test("schema v14 installs durable lifecycle/delete receipts and process-private 
   try {
     installVersion13(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 16);
+    assert.equal(PRODUCT_SCHEMA_VERSION, 17);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,

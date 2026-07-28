@@ -148,12 +148,13 @@ export const initializeProductSchema = (
 ): void => {
   configureProductDatabase(database);
   assertMigrationSequence(migrations);
+  const targetVersion = migrations.at(-1)!.version;
   const installed = (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   const hasSchemaTable = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'product_schema'").get());
   const declared = hasSchemaTable
     ? (database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number } | undefined)?.version
     : undefined;
-  if (installed > PRODUCT_SCHEMA_VERSION) throw new Error(`Unsupported product schema version: ${installed}`);
+  if (installed > targetVersion) throw new Error(`Unsupported product schema version: ${installed}`);
   if (hasSchemaTable && declared !== installed) {
     throw new Error(`Product schema version drift: user_version=${installed}, product_schema=${String(declared ?? "missing")}`);
   }
@@ -175,7 +176,7 @@ export const initializeProductSchema = (
     }
     const schemaRow = database.prepare("SELECT version FROM product_schema WHERE singleton = 1").get() as { version: number } | undefined;
     const userVersion = (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (!schemaRow || schemaRow.version !== PRODUCT_SCHEMA_VERSION || userVersion !== PRODUCT_SCHEMA_VERSION) {
+    if (!schemaRow || schemaRow.version !== targetVersion || userVersion !== targetVersion) {
       throw new Error(`Incomplete product schema migration: user_version=${userVersion}, product_schema=${String(schemaRow?.version ?? "missing")}`);
     }
     database.exec("COMMIT");
@@ -197,7 +198,9 @@ const assertProductDatabaseIntegrity = (database: ProductDatabase, migrationVers
 };
 
 const assertMigrationSequence = (migrations: readonly ProductSchemaMigration[]): void => {
-  if (migrations.length !== PRODUCT_SCHEMA_VERSION) throw new Error("Product schema migration list does not reach the current version");
+  if (migrations.length < 1 || migrations.length > PRODUCT_SCHEMA_VERSION) {
+    throw new Error("Product schema migration list has an unsupported target version");
+  }
   migrations.forEach((migration, index) => {
     if (migration.version !== index + 1) throw new Error(`Product schema migrations are not sequential at index ${index}`);
   });
@@ -3584,6 +3587,195 @@ export const PRODUCT_SCHEMA_V16_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'terminal Agent turn requires goal verification'); END;
 `;
 
+export const PRODUCT_SCHEMA_V17_SQL = SQL`
+  CREATE TABLE model_generated_view_sets (
+    model_id TEXT PRIMARY KEY REFERENCES models(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    source_workspace_sha256 TEXT NOT NULL CHECK (
+      length(source_workspace_sha256) = 64
+      AND source_workspace_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    set_sha256 TEXT NOT NULL CHECK (
+      length(set_sha256) = 64
+      AND set_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    publisher_conversation_id TEXT,
+    publisher_turn_id TEXT,
+    published_at TEXT NOT NULL,
+    CHECK (
+      (publisher_conversation_id IS NULL AND publisher_turn_id IS NULL)
+      OR (publisher_conversation_id IS NOT NULL AND publisher_turn_id IS NOT NULL)
+    ),
+    FOREIGN KEY (publisher_turn_id, publisher_conversation_id)
+      REFERENCES agent_turns(id, conversation_id)
+      ON UPDATE RESTRICT ON DELETE SET NULL
+  ) STRICT;
+
+  CREATE TABLE model_generated_views (
+    id TEXT NOT NULL CHECK (length(id) BETWEEN 3 AND 128),
+    model_id TEXT NOT NULL REFERENCES model_generated_view_sets(model_id)
+      ON UPDATE RESTRICT ON DELETE CASCADE,
+    title TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 300),
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 15),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
+    payload_text TEXT NOT NULL CHECK (length(payload_text) <= 2097152),
+    payload_sha256 TEXT NOT NULL CHECK (
+      length(payload_sha256) = 64
+      AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    source_file_ids_json TEXT NOT NULL CHECK (
+      json_valid(source_file_ids_json)
+      AND json_type(source_file_ids_json) = 'array'
+    ),
+    PRIMARY KEY (model_id, id),
+    UNIQUE (model_id, position)
+  ) STRICT;
+
+  CREATE TABLE model_change_sets (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    model_id TEXT NOT NULL REFERENCES models(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    base_workspace_sha256 TEXT NOT NULL CHECK (
+      length(base_workspace_sha256) = 64
+      AND base_workspace_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    change_set_sha256 TEXT NOT NULL CHECK (
+      length(change_set_sha256) = 64
+      AND change_set_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'applied', 'rejected')),
+    execution_description_json TEXT CHECK (
+      execution_description_json IS NULL
+      OR (json_valid(execution_description_json)
+        AND json_type(execution_description_json) = 'object')
+    ),
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (id, model_id),
+    FOREIGN KEY (turn_id, conversation_id)
+      REFERENCES agent_turns(id, conversation_id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (
+      (state = 'pending' AND resolved_at IS NULL)
+      OR (state IN ('applied', 'rejected') AND resolved_at IS NOT NULL)
+    )
+  ) STRICT;
+
+  CREATE TABLE model_change_set_files (
+    item_id TEXT NOT NULL CHECK (length(item_id) BETWEEN 3 AND 128),
+    change_set_id TEXT NOT NULL REFERENCES model_change_sets(id)
+      ON UPDATE RESTRICT ON DELETE CASCADE,
+    object_file_id TEXT NOT NULL CHECK (length(object_file_id) BETWEEN 3 AND 128),
+    kind TEXT NOT NULL CHECK (
+      kind IN ('model_code', 'model_environment', 'model_visual_asset')
+    ),
+    relative_path TEXT NOT NULL CHECK (
+      length(relative_path) BETWEEN 1 AND 1024
+      AND substr(relative_path, 1, 1) != '/'
+      AND instr(relative_path, char(92)) = 0
+      AND instr(relative_path, char(0)) = 0
+      AND instr('/' || relative_path || '/', '/../') = 0
+      AND instr('/' || relative_path || '/', '/./') = 0
+      AND instr(relative_path, '//') = 0
+      AND substr(relative_path, -1, 1) != '/'
+    ),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
+    expected_prior_sha256 TEXT CHECK (
+      expected_prior_sha256 IS NULL
+      OR (length(expected_prior_sha256) = 64
+        AND expected_prior_sha256 NOT GLOB '*[^0-9a-f]*')
+    ),
+    proposed_text TEXT NOT NULL CHECK (length(proposed_text) <= 1048576),
+    proposed_sha256 TEXT NOT NULL CHECK (
+      length(proposed_sha256) = 64
+      AND proposed_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 63),
+    PRIMARY KEY (change_set_id, item_id),
+    UNIQUE (change_set_id, object_file_id),
+    UNIQUE (change_set_id, position)
+  ) STRICT;
+
+  CREATE TABLE model_change_set_receipts (
+    command_id TEXT PRIMARY KEY CHECK (length(command_id) BETWEEN 3 AND 128),
+    model_id TEXT NOT NULL REFERENCES models(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    change_set_id TEXT,
+    operation TEXT NOT NULL CHECK (operation IN ('apply', 'reject', 'direct_apply')),
+    canonical_intent_sha256 TEXT NOT NULL CHECK (
+      length(canonical_intent_sha256) = 64
+      AND canonical_intent_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json)
+      AND json_type(receipt_json) = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+      AND json_extract(receipt_json, '$.commandId') = command_id
+      AND json_extract(receipt_json, '$.operation') = operation
+      AND json_extract(receipt_json, '$.modelId') = model_id
+      AND json_extract(receipt_json, '$.committedAt') = committed_at
+      AND (
+        (operation = 'direct_apply'
+          AND change_set_id IS NULL
+          AND json_type(receipt_json, '$.changeSetId') = 'null')
+        OR
+        (operation IN ('apply', 'reject')
+          AND change_set_id IS NOT NULL
+          AND json_extract(receipt_json, '$.changeSetId') = change_set_id)
+      )
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64
+      AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+      AND json_extract(receipt_json, '$.receiptDigest') = receipt_sha256
+    ),
+    committed_at TEXT NOT NULL,
+    CHECK (
+      (operation = 'direct_apply' AND change_set_id IS NULL)
+      OR (operation IN ('apply', 'reject') AND change_set_id IS NOT NULL)
+    ),
+    FOREIGN KEY (change_set_id, model_id)
+      REFERENCES model_change_sets(id, model_id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT
+  ) STRICT;
+
+  CREATE TRIGGER model_change_set_receipts_immutable_update_v17
+  BEFORE UPDATE ON model_change_set_receipts
+  BEGIN SELECT RAISE(ABORT, 'Model change-set receipt is immutable'); END;
+
+  CREATE TRIGGER model_change_set_receipts_immutable_delete_v17
+  BEFORE DELETE ON model_change_set_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'Model change-set receipt is immutable'); END;
+
+  CREATE TABLE agent_tool_result_receipts (
+    action_id TEXT PRIMARY KEY REFERENCES action_records(id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    tool_name TEXT NOT NULL CHECK (tool_name IN (
+      'riff_propose_model_changes',
+      'riff_publish_model_generated_views'
+    )),
+    result_json TEXT NOT NULL CHECK (
+      json_valid(result_json)
+      AND json_type(result_json) = 'object'
+    ),
+    result_sha256 TEXT NOT NULL CHECK (
+      length(result_sha256) = 64
+      AND result_sha256 NOT GLOB '*[^0-9a-f]*'
+      AND result_sha256 = riff_canonical_sha256(result_json)
+    ),
+    created_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TRIGGER agent_tool_result_receipts_immutable_update_v17
+  BEFORE UPDATE ON agent_tool_result_receipts
+  BEGIN SELECT RAISE(ABORT, 'Agent tool result receipt is immutable'); END;
+
+  CREATE TRIGGER agent_tool_result_receipts_immutable_delete_v17
+  BEFORE DELETE ON agent_tool_result_receipts
+  WHEN riff_permanent_delete_context() != 1
+  BEGIN SELECT RAISE(ABORT, 'Agent tool result receipt is immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -3601,4 +3793,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 14, sql: PRODUCT_SCHEMA_V14_SQL }),
   Object.freeze({ version: 15, sql: PRODUCT_SCHEMA_V15_SQL }),
   Object.freeze({ version: 16, sql: PRODUCT_SCHEMA_V16_SQL }),
+  Object.freeze({ version: 17, sql: PRODUCT_SCHEMA_V17_SQL }),
 ]);

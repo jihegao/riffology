@@ -57,6 +57,84 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     },
     executionDescription: { type: "object" },
   }, ["requestKey", "changes"]),
+  riff_propose_model_changes: definition(
+    "Create one digest-bound, reviewable Model change set without modifying Model files.",
+    {
+      requestKey: { type: "string" },
+      changes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 64,
+        items: {
+          type: "object",
+          properties: {
+            objectFileId: { type: "string" },
+            kind: {
+              type: "string",
+              enum: [
+                "model_code",
+                "model_environment",
+                "model_visual_asset",
+              ],
+            },
+            relativePath: { type: "string" },
+            mediaType: { type: "string" },
+            text: { type: "string" },
+            expectedPriorSha256: {
+              anyOf: [
+                { type: "string", pattern: "^[0-9a-f]{64}$" },
+                { type: "null" },
+              ],
+            },
+          },
+          required: [
+            "objectFileId",
+            "kind",
+            "relativePath",
+            "mediaType",
+            "text",
+            "expectedPriorSha256",
+          ],
+          additionalProperties: false,
+        },
+      },
+      executionDescription: { type: "object" },
+    },
+    ["requestKey", "changes"],
+  ),
+  riff_publish_model_generated_views: definition(
+    "Atomically replace the current Model's bounded generated-view set.",
+    {
+      requestKey: { type: "string" },
+      views: {
+        type: "array",
+        maxItems: 16,
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            title: { type: "string" },
+            mediaType: { type: "string" },
+            payload: { type: "string" },
+            sourceFileIds: {
+              type: "array",
+              maxItems: 256,
+              items: { type: "string" },
+            },
+          },
+          required: [
+            "id",
+            "title",
+            "mediaType",
+            "payload",
+            "sourceFileIds",
+          ],
+          additionalProperties: false,
+        },
+      },
+    },
+    ["requestKey", "views"],
+  ),
   riff_list_experiment_configurations: definition(
     "List active, digest-bound Experiment configurations for the current Project.",
     {},
@@ -259,6 +337,8 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_list_model_workspace: [],
     riff_read_model_file: ["fileId"],
     riff_apply_model_changes: ["requestKey", "changes", "executionDescription"],
+    riff_propose_model_changes: ["requestKey", "changes", "executionDescription"],
+    riff_publish_model_generated_views: ["requestKey", "views"],
     riff_list_experiment_configurations: [],
     riff_update_experiment_configuration: [
       "requestKey",
@@ -281,13 +361,22 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > maximum) throw new AgentToolPermissionError(`Agent tool ${key} is invalid.`);
   };
   if (name === "riff_read_model_file") text("fileId", 256);
-  if (name === "riff_apply_model_changes") {
+  if (name === "riff_apply_model_changes"
+    || name === "riff_propose_model_changes") {
     text("requestKey", 256);
     if (!Array.isArray(input.changes) || input.changes.length < 1 || input.changes.length > 64 || input.changes.some((change) => !change || typeof change !== "object" || Array.isArray(change))) {
       throw new AgentToolPermissionError("Agent model changes are invalid.");
     }
     if (input.executionDescription !== undefined && (!input.executionDescription || typeof input.executionDescription !== "object" || Array.isArray(input.executionDescription))) {
       throw new AgentToolPermissionError("Agent execution description is invalid.");
+    }
+  }
+  if (name === "riff_publish_model_generated_views") {
+    text("requestKey", 256);
+    if (!Array.isArray(input.views) || input.views.length > 16
+      || input.views.some((view) => !view || typeof view !== "object"
+        || Array.isArray(view))) {
+      throw new AgentToolPermissionError("Agent generated views are invalid.");
     }
   }
   if (name === "riff_update_experiment_configuration") {

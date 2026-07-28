@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { PRODUCT_SCHEMA_VERSION } from "../src/product-domain.ts";
 import {
   configureProductDatabase,
   initializeProductSchema,
   PRODUCT_SCHEMA_MIGRATIONS,
-  PRODUCT_SCHEMA_V15_SQL,
+  PRODUCT_SCHEMA_V17_SQL,
 } from "../src/product-schema.ts";
 
-const installVersion14 = (database: DatabaseSync): void => {
+const installVersion16 = (database: DatabaseSync): void => {
   configureProductDatabase(database);
-  for (const migration of PRODUCT_SCHEMA_MIGRATIONS.slice(0, 14)) {
+  for (const migration of PRODUCT_SCHEMA_MIGRATIONS.slice(0, 16)) {
     database.exec(migration.sql);
     database.prepare(
       "UPDATE product_schema SET version = ? WHERE singleton = 1",
@@ -20,35 +19,47 @@ const installVersion14 = (database: DatabaseSync): void => {
   }
 };
 
-test("schema v15 adds immutable Conversation provider-binding receipts", () => {
+test("schema v17 adds bounded generated views, change sets, and immutable receipts", () => {
   const database = new DatabaseSync(":memory:");
   try {
-    installVersion14(database);
+    installVersion16(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 17);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;
       }).user_version,
-      PRODUCT_SCHEMA_VERSION,
+      17,
     );
-    assert.equal(Boolean(database.prepare(
-      `SELECT 1 FROM sqlite_master
-       WHERE type = 'table'
-         AND name = 'conversation_provider_binding_receipts'`,
-    ).get()), true);
+    for (const table of [
+      "model_generated_view_sets",
+      "model_generated_views",
+      "model_change_sets",
+      "model_change_set_files",
+      "model_change_set_receipts",
+      "agent_tool_result_receipts",
+    ]) {
+      assert.equal(Boolean(database.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+      ).get(table)), true, table);
+    }
     for (const trigger of [
-      "conversation_provider_binding_receipts_immutable_update_v15",
-      "conversation_provider_binding_receipts_immutable_delete_v15",
+      "model_change_set_receipts_immutable_update_v17",
+      "model_change_set_receipts_immutable_delete_v17",
+      "agent_tool_result_receipts_immutable_update_v17",
+      "agent_tool_result_receipts_immutable_delete_v17",
     ]) {
       assert.equal(Boolean(database.prepare(
         "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
       ).get(trigger)), true, trigger);
     }
     assert.equal(
-      (database.prepare("PRAGMA quick_check").get() as {
-        quick_check: string;
-      }).quick_check,
+      (database.prepare("PRAGMA foreign_key_check").get() ?? null),
+      null,
+    );
+    assert.equal(
+      (database.prepare("PRAGMA integrity_check").get() as {
+        integrity_check: string;
+      }).integrity_check,
       "ok",
     );
   } finally {
@@ -56,39 +67,37 @@ test("schema v15 adds immutable Conversation provider-binding receipts", () => {
   }
 });
 
-test("schema v15 migration failure restores both version markers", () => {
+test("schema v17 migration failure rolls back version markers and all v17 tables", () => {
   const database = new DatabaseSync(":memory:");
   try {
-    installVersion14(database);
+    installVersion16(database);
     const broken = [
-      ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 14),
+      ...PRODUCT_SCHEMA_MIGRATIONS.slice(0, 16),
       {
-        version: 15,
-        sql: `${PRODUCT_SCHEMA_V15_SQL}
-          SELECT * FROM missing_v15_rollback_probe;`,
+        version: 17,
+        sql: `${PRODUCT_SCHEMA_V17_SQL}
+          SELECT * FROM missing_v17_rollback_probe;`,
       },
-      PRODUCT_SCHEMA_MIGRATIONS[15]!,
     ];
     assert.throws(
       () => initializeProductSchema(database, broken),
-      /missing_v15_rollback_probe/u,
+      /missing_v17_rollback_probe/u,
     );
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;
       }).user_version,
-      14,
+      16,
     );
     assert.equal(
       (database.prepare(
         "SELECT version FROM product_schema WHERE singleton = 1",
       ).get() as { version: number }).version,
-      14,
+      16,
     );
     assert.equal(Boolean(database.prepare(
       `SELECT 1 FROM sqlite_master
-       WHERE type = 'table'
-         AND name = 'conversation_provider_binding_receipts'`,
+       WHERE type = 'table' AND name = 'model_change_sets'`,
     ).get()), false);
   } finally {
     database.close();

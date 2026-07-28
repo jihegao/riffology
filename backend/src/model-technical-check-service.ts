@@ -61,7 +61,7 @@ export class ModelTechnicalCheckService {
     const files = this.store.listObjectFiles({ kind: "model", id: model.id }).filter(checkableFile);
     return {
       model: { id: model.id, name: model.name, technicalStatus: model.technicalStatus, runMode: model.runMode, updatedAt: model.updatedAt },
-      digest: projectionDigest(files),
+      digest: this.store.modelWorkspaceDigest(model.id),
       execution: publicExecutionDescription(
         validateExecutionDescriptionV2(model.executionDescription),
       ),

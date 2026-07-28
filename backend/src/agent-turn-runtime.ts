@@ -4,7 +4,11 @@ import { canonicalJsonV2 } from "./canonical-json-v2.ts";
 import { AgentMcpServer } from "./agent-mcp.ts";
 import { toolsForOwner, type AgentToolExecutor, type AgentToolGrant, type AgentToolName } from "./agent-tools.ts";
 import type { AgentContextInput } from "./agent-context.ts";
-import type { ConversationOwner, ModelFileMutation } from "./agent-domain.ts";
+import type {
+  ActionRecordDto,
+  ConversationOwner,
+  ModelFileMutation,
+} from "./agent-domain.ts";
 import {
   experimentConfigurationRecordDigest,
   ProductStoreV2,
@@ -13,6 +17,8 @@ import {
 import { planExperiment } from "./experiment-planner.ts";
 import { SimulationSkillCatalog, type LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
+import { rendererDto } from "./renderer-registry.ts";
+import { validateExecutionDescriptionV2 } from "./execution-protocol-v2.ts";
 
 const VISUAL_OBSERVATION_OPERATIONS = Object.freeze({
   structured: "observe_structured",
@@ -229,6 +235,9 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       case "riff_list_model_workspace": return this.#listModelWorkspace(grant);
       case "riff_read_model_file": return this.#readModelFile(grant, String(input.fileId));
       case "riff_apply_model_changes": return this.#applyModelChanges(grant, input);
+      case "riff_propose_model_changes": return this.#proposeModelChanges(grant, input);
+      case "riff_publish_model_generated_views":
+        return this.#publishModelGeneratedViews(grant, input);
       case "riff_list_experiment_configurations":
         return this.#listExperimentConfigurations(grant);
       case "riff_update_experiment_configuration":
@@ -347,26 +356,296 @@ export class AgentTurnRuntime implements AgentToolExecutor {
 
   #applyModelChanges(grant: AgentToolGrant, input: Readonly<Record<string, unknown>>) {
     this.#requireModel(grant);
-    const actionId = stableId("action", `${grant.turnId}:apply:${canonical(input)}`);
-    this.#recordProposed(actionId, grant, "model_files_mutate", input);
-    if (grant.intentAuthority !== "explicit") return this.#deny(actionId, "explicit_imperative_required");
-    const raw = input.changes;
-    if (!Array.isArray(raw) || !raw.length || raw.length > 64) return this.#deny(actionId, "invalid_model_changes");
-    let files: ModelFileMutation[];
-    try { files = raw.map(parseModelFileMutation); }
-    catch { return this.#deny(actionId, "invalid_model_changes"); }
-    const executionDescription = input.executionDescription;
-    if (executionDescription !== undefined && (!executionDescription || typeof executionDescription !== "object" || Array.isArray(executionDescription))) return this.#deny(actionId, "invalid_execution_description");
+    const parsed = parseModelMutationToolInput(input);
+    const actionId = stableId(
+      "action",
+      `${grant.turnId}:apply:${parsed.requestKey}`,
+    );
+    if (!this.store.getActionRecord(grant.turnId, actionId)) {
+      this.store.validateModelFileMutations(grant.owner.id, parsed.files);
+    }
+    let action = this.#recordProposed(
+      actionId,
+      grant,
+      "model_files_mutate",
+      parsed.auditDescriptor,
+    );
+    if (action.state === "denied"
+      || action.state === "rolled_back"
+      || action.state === "failed") {
+      return safeActionResult(action);
+    }
+    if (grant.intentAuthority !== "explicit") {
+      return action.state === "proposed"
+        ? safeActionResult(this.#deny(actionId, "explicit_imperative_required"))
+        : safeActionResult(action);
+    }
     const at = this.#now();
-    this.store.transitionActionRecord({ id: actionId, expectedState: "proposed", state: "authorized", at });
     const transactionId = `mutation_agent_${createHash("sha256").update(actionId).digest("hex").slice(0, 32)}`;
-    this.store.transitionActionRecord({ id: actionId, expectedState: "authorized", state: "staging", mutationTransactionId: transactionId, at });
+    if (action.state === "proposed") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "proposed",
+        state: "authorized",
+        at,
+      });
+    }
+    if (action.state === "authorized") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "authorized",
+        state: "staging",
+        mutationTransactionId: transactionId,
+        at,
+      });
+    }
     try {
-      const changed = this.store.mutateModelFiles({ modelId: grant.owner.id, files, ...(executionDescription ? { executionDescription: executionDescription as Record<string, unknown> } : {}), updatedAt: at, transactionId });
-      return this.store.transitionActionRecord({ id: actionId, expectedState: "staging", state: "committed", mutationTransactionId: transactionId,
-        affectedResources: changed.map((file) => ({ kind: "model_file", id: file.id, sha256: file.sha256 })), at });
+      const receipt = this.store.commitDirectModelChanges({
+        commandId: stableId("model_command", `${grant.turnId}:${parsed.requestKey}`),
+        modelId: grant.owner.id,
+        files: parsed.files,
+        ...(parsed.executionDescription
+          ? { executionDescription: parsed.executionDescription }
+          : {}),
+        committedAt: at,
+        transactionId,
+      });
+      if (action.state === "staging") {
+        action = this.store.transitionActionRecord({
+          id: actionId,
+          expectedState: "staging",
+          state: "committed",
+          mutationTransactionId: transactionId,
+          affectedResources: receipt.files.map((file) => ({
+            kind: "model_file",
+            id: file.itemId,
+            sha256: file.proposedSha256,
+          })),
+          at,
+        });
+      }
+      return safeActionResult(action, { mutationReceipt: receipt });
     } catch (error) {
       try { this.store.transitionActionRecord({ id: actionId, expectedState: "staging", state: "rolled_back", mutationTransactionId: transactionId, errorCode: "model_mutation_failed", at }); } catch { /* startup reconciliation owns ambiguous staging */ }
+      throw error;
+    }
+  }
+
+  #proposeModelChanges(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+  ) {
+    this.#requireModel(grant);
+    const parsed = parseModelMutationToolInput(input);
+    const actionId = stableId(
+      "action",
+      `${grant.turnId}:propose:${parsed.requestKey}`,
+    );
+    if (!this.store.getActionRecord(grant.turnId, actionId)) {
+      this.store.validateModelFileMutations(grant.owner.id, parsed.files);
+    }
+    let action = this.#recordProposed(
+      actionId,
+      grant,
+      "model_change_set_create",
+      parsed.auditDescriptor,
+    );
+    const changeSetId = stableId(
+      "change_set",
+      `${grant.turnId}:${parsed.requestKey}`,
+    );
+    if (action.state === "committed") {
+      return assertSafeProposalToolResult(this.store.getAgentToolResult(
+        actionId,
+        "riff_propose_model_changes",
+      ));
+    }
+    if (action.state === "denied"
+      || action.state === "rolled_back"
+      || action.state === "failed") {
+      return safeActionResult(action);
+    }
+    const at = this.#now();
+    const transactionId =
+      `mutation_agent_${createHash("sha256").update(actionId).digest("hex").slice(0, 32)}`;
+    if (action.state === "proposed") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "proposed",
+        state: "authorized",
+        at,
+      });
+    }
+    if (action.state === "authorized") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "authorized",
+        state: "staging",
+        mutationTransactionId: transactionId,
+        at,
+      });
+    }
+    try {
+      const changeSet = this.store.createModelChangeSet({
+        id: changeSetId,
+        modelId: grant.owner.id,
+        conversationId: grant.conversationId,
+        turnId: grant.turnId,
+        baseWorkspaceDigest: this.store.modelWorkspaceDigest(grant.owner.id),
+        files: parsed.files,
+        ...(parsed.executionDescription
+          ? { executionDescription: parsed.executionDescription }
+          : {}),
+        createdAt: at,
+        transactionId,
+      });
+      if (action.state === "staging") {
+        const committed = this.store.commitActionWithToolResult({
+          actionId,
+          toolName: "riff_propose_model_changes",
+          mutationTransactionId: transactionId,
+          affectedResources: [{
+            kind: "model_change_set",
+            id: changeSet.id,
+            sha256: changeSet.changeSetDigest,
+          }],
+          result: safeCommittedActionResult(action, {
+            changeSet: safeChangeSetSummary(changeSet),
+          }),
+          at,
+        });
+        action = committed.action;
+        return assertSafeProposalToolResult(committed.result);
+      }
+      return assertSafeProposalToolResult(this.store.getAgentToolResult(
+        actionId,
+        "riff_propose_model_changes",
+      ));
+    } catch (error) {
+      try {
+        this.store.transitionActionRecord({
+          id: actionId,
+          expectedState: "staging",
+          state: "rolled_back",
+          mutationTransactionId: transactionId,
+          errorCode: "model_change_set_failed",
+          at,
+        });
+      } catch {
+        // Startup reconciliation owns ambiguous staging.
+      }
+      throw error;
+    }
+  }
+
+  #publishModelGeneratedViews(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+  ) {
+    this.#requireModel(grant);
+    const parsed = parseGeneratedViewsToolInput(input);
+    const actionId = stableId(
+      "action",
+      `${grant.turnId}:views:${parsed.requestKey}`,
+    );
+    if (!this.store.getActionRecord(grant.turnId, actionId)) {
+      const modelFiles = new Set(
+        this.store.listObjectFiles(grant.owner).map((file) => file.id),
+      );
+      if (parsed.views.some((view) =>
+        view.sourceFileIds.some((fileId) => !modelFiles.has(fileId)))) {
+        throw new AgentRuntimeError(
+          "file_scope_mismatch",
+          "A generated-view source is outside the bound Model workspace.",
+        );
+      }
+    }
+    let action = this.#recordProposed(
+      actionId,
+      grant,
+      "model_generated_views_publish",
+      parsed.auditDescriptor,
+    );
+    if (action.state === "committed") {
+      return assertSafeGeneratedViewsToolResult(
+        this.store.getAgentToolResult(
+          actionId,
+          "riff_publish_model_generated_views",
+        ),
+      );
+    }
+    if (action.state === "denied"
+      || action.state === "rolled_back"
+      || action.state === "failed") {
+      return safeActionResult(action);
+    }
+    const at = this.#now();
+    const transactionId =
+      `mutation_agent_${createHash("sha256").update(actionId).digest("hex").slice(0, 32)}`;
+    if (action.state === "proposed") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "proposed",
+        state: "authorized",
+        at,
+      });
+    }
+    if (action.state === "authorized") {
+      action = this.store.transitionActionRecord({
+        id: actionId,
+        expectedState: "authorized",
+        state: "staging",
+        mutationTransactionId: transactionId,
+        at,
+      });
+    }
+    try {
+      const set = this.store.publishGeneratedViews({
+        modelId: grant.owner.id,
+        conversationId: grant.conversationId,
+        turnId: grant.turnId,
+        sourceWorkspaceDigest: this.store.modelWorkspaceDigest(grant.owner.id),
+        views: parsed.views,
+        publishedAt: at,
+        transactionId,
+      });
+      if (action.state === "staging") {
+        const committed = this.store.commitActionWithToolResult({
+          actionId,
+          toolName: "riff_publish_model_generated_views",
+          mutationTransactionId: transactionId,
+          affectedResources: [{
+            kind: "model_generated_view_set",
+            id: grant.owner.id,
+            sha256: set.setDigest,
+          }],
+          result: safeCommittedActionResult(action, {
+            generatedViewSet: safeGeneratedViewSetSummary(set),
+          }),
+          at,
+        });
+        action = committed.action;
+        return assertSafeGeneratedViewsToolResult(committed.result);
+      }
+      return assertSafeGeneratedViewsToolResult(
+        this.store.getAgentToolResult(
+          actionId,
+          "riff_publish_model_generated_views",
+        ),
+      );
+    } catch (error) {
+      try {
+        this.store.transitionActionRecord({
+          id: actionId,
+          expectedState: "staging",
+          state: "rolled_back",
+          mutationTransactionId: transactionId,
+          errorCode: "generated_views_publish_failed",
+          at,
+        });
+      } catch {
+        // Startup reconciliation owns ambiguous staging.
+      }
       throw error;
     }
   }
@@ -643,10 +922,276 @@ const parseModelFileMutation = (value: unknown): ModelFileMutation => {
   if (Object.keys(row).some((key) => !["objectFileId", "kind", "relativePath", "mediaType", "text", "expectedPriorSha256"].includes(key))) throw new Error("invalid");
   const objectFileId = boundedId(row.objectFileId); const relativePath = safeLogicalName(boundedText(row.relativePath, 400)); const mediaType = boundedText(row.mediaType, 200);
   const kind = row.kind; if (!new Set(["model_code", "model_environment", "model_visual_asset"]).has(String(kind))) throw new Error("invalid");
-  const text = boundedText(row.text, 1_000_000, true); const expected = row.expectedPriorSha256;
+  const text = boundedText(row.text, 1_048_576, true); const expected = row.expectedPriorSha256;
   if (expected !== null && (typeof expected !== "string" || !/^[0-9a-f]{64}$/u.test(expected))) throw new Error("invalid");
   return { objectFileId, kind: kind as ModelFileMutation["kind"], relativePath, mediaType, bytes: Buffer.from(text), expectedPriorSha256: expected as string | null };
 };
+const parseModelMutationToolInput = (
+  input: Readonly<Record<string, unknown>>,
+) => {
+  if (Object.keys(input).some((key) =>
+    !["requestKey", "changes", "executionDescription"].includes(key))
+    || !Object.hasOwn(input, "requestKey")
+    || !Object.hasOwn(input, "changes")
+    || !Array.isArray(input.changes)
+    || input.changes.length < 1
+    || input.changes.length > 64) {
+    throw new AgentRuntimeError(
+      "invalid_tool_input",
+      "Agent Model changes are invalid.",
+    );
+  }
+  const requestKey = boundedId(input.requestKey);
+  const files = input.changes.map(parseModelFileMutation);
+  const executionDescription = input.executionDescription === undefined
+    ? undefined
+    : validateExecutionDescriptionV2(input.executionDescription);
+  const changesDigest = createHash("sha256")
+    .update(canonical({
+      changes: files.map((file) => ({
+        objectFileId: file.objectFileId,
+        kind: file.kind,
+        relativePath: file.relativePath,
+        mediaType: file.mediaType,
+        textSha256: createHash("sha256").update(file.bytes).digest("hex"),
+        expectedPriorSha256: file.expectedPriorSha256,
+      })),
+      executionDescription: executionDescription ?? null,
+    }))
+    .digest("hex");
+  return Object.freeze({
+    requestKey,
+    files: Object.freeze(files),
+    executionDescription,
+    auditDescriptor: Object.freeze({
+      schemaVersion: 1,
+      requestKey,
+      changeCount: files.length,
+      changesDigest,
+      executionDescriptionDigest: executionDescription === undefined
+        ? null
+        : createHash("sha256")
+          .update(canonical(executionDescription))
+          .digest("hex"),
+    }),
+  });
+};
+const parseGeneratedView = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid");
+  }
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).some((key) =>
+    !["id", "title", "mediaType", "payload", "sourceFileIds"].includes(key))) {
+    throw new Error("invalid");
+  }
+  const sourceFileIds = row.sourceFileIds;
+  if (!Array.isArray(sourceFileIds) || sourceFileIds.length > 256
+    || sourceFileIds.some((id) => typeof id !== "string")) {
+    throw new Error("invalid");
+  }
+  return {
+    id: boundedId(row.id),
+    title: boundedText(row.title, 300),
+    mediaType: boundedText(row.mediaType, 200),
+    payload: boundedText(row.payload, 2_097_152, true),
+    sourceFileIds: sourceFileIds.map(boundedId),
+  };
+};
+const parseGeneratedViewsToolInput = (
+  input: Readonly<Record<string, unknown>>,
+) => {
+  if (!closedInput(input, ["requestKey", "views"])
+    || !Array.isArray(input.views)
+    || input.views.length > 16) {
+    throw new AgentRuntimeError(
+      "invalid_tool_input",
+      "Generated views are invalid.",
+    );
+  }
+  const requestKey = boundedId(input.requestKey);
+  const views = input.views.map(parseGeneratedView);
+  if (new Set(views.map((view) => view.id)).size !== views.length) {
+    throw new AgentRuntimeError(
+      "invalid_tool_input",
+      "Generated-view identities are invalid.",
+    );
+  }
+  let totalBytes = 0;
+  let activePayloads = 0;
+  for (const view of views) {
+    const bytes = Buffer.from(view.payload, "utf8");
+    totalBytes += bytes.byteLength;
+    if (totalBytes > 8 * 1024 * 1024
+      || new Set(view.sourceFileIds).size !== view.sourceFileIds.length) {
+      throw new AgentRuntimeError(
+        "invalid_tool_input",
+        "Generated views exceed their bounded contract.",
+      );
+    }
+    const rendered = rendererDto({
+      title: view.title,
+      mediaType: view.mediaType,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes,
+    });
+    if (rendered.kind === "attachment"
+      && rendered.reason === "active_content") {
+      activePayloads += 1;
+      if (activePayloads > 1) {
+        throw new AgentRuntimeError(
+          "invalid_tool_input",
+          "Only one active generated-view payload is allowed.",
+        );
+      }
+    }
+  }
+  const viewsDigest = createHash("sha256").update(canonical(views.map((view) => ({
+    id: view.id,
+    title: view.title,
+    mediaType: view.mediaType,
+    payloadSha256: createHash("sha256").update(view.payload).digest("hex"),
+    sourceFileIds: view.sourceFileIds,
+  })))).digest("hex");
+  return Object.freeze({
+    requestKey,
+    views: Object.freeze(views),
+    auditDescriptor: Object.freeze({
+      schemaVersion: 1,
+      requestKey,
+      viewCount: views.length,
+      totalBytes,
+      viewsDigest,
+    }),
+  });
+};
+const closedInput = (
+  value: Readonly<Record<string, unknown>>,
+  keys: readonly string[],
+): boolean =>
+  Object.keys(value).sort().join("\u0000") === [...keys].sort().join("\u0000");
+const safeActionResult = (
+  action: ActionRecordDto,
+  extra: Readonly<Record<string, unknown>> = {},
+) => Object.freeze({
+  id: action.id,
+  actionKind: action.actionKind,
+  permissionDecision: action.permissionDecision,
+  state: action.state,
+  errorCode: action.errorCode,
+  ...extra,
+});
+const safeCommittedActionResult = (
+  action: ActionRecordDto,
+  extra: Readonly<Record<string, unknown>>,
+) => safeActionResult({ ...action, state: "committed" }, extra);
+const assertSafeProposalToolResult = (
+  value: Record<string, unknown>,
+): Record<string, unknown> => {
+  if (!closedInput(value, [
+    "actionKind",
+    "changeSet",
+    "errorCode",
+    "id",
+    "permissionDecision",
+    "state",
+  ])
+    || value.actionKind !== "model_change_set_create"
+    || value.permissionDecision !== "allowed"
+    || value.state !== "committed"
+    || value.errorCode !== null
+    || typeof value.id !== "string"
+    || !value.changeSet
+    || typeof value.changeSet !== "object"
+    || Array.isArray(value.changeSet)
+    || !closedInput(value.changeSet as Record<string, unknown>, [
+      "baseWorkspaceDigest",
+      "changeSetDigest",
+      "id",
+      "state",
+    ])) {
+    throw new AgentRuntimeError(
+      "tool_result_corrupt",
+      "The durable proposal result is invalid.",
+    );
+  }
+  const changeSet = value.changeSet as Record<string, unknown>;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(String(value.id))
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(String(changeSet.id))
+    || !/^[0-9a-f]{64}$/u.test(String(changeSet.changeSetDigest))
+    || !/^[0-9a-f]{64}$/u.test(String(changeSet.baseWorkspaceDigest))
+    || changeSet.state !== "pending") {
+    throw new AgentRuntimeError(
+      "tool_result_corrupt",
+      "The durable proposal result is invalid.",
+    );
+  }
+  return Object.freeze(value);
+};
+const assertSafeGeneratedViewsToolResult = (
+  value: Record<string, unknown>,
+): Record<string, unknown> => {
+  if (!closedInput(value, [
+    "actionKind",
+    "errorCode",
+    "generatedViewSet",
+    "id",
+    "permissionDecision",
+    "state",
+  ])
+    || value.actionKind !== "model_generated_views_publish"
+    || value.permissionDecision !== "allowed"
+    || value.state !== "committed"
+    || value.errorCode !== null
+    || typeof value.id !== "string"
+    || !value.generatedViewSet
+    || typeof value.generatedViewSet !== "object"
+    || Array.isArray(value.generatedViewSet)
+    || !closedInput(value.generatedViewSet as Record<string, unknown>, [
+      "setDigest",
+      "sourceWorkspaceDigest",
+      "viewCount",
+    ])) {
+    throw new AgentRuntimeError(
+      "tool_result_corrupt",
+      "The durable generated-view result is invalid.",
+    );
+  }
+  const set = value.generatedViewSet as Record<string, unknown>;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(String(value.id))
+    || !/^[0-9a-f]{64}$/u.test(String(set.setDigest))
+    || !/^[0-9a-f]{64}$/u.test(String(set.sourceWorkspaceDigest))
+    || !Number.isSafeInteger(set.viewCount)
+    || Number(set.viewCount) < 0
+    || Number(set.viewCount) > 16) {
+    throw new AgentRuntimeError(
+      "tool_result_corrupt",
+      "The durable generated-view result is invalid.",
+    );
+  }
+  return Object.freeze(value);
+};
+const safeChangeSetSummary = (changeSet: Readonly<{
+  id: string;
+  changeSetDigest: string;
+  baseWorkspaceDigest: string;
+  state: string;
+}>) => Object.freeze({
+  id: changeSet.id,
+  changeSetDigest: changeSet.changeSetDigest,
+  baseWorkspaceDigest: changeSet.baseWorkspaceDigest,
+  state: changeSet.state,
+});
+const safeGeneratedViewSetSummary = (set: Readonly<{
+  setDigest: string;
+  sourceWorkspaceDigest: string;
+  views: readonly unknown[];
+}>) => Object.freeze({
+  setDigest: set.setDigest,
+  sourceWorkspaceDigest: set.sourceWorkspaceDigest,
+  viewCount: set.views.length,
+});
 const boundedId = (value: unknown): string => { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value)) throw new Error("invalid"); return value; };
 const boundedDigest = (value: unknown): string => {
   if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) {
@@ -662,4 +1207,5 @@ const stripOwnedPrefix = (kind: string, value: string): string => {
   return value.slice(prefix.length);
 };
 const stableId = (prefix: string, input: string): string => `${prefix}_${createHash("sha256").update(input).digest("hex").slice(0, 32)}`;
-const canonical = (value: unknown): string => canonicalJsonV2(value);
+const canonical = (value: unknown): string =>
+  canonicalJsonV2(value).toString("utf8");

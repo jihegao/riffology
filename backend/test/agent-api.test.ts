@@ -27,6 +27,7 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   executeScopedMutation = false;
   afterScopedMutation?: Promise<void>;
   scopedMutationObserved?: () => void;
+  scopedProbe?: (mcpUrl: string) => Promise<void>;
 
   async initialize(): Promise<OpenCodeReadiness> { return { status: "ready", modelId: "provider-a/model-a", version: "test" }; }
   async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding) {
@@ -44,6 +45,12 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   async injectContext(sessionId: string, text: string) { this.injections.push({ sessionId, text }); }
   async promptWithModel(sessionId: string, binding: { providerId: string; modelId: string }, prompt: OpenCodePrompt): Promise<OpenCodeAssistantResponse> {
     this.prompts.push({ sessionId, binding, text: prompt.text });
+    if (this.scopedProbe) {
+      const scopeId = prompt.scopedMcpScopeId;
+      const mcpUrl = scopeId ? this.scopedBindings.get(scopeId) : undefined;
+      assert.ok(mcpUrl, "a scoped MCP binding must be active before the probe");
+      await this.scopedProbe(mcpUrl);
+    }
     if (this.executeScopedMutation) {
       const scopeId = prompt.scopedMcpScopeId;
       const mcpUrl = scopeId ? this.scopedBindings.get(scopeId) : undefined;
@@ -368,6 +375,11 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   assert.equal(openCode.unboundScopes.length, 1);
   assert.equal(openCode.scopedUrls.length, 1);
   assert.doesNotMatch(JSON.stringify(payload), /cap=|capability|externalSessionRef|workspacePath|opaque-session/u);
+  assert.doesNotMatch(
+    JSON.stringify(payload),
+    /mutationReceipt|itemId|objectFileId|expectedPriorSha256/u,
+    "capability-scoped direct-apply receipt details must not enter browser projections",
+  );
 
   const code = app.productStore!.listObjectFiles({ kind: "model", id: created.model.id }).find((file) => file.kind === "model_code")!;
   assert.equal(app.productStore!.readObjectFile(code.id).toString("utf8"), "print('scoped MCP')\n");
@@ -376,6 +388,76 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   const expired = await post(openCode.scopedUrls[0]!, { jsonrpc: "2.0", id: 4, method: "tools/list" });
   assert.equal(expired.status, 200);
   assert.equal((await expired.json() as any).error.code, -32001);
+});
+
+test("scoped MCP admits the reachable 8 MiB proposal ceiling without widening Product APIs", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-large-scoped-mcp-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => {
+    await app.close();
+    await rm(base, { recursive: true, force: true });
+  });
+  const created = await createModel(baseUrl, "large-scoped-mcp-model");
+  openCode.scopedProbe = async (mcpUrl) => {
+    const request = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "riff_propose_model_changes",
+        arguments: {
+          requestKey: "proposal-exact-8mib",
+          changes: Array.from({ length: 8 }, (_, index) => ({
+            objectFileId: `file_large_proposal_${index}`,
+            kind: "model_code",
+            relativePath: `large-${index}.py`,
+            mediaType: "text/x-python",
+            text: "a".repeat(1_048_576),
+            expectedPriorSha256: null,
+          })),
+        },
+      },
+    };
+    assert.equal(
+      Buffer.byteLength(JSON.stringify(request)) > 8 * 1024 * 1024,
+      true,
+    );
+    const response = await post(mcpUrl, request);
+    assert.equal(response.status, 200);
+    const payload = await response.json() as any;
+    assert.equal(payload.result.isError, undefined, JSON.stringify(payload));
+  };
+  const response = await post(
+    `${baseUrl}/api/conversations/${created.conversation.id}/turns`,
+    {
+      requestKey: "large-scoped-mcp-turn",
+      text: "Could we review a possible Model change?",
+      attachmentIds: [],
+    },
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  const changeSets = app.productStore!.listModelChangeSets(created.model.id);
+  assert.equal(changeSets.length, 1);
+  assert.equal(
+    changeSets[0]!.files.reduce((total, file) =>
+      total + Buffer.byteLength(file.proposedText), 0),
+    8 * 1024 * 1024,
+  );
+  const oversizedOrdinaryProductRequest = await post(
+    `${baseUrl}/api/models`,
+    {
+      commandId: "ordinary-product-over-128k",
+      name: "x".repeat(128_001),
+      providerId: "provider-a",
+      modelId: "model-a",
+    },
+  );
+  assert.equal(oversizedOrdinaryProductRequest.status, 413);
+  assert.equal(
+    (await oversizedOrdinaryProductRequest.json() as any).error.code,
+    "request_too_large",
+  );
 });
 
 test("owner-bound conversation provider selection rejects developer-profile-only models", async (t) => {
@@ -579,6 +661,10 @@ test("Model workspace projection and technical-check start/read are digest-bound
   assert.match(workspace.digest, /^[0-9a-f]{64}$/u);
   assert.equal(workspace.files.some((file: any) => file.relativePath === "code/model.py"), true);
   assert.deepEqual(Object.keys(workspace.files[0]).sort(), ["id", "kind", "mediaType", "relativePath", "sha256", "sizeBytes"]);
+  assert.equal(
+    workspace.digest,
+    app.productStore!.modelWorkspaceDigest(created.model.id),
+  );
 
   const startedResponse = await post(`${baseUrl}/api/models/${created.model.id}/technical-checks`, { commandId: "check-once" });
   assert.equal(startedResponse.status, 200);
@@ -586,7 +672,12 @@ test("Model workspace projection and technical-check start/read are digest-bound
   assert.equal(started.state, "passed");
   assert.equal(started.aggregate, "executable");
   assert.equal(started.publication, "published");
-  assert.equal(started.capturedWorkspaceDigest, workspace.digest);
+  assert.notEqual(
+    app.productStore!.modelWorkspaceDigest(created.model.id),
+    workspace.digest,
+    "publishing executable technical status changes Model authority",
+  );
+  assert.match(started.capturedWorkspaceDigest, /^[0-9a-f]{64}$/u);
   assert.equal(started.claim, "technical_execution_only");
   assert.equal(checker.calls, 1);
 
@@ -602,6 +693,148 @@ test("Model workspace projection and technical-check start/read are digest-bound
   const publicText = JSON.stringify({ workspace, started, read });
   assert.doesNotMatch(publicText, /riff-model-owned-check|\/private\/|\/Users\/|workspacePath|capabilityId|private log/u);
   assert.equal(checker.roots.every((root) => !publicText.includes(root)), true);
+});
+
+test("generated-view and change-set APIs are digest-bound and redact Store identities", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-dynamic-workbench-"));
+  const openCode = new ApiOpenCode();
+  const { app, baseUrl } = await start(base, openCode);
+  t.after(async () => {
+    await app.close();
+    await rm(base, { recursive: true, force: true });
+  });
+  const created = await createModel(baseUrl, "dynamic-api-model");
+  const other = await createModel(baseUrl, "dynamic-api-model-other");
+  const store = app.productStore!;
+  store.startAgentTurn({
+    turnId: "turn_dynamic_api",
+    userMessageId: "message_dynamic_api",
+    conversationId: created.conversation.id,
+    requestKey: "dynamic-api",
+    text: "Could we review a proposed Model change?",
+    createdAt: "2026-07-28T12:00:00.000Z",
+  });
+  const workspace = await (await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/workspace`,
+  )).json() as any;
+  const code = workspace.files.find((file: any) =>
+    file.relativePath === "code/model.py");
+  store.publishGeneratedViews({
+    modelId: created.model.id,
+    conversationId: created.conversation.id,
+    turnId: "turn_dynamic_api",
+    sourceWorkspaceDigest: workspace.digest,
+    views: [{
+      id: "view_dynamic_api",
+      title: "Current relationships",
+      mediaType: "text/markdown",
+      payload: "# Current relationships\n",
+      sourceFileIds: [code.id],
+    }],
+    publishedAt: "2026-07-28T12:00:00.000Z",
+  });
+  const changeSet = store.createModelChangeSet({
+    id: "change_set_dynamic_api",
+    modelId: created.model.id,
+    conversationId: created.conversation.id,
+    turnId: "turn_dynamic_api",
+    baseWorkspaceDigest: workspace.digest,
+    files: [{
+      objectFileId: code.id,
+      kind: code.kind,
+      relativePath: "model.py",
+      mediaType: code.mediaType,
+      bytes: Buffer.from("value = 9\n"),
+      expectedPriorSha256: code.sha256,
+    }],
+    createdAt: "2026-07-28T12:00:00.000Z",
+  });
+
+  const viewsResponse = await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/generated-views`,
+  );
+  assert.equal(viewsResponse.status, 200);
+  const views = await viewsResponse.json() as any;
+  assert.equal(views.freshness, "fresh");
+  assert.equal(views.views[0].title, "Current relationships");
+  assert.deepEqual(views.views[0].sourceFileRefs, ["code/model.py"]);
+  assert.equal("publisherConversationId" in views, false);
+  assert.equal("publisherTurnId" in views, false);
+  const rendered = await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/generated-views/view_dynamic_api/renderable`,
+  );
+  assert.equal(rendered.status, 200);
+  assert.equal((await rendered.json() as any).kind, "markdown");
+
+  const listResponse = await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/change-sets?state=pending`,
+  );
+  assert.equal(listResponse.status, 200);
+  const listed = await listResponse.json() as any;
+  assert.equal(listed.changeSets[0].id, changeSet.id);
+  const detailResponse = await apiFetch(
+    `${baseUrl}/api/models/${created.model.id}/change-sets/${changeSet.id}`,
+  );
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json() as any;
+  assert.equal(detail.freshness, "fresh");
+  assert.equal(detail.files[0].relativePath, "model.py");
+  const publicText = JSON.stringify({ views, listed, detail });
+  assert.doesNotMatch(
+    publicText,
+    /objectFileId|conversationId|turnId|workspacePath|\/Users\/|\/private\/|opaque-session|capability/u,
+  );
+  for (const response of [
+    await apiFetch(
+      `${baseUrl}/api/models/${other.model.id}/generated-views/view_dynamic_api/renderable`,
+    ),
+    await apiFetch(
+      `${baseUrl}/api/models/${other.model.id}/change-sets/${changeSet.id}`,
+    ),
+    await post(
+      `${baseUrl}/api/models/${other.model.id}/change-sets/${changeSet.id}/apply`,
+      {
+        commandId: "command_cross_model_apply",
+        expectedChangeSetDigest: changeSet.changeSetDigest,
+        expectedWorkspaceDigest: workspace.digest,
+      },
+    ),
+    await post(
+      `${baseUrl}/api/models/${other.model.id}/change-sets/${changeSet.id}/reject`,
+      {
+        commandId: "command_cross_model_reject",
+        expectedChangeSetDigest: changeSet.changeSetDigest,
+      },
+    ),
+  ]) {
+    assert.equal(response.status, 404);
+  }
+  assert.equal(store.getModelChangeSet(created.model.id, changeSet.id).state, "pending");
+
+  const appliedResponse = await post(
+    `${baseUrl}/api/models/${created.model.id}/change-sets/${changeSet.id}/apply`,
+    {
+      commandId: "command_dynamic_api",
+      expectedChangeSetDigest: changeSet.changeSetDigest,
+      expectedWorkspaceDigest: workspace.digest,
+    },
+  );
+  assert.equal(appliedResponse.status, 200, await appliedResponse.clone().text());
+  const receipt = await appliedResponse.json() as any;
+  assert.equal(receipt.operation, "apply");
+  assert.equal(
+    store.readObjectFile(code.id).toString("utf8"),
+    "value = 9\n",
+  );
+  const replay = await post(
+    `${baseUrl}/api/models/${created.model.id}/change-sets/${changeSet.id}/apply`,
+    {
+      commandId: "command_dynamic_api",
+      expectedChangeSetDigest: changeSet.changeSetDigest,
+      expectedWorkspaceDigest: workspace.digest,
+    },
+  );
+  assert.deepEqual(await replay.json(), receipt);
 });
 
 test("A3 New project creates a fixed Model copy and exposes a sanitized workspace", async (t) => {
@@ -647,7 +880,40 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   assert.deepEqual(workspace.project, project.project);
   assert.equal(workspace.files.length > 0, true);
   assert.equal(workspace.files.every((file: any) =>
-    JSON.stringify(Object.keys(file).sort()) === JSON.stringify(["createdAt", "id", "mediaType", "sha256", "sizeBytes"])), true);
+    JSON.stringify(Object.keys(file).sort()) === JSON.stringify([
+      "createdAt",
+      "fileRef",
+      "mediaType",
+      "readOnly",
+      "relativePath",
+      "sha256",
+      "sizeBytes",
+    ])), true);
+  assert.equal(workspace.files.every((file: any) =>
+    file.readOnly === true
+      && !file.relativePath.startsWith("/")
+      && !("id" in file)), true);
+  const projectRenderable = await apiFetch(
+    `${baseUrl}/api/projects/${project.project.id}/files/${workspace.files[0].fileRef}/renderable`,
+  );
+  assert.equal(projectRenderable.status, 200);
+  const projectResource = await projectRenderable.json() as any;
+  assert.equal(typeof projectResource.kind, "string");
+  const otherProjectResponse = await post(`${baseUrl}/api/projects`, {
+    commandId: "new-project-other",
+    name: "Other Scenario Project",
+    modelId: created.model.id,
+  });
+  assert.equal(otherProjectResponse.status, 201);
+  const otherProject = await otherProjectResponse.json() as any;
+  const crossProjectRenderable = await apiFetch(
+    `${baseUrl}/api/projects/${otherProject.project.id}/files/${workspace.files[0].fileRef}/renderable`,
+  );
+  assert.equal(crossProjectRenderable.status, 404);
+  assert.doesNotMatch(
+    JSON.stringify({ workspace, projectResource }),
+    /\/Users\/|\/private\/|workspacePath|objectFileId|sessionId|capability/u,
+  );
   assert.deepEqual(workspace.conversations, []);
   assert.deepEqual(workspace.experimentConfigurations, []);
   assert.deepEqual(workspace.runs, []);
