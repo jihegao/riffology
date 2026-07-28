@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -65,6 +66,8 @@ export function ReviewRail({
   const loadFileRef = useRef(loadFile);
   loadFileRef.current = loadFile;
   const drag = useRef<Readonly<{ x: number; width: number }> | null>(null);
+  const responsiveState = useRef({ narrow, open });
+  responsiveState.current = { narrow, open };
 
   const selectedFile = files.find((file) => file.key === selectedFileKey);
   const selectedChangeSet = changeSets.find((item) => item.id === selectedChangeSetId);
@@ -82,7 +85,7 @@ export function ReviewRail({
     setReceipt(undefined);
   }, [ownerKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (narrow) setOpen(false);
   }, [narrow, ownerKey]);
 
@@ -158,6 +161,8 @@ export function ReviewRail({
 
   useEffect(() => {
     if (!open) return;
+    if (!responsiveState.current.open
+      || responsiveState.current.narrow !== narrow) return;
     const rail = railRef.current;
     const inerted = narrow && rail ? inertOutsideDialog(rail) : [];
     const onKeyDown = (event: KeyboardEvent) => {

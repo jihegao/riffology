@@ -8,6 +8,11 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      errors.push(`${response.status()} ${new URL(response.url()).pathname}`);
+    }
+  });
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Models" })).toBeVisible();
@@ -42,7 +47,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
     "Technically executable",
   );
   const ownerName = (await page.getByTestId("shell-owner-heading").textContent())!.trim();
-  await expect(page.getByRole("heading", { name: ownerName, exact: true })).toHaveCount(1);
+  await expect.poll(() => visibleExactTextCount(page, ownerName)).toBe(1);
   await expect(page.getByText("PERSISTENT CONTEXT", { exact: true })).toHaveCount(0);
   await expect(page.getByText("CURRENT OBJECT", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toHaveCount(0);
@@ -92,10 +97,7 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   );
   const projectOwnerName =
     (await page.getByTestId("shell-owner-heading").textContent())!.trim();
-  await expect(page.getByRole("heading", {
-    name: projectOwnerName,
-    exact: true,
-  })).toHaveCount(1);
+  await expect.poll(() => visibleExactTextCount(page, projectOwnerName)).toBe(1);
 
   await page.getByTestId("pane-workspace").focus();
   await page.setViewportSize({ width: 640, height: 900 });
@@ -158,3 +160,12 @@ test("A4-2 Home and shared shell remain truthful, responsive, and state-stable",
   await page.screenshot({ path: testInfo.outputPath("a4-2-home-shell.png"), fullPage: true });
   expect(errors).toEqual([]);
 });
+
+const visibleExactTextCount = (page: import("@playwright/test").Page, text: string) =>
+  page.getByText(text, { exact: true }).evaluateAll((elements) =>
+    elements.filter((element) => {
+      const style = getComputedStyle(element);
+      return style.visibility !== "hidden"
+        && style.display !== "none"
+        && element.getClientRects().length > 0;
+    }).length);

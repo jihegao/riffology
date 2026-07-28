@@ -103,11 +103,12 @@ test("A4-6 continuous real-provider Product exit", async ({
     const windModelCard = resourceCard(page, "home-models", WIND_MODEL_NAME);
     await windModelCard.getByRole("link", { name: "Open Model" }).click();
     await expect(page.getByTestId("model-workspace")).toBeVisible();
+    await expect.poll(() => visibleExactTextCount(page, WIND_MODEL_NAME)).toBe(1);
     await expect(page.getByText(/thin execution contract passed/u)).toBeVisible();
     await page.getByTestId("pane-workspace").getByRole("button", {
-      name: /Render .*README\.md/u,
+      name: /visuals\/README\.md/u,
     }).click();
-    await expect(page.getByRole("heading", { name: /README\.md/u })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "visuals/README.md" })).toBeVisible();
     await expect(page.getByText(/behavioral reproduction/u)).toBeVisible();
 
     // 3. A real provider performs two turns and creates two durable documents.
@@ -118,6 +119,7 @@ test("A4-6 continuous real-provider Product exit", async ({
     await modelForm.getByLabel("Provider / model").selectOption(QUALIFIED_MODEL_ID);
     await modelForm.getByRole("button", { name: "Create Model" }).click();
     await expect(page.getByTestId("shell-owner-heading")).toHaveText(LIVE_MODEL_NAME);
+    await expect.poll(() => visibleExactTextCount(page, LIVE_MODEL_NAME)).toBe(1);
     primaryConversationUrl = page.url();
     await page.getByText("Manage Conversation").click();
     await page.getByLabel("Conversation name").fill(FIRST_CONVERSATION);
@@ -205,6 +207,7 @@ test("A4-6 continuous real-provider Product exit", async ({
     await expect(page.getByTestId("shell-owner-heading")).toHaveText(
       WIND_PROJECT_NAME,
     );
+    await expect.poll(() => visibleExactTextCount(page, WIND_PROJECT_NAME)).toBe(1);
     await expect(page.getByTestId("workspace-owner-card")).toContainText(
       "immutable Model copy",
     );
@@ -755,6 +758,15 @@ const resourceCard = (
 ) => page.getByTestId(testId).locator("article").filter({
   has: page.getByRole("heading", { name: heading, exact: true }),
 });
+
+const visibleExactTextCount = (page: Page, text: string) =>
+  page.getByText(text, { exact: true }).evaluateAll((elements) =>
+    elements.filter((element) => {
+      const style = getComputedStyle(element);
+      return style.visibility !== "hidden"
+        && style.display !== "none"
+        && element.getClientRects().length > 0;
+    }).length);
 
 const createConversation = async (
   page: Page,

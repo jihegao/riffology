@@ -522,8 +522,9 @@ function SharedShell({
     };
   }, [pane]);
 
-  const selectPane = (next: Pane) => {
+  const selectPane = (next: Pane, control: HTMLButtonElement) => {
     setPane(next);
+    control.focus();
   };
   return (
     <main id="product-main" className="product-shell" tabIndex={-1}>
@@ -549,7 +550,7 @@ function SharedShell({
           ref={conversationButtonRef}
           type="button"
           aria-pressed={pane === "conversation"}
-          onClick={() => selectPane("conversation")}
+          onClick={(event) => selectPane("conversation", event.currentTarget)}
         >
           Conversation
         </button>
@@ -557,7 +558,7 @@ function SharedShell({
           ref={workspaceButtonRef}
           type="button"
           aria-pressed={pane === "workspace"}
-          onClick={() => selectPane("workspace")}
+          onClick={(event) => selectPane("workspace", event.currentTarget)}
         >
           Workspace
         </button>
