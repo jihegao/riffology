@@ -153,6 +153,9 @@ A4-6 revision-scoped evidence is retained through the stable
 - [`milestone-a4-5-retirement-manifest.md`](milestone-a4-5-retirement-manifest.md):
   exact tracked-code retirement identities, replacements, exclusions, and
   postconditions, mechanically verified against the merged A4-4 baseline.
+- [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md):
+  active post-MVP shared-shell refinement for full-height Conversation,
+  weak-contract generated Model views, and file/change review.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.
