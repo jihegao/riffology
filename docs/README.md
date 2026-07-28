@@ -4,7 +4,7 @@
 - Role: normative contract
 - Scope: repository documentation roles, authority, navigation, and maintenance rules
 - Source of truth: this index for documentation governance; linked documents for their declared scope
-- Last reviewed: 2026-07-25
+- Last reviewed: 2026-07-28
 
 ## Authority order
 
@@ -71,7 +71,7 @@ implementation authority.
 | **1 — data foundation** | Implemented and merged. |
 | **2 — Agent and Model workspace** | Implemented, merged, and accepted with real-provider same-session two-turn evidence. |
 | **3 — Project and execution** | Implemented and accepted. Fixed-copy Projects, deterministic planning, batch/visual lifecycle, scoped Playwright, isolated browser broker/frame/WebSocket, generic output/event access, direct controls, A3-2d4 revocation, A3-3 ordinary wind import, and the narrow Product Chromium restart flow are complete. |
-| **4 — shared product shell** | A4-0 through A4-5 are merged. A4-6 local branch gate, final independent reviews, and the 31.2s continuous Chromium 12-step run have passed with explicit live discovery/fallback evidence; merge, merged-revision rerun, and Issue closure remain ordered. |
+| **4 — shared product shell** | Implemented, merged through PR #55, rerun on merged `main`, and closed with Issue #15 on 2026-07-25. |
 
 A3-2c1 is the merged authority/audit and legacy-CDP-isolation foundation
 (PR #38). A3-2c2 adds bounded Project-only read observation through a fresh,
@@ -127,18 +127,15 @@ message/attachment/document/activity projections, lifecycle recovery and
 preview/confirm deletion, plus explicit no-fabrication read-only behavior.
 A4-4 supplies the dynamic workspace/execution slice described above. A4-5
 supplies recovery/cutover/retirement without touching protected local state.
-A4-6 local gate evidence is recorded in
-[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md); Issue #15 remains OPEN until
-merge and the merged-revision rerun complete.
+A4-6 revision-scoped evidence is retained through the stable
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md) redirect. PR #55 merged as
+`d333580`, the merged-main rerun passed, and Issue #15 is closed.
 
 ## Active product and stage documents
 
 - [`product-requirements.md`](product-requirements.md): the Chinese single MVP
   PRD, including Platform/Domain Pack ownership, requirement-ID lifecycle, and
   PRD/Roadmap/Architecture/Code authority boundaries.
-- [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md): redacted provider
-  selection, continuous Chromium, cumulative full-gate, and ordered closeout
-  evidence for the only slice allowed to close Issue #15.
 - [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md):
   implemented Stage 1 SQLite/object-directory, atomic mutation, lifecycle,
   recovery, and fixed-copy Project design.
@@ -178,15 +175,13 @@ merge and the merged-revision rerun complete.
 
 - [`milestone-a-product-contract.md`](milestone-a-product-contract.md): stable
   redirect from the former product contract to the single PRD.
-- [`product-roadmap.md`](product-roadmap.md): superseded Gate-era roadmap.
-- [`wind-turbine-maintenance-gate-0.md`](wind-turbine-maintenance-gate-0.md):
-  former Gate 0 wind target and source mapping.
-- [`gate-1-wind-turbine-model-design.md`](gate-1-wind-turbine-model-design.md),
-  [`gate-2-project-state-design.md`](gate-2-project-state-design.md), and
-  [`gate-3-evidence-studio-design.md`](gate-3-evidence-studio-design.md):
-  historical Gate implementation designs.
-- [`mesa-service.md`](mesa-service.md): historical wind-specific Mesa service
-  contract.
+- [`archive/`](archive/README.md): historical-document index.
+- [`archive/gate-era/`](archive/gate-era/README.md): complete superseded
+  Gate-era roadmap, Wind target/model, Evidence Studio, Project-state, and
+  wind-specific Mesa service documents. Their former `docs/*.md` locations are
+  retained as short compatibility redirects.
+- [`archive/evidence/`](archive/evidence/README.md): revision-scoped exit
+  evidence, including the completed A4-6 and Issue #56 PR 5 records.
 
 These files may still describe runnable code or useful wind-model evidence.
 They do not authorize a wind-only product, removal of Conversation/OpenCode, or
@@ -216,3 +211,6 @@ CommonMark rendering, code tests, browser acceptance, or independent review.
 5. Never infer implementation from documentation alone.
 6. Never infer permission to delete untracked user files from a cleanup plan or
    historical retirement document.
+7. Move complete superseded content under `docs/archive/`, add historical
+   metadata and an archive index, and retain a short redirect at any established
+   public path.

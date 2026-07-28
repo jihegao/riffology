@@ -7,8 +7,9 @@ usage-limit error was explicit. After user authorization, discovery was repeated
 and `deepseek/deepseek-v4-flash` was selected. This was not a silent fallback.
 Evidence contains no credential, upstream session ID, absolute path, or raw tool
 payload. The redacted selection and gate record is
-[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). Issue #15 remains OPEN
-pending merge and the merged-revision rerun.
+retained through [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). PR #55
+merged as `d333580`, the merged-main rerun passed, and Issue #15 closed on
+2026-07-25.
 
 ## Milestone A2 current authority
 

@@ -478,7 +478,7 @@ MVP 在本地 macOS 运行：
 | **1 — 数据基础** | SQLite/对象目录、ownership、原子 mutation/recovery、lifecycle、固定副本 Project primitive。 | 已实现并合并。 |
 | **2 — Agent 与 Model 工作区** | 持久 Conversations、OpenCode session/context、skills/scoped tools、documents/attachments、通用 Model workspace、technical checks。 | 已实现、合并，并完成真实 provider 两轮验收。 |
 | **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 已实现并验收。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、通用 output/download/events/direct controls、跨 authority 撤销、普通风机 Model/Project/Experiment 导入，以及创建 Project、编辑 Experiment、真实运行、下载与重启恢复的窄 Product Chromium 场景均完成。 |
-| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | A4-6 本地 branch gate 与最终独立复审已通过；最终聚合中的连续 Chromium 12 步场景为 31.2s：真实两 Conversation、两文档/附件、Project CAS、两 batch、outputs/events/download、请求后分析、受限 visual、同根 restart、provider-down 无伪回复/direct Run，以及桌面/窄屏、CDP scale 2 下真实键盘切换、无横向溢出和零 console/page error。门禁为 backend 598 total/597 passed/zero failed/one optional skip、Web 28/28、production-entry 1/1、build、retained Chromium 18/18；provider discovery 与显式授权 fallback 见 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md)。合并与 `main` 复跑仍按顺序执行，Issue #15 仍 OPEN。 |
+| **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 已通过 A4-6 branch gate、最终独立复审和连续 Chromium 12 步场景；PR #55 已合并为 `d333580`，merged-main 复跑通过，Issue #15 于 2026-07-25 关闭。修订范围证据经 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md) 稳定入口归档。 |
 
 详细切片状态记录在
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)、

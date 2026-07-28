@@ -190,8 +190,9 @@ console/page error。完整 branch gate 是 backend 598 total/597 passed/zero fa
 optional skip，focused backend 28/28，Web 28/28、production-entry 1/1 和 build，
 retained Chromium 18/18，最终 correctness/security、accessibility 与
 product/architecture 独立复审 P0/P1=0。脱敏证据见
-[`docs/a4-6-exit-evidence.md`](docs/a4-6-exit-evidence.md)。Issue #15 仍 OPEN，
-只有合并后从 `main` 复跑才能关闭。
+[`docs/a4-6-exit-evidence.md`](docs/a4-6-exit-evidence.md)，完整记录现已归档。
+PR #55 已合并为 `d333580`，merged-main 复跑通过，Issue #15
+已于 2026-07-25 关闭。
 
 Restricted Model execution currently supports the local-user macOS boundary
 through `/usr/bin/sandbox-exec`, a Model-owned working directory, scrubbed
@@ -438,7 +439,8 @@ order before exactly one atomic Model mutation reaches
 `visual_model_state_verified`, and survives browser refresh plus backend
 restart. This proves the scoped Conversation/tool/receipt contract for that
 model and provider; it does not prove simulation semantics, calibration,
-generic technical-check success, provider generality, or merged-main state.
+generic technical-check success, or provider generality. PR #61 later merged
+this slice as `9814c53`, and Issue #56 closed on 2026-07-26.
 See [`docs/issue-56-pr5-exit-evidence.md`](docs/issue-56-pr5-exit-evidence.md).
 
 ## Verification
