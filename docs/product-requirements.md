@@ -2,14 +2,15 @@
 
 - Status: active
 - Role: normative contract
-- Scope: Riff 本地单用户 MVP，原交付代号为 Milestone A
+- Scope: Riff 本地单用户 MVP（原交付代号 Milestone A）及已批准的后续产品细化
 - Source of truth: 本文档是产品目标与需求的唯一权威；合并代码与测试是实现状态的权威
-- Last reviewed: 2026-07-25
+- Last reviewed: 2026-07-28
 
 ## 1. 文档权威与职责分工
 
-本文档是 Riff MVP 唯一的产品需求文档，统一定义已批准的产品结果、用户体验、
-功能需求、架构边界、非功能需求、交付阶段和验收标准。
+本文档是 Riff 本地单用户产品（含已交付 MVP 与已批准后续细化）唯一的产品需求
+文档，统一定义已批准的产品结果、用户体验、功能需求、架构边界、非功能需求、
+交付阶段和验收标准。
 
 阶段设计、API 合同、ADR、Roadmap 和测试记录均为从属文档。它们可以细化实现，
 但不能自行增加产品工作流、删除能力或覆盖本 PRD。本文档描述的目标不等于已经
@@ -251,6 +252,9 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-SHELL-03 | 右栏必须支持 Markdown、代码、表格、JSON、图表和 Model 自带页面的通用 renderer。 |
 | FR-SHELL-04 | 右栏必须使用弱约定，不得强制固定的风机、Evidence 或审批标签页。 |
 | FR-SHELL-05 | Agent 只读或不可用时，直接 Run 和资源操作必须仍可使用。 |
+| FR-SHELL-06 | 进入 Model/Project 后，对象名称作为页面/工作区标题必须只在统一顶栏或面包屑中呈现一次；正文、caption 或 receipt 中必要的上下文引用不属于重复标题。桌面双栏或窄屏选中 Conversation 时，Conversation 必须从顶栏下方延伸至视口底部，并使中部内容区独立滚动、输入区保持在左栏底部。 |
+| FR-SHELL-07 | 文件树、安全预览和当前内容与拟议修改的 diff review 是稳定平台审阅能力；它们必须按当前 owner capability 出现，不得要求所有对象具有固定 Files/Changes 标签。 |
+| FR-SHELL-08 | 右栏可以展示与当前 Model workspace digest 绑定的 Agent 生成视图；视图的名称、数量、顺序和通用 renderer kind 必须动态决定，可以为空，不得要求类图、泳道图、数据流图或特定 spec 文件。 |
 
 ### 9.3 对话、Skills、文档与附件
 
@@ -273,6 +277,7 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-15 | 每个需要工具的 turn 只能注册一个 opaque loopback Riff MCP，并从同一 owner/session-generation capability 的 sorted exact tool list 逐项启用；`*`、native file/command/Skill built-ins、ambient/plugin MCP 与第三方工具必须 deny-all。唯一 native 例外 `question` 只能经过 FR-CONV-12 的精确当前 turn Resume 边界回答，且不授予 Riff tool/object 权限。bind/prompt MCP 列表不一致、缺失、重复、乱序、伪造、跨 owner 或过期均须在 prompt 或执行前稳定拒绝，capability URL 与 credential 不得进入 prompt、transcript 或 browser DTO。 |
 | FR-CONV-16 | schema v16 下新进入 terminal 的每个 turn 必须具有不可变、digest-bound 的 goal-verification receipt，并与 assistant/failure 和 terminal turn 原子提交；从 v15 迁移的历史 terminal turn 保持可读但不得伪造 receipt。OpenCode `idle` 仅是必要证据；显式修改只有在 action 全部终态、每个 committed action 声明非空 effect、受支持的 goal/action 映射一致、已提交 transaction 的当前 owner 资源一致，且视觉 Model 具有本 turn 的 Model 文件修改并可验证 execution-protocol-v2/run mode 时才能标记 `completed`。 |
 | FR-CONV-17 | Goal disposition 必须是 `completed`、`needs_user_input`、`failed`、`read_only`、`outcome_unknown` 或 `budget_exhausted`。发生部分效果、资源漂移或中断后效果不明时不得自动 Retry；Product 层不得在原生 OpenCode tool loop 后再发第二个外层 prompt。公开 runtime 只投影有界 receipt 证据，不得返回原始 goal、goal digest、路径、上游 ID 或 tool payload。 |
+| FR-CONV-18 | 明确修改指令本身可以沿现有授权边界原子提交；探索性或 proposal-only 对话只能创建与 Model workspace digest 绑定的待审变更集，且只有用户通过直接 Product command apply 后才能提交。两条路径都只有在 Store 返回 committed mutation receipt 后，界面才能声明 Model 已修改。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |
@@ -289,6 +294,7 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-MODEL-05 | “技术上可执行”只能表达薄执行合同已通过，绝不能表达正确、已校准、可信或适合决策。 |
 | FR-MODEL-06 | Model 执行必须使用隔离环境、受限 owner 工作区、清理后的 credential、默认无网络、有限资源和取消能力。 |
 | FR-MODEL-07 | Model 范围 Agent 工具不得访问其他对象、产品源码、任意 home 路径、环境 credential 或未采用引用。 |
+| FR-MODEL-08 | Agent 生成的结构化视图是有界、owner-scoped、可失效的派生投影，不是 Model 文件、执行合同、技术状态或修改完成证据；Model 变化后旧视图必须明确标记 stale。 |
 
 ### 9.5 Project 与实验配置
 
@@ -471,7 +477,7 @@ MVP 在本地 macOS 运行：
 ## 14. 交付阶段与当前实现快照
 
 阶段保持顺序依赖，因为后续能力依赖前序权威和持久化合同。以下状态只是
-2026-07-25 的导航快照，不能替代合并代码与 GitHub 证据。
+2026-07-28 的导航快照，不能替代合并代码与 GitHub 证据。
 
 | 阶段 | 产品切片 | 当前快照 |
 | --- | --- | --- |
@@ -479,6 +485,7 @@ MVP 在本地 macOS 运行：
 | **2 — Agent 与 Model 工作区** | 持久 Conversations、OpenCode session/context、skills/scoped tools、documents/attachments、通用 Model workspace、technical checks。 | 已实现、合并，并完成真实 provider 两轮验收。 |
 | **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 已实现并验收。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、通用 output/download/events/direct controls、跨 authority 撤销、普通风机 Model/Project/Experiment 导入，以及创建 Project、编辑 Experiment、真实运行、下载与重启恢复的窄 Product Chromium 场景均完成。 |
 | **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 已通过 A4-6 branch gate、最终独立复审和连续 Chromium 12 步场景；PR #55 已合并为 `d333580`，merged-main 复跑通过，Issue #15 于 2026-07-25 关闭。修订范围证据经 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md) 稳定入口归档。 |
+| **5 — 动态工作台细化** | 全高 Conversation、弱约定 generated views、文件树与拟议/已提交 change-set review、状态驱动 Project 组织。 | 已批准、尚未实现；目标合同由 [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md) 定义，必须经分阶段代码、测试、独立评审和 merged-main browser gate 才能更新状态。 |
 
 详细切片状态记录在
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)、
@@ -536,6 +543,8 @@ MVP 在本地 macOS 运行：
   A4-1 至 A4-5 的窄切片实现台账；
 - [`milestone-a4-5-retirement-manifest.md`](milestone-a4-5-retirement-manifest.md)：
   A4-5 tracked-code 退役的身份、版本、摘要、替代证据和明确排除范围；
+- [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md)：
+  共享 shell 的后续全高布局、动态生成视图和文件/变更审阅设计；
 - [`architecture.md`](architecture.md)：更深入的当前与历史架构说明；
 - [`backend-api.md`](backend-api.md)、[`opencode-bridge.md`](opencode-bridge.md)
   和 [`ui-workflow.md`](ui-workflow.md)：子系统合同；
