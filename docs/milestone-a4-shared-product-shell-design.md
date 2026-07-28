@@ -1,6 +1,6 @@
 # Milestone A4 shared product shell design
 
-- Status: active; A4-0 through A4-5 implemented; A4-6 local continuous gate observed, merge/post-merge closeout pending
+- Status: implemented; A4-0 through A4-6 merged and post-merge closeout complete
 - Role: active design
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
@@ -789,8 +789,8 @@ Chromium 18/18, including broker/WebSocket 6/6 and Visual-Agent 6/6. Exact
 provider selection, documentation 29/29, and independent
 correctness/security, accessibility, and product/architecture P0/P1=0 evidence
 are recorded in
-[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). Merge, merged-revision rerun,
-and Issue closure remain ordered later steps.
+[`a4-6-exit-evidence.md`](a4-6-exit-evidence.md). PR #55 merged as `d333580`,
+the merged-revision rerun passed, and Issue #15 closed on 2026-07-25.
 
 ## 13. Documentation and review gate
 
@@ -1070,6 +1070,6 @@ security/accessibility, and test/documentation re-reviews each report
 P0=0/P1=0/P2=0 for the current A4-5 diff.
 
 This historical A4-5 record is not itself A4-6 evidence. The cumulative slice
-and A4-6 full gates verify the 69 trace rows; the continuous A4-6 scenario
-verifies the twelve integrated exit steps. Issue #15 remains OPEN and no
-complete-MVP claim is made before merge/post-merge closure.
+and A4-6 full gates verified the 69 trace rows; the continuous A4-6 scenario
+verified the twelve integrated exit steps. Final closure is recorded against
+merged revision `d333580`; it is not inferred from this earlier A4-5 record.
