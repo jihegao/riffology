@@ -242,6 +242,10 @@ const genericExplicitGoalMatchesCommittedActions = (
     if (action.actionKind === "attachment_adopt") {
       return /\b(?:adopt|attachment)\b|(?:采用|附件)/iu.test(text);
     }
+    if (action.actionKind === "model_generated_views_publish") {
+      return ownerKind === "model"
+        && /\b(?:generated view|diagram|structure view)\b|(?:生成视图|结构视图|图示)/iu.test(text);
+    }
     return false;
   });
 };

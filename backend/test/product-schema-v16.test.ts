@@ -47,18 +47,18 @@ test("schema v16 adds immutable goal receipts and a terminal-turn receipt gate",
   try {
     installVersion15(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 16);
+    assert.equal(PRODUCT_SCHEMA_VERSION, 17);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;
       }).user_version,
-      16,
+      PRODUCT_SCHEMA_VERSION,
     );
     assert.equal(
       (database.prepare(
         "SELECT version FROM product_schema WHERE singleton = 1",
       ).get() as { version: number }).version,
-      16,
+      PRODUCT_SCHEMA_VERSION,
     );
     assert.equal(Boolean(database.prepare(
       `SELECT 1 FROM sqlite_master

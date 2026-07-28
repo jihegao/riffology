@@ -60,6 +60,10 @@ import type {
   IsoTimestamp,
   LifecycleState,
   ManagedResourceKind,
+  GeneratedViewRecord,
+  GeneratedViewSetRecord,
+  ModelChangeSetRecord,
+  ModelMutationReceipt,
   ModelRecord,
   ModelRunMode,
   ModelTechnicalStatus,
@@ -139,6 +143,26 @@ export type InitialModelFile = {
   mediaType: string;
   bytes: Uint8Array;
 };
+
+export type GeneratedViewPublication = Readonly<{
+  id: string;
+  title: string;
+  mediaType: string;
+  payload: string;
+  sourceFileIds: readonly string[];
+}>;
+
+export type ModelChangeSetProposal = Readonly<{
+  id: string;
+  modelId: string;
+  conversationId: string;
+  turnId: string;
+  baseWorkspaceDigest: string;
+  files: readonly ModelFileMutation[];
+  executionDescription?: Record<string, unknown>;
+  createdAt: IsoTimestamp;
+  transactionId?: string;
+}>;
 
 export type CreateModelInput = {
   id: string;
@@ -1282,7 +1306,7 @@ export class ProductStoreV2 {
     const conversation = this.#database.prepare("SELECT model_id, project_id FROM conversations WHERE id = ?").get(input.conversationId) as { model_id: string | null; project_id: string | null } | undefined;
     if (!conversation) throw new ProductStoreV2Error("Conversation does not exist.");
     const owner = conversation.model_id ? { kind: "model" as const, id: conversation.model_id } : { kind: "project" as const, id: conversation.project_id! };
-    this.#databaseMutation([
+    const statements: DatabaseMutationStatement[] = [
       activeOwnerGuard(owner),
       { sql: `UPDATE conversations SET provider_locked_at = coalesce(provider_locked_at, ?), updated_at = ?
         WHERE id = ? AND lifecycle_state = 'active'`, params: [input.createdAt, input.createdAt, input.conversationId], expectedChanges: 1 },
@@ -1296,7 +1320,8 @@ export class ProductStoreV2 {
         SELECT ?, id FROM attachments WHERE id = ? AND conversation_id = ?`, params: [input.userMessageId, attachmentId, input.conversationId], expectedChanges: 1 } satisfies DatabaseMutationStatement)),
       { sql: `INSERT INTO agent_turns (id, conversation_id, request_key, intent_sha256, input_message_id, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'running', ?, ?)`, params: [input.turnId, input.conversationId, input.requestKey, intentDigest, input.userMessageId, input.createdAt, input.createdAt], expectedChanges: 1 },
-    ]);
+    ];
+    this.#databaseMutation(statements);
     return this.#agentTurn(input.conversationId, input.requestKey);
   }
 
@@ -1322,7 +1347,7 @@ export class ProductStoreV2 {
       return this.#agentTurn(input.conversationId, input.requestKey);
     }
     if (input.contextDigest != null && !/^[0-9a-f]{64}$/u.test(input.contextDigest)) throw new ProductStoreV2Error("Context digest is invalid.");
-    this.#databaseMutation([
+    const statements: DatabaseMutationStatement[] = [
       activeLifecycleGuard("conversations", input.conversationId),
       { sql: `INSERT INTO messages (id, conversation_id, ordinal, role, status, text, content_json, created_at, updated_at)
         SELECT ?, ?, count(*), 'assistant', 'complete', ?, ?, ?, ? FROM messages WHERE conversation_id = ?`,
@@ -1331,7 +1356,8 @@ export class ProductStoreV2 {
       { sql: `UPDATE agent_turns SET state = 'complete', assistant_message_id = ?, reconstructed_context_sha256 = ?, updated_at = ?
         WHERE conversation_id = ? AND request_key = ? AND state = 'running'`,
         params: [input.assistantMessageId, input.contextDigest ?? null, input.completedAt, input.conversationId, input.requestKey], expectedChanges: 1 },
-    ]);
+    ];
+    this.#databaseMutation(statements);
     return this.#agentTurn(input.conversationId, input.requestKey);
   }
 
@@ -1358,11 +1384,12 @@ export class ProductStoreV2 {
       }
       return this.#agentTurn(conversationId, requestKey);
     }
-    this.#databaseMutation([
+    const statements: DatabaseMutationStatement[] = [
       goalVerificationInsert(existing.id, conversationId, goalVerification),
       { sql: `UPDATE agent_turns SET state = 'failed', failure_code = ?, failure_retryable = ?, updated_at = ?
         WHERE conversation_id = ? AND request_key = ? AND state IN ('queued', 'running')`, params: [code, retryable ? 1 : 0, at, conversationId, requestKey], expectedChanges: 1 },
-    ]);
+    ];
+    this.#databaseMutation(statements);
     return this.#agentTurn(conversationId, requestKey);
   }
 
@@ -1480,6 +1507,23 @@ export class ProductStoreV2 {
             return documents.some((document) =>
               document.id === resource.id
               && document.lifecycleState === "active");
+          }
+          if (resource.kind === "model_change_set" && owner.kind === "model") {
+            const changeSet = this.#database.prepare(
+              `SELECT change_set_sha256 FROM model_change_sets
+                WHERE id = ? AND model_id = ? AND state = 'pending'`,
+            ).get(resource.id, owner.id) as { change_set_sha256: string } | undefined;
+            return typeof resource.sha256 === "string"
+              && changeSet?.change_set_sha256 === resource.sha256;
+          }
+          if (resource.kind === "model_generated_view_set"
+            && owner.kind === "model") {
+            const set = this.#database.prepare(
+              "SELECT set_sha256 FROM model_generated_view_sets WHERE model_id = ?",
+            ).get(owner.id) as { set_sha256: string } | undefined;
+            return resource.id === owner.id
+              && typeof resource.sha256 === "string"
+              && set?.set_sha256 === resource.sha256;
           }
           return false;
         }));
@@ -1758,6 +1802,116 @@ export class ProductStoreV2 {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params: [input.id, input.conversationId, input.turnId, input.actionKind, json(input.intent),
         input.permissionDecision, input.state, json(input.affectedResources ?? []), input.errorCode ?? null, input.createdAt, input.createdAt], expectedChanges: 1 }]);
     return this.#actions(input.turnId).find((row) => row.id === input.id)!;
+  }
+
+  getActionRecord(turnId: string, actionId: string): ActionRecordDto | null {
+    assertId(turnId);
+    assertId(actionId);
+    return this.#actions(turnId).find((row) => row.id === actionId) ?? null;
+  }
+
+  commitActionWithToolResult(input: {
+    actionId: string;
+    toolName:
+      | "riff_propose_model_changes"
+      | "riff_publish_model_generated_views";
+    mutationTransactionId: string;
+    affectedResources: unknown[];
+    result: Record<string, unknown>;
+    at: IsoTimestamp;
+  }): { action: ActionRecordDto; result: Record<string, unknown> } {
+    assertId(input.actionId);
+    assertId(input.mutationTransactionId);
+    assertIsoTimestamp(input.at, "Agent tool result timestamp");
+    if (!isPlainRecord(input.result)) {
+      throw new ProductStoreV2Error("Agent tool result must be an object.");
+    }
+    const resultJson = json(input.result);
+    if (Buffer.byteLength(resultJson, "utf8") > 262_144) {
+      throw new ProductStoreV2Error("Agent tool result exceeds its bound.");
+    }
+    const row = this.#database.prepare(
+      "SELECT turn_id, state, mutation_transaction_id FROM action_records WHERE id = ?",
+    ).get(input.actionId) as {
+      turn_id: string;
+      state: string;
+      mutation_transaction_id: string | null;
+    } | undefined;
+    if (!row || row.state !== "staging"
+      || row.mutation_transaction_id !== input.mutationTransactionId
+      || !this.#database.prepare(
+        "SELECT 1 FROM committed_mutations WHERE transaction_id = ?",
+      ).get(input.mutationTransactionId)) {
+      throw new ProductStoreV2Error(
+        "Agent tool result requires a durably committed staging action.",
+      );
+    }
+    const resultDigest = canonicalDigest(input.result);
+    this.#databaseMutation([
+      {
+        sql: `UPDATE action_records SET state = 'committed',
+          affected_resources_json = ?, error_code = NULL, updated_at = ?
+          WHERE id = ? AND state = 'staging'
+            AND mutation_transaction_id = ?`,
+        params: [
+          json(input.affectedResources),
+          input.at,
+          input.actionId,
+          input.mutationTransactionId,
+        ],
+        expectedChanges: 1,
+      },
+      {
+        sql: `INSERT INTO agent_tool_result_receipts
+          (action_id, tool_name, result_json, result_sha256, created_at)
+          VALUES (?, ?, ?, ?, ?)`,
+        params: [
+          input.actionId,
+          input.toolName,
+          resultJson,
+          resultDigest,
+          input.at,
+        ],
+        expectedChanges: 1,
+      },
+    ]);
+    return {
+      action: this.#actions(row.turn_id)
+        .find((action) => action.id === input.actionId)!,
+      result: this.getAgentToolResult(input.actionId, input.toolName),
+    };
+  }
+
+  getAgentToolResult(
+    actionId: string,
+    toolName:
+      | "riff_propose_model_changes"
+      | "riff_publish_model_generated_views",
+  ): Record<string, unknown> {
+    assertId(actionId);
+    const row = this.#database.prepare(
+      `SELECT tool_name, result_json, result_sha256
+       FROM agent_tool_result_receipts WHERE action_id = ?`,
+    ).get(actionId) as {
+      tool_name: string;
+      result_json: string;
+      result_sha256: string;
+    } | undefined;
+    if (!row || row.tool_name !== toolName) {
+      throw new ProductStoreV2Error("Agent tool result receipt does not exist.");
+    }
+    try {
+      const result = JSON.parse(row.result_json);
+      if (!isPlainRecord(result)
+        || canonicalDigest(result) !== row.result_sha256
+        || Buffer.byteLength(row.result_json, "utf8") > 262_144) {
+        throw new ProductStoreV2Error("Agent tool result receipt is invalid.");
+      }
+      return Object.freeze(result);
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error) throw error;
+      throw new ProductStoreV2Error("Agent tool result receipt is invalid.");
+    }
   }
 
   transitionActionRecord(input: { id: string; expectedState: "proposed" | "authorized" | "staging"; state: "authorized" | "staging" | "committed" | "denied" | "rolled_back" | "failed"; mutationTransactionId?: string | null; affectedResources?: unknown[]; errorCode?: string | null; at: IsoTimestamp }): ActionRecordDto {
@@ -6816,8 +6970,16 @@ export class ProductStoreV2 {
     const exclusions: PermanentDeletePreview["exclusions"] = [];
     const fileRows: ObjectRow[] = [];
     const stateRows: unknown[] = [];
+    const recordKeys = new Set<string>();
     const addRows = (table: string, rows: any[], key: (row: any) => Record<string, string | number> = (row) => ({ id: row.id })) => {
-      for (const row of rows) { records.push({ table, key: key(row) }); stateRows.push({ table, row: { ...row } }); }
+      for (const row of rows) {
+        const recordKey = key(row);
+        const identity = `${table}:${canonicalDigest(recordKey)}`;
+        if (recordKeys.has(identity)) continue;
+        recordKeys.add(identity);
+        records.push({ table, key: recordKey });
+        stateRows.push({ table, row: { ...row } });
+      }
     };
     const row = this.#database.prepare(`SELECT * FROM ${managedTable(kind).table} WHERE id = ?`).get(id) as any;
     if (!row) throw new ProductStoreV2Error("Preview target does not exist.");
@@ -6830,6 +6992,40 @@ export class ProductStoreV2 {
       this.#collectConversationClosure(conversations.map((item) => item.id), addRows, fileRows, blockers, exclusions);
       fileRows.push(...this.#objectRows(`owner_${kind}_id = ?`, [id]));
       if (kind === "model") {
+        addRows(
+          "model_generated_views",
+          this.#database.prepare(
+            "SELECT * FROM model_generated_views WHERE model_id = ? ORDER BY position, id",
+          ).all(id) as any[],
+          (view) => ({ model_id: view.model_id, id: view.id }),
+        );
+        addRows(
+          "model_generated_view_sets",
+          this.#database.prepare(
+            "SELECT * FROM model_generated_view_sets WHERE model_id = ?",
+          ).all(id) as any[],
+          (set) => ({ model_id: set.model_id }),
+        );
+        const changeSets = this.#database.prepare(
+          "SELECT * FROM model_change_sets WHERE model_id = ? ORDER BY id",
+        ).all(id) as any[];
+        for (const changeSet of changeSets) {
+          addRows(
+            "model_change_set_files",
+            this.#database.prepare(
+              "SELECT * FROM model_change_set_files WHERE change_set_id = ? ORDER BY position, item_id",
+            ).all(changeSet.id) as any[],
+            (file) => ({ change_set_id: file.change_set_id, item_id: file.item_id }),
+          );
+        }
+        addRows("model_change_sets", changeSets);
+        addRows(
+          "model_change_set_receipts",
+          this.#database.prepare(
+            "SELECT * FROM model_change_set_receipts WHERE model_id = ? ORDER BY command_id",
+          ).all(id) as any[],
+          (receipt) => ({ command_id: receipt.command_id }),
+        );
         addRows("model_technical_checks", this.#database.prepare("SELECT * FROM model_technical_checks WHERE model_id = ? ORDER BY id").all(id) as any[]);
         for (const project of this.#database.prepare("SELECT id FROM projects WHERE source_model_id = ? ORDER BY id").all(id) as Array<{ id: string }>) blockers.push({ kind: "project_lineage", id: project.id });
         for (const manifest of this.#database.prepare(
@@ -7421,6 +7617,399 @@ export class ProductStoreV2 {
     return this.#objectRows(`${column} = ?`, [owner.id]).sort(compareObjectRows).map((row) => this.#verifiedMetadata(row));
   }
 
+  modelWorkspaceDigest(modelId: string): string {
+    assertId(modelId);
+    const model = this.#database.prepare(
+      `SELECT lifecycle_state, technical_status, run_mode,
+        execution_description_json FROM models WHERE id = ?`,
+    ).get(modelId) as {
+      lifecycle_state: LifecycleState;
+      technical_status: ModelTechnicalStatus;
+      run_mode: ModelRunMode;
+      execution_description_json: string;
+    } | undefined;
+    if (!model || model.lifecycle_state === "trashed") {
+      throw new ProductStoreV2Error("Model does not exist.");
+    }
+    const files = this.#objectRows(
+      `owner_model_id = ? AND kind IN
+        ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')`,
+      [modelId],
+    );
+    files.forEach((file) => this.#verifiedMetadata(file));
+    return canonicalDigest({
+      schemaVersion: 1,
+      authority: {
+        technicalStatus: model.technical_status,
+        runMode: model.run_mode,
+        executionDescription: JSON.parse(model.execution_description_json),
+      },
+      files: files.map((file) => ({
+        kind: file.kind,
+        relativePath: file.relative_path,
+        mediaType: file.media_type,
+        sizeBytes: file.size_bytes,
+        sha256: file.sha256,
+      })).sort((left, right) =>
+        compareStrings(left.relativePath, right.relativePath)
+        || compareStrings(left.kind, right.kind)),
+    });
+  }
+
+  publishGeneratedViews(input: {
+    modelId: string;
+    conversationId: string;
+    turnId: string;
+    sourceWorkspaceDigest: string;
+    views: readonly GeneratedViewPublication[];
+    publishedAt: IsoTimestamp;
+    transactionId?: string;
+  }): GeneratedViewSetRecord {
+    assertId(input.modelId);
+    assertId(input.conversationId);
+    assertId(input.turnId);
+    assertIsoTimestamp(input.publishedAt, "Generated-view publication timestamp");
+    if (!/^[0-9a-f]{64}$/u.test(input.sourceWorkspaceDigest)
+      || input.sourceWorkspaceDigest !== this.modelWorkspaceDigest(input.modelId)) {
+      throw new ProductStoreV2Error("Generated views require the current Model workspace digest.");
+    }
+    if (input.views.length > 16
+      || new Set(input.views.map((view) => view.id)).size !== input.views.length) {
+      throw new ProductStoreV2Error("Generated views exceed the set or identity limit.");
+    }
+    const conversation = this.getConversation(input.conversationId);
+    if (conversation.owner.kind !== "model" || conversation.owner.id !== input.modelId) {
+      throw new ProductStoreV2Error("Generated-view publisher is outside the Model.");
+    }
+    const modelFiles = new Set(this.#objectRows(
+      "owner_model_id = ?",
+      [input.modelId],
+    ).map((file) => file.id));
+    let totalBytes = 0;
+    let activePayloads = 0;
+    const views = input.views.map((view, position) => {
+      assertId(view.id);
+      assertBoundedText(view.title, 300, "Generated-view title");
+      assertBoundedText(view.mediaType, 200, "Generated-view media type");
+      if (!Array.isArray(view.sourceFileIds)
+        || view.sourceFileIds.length > 256
+        || new Set(view.sourceFileIds).size !== view.sourceFileIds.length
+        || view.sourceFileIds.some((id) => !SAFE_ID.test(id) || !modelFiles.has(id))) {
+        throw new ProductStoreV2Error("Generated-view source references are invalid.");
+      }
+      const bytes = Buffer.from(view.payload, "utf8");
+      if (["text/html", "image/svg+xml"].includes(view.mediaType.toLowerCase())) {
+        activePayloads += 1;
+        if (activePayloads > 1) {
+          throw new ProductStoreV2Error(
+            "Generated views allow only one active renderer payload.",
+          );
+        }
+      }
+      if (bytes.byteLength > 2_097_152
+        || !Number.isSafeInteger(totalBytes + bytes.byteLength)
+        || totalBytes + bytes.byteLength > 8 * 1024 * 1024) {
+        throw new ProductStoreV2Error("Generated views exceed the payload limit.");
+      }
+      totalBytes += bytes.byteLength;
+      return Object.freeze({
+        id: view.id,
+        modelId: input.modelId,
+        title: view.title,
+        position,
+        mediaType: view.mediaType,
+        payload: view.payload,
+        payloadDigest: sha256(bytes),
+        sourceFileIds: Object.freeze([...view.sourceFileIds]),
+      }) satisfies GeneratedViewRecord;
+    });
+    const setDigest = canonicalDigest({
+      sourceWorkspaceDigest: input.sourceWorkspaceDigest,
+      views: views.map(({ id, title, position, mediaType, payloadDigest, sourceFileIds }) =>
+        ({ id, title, position, mediaType, payloadDigest, sourceFileIds })),
+    });
+    const priorCount = Number((this.#database.prepare(
+      "SELECT count(*) AS count FROM model_generated_views WHERE model_id = ?",
+    ).get(input.modelId) as { count: number }).count);
+    const hadSet = Boolean(this.#database.prepare(
+      "SELECT 1 FROM model_generated_view_sets WHERE model_id = ?",
+    ).get(input.modelId));
+    const statements: DatabaseMutationStatement[] = [
+      {
+        sql: "DELETE FROM model_generated_views WHERE model_id = ?",
+        params: [input.modelId],
+        expectedChanges: priorCount,
+      },
+      {
+        sql: "DELETE FROM model_generated_view_sets WHERE model_id = ?",
+        params: [input.modelId],
+        expectedChanges: hadSet ? 1 : 0,
+      },
+      {
+        sql: `INSERT INTO model_generated_view_sets
+          (model_id, source_workspace_sha256, set_sha256,
+            publisher_conversation_id, publisher_turn_id, published_at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+        params: [
+          input.modelId,
+          input.sourceWorkspaceDigest,
+          setDigest,
+          input.conversationId,
+          input.turnId,
+          input.publishedAt,
+        ],
+        expectedChanges: 1,
+      },
+      ...views.map((view) => ({
+        sql: `INSERT INTO model_generated_views
+          (id, model_id, title, position, media_type, payload_text,
+            payload_sha256, source_file_ids_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          view.id,
+          view.modelId,
+          view.title,
+          view.position,
+          view.mediaType,
+          view.payload,
+          view.payloadDigest,
+          json(view.sourceFileIds),
+        ],
+        expectedChanges: 1,
+      })),
+    ];
+    if (input.transactionId) {
+      this.#databaseMutation([
+        ...statements,
+        databaseOnlyMutationReceipt(input.transactionId, input.publishedAt),
+      ]);
+    } else {
+      this.#databaseMutation(statements);
+    }
+    return this.getGeneratedViewSet(input.modelId)!;
+  }
+
+  getGeneratedViewSet(modelId: string): GeneratedViewSetRecord | null {
+    assertId(modelId);
+    const set = this.#database.prepare(
+      "SELECT * FROM model_generated_view_sets WHERE model_id = ?",
+    ).get(modelId) as any;
+    if (!set) return null;
+    const modelFiles = new Set(this.#objectRows(
+      "owner_model_id = ?",
+      [modelId],
+    ).map((file) => file.id));
+    const rows = this.#database.prepare(
+      "SELECT * FROM model_generated_views WHERE model_id = ? ORDER BY position, id",
+    ).all(modelId) as any[];
+    let views: GeneratedViewRecord[];
+    try {
+      let activePayloads = 0;
+      let totalBytes = 0;
+      views = rows.map((row, position) => {
+        const view = generatedViewRecord(row);
+        const payloadBytes = Buffer.from(view.payload, "utf8");
+        totalBytes += payloadBytes.byteLength;
+        const payloadDigest = sha256(payloadBytes);
+        if (["text/html", "image/svg+xml"].includes(view.mediaType.toLowerCase())) {
+          activePayloads += 1;
+        }
+        if (view.modelId !== modelId
+          || view.position !== position
+          || payloadDigest !== view.payloadDigest
+          || payloadBytes.byteLength > 2_097_152
+          || totalBytes > 8 * 1024 * 1024
+          || activePayloads > 1
+          || view.sourceFileIds.length > 256
+          || new Set(view.sourceFileIds).size !== view.sourceFileIds.length
+          || view.sourceFileIds.some((id) => !SAFE_ID.test(id) || !modelFiles.has(id))) {
+          throw new ProductStoreV2Error("Generated-view evidence is invalid.");
+        }
+        return view;
+      });
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error) throw error;
+      throw new ProductStoreV2Error("Generated-view evidence is invalid.");
+    }
+    const expectedSetDigest = canonicalDigest({
+      sourceWorkspaceDigest: set.source_workspace_sha256,
+      views: views.map(({ id, title, position, mediaType, payloadDigest, sourceFileIds }) =>
+        ({ id, title, position, mediaType, payloadDigest, sourceFileIds })),
+    });
+    if (!/^[0-9a-f]{64}$/u.test(set.source_workspace_sha256)
+      || set.set_sha256 !== expectedSetDigest
+      || views.length > 16) {
+      throw new ProductStoreV2Error("Generated-view evidence is invalid.");
+    }
+    return Object.freeze({
+      modelId,
+      sourceWorkspaceDigest: set.source_workspace_sha256,
+      setDigest: set.set_sha256,
+      publisherConversationId: set.publisher_conversation_id,
+      publisherTurnId: set.publisher_turn_id,
+      publishedAt: set.published_at,
+      views: Object.freeze(views),
+    });
+  }
+
+  createModelChangeSet(input: ModelChangeSetProposal): ModelChangeSetRecord {
+    assertId(input.id);
+    assertId(input.modelId);
+    assertId(input.conversationId);
+    assertId(input.turnId);
+    assertIsoTimestamp(input.createdAt, "Model change-set timestamp");
+    if (!/^[0-9a-f]{64}$/u.test(input.baseWorkspaceDigest)
+      || input.baseWorkspaceDigest !== this.modelWorkspaceDigest(input.modelId)) {
+      throw new ProductStoreV2Error("Model change set is stale.");
+    }
+    const conversation = this.getConversation(input.conversationId);
+    if (conversation.owner.kind !== "model" || conversation.owner.id !== input.modelId) {
+      throw new ProductStoreV2Error("Model change set is outside the conversation owner.");
+    }
+    const files = this.#validateChangeSetFiles(input.modelId, input.files);
+    const changeSetDigest = canonicalDigest({
+      modelId: input.modelId,
+      baseWorkspaceDigest: input.baseWorkspaceDigest,
+      files: files.map(({ itemId, objectFileId, kind, relativePath, mediaType,
+        expectedPriorSha256, proposedSha256, position }) => ({
+        itemId, objectFileId, kind, relativePath, mediaType,
+        expectedPriorSha256, proposedSha256, position,
+      })),
+      executionDescription: input.executionDescription ?? null,
+    });
+    const existing = this.#database.prepare(
+      "SELECT change_set_sha256 FROM model_change_sets WHERE id = ?",
+    ).get(input.id) as { change_set_sha256: string } | undefined;
+    if (existing) {
+      if (existing.change_set_sha256 !== changeSetDigest) {
+        throw new ProductStoreV2Error("Model change-set ID was reused with different intent.");
+      }
+      return this.getModelChangeSet(input.modelId, input.id);
+    }
+    const statements: DatabaseMutationStatement[] = [
+      {
+        sql: `INSERT INTO model_change_sets
+          (id, model_id, conversation_id, turn_id, base_workspace_sha256,
+            change_set_sha256, state, execution_description_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        params: [
+          input.id,
+          input.modelId,
+          input.conversationId,
+          input.turnId,
+          input.baseWorkspaceDigest,
+          changeSetDigest,
+          input.executionDescription === undefined ? null : json(input.executionDescription),
+          input.createdAt,
+        ],
+        expectedChanges: 1,
+      },
+      ...files.map((file) => ({
+        sql: `INSERT INTO model_change_set_files
+          (item_id, change_set_id, object_file_id, kind, relative_path,
+            media_type, expected_prior_sha256, proposed_text, proposed_sha256,
+            position)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          file.itemId,
+          input.id,
+          file.objectFileId,
+          file.kind,
+          file.relativePath,
+          file.mediaType,
+          file.expectedPriorSha256,
+          file.proposedText,
+          file.proposedSha256,
+          file.position,
+        ],
+        expectedChanges: 1,
+      })),
+    ];
+    if (input.transactionId) {
+      this.#databaseMutation([
+        ...statements,
+        databaseOnlyMutationReceipt(input.transactionId, input.createdAt),
+      ]);
+    } else {
+      this.#databaseMutation(statements);
+    }
+    return this.getModelChangeSet(input.modelId, input.id);
+  }
+
+  validateModelFileMutations(
+    modelId: string,
+    files: readonly ModelFileMutation[],
+  ): void {
+    assertId(modelId);
+    this.modelWorkspaceDigest(modelId);
+    this.#validateChangeSetFiles(modelId, files);
+  }
+
+  listModelChangeSets(modelId: string, state?: "pending" | "applied" | "rejected"): ModelChangeSetRecord[] {
+    assertId(modelId);
+    if (state !== undefined && !["pending", "applied", "rejected"].includes(state)) {
+      throw new ProductStoreV2Error("Model change-set state is invalid.");
+    }
+    const rows = this.#database.prepare(
+      `SELECT id FROM model_change_sets WHERE model_id = ?
+        ${state === undefined ? "" : "AND state = ?"}
+        ORDER BY created_at DESC, id`,
+    ).all(...(state === undefined ? [modelId] : [modelId, state])) as Array<{ id: string }>;
+    return rows.map((row) => this.getModelChangeSet(modelId, row.id));
+  }
+
+  getModelChangeSet(modelId: string, changeSetId: string): ModelChangeSetRecord {
+    assertId(modelId);
+    assertId(changeSetId);
+    const row = this.#database.prepare(
+      "SELECT * FROM model_change_sets WHERE id = ? AND model_id = ?",
+    ).get(changeSetId, modelId) as any;
+    if (!row) throw new ProductStoreV2Error("Model change set does not exist.");
+    const files = (this.#database.prepare(
+      "SELECT * FROM model_change_set_files WHERE change_set_id = ? ORDER BY position, item_id",
+    ).all(changeSetId) as any[]).map(modelChangeSetFileRecord);
+    return Object.freeze({
+      id: row.id,
+      modelId: row.model_id,
+      conversationId: row.conversation_id,
+      turnId: row.turn_id,
+      baseWorkspaceDigest: row.base_workspace_sha256,
+      changeSetDigest: row.change_set_sha256,
+      state: row.state,
+      executionDescription: row.execution_description_json === null
+        ? null
+        : JSON.parse(row.execution_description_json),
+      createdAt: row.created_at,
+      resolvedAt: row.resolved_at,
+      files: Object.freeze(files),
+    });
+  }
+
+  applyModelChangeSet(input: {
+    commandId: string;
+    modelId: string;
+    changeSetId: string;
+    expectedChangeSetDigest: string;
+    expectedWorkspaceDigest: string;
+    committedAt: IsoTimestamp;
+  }): ModelMutationReceipt {
+    return this.#resolveModelChangeSet({ ...input, operation: "apply" });
+  }
+
+  rejectModelChangeSet(input: {
+    commandId: string;
+    modelId: string;
+    changeSetId: string;
+    expectedChangeSetDigest: string;
+    committedAt: IsoTimestamp;
+  }): ModelMutationReceipt {
+    return this.#resolveModelChangeSet({
+      ...input,
+      expectedWorkspaceDigest: this.modelWorkspaceDigest(input.modelId),
+      operation: "reject",
+    });
+  }
+
   replaceModelFile(objectFileId: string, bytesInput: Uint8Array, updatedAt: IsoTimestamp): StoredObjectMetadata {
     const row = this.#objectRow(objectFileId);
     if (!row.owner_model_id || !["model_code", "model_environment", "model_visual_asset", "adopted_attachment"].includes(row.kind)) {
@@ -7439,7 +8028,320 @@ export class ProductStoreV2 {
 
   mutateModelFiles(input: { modelId: string; files: ModelFileMutation[]; executionDescription?: Record<string, unknown>; updatedAt: IsoTimestamp; transactionId?: string }): StoredObjectMetadata[] {
     this.#assertOpen();
-    if (!input.files.length || new Set(input.files.map((file) => file.objectFileId)).size !== input.files.length) throw new ProductStoreV2Error("Model mutation requires unique files.");
+    const mutation = this.#modelMutation(input);
+    this.#coordinator.execute({
+      transactionId: input.transactionId,
+      files: mutation.fileMutations,
+      statements: mutation.statements,
+    });
+    const plans = mutation.plans;
+    return plans.map(({ file }) => this.#file(file.objectFileId));
+  }
+
+  commitDirectModelChanges(input: {
+    commandId: string;
+    modelId: string;
+    files: ModelFileMutation[];
+    executionDescription?: Record<string, unknown>;
+    committedAt: IsoTimestamp;
+    transactionId: string;
+  }): ModelMutationReceipt {
+    assertId(input.commandId);
+    assertId(input.modelId);
+    assertIsoTimestamp(input.committedAt, "Direct Model mutation timestamp");
+    const changeSetDigest = canonicalDigest({
+      modelId: input.modelId,
+      files: input.files.map((file) => ({
+        objectFileId: file.objectFileId,
+        kind: file.kind,
+        relativePath: file.relativePath,
+        mediaType: file.mediaType,
+        expectedPriorSha256: file.expectedPriorSha256,
+        proposedSha256: sha256(Buffer.from(file.bytes)),
+      })),
+      executionDescription: input.executionDescription ?? null,
+    });
+    const intentDigest = canonicalDigest({
+      operation: "direct_apply",
+      modelId: input.modelId,
+      changeSetDigest,
+    });
+    const replay = this.#modelMutationReceipt(input.commandId, intentDigest);
+    if (replay) return replay;
+    const beforeWorkspaceDigest = this.modelWorkspaceDigest(input.modelId);
+    const mutation = this.#modelMutation({
+      modelId: input.modelId,
+      files: input.files,
+      ...(input.executionDescription === undefined
+        ? {}
+        : { executionDescription: input.executionDescription }),
+      updatedAt: input.committedAt,
+    });
+    const unsigned = {
+      schemaVersion: 1 as const,
+      commandId: input.commandId,
+      operation: "direct_apply" as const,
+      modelId: input.modelId,
+      changeSetId: null,
+      changeSetDigest,
+      beforeWorkspaceDigest,
+      afterWorkspaceDigest: mutation.afterWorkspaceDigest,
+      files: mutation.plans.map(({ file, digest }) => Object.freeze({
+        itemId: file.objectFileId,
+        relativePath: file.relativePath,
+        priorSha256: file.expectedPriorSha256,
+        proposedSha256: digest,
+      })),
+      committedAt: input.committedAt,
+    };
+    const receipt = Object.freeze({
+      ...unsigned,
+      receiptDigest: canonicalDigest(unsigned),
+    }) satisfies ModelMutationReceipt;
+    this.#coordinator.execute({
+      transactionId: input.transactionId,
+      files: mutation.fileMutations,
+      statements: [
+        ...mutation.statements,
+        modelMutationReceiptInsert(receipt, intentDigest),
+      ],
+    });
+    return receipt;
+  }
+
+  #validateChangeSetFiles(modelId: string, mutations: readonly ModelFileMutation[]) {
+    if (!mutations.length || mutations.length > 64
+      || new Set(mutations.map((file) => file.objectFileId)).size !== mutations.length) {
+      throw new ProductStoreV2Error("Model change set exceeds the file or identity limit.");
+    }
+    let totalBytes = 0;
+    return mutations.map((file, position) => {
+      assertId(file.objectFileId);
+      assertLogicalModelRelativePath(file.relativePath);
+      assertBoundedText(file.mediaType, 200, "Model change-set media type");
+      const bytes = Buffer.from(file.bytes);
+      if (bytes.byteLength > 1_048_576
+        || !Number.isSafeInteger(totalBytes + bytes.byteLength)
+        || totalBytes + bytes.byteLength > 8 * 1024 * 1024) {
+        throw new ProductStoreV2Error("Model change set exceeds the payload limit.");
+      }
+      totalBytes += bytes.byteLength;
+      const fullPath = modelFilePath(file.kind, file.relativePath);
+      const prior = this.#database.prepare(
+        "SELECT * FROM object_files WHERE id = ?",
+      ).get(file.objectFileId) as ObjectRow | undefined;
+      if (prior) {
+        if (prior.owner_model_id !== modelId
+          || prior.kind !== file.kind
+          || prior.relative_path !== fullPath
+          || prior.sha256 !== file.expectedPriorSha256) {
+          throw new ProductStoreV2Error("Model change-set file precondition or ownership mismatch.");
+        }
+      } else {
+        if (file.expectedPriorSha256 !== null) {
+          throw new ProductStoreV2Error("New Model change-set file must expect no prior digest.");
+        }
+        const pathOwner = this.#database.prepare(
+          "SELECT id FROM object_files WHERE owner_model_id = ? AND relative_path = ?",
+        ).get(modelId, fullPath);
+        if (pathOwner) {
+          throw new ProductStoreV2Error("Model change-set path is already owned by another file.");
+        }
+      }
+      return Object.freeze({
+        itemId: `change_item_${canonicalDigest({
+          objectFileId: file.objectFileId,
+          position,
+        }).slice(0, 32)}`,
+        objectFileId: file.objectFileId,
+        kind: file.kind,
+        relativePath: file.relativePath,
+        mediaType: file.mediaType,
+        expectedPriorSha256: file.expectedPriorSha256,
+        proposedText: bytes.toString("utf8"),
+        proposedSha256: sha256(bytes),
+        position,
+      });
+    });
+  }
+
+  #resolveModelChangeSet(input: {
+    commandId: string;
+    modelId: string;
+    changeSetId: string;
+    expectedChangeSetDigest: string;
+    expectedWorkspaceDigest: string;
+    operation: "apply" | "reject";
+    committedAt: IsoTimestamp;
+  }): ModelMutationReceipt {
+    assertId(input.commandId);
+    assertId(input.modelId);
+    assertId(input.changeSetId);
+    assertIsoTimestamp(input.committedAt, "Model change-set resolution timestamp");
+    if (!/^[0-9a-f]{64}$/u.test(input.expectedChangeSetDigest)
+      || !/^[0-9a-f]{64}$/u.test(input.expectedWorkspaceDigest)) {
+      throw new ProductStoreV2Error("Model change-set resolution digest is invalid.");
+    }
+    const intentDigest = canonicalDigest(
+      input.operation === "apply"
+        ? {
+            operation: input.operation,
+            modelId: input.modelId,
+            changeSetId: input.changeSetId,
+            expectedChangeSetDigest: input.expectedChangeSetDigest,
+            expectedWorkspaceDigest: input.expectedWorkspaceDigest,
+          }
+        : {
+            operation: input.operation,
+            modelId: input.modelId,
+            changeSetId: input.changeSetId,
+            expectedChangeSetDigest: input.expectedChangeSetDigest,
+          },
+    );
+    const replay = this.#modelMutationReceipt(input.commandId, intentDigest);
+    if (replay) return replay;
+    const changeSet = this.getModelChangeSet(input.modelId, input.changeSetId);
+    const currentWorkspaceDigest = this.modelWorkspaceDigest(input.modelId);
+    const staleApply = input.operation === "apply"
+      && (currentWorkspaceDigest !== input.expectedWorkspaceDigest
+        || currentWorkspaceDigest !== changeSet.baseWorkspaceDigest);
+    if (changeSet.state !== "pending"
+      || changeSet.changeSetDigest !== input.expectedChangeSetDigest
+      || staleApply) {
+      throw new ProductStoreV2Error("Model change set is stale.");
+    }
+    const mutations: ModelFileMutation[] = changeSet.files.map((file) => ({
+      objectFileId: file.objectFileId,
+      kind: file.kind,
+      relativePath: file.relativePath,
+      mediaType: file.mediaType,
+      bytes: Buffer.from(file.proposedText, "utf8"),
+      expectedPriorSha256: file.expectedPriorSha256,
+    }));
+    const mutation = input.operation === "apply"
+      ? this.#modelMutation({
+          modelId: input.modelId,
+          files: mutations,
+          ...(changeSet.executionDescription === null
+            ? {}
+            : { executionDescription: changeSet.executionDescription }),
+          updatedAt: input.committedAt,
+        })
+      : null;
+    const afterWorkspaceDigest = mutation?.afterWorkspaceDigest
+      ?? currentWorkspaceDigest;
+    const unsigned = {
+      schemaVersion: 1 as const,
+      commandId: input.commandId,
+      operation: input.operation,
+      modelId: input.modelId,
+      changeSetId: input.changeSetId,
+      changeSetDigest: changeSet.changeSetDigest,
+      beforeWorkspaceDigest: currentWorkspaceDigest,
+      afterWorkspaceDigest,
+      files: changeSet.files.map((file) => Object.freeze({
+        itemId: file.itemId,
+        relativePath: file.relativePath,
+        priorSha256: file.expectedPriorSha256,
+        proposedSha256: file.proposedSha256,
+      })),
+      committedAt: input.committedAt,
+    };
+    const receipt = Object.freeze({
+      ...unsigned,
+      receiptDigest: canonicalDigest(unsigned),
+    }) satisfies ModelMutationReceipt;
+    const statements: DatabaseMutationStatement[] = [
+      ...(mutation?.statements ?? [activeLifecycleGuard("models", input.modelId)]),
+      {
+        sql: `UPDATE model_change_sets
+          SET state = ?, resolved_at = ?
+          WHERE id = ? AND model_id = ? AND state = 'pending'
+            AND change_set_sha256 = ? AND base_workspace_sha256 = ?`,
+        params: [
+          input.operation === "apply" ? "applied" : "rejected",
+          input.committedAt,
+          input.changeSetId,
+          input.modelId,
+          input.expectedChangeSetDigest,
+          changeSet.baseWorkspaceDigest,
+        ],
+        expectedChanges: 1,
+      },
+      modelMutationReceiptInsert(receipt, intentDigest),
+    ];
+    if (mutation) {
+      this.#coordinator.execute({
+        transactionId: `mutation_changeset_${canonicalDigest({
+          commandId: input.commandId,
+          intentDigest,
+        }).slice(0, 32)}`,
+        files: mutation.fileMutations,
+        statements,
+      });
+    } else {
+      this.#databaseMutation(statements);
+    }
+    return receipt;
+  }
+
+  #modelMutationReceipt(commandId: string, intentDigest: string): ModelMutationReceipt | null {
+    const row = this.#database.prepare(
+      `SELECT command_id, model_id, change_set_id, operation,
+        canonical_intent_sha256, receipt_json, receipt_sha256, committed_at
+       FROM model_change_set_receipts WHERE command_id = ?`,
+    ).get(commandId) as {
+      command_id: string;
+      model_id: string;
+      change_set_id: string | null;
+      operation: string;
+      canonical_intent_sha256: string;
+      receipt_json: string;
+      receipt_sha256: string;
+      committed_at: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.canonical_intent_sha256 !== intentDigest) {
+      throw new ProductStoreV2Error("Model mutation command ID was reused with different intent.");
+    }
+    try {
+      const receipt = assertModelMutationReceipt(JSON.parse(row.receipt_json));
+      if (receipt.commandId !== row.command_id
+        || receipt.modelId !== row.model_id
+        || receipt.changeSetId !== row.change_set_id
+        || receipt.operation !== row.operation
+        || receipt.committedAt !== row.committed_at
+        || receipt.receiptDigest !== row.receipt_sha256) {
+        throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+      }
+      return receipt;
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error) throw error;
+      throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+    }
+  }
+
+  #modelMutation(input: {
+    modelId: string;
+    files: ModelFileMutation[];
+    executionDescription?: Record<string, unknown>;
+    updatedAt: IsoTimestamp;
+  }) {
+    if (!input.files.length
+      || new Set(input.files.map((file) => file.objectFileId)).size !== input.files.length) {
+      throw new ProductStoreV2Error("Model mutation requires unique files.");
+    }
+    const currentModel = this.#database.prepare(
+      `SELECT technical_status, run_mode, execution_description_json
+       FROM models WHERE id = ? AND lifecycle_state = 'active'`,
+    ).get(input.modelId) as {
+      technical_status: ModelTechnicalStatus;
+      run_mode: ModelRunMode;
+      execution_description_json: string;
+    } | undefined;
+    if (!currentModel) {
+      throw new ProductStoreV2Error("Model must be active before mutation.");
+    }
     let executionRunMode: ModelRunMode | null = null;
     if (input.executionDescription !== undefined) {
       try {
@@ -7447,43 +8349,128 @@ export class ProductStoreV2 {
           input.executionDescription,
         ).runMode;
       } catch {
-        // Preserve the existing Store compatibility boundary for legacy
-        // descriptions. Invalid v2 evidence can never satisfy goal verification.
+        // Legacy Store callers may still carry a pre-v2 description. Agent
+        // proposal/apply entrypoints validate v2 before durable action.
       }
     }
     const plans = input.files.map((file) => {
       assertId(file.objectFileId);
+      assertLogicalModelRelativePath(file.relativePath);
       const relativePath = modelFilePath(file.kind, file.relativePath);
-      const prior = this.#database.prepare("SELECT * FROM object_files WHERE id = ?").get(file.objectFileId) as ObjectRow | undefined;
+      const prior = this.#database.prepare(
+        "SELECT * FROM object_files WHERE id = ?",
+      ).get(file.objectFileId) as ObjectRow | undefined;
       if (prior) {
-        if (prior.owner_model_id !== input.modelId || prior.kind !== file.kind || prior.relative_path !== relativePath || prior.sha256 !== file.expectedPriorSha256) {
+        if (prior.owner_model_id !== input.modelId
+          || prior.kind !== file.kind
+          || prior.relative_path !== relativePath
+          || prior.sha256 !== file.expectedPriorSha256) {
           throw new ProductStoreV2Error("Model file mutation precondition or ownership mismatch.");
         }
-      } else if (file.expectedPriorSha256 !== null) throw new ProductStoreV2Error("New Model file must expect no prior digest.");
+      } else if (file.expectedPriorSha256 !== null) {
+        throw new ProductStoreV2Error("New Model file must expect no prior digest.");
+      }
       const bytes = Buffer.from(file.bytes);
       const digest = sha256(bytes);
-      return { file, prior, bytes, digest, relativePath, target: { owner: { kind: "model" as const, id: input.modelId }, relativePath } };
+      return {
+        file,
+        prior,
+        bytes,
+        digest,
+        relativePath,
+        target: {
+          owner: { kind: "model" as const, id: input.modelId },
+          relativePath,
+        },
+      };
     });
-    const statements: DatabaseMutationStatement[] = [activeLifecycleGuard("models", input.modelId), ...plans.map(({ file, prior, bytes, digest, relativePath }) => prior ? ({
-      sql: "UPDATE object_files SET media_type = ?, size_bytes = ?, sha256 = ? WHERE id = ? AND owner_model_id = ? AND sha256 = ?",
-      params: [file.mediaType, bytes.byteLength, digest, file.objectFileId, input.modelId, file.expectedPriorSha256], expectedChanges: 1,
-    }) : objectInsert({ id: file.objectFileId, owner: { kind: "model", id: input.modelId }, kind: file.kind, relativePath,
-      mediaType: file.mediaType, sizeBytes: bytes.byteLength, digest, createdAt: input.updatedAt })), {
-      sql: `UPDATE models SET technical_status = 'draft',
-        run_mode = coalesce(?, run_mode),
-        execution_description_json = coalesce(?, execution_description_json),
-        updated_at = ?
-        WHERE id = ? AND lifecycle_state = 'active'`, params: [
+    const statements: DatabaseMutationStatement[] = [
+      activeLifecycleGuard("models", input.modelId),
+      ...plans.map(({ file, prior, bytes, digest, relativePath }) => prior
+        ? ({
+            sql: `UPDATE object_files SET media_type = ?, size_bytes = ?, sha256 = ?
+              WHERE id = ? AND owner_model_id = ? AND sha256 = ?`,
+            params: [
+              file.mediaType,
+              bytes.byteLength,
+              digest,
+              file.objectFileId,
+              input.modelId,
+              file.expectedPriorSha256,
+            ],
+            expectedChanges: 1,
+          })
+        : objectInsert({
+            id: file.objectFileId,
+            owner: { kind: "model", id: input.modelId },
+            kind: file.kind,
+            relativePath,
+            mediaType: file.mediaType,
+            sizeBytes: bytes.byteLength,
+            digest,
+            createdAt: input.updatedAt,
+          })),
+      {
+        sql: `UPDATE models SET technical_status = 'draft',
+          run_mode = coalesce(?, run_mode),
+          execution_description_json = coalesce(?, execution_description_json),
+          updated_at = ?
+          WHERE id = ? AND lifecycle_state = 'active'`,
+        params: [
           executionRunMode,
           input.executionDescription === undefined
             ? null
             : json(input.executionDescription),
           input.updatedAt,
           input.modelId,
-        ], expectedChanges: 1,
-    }];
-    this.#coordinator.execute({ transactionId: input.transactionId, files: plans.map(({ target, bytes, file }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: file.expectedPriorSha256 })), statements });
-    return plans.map(({ file }) => this.#file(file.objectFileId));
+        ],
+        expectedChanges: 1,
+      },
+    ];
+    const currentRows = this.#objectRows(
+      `owner_model_id = ? AND kind IN
+        ('model_code', 'model_environment', 'model_visual_asset', 'adopted_attachment')`,
+      [input.modelId],
+    );
+    const changed = new Map(plans.map((plan) => [plan.file.objectFileId, plan]));
+    const afterRows = currentRows.filter((row) => !changed.has(row.id)).map((row) => ({
+      kind: row.kind,
+      relativePath: row.relative_path,
+      mediaType: row.media_type,
+      sizeBytes: row.size_bytes,
+      sha256: row.sha256,
+    }));
+    for (const plan of plans) {
+      afterRows.push({
+        kind: plan.file.kind,
+        relativePath: plan.relativePath,
+        mediaType: plan.file.mediaType,
+        sizeBytes: plan.bytes.byteLength,
+        sha256: plan.digest,
+      });
+    }
+    return {
+      plans,
+      statements,
+      fileMutations: plans.map(({ target, bytes, file }) => ({
+        operation: "write" as const,
+        target,
+        bytes,
+        expectedPriorSha256: file.expectedPriorSha256,
+      })),
+      afterWorkspaceDigest: canonicalDigest({
+        schemaVersion: 1,
+        authority: {
+          technicalStatus: "draft",
+          runMode: executionRunMode ?? currentModel.run_mode,
+          executionDescription: input.executionDescription
+            ?? JSON.parse(currentModel.execution_description_json),
+        },
+        files: afterRows.sort((left, right) =>
+          compareStrings(left.relativePath, right.relativePath)
+          || compareStrings(left.kind, right.kind)),
+      }),
+    };
   }
 
   createModelWithFirstConversation(input: { model: CreateModelInput; conversation: Omit<CreateConversationInput, "owner"> }): { model: ModelRecord; conversation: ConversationDto } {
@@ -7739,11 +8726,32 @@ export class ProductStoreV2 {
       const turns = this.#database.prepare("SELECT * FROM agent_turns WHERE conversation_id = ? ORDER BY created_at, id").all(conversationId) as any[];
       addRows("agent_turns", turns);
       for (const turn of turns) {
+        const changeSets = this.#database.prepare(
+          "SELECT * FROM model_change_sets WHERE turn_id = ? ORDER BY id",
+        ).all(turn.id) as any[];
+        for (const changeSet of changeSets) {
+          addRows(
+            "model_change_set_receipts",
+            this.#database.prepare(
+              "SELECT * FROM model_change_set_receipts WHERE change_set_id = ? ORDER BY command_id",
+            ).all(changeSet.id) as any[],
+            (receipt) => ({ command_id: receipt.command_id }),
+          );
+          addRows(
+            "model_change_set_files",
+            this.#database.prepare(
+              "SELECT * FROM model_change_set_files WHERE change_set_id = ? ORDER BY position, item_id",
+            ).all(changeSet.id) as any[],
+            (file) => ({ change_set_id: file.change_set_id, item_id: file.item_id }),
+          );
+        }
+        addRows("model_change_sets", changeSets);
         addRows(
           "agent_goal_verification_receipts",
           this.#database.prepare(
             "SELECT * FROM agent_goal_verification_receipts WHERE turn_id = ?",
           ).all(turn.id) as any[],
+          (receipt) => ({ turn_id: receipt.turn_id }),
         );
         for (const audit of this.#database.prepare(
           `SELECT id, run_id FROM visual_agent_audit_facts
@@ -7759,6 +8767,15 @@ export class ProductStoreV2 {
         }
         addRows("skill_uses", this.#database.prepare("SELECT * FROM skill_uses WHERE turn_id = ? ORDER BY id").all(turn.id) as any[]);
         const actions = this.#database.prepare("SELECT * FROM action_records WHERE turn_id = ? ORDER BY id").all(turn.id) as any[];
+        for (const action of actions) {
+          addRows(
+            "agent_tool_result_receipts",
+            this.#database.prepare(
+              "SELECT * FROM agent_tool_result_receipts WHERE action_id = ?",
+            ).all(action.id) as any[],
+            (receipt) => ({ action_id: receipt.action_id }),
+          );
+        }
         addRows("action_records", actions);
         for (const action of actions) addRows("temporary_document_adoptions", this.#database.prepare("SELECT * FROM temporary_document_adoptions WHERE action_record_id = ? ORDER BY document_id").all(action.id) as any[], (item) => ({ document_id: item.document_id, action_record_id: item.action_record_id }));
       }
@@ -9111,9 +10128,13 @@ const managedTable = (kind: ManagedResourceKind): { table: string; trashColumn: 
 
 const PERMANENT_DELETE_TABLE_PRIORITY = Object.freeze([
   "visual_agent_audit_facts",
+  "model_change_set_receipts",
+  "model_change_set_files",
+  "model_generated_views",
   "message_attachments",
   "temporary_document_adoptions",
   "skill_uses",
+  "agent_tool_result_receipts",
   "action_records",
   "agent_goal_verification_receipts",
   "agent_turns",
@@ -9139,6 +10160,8 @@ const PERMANENT_DELETE_TABLE_PRIORITY = Object.freeze([
   "object_files",
   "trash_entries",
   "model_technical_checks",
+  "model_change_sets",
+  "model_generated_view_sets",
   "experiment_command_receipts",
   "runs",
   "experiment_configurations",
@@ -9191,6 +10214,162 @@ const compareKindId = (left: { kind: string; id: string }, right: { kind: string
 const compareStrings = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const visible = (state: LifecycleState, options: { includeArchived?: boolean; includeTrashed?: boolean }): boolean => state === "active" || state === "archived" && Boolean(options.includeArchived) || state === "trashed" && Boolean(options.includeTrashed);
 const json = (value: unknown): string => canonicalJsonV2(value).toString("utf8");
+
+const generatedViewRecord = (row: any): GeneratedViewRecord => Object.freeze({
+  id: row.id,
+  modelId: row.model_id,
+  title: row.title,
+  position: row.position,
+  mediaType: row.media_type,
+  payload: row.payload_text,
+  payloadDigest: row.payload_sha256,
+  sourceFileIds: Object.freeze(JSON.parse(row.source_file_ids_json) as string[]),
+});
+
+const modelChangeSetFileRecord = (row: any) => Object.freeze({
+  itemId: row.item_id,
+  changeSetId: row.change_set_id,
+  objectFileId: row.object_file_id,
+  kind: row.kind,
+  relativePath: row.relative_path,
+  mediaType: row.media_type,
+  expectedPriorSha256: row.expected_prior_sha256,
+  proposedText: row.proposed_text,
+  proposedSha256: row.proposed_sha256,
+  position: row.position,
+});
+
+const assertModelMutationReceipt = (value: unknown): ModelMutationReceipt => {
+  if (!isPlainRecord(value)
+    || !closedKeys(value, [
+      "afterWorkspaceDigest",
+      "beforeWorkspaceDigest",
+      "changeSetDigest",
+      "changeSetId",
+      "commandId",
+      "committedAt",
+      "files",
+      "modelId",
+      "operation",
+      "receiptDigest",
+      "schemaVersion",
+    ])
+    || value.schemaVersion !== 1
+    || !SAFE_ID.test(String(value.commandId))
+    || !SAFE_ID.test(String(value.modelId))
+    || !["apply", "reject", "direct_apply"].includes(String(value.operation))
+    || !/^[0-9a-f]{64}$/u.test(String(value.changeSetDigest))
+    || !/^[0-9a-f]{64}$/u.test(String(value.beforeWorkspaceDigest))
+    || !/^[0-9a-f]{64}$/u.test(String(value.afterWorkspaceDigest))
+    || !Array.isArray(value.files)
+    || value.files.length > 64
+    || typeof value.committedAt !== "string"
+    || !/^[0-9a-f]{64}$/u.test(String(value.receiptDigest))) {
+    throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+  }
+  assertIsoTimestamp(value.committedAt, "Model mutation receipt timestamp");
+  const operation = value.operation as ModelMutationReceipt["operation"];
+  if ((operation === "direct_apply" && value.changeSetId !== null)
+    || (operation !== "direct_apply"
+      && (typeof value.changeSetId !== "string" || !SAFE_ID.test(value.changeSetId)))) {
+    throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+  }
+  const files = value.files.map((item) => {
+    if (!isPlainRecord(item)
+      || !closedKeys(item, [
+        "itemId",
+        "priorSha256",
+        "proposedSha256",
+        "relativePath",
+      ])
+      || !SAFE_ID.test(String(item.itemId))
+      || typeof item.relativePath !== "string"
+      || (item.priorSha256 !== null
+        && !/^[0-9a-f]{64}$/u.test(String(item.priorSha256)))
+      || !/^[0-9a-f]{64}$/u.test(String(item.proposedSha256))) {
+      throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+    }
+    assertLogicalModelRelativePath(item.relativePath);
+    return Object.freeze({
+      itemId: item.itemId as string,
+      relativePath: item.relativePath,
+      priorSha256: item.priorSha256 as string | null,
+      proposedSha256: item.proposedSha256 as string,
+    });
+  });
+  const unsigned = {
+    schemaVersion: 1 as const,
+    commandId: value.commandId as string,
+    operation,
+    modelId: value.modelId as string,
+    changeSetId: value.changeSetId as string | null,
+    changeSetDigest: value.changeSetDigest as string,
+    beforeWorkspaceDigest: value.beforeWorkspaceDigest as string,
+    afterWorkspaceDigest: value.afterWorkspaceDigest as string,
+    files: Object.freeze(files),
+    committedAt: value.committedAt,
+  };
+  if (canonicalDigest(unsigned) !== value.receiptDigest) {
+    throw new ProductStoreV2Error("Model mutation receipt is invalid.");
+  }
+  return Object.freeze({
+    ...unsigned,
+    receiptDigest: value.receiptDigest as string,
+  });
+};
+
+const closedKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
+  Object.keys(value).sort().join("\u0000") === [...keys].sort().join("\u0000");
+
+const modelMutationReceiptInsert = (
+  receipt: ModelMutationReceipt,
+  intentDigest: string,
+): DatabaseMutationStatement => ({
+  sql: `INSERT INTO model_change_set_receipts
+    (command_id, model_id, change_set_id, operation, canonical_intent_sha256,
+      receipt_json, receipt_sha256, committed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  params: [
+    receipt.commandId,
+    receipt.modelId,
+    receipt.changeSetId,
+    receipt.operation,
+    intentDigest,
+    json(receipt),
+    receipt.receiptDigest,
+    receipt.committedAt,
+  ],
+  expectedChanges: 1,
+});
+
+const databaseOnlyMutationReceipt = (
+  transactionId: string,
+  committedAt: string,
+): DatabaseMutationStatement => ({
+  sql: `INSERT INTO committed_mutations
+    (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, ?)`,
+  params: [
+    transactionId,
+    sha256(Buffer.from(`database-only:${transactionId}`, "utf8")),
+    committedAt,
+  ],
+  expectedChanges: 1,
+});
+
+const assertBoundedText = (value: unknown, max: number, label: string): asserts value is string => {
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > max
+    || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new ProductStoreV2Error(`${label} is invalid.`);
+  }
+};
+
+const assertLogicalModelRelativePath = (value: string): void => {
+  if (!value || value.length > 512 || value.startsWith("/") || value.includes("\\")
+    || value.includes("\0") || value.endsWith("/")
+    || value.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new ProductStoreV2Error("Model logical path is invalid.");
+  }
+};
 
 const goalVerificationInsert = (
   turnId: string,

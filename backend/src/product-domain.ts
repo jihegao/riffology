@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 16 as const;
+export const PRODUCT_SCHEMA_VERSION = 17 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -51,6 +51,75 @@ export type StoredObjectMetadata = {
   sourceAttachmentId: ProductId | null;
   adoptionPurpose: string | null;
   createdAt: IsoTimestamp;
+};
+
+export type GeneratedViewFreshness = "fresh" | "stale";
+export type GeneratedViewRecord = {
+  id: ProductId;
+  modelId: ProductId;
+  title: string;
+  position: number;
+  mediaType: string;
+  payload: string;
+  payloadDigest: Sha256Digest;
+  sourceFileIds: readonly ProductId[];
+};
+
+export type GeneratedViewSetRecord = {
+  modelId: ProductId;
+  sourceWorkspaceDigest: Sha256Digest;
+  setDigest: Sha256Digest;
+  publisherConversationId: ProductId | null;
+  publisherTurnId: ProductId | null;
+  publishedAt: IsoTimestamp;
+  views: readonly GeneratedViewRecord[];
+};
+
+export type ModelChangeSetState = "pending" | "applied" | "rejected";
+export type ModelChangeSetFileRecord = {
+  itemId: ProductId;
+  changeSetId: ProductId;
+  objectFileId: ProductId;
+  kind: "model_code" | "model_environment" | "model_visual_asset";
+  relativePath: string;
+  mediaType: string;
+  expectedPriorSha256: Sha256Digest | null;
+  proposedText: string;
+  proposedSha256: Sha256Digest;
+  position: number;
+};
+
+export type ModelChangeSetRecord = {
+  id: ProductId;
+  modelId: ProductId;
+  conversationId: ProductId;
+  turnId: ProductId;
+  baseWorkspaceDigest: Sha256Digest;
+  changeSetDigest: Sha256Digest;
+  state: ModelChangeSetState;
+  executionDescription: Record<string, unknown> | null;
+  createdAt: IsoTimestamp;
+  resolvedAt: IsoTimestamp | null;
+  files: readonly ModelChangeSetFileRecord[];
+};
+
+export type ModelMutationReceipt = {
+  schemaVersion: 1;
+  commandId: ProductId;
+  operation: "apply" | "reject" | "direct_apply";
+  modelId: ProductId;
+  changeSetId: ProductId | null;
+  changeSetDigest: Sha256Digest;
+  beforeWorkspaceDigest: Sha256Digest;
+  afterWorkspaceDigest: Sha256Digest;
+  files: readonly Readonly<{
+    itemId: ProductId;
+    relativePath: string;
+    priorSha256: Sha256Digest | null;
+    proposedSha256: Sha256Digest;
+  }>[];
+  committedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
 };
 
 export type ModelRecord = {

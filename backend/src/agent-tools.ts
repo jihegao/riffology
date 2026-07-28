@@ -5,6 +5,8 @@ export const MODEL_AGENT_TOOLS = [
   "riff_list_model_workspace",
   "riff_read_model_file",
   "riff_apply_model_changes",
+  "riff_propose_model_changes",
+  "riff_publish_model_generated_views",
   "riff_create_temporary_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",

@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
+import { configureProductDatabase } from "../src/product-schema.ts";
 import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 
 const NOW = "2026-07-22T01:00:00.000Z";
@@ -47,10 +49,23 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
     ["model_code", "model_environment", "model_visual_asset"],
   );
   const modelFile = store.listObjectFiles({ kind: "model", id: "model_alpha" }).find((file) => file.id === "file_model_alpha")!;
-  const response = await runtime.handle(prepared.capability, call("riff_apply_model_changes", { requestKey: "change-a", changes: [{
+  const applyArguments = { requestKey: "change-a", changes: [{
     objectFileId: modelFile.id, kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", text: "value = 2\n", expectedPriorSha256: modelFile.sha256,
-  }] }));
+  }] };
+  const response = await runtime.handle(
+    prepared.capability,
+    call("riff_apply_model_changes", applyArguments),
+  );
   assert.equal((response?.result as any).isError, undefined, JSON.stringify(response));
+  const exactApplyReplay = await runtime.handle(
+    prepared.capability,
+    call("riff_apply_model_changes", applyArguments),
+  );
+  assert.equal(
+    (exactApplyReplay?.result as any).content[0].text,
+    (response?.result as any).content[0].text,
+  );
+  assert.equal((response?.result as any).content[0].text.includes("intent"), false);
   assert.equal(store.readObjectFile(modelFile.id).toString("utf8"), "value = 2\n");
   const replay = store.startAgentTurn({ turnId: "turn_explicit", userMessageId: "message_explicit", conversationId: "conversation_model", requestKey: "explicit", text: "$abm-modeling update the model file", attachmentIds: ["attachment_alpha"], createdAt: NOW });
   assert.equal(replay.skillUses[0]?.loadState, "loaded");
@@ -62,7 +77,7 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
 });
 
 test("ambiguous discussion has proposal-only capability and can persist a draft without mutating Model state", async (t) => {
-  const { store, runtime } = setup(t);
+  const { store, runtime, root } = setup(t);
   const before = store.listObjectFiles({ kind: "model", id: "model_alpha" }).map((file) => file.sha256);
   store.startAgentTurn({ turnId: "turn_ambiguous", userMessageId: "message_ambiguous", conversationId: "conversation_model", requestKey: "ambiguous", text: "Could we discuss changing the model?", createdAt: NOW });
   store.bindAgentSession({ id: "session_model_1", conversationId: "conversation_model", expectedGeneration: 0, state: "available", externalSessionRef: "opaque-model-1", at: NOW });
@@ -72,6 +87,8 @@ test("ambiguous discussion has proposal-only capability and can persist a draft 
   const listed = await runtime.handle(prepared.capability, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes"));
+  assert.ok(names.includes("riff_propose_model_changes"));
+  assert.ok(names.includes("riff_publish_model_generated_views"));
   assert.ok(!names.includes("riff_transition_temporary_document"));
   assert.ok(!names.includes("riff_adopt_attachment"));
   const denied = await runtime.handle(prepared.capability, call("riff_apply_model_changes", { requestKey: "forged", changes: [{}] }));
@@ -79,8 +96,266 @@ test("ambiguous discussion has proposal-only capability and can persist a draft 
   const document = await runtime.handle(prepared.capability, call("riff_create_temporary_document", { name: "Possible change", mediaType: "text/markdown", content: "# Proposal" }));
   assert.equal((document?.result as any).isError, undefined, JSON.stringify(document));
   assert.equal(store.listTemporaryDocuments("conversation_model")[0]?.documentState, "draft");
+  const modelFile = store.listObjectFiles({ kind: "model", id: "model_alpha" })
+    .find((file) => file.id === "file_model_alpha")!;
+  const sourceModel = store.listModels().find((model) => model.id === "model_alpha")!;
+  store.createModel({
+    id: "model_beta",
+    name: "Other Model",
+    technicalStatus: "draft",
+    runMode: sourceModel.runMode,
+    executionDescription: sourceModel.executionDescription,
+    createdAt: NOW,
+    files: [{
+      id: "file_model_beta",
+      kind: "model_code",
+      relativePath: "model.py",
+      mediaType: "text/x-python",
+      bytes: Buffer.from("value = 99\n"),
+    }],
+  });
+  const betaFile = store.listObjectFiles({ kind: "model", id: "model_beta" })[0]!;
+  const crossModelProposal = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", {
+      requestKey: "cross-model-proposal",
+      changes: [{
+        objectFileId: betaFile.id,
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        text: "must not cross owners",
+        expectedPriorSha256: betaFile.sha256,
+      }],
+    }),
+  );
+  assert.equal((crossModelProposal?.result as any).isError, true);
+  const crossModelView = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", {
+      requestKey: "cross-model-view",
+      views: [{
+        id: "view_cross_model",
+        title: "Must not persist",
+        mediaType: "text/markdown",
+        payload: "# Must not persist",
+        sourceFileIds: [betaFile.id],
+      }],
+    }),
+  );
+  assert.equal((crossModelView?.result as any).isError, true);
+  assert.equal(store.getGeneratedViewSet("model_alpha"), null);
+  assert.equal(
+    store.startAgentTurn({
+      turnId: "turn_ambiguous",
+      userMessageId: "message_ambiguous",
+      conversationId: "conversation_model",
+      requestKey: "ambiguous",
+      text: "Could we discuss changing the model?",
+      createdAt: NOW,
+    }).actions.some((action) =>
+      ["model_change_set_create", "model_generated_views_publish"]
+        .includes(action.actionKind)),
+    false,
+  );
+  const invalidProposal = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", {
+      requestKey: "invalid-proposal",
+      changes: [{
+        objectFileId: modelFile.id,
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        text: "must not persist",
+        expectedPriorSha256: modelFile.sha256,
+        nestedUnknown: { raw: "must not persist" },
+      }],
+    }),
+  );
+  assert.equal((invalidProposal?.result as any).isError, true);
+  assert.equal(store.listModelChangeSets("model_alpha").length, 0);
+  assert.equal(
+    store.startAgentTurn({
+      turnId: "turn_ambiguous",
+      userMessageId: "message_ambiguous",
+      conversationId: "conversation_model",
+      requestKey: "ambiguous",
+      text: "Could we discuss changing the model?",
+      createdAt: NOW,
+    }).actions.some((action) =>
+      action.actionKind === "model_change_set_create"),
+    false,
+  );
+  const proposalArguments = {
+    requestKey: "proposal-a",
+    changes: [{
+      objectFileId: modelFile.id,
+      kind: "model_code",
+      relativePath: "model.py",
+      mediaType: "text/x-python",
+      text: "value = 5\n",
+      expectedPriorSha256: modelFile.sha256,
+    }],
+  };
+  const proposal = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", proposalArguments),
+  );
+  assert.equal(store.listModelChangeSets("model_alpha", "pending").length, 1);
+  assert.equal((proposal?.result as any).isError, undefined, JSON.stringify(proposal));
+  const proposalReplay = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", proposalArguments),
+  );
+  assert.equal(
+    (proposalReplay?.result as any).content[0].text,
+    (proposal?.result as any).content[0].text,
+  );
+  const conflictingProposal = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", {
+      ...proposalArguments,
+      changes: [{
+        ...proposalArguments.changes[0],
+        text: "value = 6\n",
+      }],
+    }),
+  );
+  assert.equal((conflictingProposal?.result as any).isError, true);
+  assert.equal(store.listModelChangeSets("model_alpha").length, 1);
+  const durableProposal = store.listModelChangeSets("model_alpha")[0]!;
+  store.rejectModelChangeSet({
+    commandId: "command_reject_proposal_a",
+    modelId: "model_alpha",
+    changeSetId: durableProposal.id,
+    expectedChangeSetDigest: durableProposal.changeSetDigest,
+    committedAt: NOW,
+  });
+  const proposalAfterReject = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", proposalArguments),
+  );
+  assert.equal(
+    (proposalAfterReject?.result as any).content[0].text,
+    (proposal?.result as any).content[0].text,
+    "proposal replay must preserve its original pending summary after rejection",
+  );
+  assert.equal(
+    store.getModelChangeSet("model_alpha", durableProposal.id).state,
+    "rejected",
+  );
+  assert.equal((proposal?.result as any).content[0].text.includes("intent"), false);
+  assert.equal(store.readObjectFile(modelFile.id).toString("utf8"), "value = 1\n");
+  const viewArguments = {
+    requestKey: "publish-view-a",
+    views: [{
+      id: "view_agent_summary",
+      title: "Agent-selected summary",
+      mediaType: "text/markdown",
+      payload: "# Derived view\n",
+      sourceFileIds: [modelFile.id],
+    }],
+  };
+  const views = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", viewArguments),
+  );
+  assert.equal((views?.result as any).isError, undefined, JSON.stringify(views));
+  const viewsReplay = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", viewArguments),
+  );
+  assert.equal(
+    (viewsReplay?.result as any).content[0].text,
+    (views?.result as any).content[0].text,
+  );
+  const conflictingViews = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", {
+      ...viewArguments,
+      views: [{
+        ...viewArguments.views[0],
+        payload: "# Different view\n",
+      }],
+    }),
+  );
+  assert.equal((conflictingViews?.result as any).isError, true);
+  const secondViewArguments = {
+    requestKey: "publish-view-b",
+    views: [{
+      id: "view_agent_second",
+      title: "Second publication",
+      mediaType: "text/markdown",
+      payload: "# Second publication\n",
+      sourceFileIds: [modelFile.id],
+    }],
+  };
+  const secondViews = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", secondViewArguments),
+  );
+  assert.equal((secondViews?.result as any).isError, undefined);
+  const viewsAfterReplacement = await runtime.handle(
+    prepared.capability,
+    call("riff_publish_model_generated_views", viewArguments),
+  );
+  assert.equal(
+    (viewsAfterReplacement?.result as any).content[0].text,
+    (views?.result as any).content[0].text,
+    "publication A must replay exactly after publication B replaces the current set",
+  );
+  assert.equal(
+    store.getGeneratedViewSet("model_alpha")?.views[0]?.id,
+    "view_agent_second",
+  );
+  assert.equal((views?.result as any).content[0].text.includes("intent"), false);
+  assert.equal(store.getGeneratedViewSet("model_alpha")?.views.length, 1);
   assert.deepEqual(store.listObjectFiles({ kind: "model", id: "model_alpha" }).map((file) => file.sha256), before);
-  assert.equal(store.startAgentTurn({ turnId: "turn_ambiguous", userMessageId: "message_ambiguous", conversationId: "conversation_model", requestKey: "ambiguous", text: "Could we discuss changing the model?", createdAt: NOW }).actions[0]?.state, "committed");
+  const actions = store.startAgentTurn({ turnId: "turn_ambiguous", userMessageId: "message_ambiguous", conversationId: "conversation_model", requestKey: "ambiguous", text: "Could we discuss changing the model?", createdAt: NOW }).actions;
+  assert.equal(actions[0]?.state, "committed");
+  for (const action of actions.filter((item) =>
+    ["model_change_set_create", "model_generated_views_publish"].includes(item.actionKind))) {
+    const serializedIntent = JSON.stringify(action.intent);
+    for (const forbidden of [
+      "objectFileId",
+      "sourceFileIds",
+      "value = 5",
+      "# Derived view",
+    ]) {
+      assert.equal(serializedIntent.includes(forbidden), false, forbidden);
+    }
+  }
+  assert.equal(
+    store.previewPermanentDelete("model", "model_alpha").records
+      .some((record) => record.table === "agent_tool_result_receipts"),
+    true,
+  );
+  const proposalAction = actions.find((action) =>
+    action.actionKind === "model_change_set_create")!;
+  const receiptDatabase = new DatabaseSync(join(root, "product.sqlite3"));
+  try {
+    configureProductDatabase(receiptDatabase);
+    assert.throws(() => receiptDatabase.prepare(
+      `UPDATE agent_tool_result_receipts SET result_sha256 = ?
+       WHERE action_id = ?`,
+    ).run("0".repeat(64), proposalAction.id), /immutable/u);
+    receiptDatabase.exec(
+      "DROP TRIGGER agent_tool_result_receipts_immutable_update_v17",
+    );
+    receiptDatabase.exec("PRAGMA ignore_check_constraints = ON");
+    receiptDatabase.prepare(
+      `UPDATE agent_tool_result_receipts SET result_sha256 = ?
+       WHERE action_id = ?`,
+    ).run("0".repeat(64), proposalAction.id);
+  } finally {
+    receiptDatabase.close();
+  }
+  const corruptedReplay = await runtime.handle(
+    prepared.capability,
+    call("riff_propose_model_changes", proposalArguments),
+  );
+  assert.equal((corruptedReplay?.result as any).isError, true);
 });
 
 test("Project capability never exposes Model workspace mutation and attachment adoption is limited to current turn", async (t) => {
@@ -563,6 +838,7 @@ function setup(
   }
   const skills = new SimulationSkillCatalog(skillRoot, ["abm-modeling"]);
   return {
+    root,
     store,
     runtime: new AgentTurnRuntime(store, skills, {
       now: () => NOW,

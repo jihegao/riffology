@@ -114,6 +114,34 @@ test("generic completion requires a nonempty, goal-matched committed effect", ()
   assert.equal(matched.reasonCode, "committed_owner_state_verified");
 });
 
+test("generated-view publication can satisfy a view goal but never a visual Model mutation goal", () => {
+  const generated = {
+    ...action("committed", "generated_views", [{
+      kind: "model_generated_view_set",
+      id: "model_views",
+      sha256: "e".repeat(64),
+    }]),
+    actionKind: "model_generated_views_publish",
+  };
+  const viewGoal = verifyAgentGoal(input({
+    goalText: "Generate a structure view for this Model.",
+    actions: [generated],
+  }));
+  assert.equal(viewGoal.disposition, "completed");
+  assert.equal(viewGoal.reasonCode, "committed_owner_state_verified");
+
+  const visualModelGoal = verifyAgentGoal(input({
+    goalText: "Create a visualization Model.",
+    actions: [generated],
+    ownerEvidence: {
+      ...input().ownerEvidence,
+      runMode: "visual",
+    },
+  }));
+  assert.equal(visualModelGoal.disposition, "needs_user_input");
+  assert.equal(visualModelGoal.reasonCode, "visual_model_goal_unverified");
+});
+
 test("a visual Model goal rejects batch evidence and accepts visual or both only with current committed evidence", () => {
   const committed = {
     ...action("committed", "visual", [

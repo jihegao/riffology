@@ -196,6 +196,12 @@ The exact `riff_apply_model_changes` MCP schema publishes every required item
 field (`objectFileId`, `kind`, `relativePath`, `mediaType`, `text`, and nullable
 `expectedPriorSha256`) and rejects additional keys. This is schema precision
 for the existing scoped mutation authority, not a broader file API.
+`riff_propose_model_changes` accepts the same bounded diff shape but creates
+only a pending review set. `riff_publish_model_generated_views` publishes zero
+to sixteen arbitrary, ordered, LLM-selected structured views against the
+current Model workspace digest. Neither tool introduces fixed Model tabs,
+required diagram names, or a `model-spec.json` contract. Publishing views does
+not mutate Model files, workspace digest, or technical status.
 
 The real browser exit uses one message with
 `zhipuai-coding-plan/glm-5.2`, four ordered scoped Riff tools, and one atomic
@@ -209,7 +215,7 @@ The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
 [`Milestone A2 design`](milestone-a2-agent-workspace-design.md) refines its
 implemented Agent/API boundary; the legacy Gate API retained below does not.
-`ProductStoreV2` through schema migration v16, execution
+`ProductStoreV2` through schema migration v17, execution
 contract v4, and checked object bytes are
 the durable authority. Browser/API callers cannot supply ownership, workspace
 paths, file digests, OpenCode session identifiers, process commands, or
@@ -223,6 +229,12 @@ The implemented Stage 2 and Stage 3 routes are:
 | `GET /api/agents?ownerKind={model\|project}&ownerId={id}` | Discover selectable primary Agents inside the backend-derived owner workspace; return only name, redacted description, and native status. |
 | `POST /api/models` | Accept a name and initial provider/model, then atomically create a generic Model, its first conversation, and server-owned scaffold. |
 | `GET /api/models/{modelId}/workspace` | Return an allowlisted, digest-bound Model workspace projection; never an absolute path or arbitrary file API. |
+| `GET /api/models/{modelId}/generated-views` | Return the latest bounded generated-view set, arbitrary ordered names, source logical paths, and `fresh`/`stale` status derived from the current workspace digest. |
+| `GET /api/models/{modelId}/generated-views/{viewId}/renderable` | Return one allowlisted generic renderer DTO. A view set may contain at most one renderer payload that can execute active rendering semantics. |
+| `GET /api/models/{modelId}/change-sets?state={pending\|applied\|rejected}` | List bounded Model change-set review summaries without object-file IDs, conversation IDs, turn IDs, or filesystem paths. |
+| `GET /api/models/{modelId}/change-sets/{changeSetId}` | Return the redacted logical-path diff for one change set. |
+| `POST /api/models/{modelId}/change-sets/{changeSetId}/apply` | Atomically apply an exact pending diff with `commandId`, workspace digest, and change-set digest CAS guards; stale input returns 409 and is not rebased. Exact command replay returns the immutable receipt. |
+| `POST /api/models/{modelId}/change-sets/{changeSetId}/reject` | Reject a pending review set without mutating Model files; exact command replay returns the immutable receipt. |
 | `POST /api/models/{modelId}/technical-checks` | Start or idempotently return a digest-bound thin technical check using a `commandId`. |
 | `GET /api/models/{modelId}/technical-checks/{checkId}` | Read the bounded check DTO and its `pending`, `published`, or `superseded` publication state. |
 | `GET/POST /api/objects/{model|project}/{id}/conversations` | List/create owner-scoped named conversations. GET accepts exactly one `lifecycle=active|archived|trashed`; provider/model locks with the first accepted user message. |
@@ -241,7 +253,8 @@ The implemented Stage 2 and Stage 3 routes are:
 | `POST /api/conversations/{conversationId}/turns/{requestKey}/resume` | Answer or reject one public pending interaction on that exact active turn; never starts another prompt. |
 | `POST /a2/mcp?cap=...` | Internal loopback JSON-RPC endpoint for the short-lived, server-minted turn capability; not a browser tool API. |
 | `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
-| `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, and indexed output projections. |
+| `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, indexed output projections, and opaque read-only file references. It exposes neither object IDs nor storage paths. |
+| `GET /api/projects/{projectId}/files/{fileRef}/renderable` | Render one copied Project file through the bounded read-only renderer selected by the server-derived opaque reference. |
 | `POST /api/projects/{projectId}/experiment-configs` | Validate and canonicalize `ExperimentConfigurationV1`, expand its exact plan, and persist an immutable create-command response receipt. |
 | `PATCH /api/projects/{projectId}/experiment-configs/{configId}` | Require `commandId`, `expectedConfigurationDigest`, and `expectedRecordDigest`; apply both CAS guards and preserve exact historical response replay. |
 | `POST /api/projects/{projectId}/runs` | Replan and freeze the named experiment, apply server-owned limits, atomically create/replay the queued run receipt, and admit its declared supported batch or visual run kind to the shared dispatcher. |

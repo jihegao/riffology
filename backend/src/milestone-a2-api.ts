@@ -77,7 +77,15 @@ export class MilestoneA2Api {
       }
       const capability = url.searchParams.get("cap");
       if (!capability) throw new ApiError(401, "mcp_capability_required", "A scoped A2 MCP capability is required.");
-      const body = await strictJsonBody(request, ["jsonrpc", "id", "method", "params"], ["id", "params"], 1_200_000);
+      // The loopback capability-scoped MCP endpoint alone admits the domain's
+      // reachable 8 MiB proposal/view payload ceiling plus bounded JSON
+      // escaping overhead. Ordinary Product APIs retain their smaller limits.
+      const body = await strictJsonBody(
+        request,
+        ["jsonrpc", "id", "method", "params"],
+        ["id", "params"],
+        18 * 1024 * 1024,
+      );
       const result = await this.service.handleAgentMcp(capability, body);
       if (result === undefined) { response.writeHead(204, { "cache-control": "no-store" }); response.end(); }
       else json(response, 200, result);
@@ -243,6 +251,16 @@ export class MilestoneA2Api {
     }
     if (request.method === "GET" && parts.length === 4 && parts[1] === "projects" && parts[3] === "workspace") {
       json(response, 200, this.service.projectWorkspace(parts[2]));
+      return true;
+    }
+    if (request.method === "GET" && parts.length === 6
+      && parts[1] === "projects" && parts[3] === "files"
+      && parts[5] === "renderable") {
+      privateJson(
+        response,
+        200,
+        this.service.projectFileRenderable(parts[2], parts[4]),
+      );
       return true;
     }
     if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "runs") {
@@ -427,6 +445,85 @@ export class MilestoneA2Api {
       }
       if (request.method === "GET" && parts.length === 5 && parts[3] === "renderables") {
         privateJson(response, 200, this.service.modelRenderable(modelId, parts[4]));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 4
+        && parts[3] === "generated-views") {
+        privateJson(response, 200, this.service.generatedViews(modelId));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 6
+        && parts[3] === "generated-views" && parts[5] === "renderable") {
+        privateJson(
+          response,
+          200,
+          this.service.generatedViewRenderable(modelId, parts[4]),
+        );
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 4
+        && parts[3] === "change-sets") {
+        exactQuery(url, ["state"]);
+        const state = url.searchParams.get("state");
+        if (state !== null && !["pending", "applied", "rejected"].includes(state)) {
+          throw new ApiError(422, "invalid_product_query", "Change-set state is invalid.");
+        }
+        privateJson(
+          response,
+          200,
+          this.service.listModelChangeSets(
+            modelId,
+            state as "pending" | "applied" | "rejected" | undefined,
+          ),
+        );
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 5
+        && parts[3] === "change-sets") {
+        privateJson(
+          response,
+          200,
+          this.service.getModelChangeSet(modelId, parts[4]),
+        );
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6
+        && parts[3] === "change-sets" && parts[5] === "apply") {
+        const body = await strictJsonBody(request, [
+          "commandId",
+          "expectedChangeSetDigest",
+          "expectedWorkspaceDigest",
+        ]);
+        privateJson(response, 200, this.service.applyModelChangeSet({
+          modelId,
+          changeSetId: parts[4],
+          commandId: requiredString(body.commandId, "commandId"),
+          expectedChangeSetDigest: requiredString(
+            body.expectedChangeSetDigest,
+            "expectedChangeSetDigest",
+          ),
+          expectedWorkspaceDigest: requiredString(
+            body.expectedWorkspaceDigest,
+            "expectedWorkspaceDigest",
+          ),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 6
+        && parts[3] === "change-sets" && parts[5] === "reject") {
+        const body = await strictJsonBody(request, [
+          "commandId",
+          "expectedChangeSetDigest",
+        ]);
+        privateJson(response, 200, this.service.rejectModelChangeSet({
+          modelId,
+          changeSetId: parts[4],
+          commandId: requiredString(body.commandId, "commandId"),
+          expectedChangeSetDigest: requiredString(
+            body.expectedChangeSetDigest,
+            "expectedChangeSetDigest",
+          ),
+        }));
         return true;
       }
       if ((request.method === "GET" || request.method === "HEAD")
@@ -642,7 +739,10 @@ export class MilestoneA2Api {
       const eventQuery = method === "GET"
         && /\/diagnostic-events$/u.test(url.pathname);
       const agentQuery = method === "GET" && url.pathname === "/api/agents";
-      if (url.search !== "" && !collectionQuery && !eventQuery && !agentQuery) {
+      const changeSetQuery = method === "GET"
+        && /^\/api\/models\/[^/]+\/change-sets$/u.test(url.pathname);
+      if (url.search !== "" && !collectionQuery && !eventQuery && !agentQuery
+        && !changeSetQuery) {
         throw new ApiError(
           422,
           "invalid_product_query",

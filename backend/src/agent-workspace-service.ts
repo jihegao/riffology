@@ -45,6 +45,9 @@ import {
 } from "./execution-protocol-v2.ts";
 import type {
   ExperimentConfigurationRecord,
+  GeneratedViewSetRecord,
+  ModelChangeSetRecord,
+  ModelMutationReceipt,
   ModelRecord,
   OutputIndexRecord,
   ProjectRecord,
@@ -163,11 +166,56 @@ export type ProjectWorkspaceProjectionDto = {
   project: ProjectCreationDto["project"];
   execution: PublicExecutionDescriptionV2;
   executionDescriptionDigest: string;
-  files: Array<Pick<StoredObjectMetadata, "id" | "mediaType" | "sizeBytes" | "sha256" | "createdAt">>;
+  files: Array<{
+    fileRef: string;
+    relativePath: string;
+    mediaType: string;
+    sizeBytes: number;
+    sha256: string;
+    createdAt: string;
+    readOnly: true;
+  }>;
   conversations: ConversationDto[];
   experimentConfigurations: ExperimentConfigurationDto[];
   runs: ProjectRunDto[];
 };
+
+export type GeneratedViewSetDto = Readonly<{
+  sourceWorkspaceDigest: string;
+  currentWorkspaceDigest: string;
+  setDigest: string;
+  freshness: "fresh" | "stale";
+  publishedAt: string;
+  views: readonly Readonly<{
+    id: string;
+    title: string;
+    position: number;
+    rendererKind: RendererDto["kind"];
+    mediaType: string;
+    payloadDigest: string;
+    sourceFileRefs: readonly string[];
+  }>[];
+}>;
+
+export type ModelChangeSetDto = Readonly<{
+  id: string;
+  baseWorkspaceDigest: string;
+  currentWorkspaceDigest: string;
+  changeSetDigest: string;
+  freshness: "fresh" | "stale";
+  state: ModelChangeSetRecord["state"];
+  createdAt: string;
+  resolvedAt: string | null;
+  files: readonly Readonly<{
+    itemId: string;
+    kind: string;
+    relativePath: string;
+    mediaType: string;
+    priorSha256: string | null;
+    proposedSha256: string;
+    proposedText: string;
+  }>[];
+}>;
 
 export type ExperimentConfigurationDto =
   | (Extract<ExperimentConfigurationRecord, { contractVersion: 3 }> & { recordDigest: null })
@@ -333,6 +381,130 @@ export class AgentWorkspaceService {
       if (error instanceof RendererRegistryError) {
         throw new ApiError(422, error.code, error.message);
       }
+      throw storeApiError(error);
+    }
+  }
+
+  generatedViews(modelIdInput: string): GeneratedViewSetDto | null {
+    const modelId = boundedId(modelIdInput);
+    try {
+      const set = this.store.getGeneratedViewSet(modelId);
+      if (!set) return null;
+      const workspace = this.modelWorkspace(modelId);
+      const filesById = new Map(workspace.files.map((file) => [file.id, file]));
+      return {
+        sourceWorkspaceDigest: set.sourceWorkspaceDigest,
+        currentWorkspaceDigest: workspace.digest,
+        setDigest: set.setDigest,
+        freshness: set.sourceWorkspaceDigest === workspace.digest ? "fresh" : "stale",
+        publishedAt: set.publishedAt,
+        views: set.views.map((view) => ({
+          id: view.id,
+          title: view.title,
+          position: view.position,
+          rendererKind: renderGeneratedView(view).kind,
+          mediaType: view.mediaType,
+          payloadDigest: view.payloadDigest,
+          sourceFileRefs: view.sourceFileIds.flatMap((fileId) => {
+            const file = filesById.get(fileId);
+            return file ? [file.relativePath] : [];
+          }),
+        })),
+      };
+    } catch (error) {
+      if (error instanceof RendererRegistryError) {
+        throw new ApiError(422, error.code, error.message);
+      }
+      throw storeApiError(error);
+    }
+  }
+
+  generatedViewRenderable(modelIdInput: string, viewIdInput: string): RendererDto {
+    const modelId = boundedId(modelIdInput);
+    const viewId = boundedId(viewIdInput);
+    try {
+      const set = this.store.getGeneratedViewSet(modelId);
+      const view = set?.views.find((candidate) => candidate.id === viewId);
+      if (!view) {
+        throw new ApiError(404, "resource_not_found", "The generated Model view does not exist.");
+      }
+      return renderGeneratedView(view);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof RendererRegistryError) {
+        throw new ApiError(422, error.code, error.message);
+      }
+      throw storeApiError(error);
+    }
+  }
+
+  listModelChangeSets(
+    modelIdInput: string,
+    state?: "pending" | "applied" | "rejected",
+  ): { changeSets: ModelChangeSetDto[] } {
+    const modelId = boundedId(modelIdInput);
+    try {
+      return {
+        changeSets: this.store.listModelChangeSets(modelId, state)
+          .map((record) => publicModelChangeSet(
+            record,
+            this.store.modelWorkspaceDigest(modelId),
+          )),
+      };
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  getModelChangeSet(modelIdInput: string, changeSetIdInput: string): ModelChangeSetDto {
+    const modelId = boundedId(modelIdInput);
+    const changeSetId = boundedId(changeSetIdInput);
+    try {
+      return publicModelChangeSet(
+        this.store.getModelChangeSet(modelId, changeSetId),
+        this.store.modelWorkspaceDigest(modelId),
+      );
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  applyModelChangeSet(input: {
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+    expectedWorkspaceDigest: string;
+  }): ModelMutationReceipt {
+    try {
+      return this.store.applyModelChangeSet({
+        modelId: boundedId(input.modelId),
+        changeSetId: boundedId(input.changeSetId),
+        commandId: boundedId(input.commandId),
+        expectedChangeSetDigest: boundedDigest(input.expectedChangeSetDigest),
+        expectedWorkspaceDigest: boundedDigest(input.expectedWorkspaceDigest),
+        committedAt: this.#now(),
+      });
+    } catch (error) {
+      throw storeApiError(error);
+    }
+  }
+
+  rejectModelChangeSet(input: {
+    modelId: string;
+    changeSetId: string;
+    commandId: string;
+    expectedChangeSetDigest: string;
+  }): ModelMutationReceipt {
+    try {
+      return this.store.rejectModelChangeSet({
+        modelId: boundedId(input.modelId),
+        changeSetId: boundedId(input.changeSetId),
+        commandId: boundedId(input.commandId),
+        expectedChangeSetDigest: boundedDigest(input.expectedChangeSetDigest),
+        committedAt: this.#now(),
+      });
+    } catch (error) {
       throw storeApiError(error);
     }
   }
@@ -669,7 +841,9 @@ export class AgentWorkspaceService {
         project: publicProject(project),
       execution: publicExecutionDescription(execution),
         executionDescriptionDigest: canonicalDigest(execution),
-        files: this.store.listObjectFiles({ kind: "project", id }).filter((file) => file.kind === "project_model_snapshot").map(publicFile),
+        files: this.store.listObjectFiles({ kind: "project", id })
+          .filter((file) => file.kind === "project_model_snapshot")
+          .map((file) => publicProjectFile(id, file)),
         conversations: this.store.listConversations({ kind: "project", id }),
         experimentConfigurations: this.store.listExperimentConfigurations(id).map((record) =>
           publicExperimentConfiguration(
@@ -693,6 +867,32 @@ export class AgentWorkspaceService {
           )),
       };
     } catch (error) { throw storeApiError(error); }
+  }
+
+  projectFileRenderable(projectIdInput: string, fileRefInput: string): RendererDto {
+    const projectId = boundedId(projectIdInput);
+    const fileRef = boundedId(fileRefInput);
+    try {
+      const file = this.store.listObjectFiles({ kind: "project", id: projectId })
+        .filter((candidate) => candidate.kind === "project_model_snapshot")
+        .find((candidate) => projectFileRef(projectId, candidate) === fileRef);
+      if (!file) {
+        throw new ApiError(404, "resource_not_found", "The Project file does not exist.");
+      }
+      return rendererDto({
+        title: projectLogicalPath(file.relativePath),
+        mediaType: file.mediaType,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        bytes: this.store.readObjectFile(file.id),
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof RendererRegistryError) {
+        throw new ApiError(422, error.code, error.message);
+      }
+      throw storeApiError(error);
+    }
   }
 
   getRun(projectIdInput: string, runIdInput: string): ProjectRunDto {
@@ -2025,12 +2225,64 @@ const publicProject = (record: ProjectRecord): ProjectCreationDto["project"] => 
   updatedAt: record.updatedAt,
 });
 
-const publicFile = (file: StoredObjectMetadata): ProjectWorkspaceProjectionDto["files"][number] => ({
-  id: file.id,
+const publicProjectFile = (
+  projectId: string,
+  file: StoredObjectMetadata,
+): ProjectWorkspaceProjectionDto["files"][number] => ({
+  fileRef: projectFileRef(projectId, file),
+  relativePath: projectLogicalPath(file.relativePath),
   mediaType: file.mediaType,
   sizeBytes: file.sizeBytes,
   sha256: file.sha256,
   createdAt: file.createdAt,
+  readOnly: true,
+});
+
+const projectFileRef = (projectId: string, file: StoredObjectMetadata): string =>
+  stableId("project_file", canonicalDigest({
+    projectId,
+    relativePath: file.relativePath,
+    sha256: file.sha256,
+  }));
+
+const projectLogicalPath = (relativePath: string): string =>
+  relativePath.startsWith("model-snapshot/")
+    ? relativePath.slice("model-snapshot/".length)
+    : relativePath;
+
+const renderGeneratedView = (
+  view: GeneratedViewSetRecord["views"][number],
+): RendererDto => rendererDto({
+  title: view.title,
+  mediaType: view.mediaType,
+  sizeBytes: Buffer.byteLength(view.payload, "utf8"),
+  sha256: view.payloadDigest,
+  bytes: Buffer.from(view.payload, "utf8"),
+});
+
+const publicModelChangeSet = (
+  record: ModelChangeSetRecord,
+  currentWorkspaceDigest: string,
+): ModelChangeSetDto => ({
+  id: record.id,
+  baseWorkspaceDigest: record.baseWorkspaceDigest,
+  currentWorkspaceDigest,
+  changeSetDigest: record.changeSetDigest,
+  freshness: record.baseWorkspaceDigest === currentWorkspaceDigest
+    ? "fresh"
+    : "stale",
+  state: record.state,
+  createdAt: record.createdAt,
+  resolvedAt: record.resolvedAt,
+  files: record.files.map((file) => ({
+    itemId: file.itemId,
+    kind: file.kind,
+    relativePath: file.relativePath,
+    mediaType: file.mediaType,
+    priorSha256: file.expectedPriorSha256,
+    proposedSha256: file.proposedSha256,
+    proposedText: file.proposedText,
+  })),
 });
 
 const publicExperimentConfiguration = (
@@ -2391,6 +2643,8 @@ const storeApiError = (error: unknown): ApiError => {
   if (/^stale_record:/u.test(error.message)) return new ApiError(409, "stale_record", "The experiment record changed after it was observed.");
   if (/^run_not_terminal:/u.test(error.message)) return new ApiError(409, "run_not_terminal", "Only a terminal run can be moved to trash.");
   if (/^state_conflict:/u.test(error.message)) return new ApiError(409, "state_conflict", "The run lifecycle changed after it was observed.");
+  if (/Model change set is stale/u.test(error.message)) return new ApiError(409, "change_set_stale", "The Model changed after this change set was proposed.");
+  if (/Model mutation command ID was reused|change-set ID was reused/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with different Model-change intent.");
   if (/command already exists with a different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with different experiment intent.");
   if (/lifecycle command.*different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That commandId was already used with a different run-control intent.");
   if (/Agent turn request key was reused with different intent/u.test(error.message)) return new ApiError(409, "idempotency_conflict", "That requestKey was already used with different turn intent.");
