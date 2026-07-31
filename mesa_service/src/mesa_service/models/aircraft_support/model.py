@@ -598,23 +598,222 @@ class AircraftSupportModel(mesa.Model):
     def _peek_work_exists(self) -> bool:
         return any(order.status in {WorkStatus.QUEUED, WorkStatus.BLOCKED_ON_PART} for order in self.work_orders.values())
 
+    def _valid_queue_pop(self, queue: list[tuple[float, int, str]], kind: RequestKind) -> WorkOrder | None:
+        while queue:
+            _, _, order_id = heapq.heappop(queue)
+            order = self.work_orders[order_id]
+            if order.status is WorkStatus.QUEUED and order.request_kind is kind:
+                return order
+        return None
+
     def _dispatch(self) -> None:
-        pass
+        available = sorted((team for team in self.teams.values() if team.state is TeamState.IDLE), key=lambda team: team.team_id)
+        for team in available:
+            order = self._next_corrective_order()
+            if order is None:
+                order = self._next_scheduled_order()
+            if order is None:
+                break
+            self._assign_order(team, order)
+
+    def _next_corrective_order(self) -> WorkOrder | None:
+        while self._corrective_queue:
+            _, _, order_id = heapq.heappop(self._corrective_queue)
+            order = self.work_orders[order_id]
+            if order.status is WorkStatus.SUPERSEDED:
+                continue
+            if order.status is WorkStatus.BLOCKED_ON_PART or order.status is not WorkStatus.QUEUED:
+                heapq.heappush(self._corrective_queue, (order.requested_at_days, order.enqueue_sequence, order.work_order_id))
+                return None
+            if self.part_stock <= 0:
+                self._block_on_part(order)
+                heapq.heappush(self._corrective_queue, (order.requested_at_days, order.enqueue_sequence, order.work_order_id))
+                return None
+            return order
+        return None
+
+    def _next_scheduled_order(self) -> WorkOrder | None:
+        while self._scheduled_queue:
+            _, _, order_id = heapq.heappop(self._scheduled_queue)
+            order = self.work_orders[order_id]
+            if order.status is WorkStatus.QUEUED:
+                aircraft = self.aircraft[order.aircraft_id]
+                if aircraft.state is not AircraftState.OPERATING:
+                    heapq.heappush(self._scheduled_queue, (order.requested_at_days, order.enqueue_sequence, order.work_order_id))
+                    return None
+                if not any(hangar.state is HangarState.FREE for hangar in self.hangars.values()):
+                    heapq.heappush(self._scheduled_queue, (order.requested_at_days, order.enqueue_sequence, order.work_order_id))
+                    return None
+                return order
+        return None
+
+    def _block_on_part(self, order: WorkOrder) -> None:
+        if order.status is WorkStatus.BLOCKED_ON_PART:
+            self._maybe_reorder()
+            return
+        order.status = WorkStatus.BLOCKED_ON_PART
+        aircraft = self.aircraft[order.aircraft_id]
+        before = aircraft.state.value
+        aircraft.state = AircraftState.GROUNDED_FOR_PART
+        self._emit("part_backordered", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, work_order_id=order.work_order_id, before_state=before, after_state=aircraft.state.value, payload={"part_id": "part-0001"})
+        self._maybe_reorder()
+
+    def _maybe_reorder(self) -> None:
+        if self.part_stock + self.part_in_transit <= int(self.parameters["part_reorder_point"]):
+            quantity = int(self.parameters["part_order_quantity"])
+            self._part_order_sequence += 1
+            part_order = PartOrder(
+                part_order_id=f"po-{self._part_order_sequence:08d}",
+                quantity=quantity,
+                ordered_at_days=self.sim_time_days,
+                arrival_at_days=self.sim_time_days + float(self.parameters["part_lead_time_days"]),
+            )
+            self.part_orders[part_order.part_order_id] = part_order
+            self.part_in_transit += quantity
+            self.part_orders_placed += 1
+            eta = part_order.arrival_at_days
+            self._emit("part_ordered", PHASE_DISPATCH, part_order_id=part_order.part_order_id, payload={"part_id": "part-0001", "quantity": quantity, "eta_days": eta})
+            self._schedule(eta, PHASE_PART_ARRIVAL, "part_arrival", part_order_id=part_order.part_order_id)
+
+    def _assign_order(self, team: MaintenanceTeamAgent, order: WorkOrder) -> None:
+        aircraft = self.aircraft[order.aircraft_id]
+        order.status = WorkStatus.ASSIGNED
+        order.assigned_team_id = team.team_id
+        order.assigned_at_days = self.sim_time_days
+        team.current_work_order_id = order.work_order_id
+        team.state = TeamState.WORKING
+        self._emit("team_assigned", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, payload={"request_kind": order.request_kind.value})
+        if order.request_kind is RequestKind.CORRECTIVE:
+            self.part_stock -= 1
+            self.parts_consumed += 1
+            order.operation_kind = OperationKind.REPAIR
+            before = aircraft.state.value
+            aircraft.state = AircraftState.GROUNDED_FOR_REPAIR
+            self._emit("repair_started", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, before_state=before, after_state=aircraft.state.value, payload={"same_crew": False})
+            self._record_wait_start(self._open_corrective_waits, self._corrective_waits, order.source_event_id, order.requested_at_days)
+            duration = self._duration(OperationKind.REPAIR)
+            self._maybe_reorder()
+        else:
+            order.operation_kind = OperationKind.SCHEDULED_MAINTENANCE
+            hangar = next(h for h in self.hangars.values() if h.state is HangarState.FREE)
+            hangar.state = HangarState.OCCUPIED
+            hangar.current_work_order_id = order.work_order_id
+            before = aircraft.state.value
+            aircraft.state = AircraftState.GROUNDED_FOR_MAINTENANCE
+            aircraft.flight_generation += 1
+            self._emit("aircraft_grounded", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+            self._emit("maintenance_started", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, before_state=before, after_state=aircraft.state.value, payload={"same_crew": False})
+            self._record_wait_start(self._open_maintenance_waits, self._maintenance_waits, order.source_event_id, order.requested_at_days)
+            duration = self._duration(OperationKind.SCHEDULED_MAINTENANCE)
+        order.status = WorkStatus.IN_PROGRESS
+        order.started_at_days = self.sim_time_days
+        self._schedule(self.sim_time_days + duration, PHASE_WORK_COMPLETION, "work_completion", aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id)
+
+    def _duration(self, operation: OperationKind) -> float:
+        if operation is OperationKind.REPAIR:
+            fixture = self._fixture_repair
+            prefix = "repair"
+            stream = "repair_duration"
+        else:
+            fixture = self._fixture_scheduled
+            prefix = "scheduled"
+            stream = "scheduled_duration"
+        if fixture:
+            duration = float(fixture.pop(0))
+        else:
+            low = float(self.parameters[f"{prefix}_low_hours"]) / 24.0
+            mode = float(self.parameters[f"{prefix}_mode_hours"]) / 24.0
+            high = float(self.parameters[f"{prefix}_high_hours"]) / 24.0
+            duration = self._random_streams[stream].triangular(low, high, mode)
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError(f"{prefix} duration must be finite and positive")
+        return duration
 
     def _handle_maintenance_due(self, event: _ScheduledEvent) -> None:
-        return None
+        aircraft = self.aircraft[event.aircraft_id or ""]
+        if event.token != aircraft.maintenance_generation:
+            self.stale_scheduled_event_count += 1
+            return
+        aircraft.maintenance_due_at_days = self.sim_time_days
+        domain = self._emit("maintenance_due", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id)
+        aircraft.maintenance_due_event_id = domain["event_id"]
+        if self._in_measurement_origin(self.sim_time_days):
+            self._open_maintenance_waits[domain["event_id"]] = self.sim_time_days
+        corrective = self.work_orders.get(aircraft.active_corrective_order_id or "")
+        if corrective and corrective.status in {WorkStatus.QUEUED, WorkStatus.ASSIGNED, WorkStatus.IN_PROGRESS, WorkStatus.BLOCKED_ON_PART}:
+            self._emit("request_suppressed", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, correlation_id=domain["event_id"], payload={"reason": "corrective_order_active"})
+            return
+        planned = self.work_orders.get(aircraft.active_planned_order_id or "")
+        if planned and planned.status not in {WorkStatus.COMPLETED, WorkStatus.SUPERSEDED}:
+            self._emit("request_suppressed", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, correlation_id=domain["event_id"], payload={"reason": "scheduled_order_active"})
+            return
+        self._new_order(RequestKind.SCHEDULED, aircraft, self.sim_time_days, domain["event_id"])
+        self._ensure_dispatch()
 
     def _handle_part_arrival(self, event: _ScheduledEvent) -> None:
         return None
 
     def _handle_completion(self, work_order_id: str | None) -> None:
-        return None
+        if work_order_id is None:
+            raise RuntimeError("completion is missing work order")
+        order = self.work_orders[work_order_id]
+        if order.status is not WorkStatus.IN_PROGRESS or order.operation_kind is None or order.assigned_team_id is None:
+            self.stale_scheduled_event_count += 1
+            return
+        aircraft = self.aircraft[order.aircraft_id]
+        team = self.teams[order.assigned_team_id]
+        if order.operation_kind is not OperationKind.SCHEDULED_MAINTENANCE:
+            return
+        before = aircraft.state.value
+        self._emit("maintenance_completed", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, correlation_id=order.correlation_id, before_state=before, after_state=AircraftState.OPERATING.value, payload={"cost": float(self.parameters["scheduled_maintenance_cost"])})
+        order.status = WorkStatus.COMPLETED
+        order.completed_at_days = self.sim_time_days
+        if self._in_measurement_completion(self.sim_time_days):
+            self._work_cost += float(self.parameters["scheduled_maintenance_cost"])
+            self.maintenance_count += 1
+        aircraft.active_planned_order_id = None
+        self._release_resources(aircraft, team, order)
+        aircraft.time_last_maintenance_days = self.sim_time_days
+        self._schedule_maintenance_due(aircraft, self._next_due_after_completion(aircraft))
+        self._enter_operating(aircraft)
+
+    def _release_resources(self, aircraft: AircraftAgent, team: MaintenanceTeamAgent, completed_order: WorkOrder | None) -> None:
+        aircraft.assigned_team_id = None
+        team.current_work_order_id = None
+        team.state = TeamState.IDLE
+        if completed_order is not None:
+            hangar = next((h for h in self.hangars.values() if h.current_work_order_id == completed_order.work_order_id), None)
+            if hangar is not None:
+                hangar.state = HangarState.FREE
+                hangar.current_work_order_id = None
+
+    def _enter_operating(self, aircraft: AircraftAgent) -> None:
+        before = aircraft.state.value
+        if before != AircraftState.OPERATING.value:
+            aircraft.state = AircraftState.OPERATING
+            self._emit("aircraft_released", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+        self._schedule_next_flight(aircraft)
+        if self._peek_work_exists():
+            self._ensure_dispatch()
+
+    def _next_due_after_completion(self, aircraft: AircraftAgent) -> float:
+        scripted = self._fixture_due.get(aircraft.aircraft_id)
+        if scripted:
+            return float(scripted.pop(0))
+        return self.sim_time_days + float(self.parameters["scheduled_maintenance_interval_days"])
 
     def _in_measurement_origin(self, time_days: float) -> bool:
         return self.warmup_days <= time_days < self.horizon_days
 
     def _in_measurement_completion(self, time_days: float) -> bool:
         return self.warmup_days <= time_days < self.horizon_days
+
+    def _record_wait_start(self, open_waits: dict[str, float], samples: list[float], source_event_id: str, fallback_origin: float) -> None:
+        origin = open_waits.pop(source_event_id, None)
+        if origin is None and self._in_measurement_origin(fallback_origin):
+            origin = fallback_origin
+        if origin is not None and self.sim_time_days <= self.horizon_days:
+            samples.append(self.sim_time_days - origin)
 
     def _emit(self, event_type: str, phase: int, *, aircraft_id: str | None = None, team_id: str | None = None, work_order_id: str | None = None, part_order_id: str | None = None, correlation_id: str | None = None, before_state: str | None = None, after_state: str | None = None, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         self._domain_sequence += 1

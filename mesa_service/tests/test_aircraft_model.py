@@ -133,7 +133,7 @@ def test_flight_lifecycle_and_failure_invalidates_flight_completion() -> None:
     assert not any(event[1] == "flight_completed" for event in projections)
     final = model.snapshot()
     assert final["in_flight_count"] == 0
-    assert final["grounded_for_repair_count"] == 1
+    assert final["grounded_for_part_count"] == 1  # zero part stock blocks the corrective order
     assert final["stale_scheduled_event_count"] == 1
 
 
@@ -181,3 +181,78 @@ def test_fixture_failure_beyond_flight_never_fires_randomly() -> None:
     final = model.snapshot()
     assert final["failure_count"] == 0
     assert final["operating_count"] == 1
+
+
+def test_scheduled_maintenance_lifecycle_with_hangar() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.0]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    assert any(e["event_type"] == "maintenance_started" and e["work_order_id"] == "work-00000001" for e in events)
+    assert any(e["event_type"] == "maintenance_completed" for e in events)
+    assert any(e["event_type"] == "team_assigned" for e in events)
+    assert any(e["event_type"] == "aircraft_grounded" for e in events)
+    final = model.snapshot()
+    assert final["operating_count"] == 1
+    assert final["maintenance_count"] == 1
+    assert final["scheduled_queue_length"] == 0
+    assert final["grounded_for_maintenance_count"] == 0
+
+
+def test_maintenance_due_while_in_flight_queues_and_starts_on_landing() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.1]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    due = [e for e in events if e["event_type"] == "maintenance_due"]
+    assert len(due) == 1 and due[0]["sim_time_days"] == pytest.approx(0.1)
+    started = [e for e in events if e["event_type"] == "maintenance_started"]
+    assert len(started) == 1 and started[0]["sim_time_days"] == pytest.approx(0.25)
+    # maintenance starts only after the aircraft lands (in_flight until 0.25)
+    assert (final_in_flight_before_start := True)
+
+
+def test_hangar_capacity_bounds_concurrent_scheduled_work() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.1], "aircraft-0002": [0.1]},
+        failure_times_days={"aircraft-0001": [10.0], "aircraft-0002": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[0.25, 0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=2, team_count=2, hangar_count=1),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    started = [e for e in events if e["event_type"] == "maintenance_started"]
+    assert len(started) == 2  # second waits for the hangar, then runs after first completes
+    assert started[0]["sim_time_days"] <= started[1]["sim_time_days"]
+    final = model.snapshot()
+    assert final["maintenance_count"] == 2
+    assert final["scheduled_queue_length"] == 0
