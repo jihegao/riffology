@@ -280,3 +280,186 @@ def test_past_scripted_due_does_not_crash_completion_reschedule() -> None:
     assert model._fixture_due == {"aircraft-0001": []}
     final = model.snapshot()
     assert final["operating_count"] == 1
+
+
+def _microcase_fixture(module):
+    return module.ScenarioFixture(
+        maintenance_due_times_days={
+            "aircraft-0001": [0.0],
+            "aircraft-0002": [0.1],
+            "aircraft-0003": [1.2],
+        },
+        failure_times_days={
+            "aircraft-0001": [10.0],
+            "aircraft-0002": [10.0],
+            "aircraft-0003": [0.2, 10.0],
+        },
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25, 0.25, 0.25],
+    )
+
+
+def test_microcase_exact_events_daily_snapshots_and_kpis() -> None:
+    module = _aircraft_module()
+    model = module.AircraftSupportModel(
+        parameters=_parameters(),
+        horizon_days=4,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=_microcase_fixture(module),
+    )
+    events = _run_to_horizon(model)
+    mechanism = _mechanism_events(events)
+    assert [_event_projection(event) for event in mechanism] == [
+        (0.0, "flight_started", "aircraft-0003"),
+        (0.0, "flight_started", "aircraft-0002"),
+        (0.0, "flight_started", "aircraft-0001"),
+        (0.0, "maintenance_due", "aircraft-0001"),
+        (0.0, "request_queued", "aircraft-0001"),
+        (0.1, "maintenance_due", "aircraft-0002"),
+        (0.1, "request_queued", "aircraft-0002"),
+        (0.2, "failure_occurred", "aircraft-0003"),
+        (0.2, "aircraft_grounded", "aircraft-0003"),
+        (0.2, "request_queued", "aircraft-0003"),
+        (0.2, "part_backordered", "aircraft-0003"),
+        (0.2, "part_ordered", None),
+        (0.25, "flight_completed", "aircraft-0001"),
+        (0.25, "flight_completed", "aircraft-0002"),
+        (0.25, "team_assigned", "aircraft-0001"),
+        (0.25, "aircraft_grounded", "aircraft-0001"),
+        (0.25, "maintenance_started", "aircraft-0001"),
+        (0.5, "maintenance_completed", "aircraft-0001"),
+        (0.5, "aircraft_released", "aircraft-0001"),
+        (0.5, "team_assigned", "aircraft-0002"),
+        (0.5, "aircraft_grounded", "aircraft-0002"),
+        (0.5, "maintenance_started", "aircraft-0002"),
+        (0.75, "maintenance_completed", "aircraft-0002"),
+        (0.75, "aircraft_released", "aircraft-0002"),
+        (1.0, "flight_started", "aircraft-0002"),
+        (1.0, "flight_started", "aircraft-0001"),
+        (1.2, "maintenance_due", "aircraft-0003"),
+        (1.2, "request_suppressed", "aircraft-0003"),
+        (1.2, "part_received", None),
+        (1.2, "team_assigned", "aircraft-0003"),
+        (1.2, "repair_started", "aircraft-0003"),
+        (1.2, "part_ordered", None),
+        (1.25, "flight_completed", "aircraft-0001"),
+        (1.25, "flight_completed", "aircraft-0002"),
+        (1.7, "repair_completed", "aircraft-0003"),
+        (1.7, "maintenance_started", "aircraft-0003"),
+        (1.95, "maintenance_completed", "aircraft-0003"),
+        (1.95, "aircraft_released", "aircraft-0003"),
+        (2.0, "flight_started", "aircraft-0003"),
+        (2.0, "flight_started", "aircraft-0002"),
+        (2.0, "flight_started", "aircraft-0001"),
+        (2.2, "part_received", None),
+        (2.25, "flight_completed", "aircraft-0001"),
+        (2.25, "flight_completed", "aircraft-0002"),
+        (2.25, "flight_completed", "aircraft-0003"),
+        (3.0, "flight_started", "aircraft-0003"),
+        (3.0, "flight_started", "aircraft-0002"),
+        (3.0, "flight_started", "aircraft-0001"),
+        (3.25, "flight_completed", "aircraft-0001"),
+        (3.25, "flight_completed", "aircraft-0002"),
+        (3.25, "flight_completed", "aircraft-0003"),
+    ]
+    assert [event["sequence"] for event in events] == list(range(1, 57))
+    assert len(events) == 56
+    daily = [event for event in events if event["event_type"] == "daily_snapshot"]
+    assert [event["sim_time_days"] for event in daily] == [0, 1, 2, 3, 4]
+    final = model.snapshot()
+    assert final["availability_numerator"] == pytest.approx(9.75)
+    assert final["availability_denominator"] == 12
+    assert final["availability_fraction"] == pytest.approx(9.75 / 12)
+    assert final["operating_aircraft_days"] == pytest.approx(7.05)
+    assert final["in_flight_aircraft_days"] == pytest.approx(2.7)
+    assert final["grounded_for_part_aircraft_days"] == pytest.approx(1.0)
+    assert final["team_working_days"] == pytest.approx(1.25)
+    assert final["hangar_occupied_days"] == pytest.approx(0.75)
+    assert final["corrective_wait_sample_count"] == 1
+    assert final["corrective_wait_mean_days"] == pytest.approx(1.0)
+    assert final["maintenance_overdue_sample_count"] == 3
+    assert final["maintenance_overdue_mean_days"] == pytest.approx(0.3833333333333333)
+    assert final["maintenance_overdue_p95_days"] == pytest.approx(0.5)
+    assert final["flight_count"] == 10
+    assert final["mission_completion_fraction"] == pytest.approx(10 / 12)
+    assert final["failure_count"] == 1
+    assert final["repair_count"] == 1
+    assert final["maintenance_count"] == 3
+    assert final["parts_consumed"] == 1
+    assert final["part_orders_placed"] == 2
+    assert final["part_stock"] == 3
+    assert final["team_cost"] == 40
+    assert final["work_cost"] == 220
+    assert final["part_procurement_cost"] == 50
+    assert final["total_cost"] == 310
+    assert final["stale_scheduled_event_count"] == 3
+    assert all(math.isfinite(value) for value in final.values() if isinstance(value, (int, float)))
+
+
+def test_part_backorder_blocks_then_arrival_unblocks_repair() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [0.1]},
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=2,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    backordered = [e for e in events if e["event_type"] == "part_backordered"]
+    received = [e for e in events if e["event_type"] == "part_received"]
+    started = [e for e in events if e["event_type"] == "repair_started"]
+    assert len(backordered) == 1
+    assert len(received) == 1
+    assert len(started) == 1
+    assert backordered[0]["sequence"] < received[0]["sequence"] < started[0]["sequence"]
+    assert backordered[0]["aircraft_id"] == "aircraft-0001"
+    assert backordered[0]["payload"]["part_id"] == "part-0001"
+    assert received[0]["payload"]["stock"] == 2
+    assert started[0]["sim_time_days"] == pytest.approx(1.1)
+    final = model.snapshot()
+    assert final["grounded_for_part_count"] == 0
+    assert final["operating_count"] == 1
+    assert final["repair_count"] == 1
+    assert final["part_orders_placed"] == 2
+
+
+def test_same_crew_maintenance_continues_after_overdue_repair() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.2]},
+        failure_times_days={"aircraft-0001": [0.1]},
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1, part_initial_stock=2),
+        horizon_days=2,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    suppressed = [e for e in events if e["event_type"] == "request_suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["payload"]["reason"] == "corrective_order_active"
+    same_crew = [e for e in events if e["event_type"] == "maintenance_started" and e["payload"].get("same_crew") is True]
+    assert len(same_crew) == 1
+    assert same_crew[0]["correlation_id"] == "work-00000001"
+    assert same_crew[0]["payload"]["same_crew"] is True
+    repair_completed = [e for e in events if e["event_type"] == "repair_completed"]
+    assert len(repair_completed) == 1
+    assert repair_completed[0]["sequence"] < same_crew[0]["sequence"]
+    assert repair_completed[0]["sim_time_days"] == pytest.approx(0.6)
+    assert same_crew[0]["sim_time_days"] == pytest.approx(0.6)
+    final = model.snapshot()
+    assert final["maintenance_count"] == 1
+    assert final["repair_count"] == 1
+    assert final["operating_count"] == 1

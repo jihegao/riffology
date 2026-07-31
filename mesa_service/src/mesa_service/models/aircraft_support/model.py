@@ -751,7 +751,23 @@ class AircraftSupportModel(mesa.Model):
         self._ensure_dispatch()
 
     def _handle_part_arrival(self, event: _ScheduledEvent) -> None:
-        return None
+        if event.part_order_id is None:
+            raise RuntimeError("part arrival is missing order identity")
+        part_order = self.part_orders[event.part_order_id]
+        part_order.received = True
+        self.part_in_transit -= part_order.quantity
+        self.part_stock += part_order.quantity
+        self._last_part_stock = float(self.part_stock)
+        self._emit("part_received", PHASE_PART_ARRIVAL, part_order_id=part_order.part_order_id, payload={"part_id": "part-0001", "quantity": part_order.quantity, "stock": self.part_stock})
+        unblocked = False
+        for order in self.work_orders.values():
+            if order.status is WorkStatus.BLOCKED_ON_PART:
+                order.status = WorkStatus.QUEUED
+                aircraft = self.aircraft[order.aircraft_id]
+                aircraft.state = AircraftState.GROUNDED_FOR_REPAIR
+                unblocked = True
+        if unblocked:
+            self._ensure_dispatch()
 
     def _handle_completion(self, work_order_id: str | None) -> None:
         if work_order_id is None:
@@ -762,20 +778,75 @@ class AircraftSupportModel(mesa.Model):
             return
         aircraft = self.aircraft[order.aircraft_id]
         team = self.teams[order.assigned_team_id]
-        if order.operation_kind is not OperationKind.SCHEDULED_MAINTENANCE:
-            return
+        operation = order.operation_kind
+        if operation is OperationKind.REPAIR:
+            event_type = "repair_completed"
+            cost = float(self.parameters["repair_cost"])
+            aircraft.active_corrective_order_id = None
+            overdue = aircraft.maintenance_due_at_days <= self.sim_time_days
+            turbine_after = AircraftState.GROUNDED_FOR_MAINTENANCE.value if overdue else AircraftState.OPERATING.value
+        else:
+            event_type = "maintenance_completed"
+            cost = float(self.parameters["scheduled_maintenance_cost"])
+            aircraft.active_planned_order_id = None
+            turbine_after = AircraftState.OPERATING.value
         before = aircraft.state.value
-        self._emit("maintenance_completed", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, correlation_id=order.correlation_id, before_state=before, after_state=AircraftState.OPERATING.value, payload={"cost": float(self.parameters["scheduled_maintenance_cost"])})
+        self._emit(event_type, PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, correlation_id=order.correlation_id, before_state=before, after_state=turbine_after, payload={"cost": cost})
         order.status = WorkStatus.COMPLETED
         order.completed_at_days = self.sim_time_days
         if self._in_measurement_completion(self.sim_time_days):
-            self._work_cost += float(self.parameters["scheduled_maintenance_cost"])
-            self.maintenance_count += 1
-        aircraft.active_planned_order_id = None
-        self._release_resources(aircraft, team, order)
-        aircraft.time_last_maintenance_days = self.sim_time_days
-        self._schedule_maintenance_due(aircraft, self._next_due_after_completion(aircraft))
-        self._enter_operating(aircraft)
+            self._work_cost += cost
+            if operation is OperationKind.REPAIR:
+                self.repair_count += 1
+            else:
+                self.maintenance_count += 1
+
+        if operation is OperationKind.REPAIR:
+            if aircraft.maintenance_due_at_days <= self.sim_time_days:
+                self._start_same_crew_maintenance(aircraft, team, order)
+                return
+            self._release_resources(aircraft, team, None)
+            self._enter_operating(aircraft)
+        else:
+            self._release_resources(aircraft, team, order)
+            aircraft.time_last_maintenance_days = self.sim_time_days
+            self._schedule_maintenance_due(aircraft, self._next_due_after_completion(aircraft))
+            self._enter_operating(aircraft)
+
+    def _start_same_crew_maintenance(self, aircraft: AircraftAgent, team: MaintenanceTeamAgent, completed_corrective: WorkOrder) -> None:
+        free_hangar = next((h for h in self.hangars.values() if h.state is HangarState.FREE), None)
+        if free_hangar is None:
+            self._release_resources(aircraft, team, None)
+            self._new_order(RequestKind.SCHEDULED, aircraft, self.sim_time_days, aircraft.maintenance_due_event_id or "maintenance-due", emit_queued=True)
+            self._ensure_dispatch()
+            return
+        self._work_sequence += 1
+        self._queue_sequence += 1
+        order = WorkOrder(
+            work_order_id=f"work-{self._work_sequence:08d}",
+            request_kind=RequestKind.SCHEDULED,
+            aircraft_id=aircraft.aircraft_id,
+            requested_at_days=aircraft.maintenance_due_at_days,
+            source_event_id=aircraft.maintenance_due_event_id or "maintenance-due",
+            enqueue_sequence=self._queue_sequence,
+            status=WorkStatus.IN_PROGRESS,
+            operation_kind=OperationKind.SCHEDULED_MAINTENANCE,
+            correlation_id=completed_corrective.work_order_id,
+            assigned_team_id=team.team_id,
+            assigned_at_days=self.sim_time_days,
+            started_at_days=self.sim_time_days,
+        )
+        self.work_orders[order.work_order_id] = order
+        aircraft.active_planned_order_id = order.work_order_id
+        free_hangar.state = HangarState.OCCUPIED
+        free_hangar.current_work_order_id = order.work_order_id
+        team.current_work_order_id = order.work_order_id
+        before = aircraft.state.value
+        aircraft.state = AircraftState.GROUNDED_FOR_MAINTENANCE
+        aircraft.flight_generation += 1
+        self._record_wait_start(self._open_maintenance_waits, self._maintenance_waits, order.source_event_id, order.requested_at_days)
+        self._emit("maintenance_started", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, correlation_id=completed_corrective.work_order_id, before_state=before, after_state=aircraft.state.value, payload={"same_crew": True})
+        self._schedule(self.sim_time_days + self._duration(OperationKind.SCHEDULED_MAINTENANCE), PHASE_WORK_COMPLETION, "work_completion", aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id)
 
     def _release_resources(self, aircraft: AircraftAgent, team: MaintenanceTeamAgent, completed_order: WorkOrder | None) -> None:
         aircraft.assigned_team_id = None
@@ -909,9 +980,11 @@ class AircraftSupportModel(mesa.Model):
             "team_utilization_numerator": team_utilization_numerator,
             "team_utilization_denominator": team_utilization_denominator,
             "team_utilization_fraction": team_utilization,
+            "team_working_days": team_working,
             "hangar_utilization_numerator": hangar_utilization_numerator,
             "hangar_utilization_denominator": hangar_utilization_denominator,
             "hangar_utilization_fraction": hangar_utilization,
+            "hangar_occupied_days": hangar_occupied,
             "measurement_window_elapsed_days": elapsed,
             "measurement_window_observed": int(elapsed > 0),
             "corrective_wait_sample_count": len(self._corrective_waits),
