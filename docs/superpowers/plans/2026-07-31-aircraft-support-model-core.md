@@ -101,9 +101,9 @@ minimum_availability_fraction
 Expected mechanism events (non-snapshot), in order (time, event, aircraft, work-order, states, payload):
 
 ```text
-(0.0,  flight_started,        a1, -, in_flight, operating→in_flight, {})
-(0.0,  flight_started,        a2, -, in_flight, operating→in_flight, {})
 (0.0,  flight_started,        a3, -, in_flight, operating→in_flight, {})
+(0.0,  flight_started,        a2, -, in_flight, operating→in_flight, {})
+(0.0,  flight_started,        a1, -, in_flight, operating→in_flight, {})
 (0.0,  maintenance_due,       a1, -, -, -, {})
 (0.0,  request_queued,        a1, work-00000001, -, -, {request_kind: scheduled})
 (0.1,  maintenance_due,       a2, -, -, -, {})
@@ -154,6 +154,8 @@ Expected mechanism events (non-snapshot), in order (time, event, aircraft, work-
 (3.25, flight_completed,      a3, -, operating, in_flight→operating, {})
 ```
 Plus 5 `daily_snapshot` events at days 0,1,2,3,4. Total 56 domain events, sequences 1..56. `stale_scheduled_event_count = 3` (A3 flight completion at 0.25; A1 and A2 stale flight departures at 1.0 invalidated by maintenance grounding).
+
+> **LIFO ordering note:** within one timestamp+phase, later-scheduled events fire first (negative schedule-sequence heap key, wind convention). The oracle rows are ordered by this rule; e.g. at t=0 the three `flight_started` fire `a3, a2, a1` because a1's flight was scheduled first. When implementing the Task 5 exact-sequence test, run the model and verify the *semantics* of each row (time, phase, IDs, states, payload) against this oracle; if the exact intra-phase ordering differs, re-derive it from the LIFO rule rather than hand-editing the oracle.
 
 Final snapshot oracle (day 4, window `[0,4)`):
 ```text
@@ -1214,9 +1216,9 @@ def test_microcase_exact_events_daily_snapshots_and_kpis() -> None:
     events = _run_to_horizon(model)
     mechanism = _mechanism_events(events)
     assert [_event_projection(event) for event in mechanism] == [
-        (0.0, "flight_started", "aircraft-0001"),
-        (0.0, "flight_started", "aircraft-0002"),
         (0.0, "flight_started", "aircraft-0003"),
+        (0.0, "flight_started", "aircraft-0002"),
+        (0.0, "flight_started", "aircraft-0001"),
         (0.0, "maintenance_due", "aircraft-0001"),
         (0.0, "request_queued", "aircraft-0001"),
         (0.1, "maintenance_due", "aircraft-0002"),
