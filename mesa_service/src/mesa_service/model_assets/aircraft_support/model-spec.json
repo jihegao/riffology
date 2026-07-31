@@ -1,0 +1,127 @@
+{
+  "model_id": "aircraft-support",
+  "model_class": "AircraftSupportModel",
+  "model_protocol_version": "aircraft-support-v1",
+  "time_unit": "day",
+  "public_step": "next_natural_day_boundary",
+  "entities": {
+    "aircraft": {
+      "class": "AircraftAgent",
+      "id_pattern": "aircraft-%04d",
+      "states": [
+        "operating",
+        "in_flight",
+        "grounded_for_repair",
+        "grounded_for_maintenance",
+        "grounded_for_part"
+      ]
+    },
+    "maintenance_team": {
+      "class": "MaintenanceTeamAgent",
+      "id_pattern": "team-%02d",
+      "states": [
+        "idle",
+        "working"
+      ]
+    },
+    "hangar_slot": {
+      "class": "HangarSlot",
+      "id_pattern": "hangar-%02d",
+      "states": [
+        "free",
+        "occupied"
+      ]
+    },
+    "part_type": {
+      "id_pattern": "part-0001",
+      "stock_policy": "reorder_point_order_quantity"
+    },
+    "work_order": {
+      "id_pattern": "work-%08d",
+      "request_kinds": [
+        "corrective",
+        "scheduled"
+      ],
+      "operation_kinds": [
+        "repair",
+        "scheduled_maintenance"
+      ],
+      "statuses": [
+        "queued",
+        "assigned",
+        "in_progress",
+        "blocked_on_part",
+        "completed",
+        "superseded"
+      ]
+    }
+  },
+  "event_ordering": {
+    "heap_key": [
+      "sim_time_days",
+      "phase",
+      "negative_schedule_sequence"
+    ],
+    "phase_values": {
+      "request_trigger": 10,
+      "work_completion": 20,
+      "part_arrival": 30,
+      "dispatch": 40,
+      "daily_snapshot": 50
+    },
+    "same_phase_tie_break": "lifo",
+    "team_assignment_tie_break": "ascending_team_id"
+  },
+  "queue_policy": {
+    "priority": [
+      "corrective",
+      "scheduled"
+    ],
+    "within_priority": "fifo",
+    "dispatch": "centralized_non_preemptive"
+  },
+  "distribution_families": {
+    "failure": "exponential_per_flying_hour",
+    "repair": "triangular",
+    "scheduled_maintenance": "triangular"
+  },
+  "failure_semantics": {
+    "sampling": "once_per_flight_on_flight_entry",
+    "rate": "failure_rate_per_flying_hour",
+    "unit": "1/flying-hour"
+  },
+  "named_random_streams": [
+    "initial_maintenance",
+    "failure",
+    "repair_duration",
+    "scheduled_duration"
+  ],
+  "parts": {
+    "single_part_type": true,
+    "part_type_id": "part-0001",
+    "policy": "reorder_point_order_quantity_with_fixed_lead_time"
+  },
+  "required_domain_events": [
+    "flight_started",
+    "flight_completed",
+    "failure_occurred",
+    "maintenance_due",
+    "request_queued",
+    "request_superseded",
+    "request_suppressed",
+    "repair_started",
+    "repair_completed",
+    "maintenance_started",
+    "maintenance_completed",
+    "team_assigned",
+    "part_ordered",
+    "part_received",
+    "part_backordered",
+    "aircraft_grounded",
+    "aircraft_released",
+    "daily_snapshot"
+  ],
+  "measurement_window": "half_open_warmup_to_horizon",
+  "p95_method": "nearest_rank",
+  "claim_scope": "synthetic_draft_unverified_no_calibration"
+}

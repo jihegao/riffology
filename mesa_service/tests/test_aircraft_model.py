@@ -548,3 +548,44 @@ def test_part_holding_cost_after_consumption_drops_stock() -> None:
     final = model.snapshot()
     assert final["part_stock"] == 1
     assert final["part_holding_cost"] == pytest.approx(2.2)
+
+
+def test_snapshot_exactly_matches_metric_schema() -> None:
+    module = _aircraft_module()
+    import json
+    from pathlib import Path
+
+    asset = Path(__file__).resolve().parents[1] / "src" / "mesa_service" / "model_assets" / "aircraft_support" / "metric-schema.json"
+    metric_schema = json.loads(asset.read_text())
+    model = module.AircraftSupportModel(
+        parameters=_parameters(),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=_microcase_fixture(module),
+    )
+    _run_to_horizon(model)
+    snapshot = model.snapshot()
+    assert set(metric_schema["required"]) == set(metric_schema["properties"]) == set(snapshot)
+    assert metric_schema["additionalProperties"] is False
+
+
+def test_exported_model_spec_matches_asset() -> None:
+    module = _aircraft_module()
+    import json
+    from pathlib import Path
+
+    asset = Path(__file__).resolve().parents[1] / "src" / "mesa_service" / "model_assets" / "aircraft_support" / "model-spec.json"
+    spec_asset = json.loads(asset.read_text())
+    assert spec_asset == module.MODEL_SPEC_DEFINITIONS
+
+
+def test_parameter_schema_required_matches_parameter_ids() -> None:
+    module = _aircraft_module()
+    import json
+    from pathlib import Path
+
+    asset = Path(__file__).resolve().parents[1] / "src" / "mesa_service" / "model_assets" / "aircraft_support" / "parameter-schema.json"
+    schema = json.loads(asset.read_text())
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"]) == set(module.PARAMETER_IDS)

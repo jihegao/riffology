@@ -1,0 +1,15 @@
+{
+  "source": {
+    "name": "verbal/experience aircraft maintenance & logistics description",
+    "reference_document": "docs/domain-brief-aircraft-support.md",
+    "quantified_values": false,
+    "time_unit": "day"
+  },
+  "conversion_kind": "synthetic_self_contained_model",
+  "copied_source_code": false,
+  "input_provenance": {
+    "all_parameters": "source_seeded_synthetic_assumption",
+    "verbal_parameter_values": "open_not_yet_quantified"
+  },
+  "claim_boundary": ["not_calibrated", "not_real_fleet_validation", "not_decision_ready", "synthetic_inputs_only"]
+}

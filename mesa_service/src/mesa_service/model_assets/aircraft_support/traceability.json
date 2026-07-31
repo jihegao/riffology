@@ -1,0 +1,19 @@
+{
+  "source_document": "docs/domain-brief-aircraft-support.md",
+  "rule_transitions": [
+    {"source_rule": "daily flight task drives flying hours", "target_rule": "daily_mission_block", "disposition": "adapted", "reason": "One mission block per operating aircraft per day; missions_per_day reserved as v1 aggregation."},
+    {"source_rule": "failures occur only while flying; risk scales with flying hours", "target_rule": "per_flight_failure_sampling", "disposition": "adapted", "reason": "Failure sampled once per flight on flight entry with rate per flying hour."},
+    {"source_rule": "scheduled maintenance is interval-based on the ground", "target_rule": "maintenance_due_trigger", "disposition": "adapted", "reason": "Aircraft remains mission-capable while overdue; grounds only when scheduled work starts."},
+    {"source_rule": "maintenance teams and hangar slots bound work", "target_rule": "team_and_hangar_resource", "disposition": "adapted", "reason": "Scheduled work needs a team and a free hangar; corrective repair needs a team and a part."},
+    {"source_rule": "part shortage causes AOG ground time", "target_rule": "blocked_on_part_and_grounded_for_part", "disposition": "adapted", "reason": "Corrective order blocked while stock is zero; aircraft grounded until part arrival."},
+    {"source_rule": "reorder-point/order-quantity policy with fixed lead time", "target_rule": "maybe_reorder", "disposition": "adapted", "reason": "Order placed when stock plus in-transit is at or below the reorder point."},
+    {"source_rule": "corrective preempts scheduled at assignment", "target_rule": "corrective_priority_dispatch", "disposition": "adapted", "reason": "Dispatch pops corrective before scheduled; FIFO within each queue."}
+  ],
+  "simultaneous_event_rule": {
+    "source": "unspecified",
+    "target": "business_phase_then_lifo",
+    "disposition": "adapted",
+    "reason": "All same-time request triggers are visible before a free team is assigned."
+  },
+  "excluded_mechanisms": ["multi_echelon_supply_chain", "multiple_aircraft_types", "crew_certification", "shift_calendars", "predictive_maintenance", "flight_scheduling_optimization"]
+}

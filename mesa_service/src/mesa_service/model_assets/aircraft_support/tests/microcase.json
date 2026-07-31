@@ -1,0 +1,12 @@
+{
+  "fixture_id": "three-aircraft-maintenance-logistics-microcase-v1",
+  "uses_production_model": true,
+  "horizon_days": 4,
+  "warmup_days": 0,
+  "seed": 2,
+  "parameters": {"aircraft_count": 3, "team_count": 1, "hangar_count": 1, "missions_per_day": 1, "mission_flying_hours": 6, "repair_cost": 100, "scheduled_maintenance_cost": 40, "team_cost_per_day": 10, "part_initial_stock": 0, "part_reorder_point": 1, "part_order_quantity": 2, "part_lead_time_days": 1.0, "part_unit_cost": 50},
+  "maintenance_due_times_days": {"aircraft-0001": [0], "aircraft-0002": [0.1], "aircraft-0003": [1.2]},
+  "failure_times_days": {"aircraft-0001": [10], "aircraft-0002": [10], "aircraft-0003": [0.2, 10]},
+  "durations_days": {"repair": [0.5], "scheduled": [0.25, 0.25, 0.25]},
+  "oracle": {"event_count_excluding_daily_snapshots": 51, "daily_snapshot_count": 5, "availability_numerator": 9.75, "availability_denominator": 12, "team_working_days": 1.25, "hangar_occupied_days": 0.75, "total_cost": 310, "stale_scheduled_event_count": 3}
+}
