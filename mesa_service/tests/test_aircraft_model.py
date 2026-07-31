@@ -85,6 +85,53 @@ def test_constructor_builds_agents_and_named_streams() -> None:
     assert len(model.teams) == 1
     assert len(model.hangars) == 1
     assert {name for name in model._random_streams} == set(module.MODEL_SPEC_DEFINITIONS["named_random_streams"])
-    assert all(aircraft.state is module.AircraftState.OPERATING for aircraft in model.aircraft.values())
+    assert all(aircraft.state is module.AircraftState.IN_FLIGHT for aircraft in model.aircraft.values())
     assert all(team.state is module.TeamState.IDLE for team in model.teams.values())
     assert all(hangar.state is module.HangarState.FREE for hangar in model.hangars.values())
+
+
+def _run_to_horizon(model) -> list[dict[str, Any]]:
+    events = list(model.drain_domain_events())
+    while model.sim_time_days < model.horizon_days:
+        model.step()
+        events.extend(model.drain_domain_events())
+    return events
+
+
+def _mechanism_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [event for event in events if event["event_type"] != "daily_snapshot"]
+
+
+def _event_projection(event: dict[str, Any]) -> tuple[float, str, str | None]:
+    return (float(event["sim_time_days"]), event["event_type"], event.get("aircraft_id"))
+
+
+def _snapshot_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event["payload"]
+    return payload.get("snapshot", payload)
+
+
+def test_flight_lifecycle_and_failure_invalidates_flight_completion() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [0.2, 10.0]},
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _run_to_horizon(model)
+    projections = [_event_projection(event) for event in _mechanism_events(events)]
+    assert projections[0][0] == 0.0 and projections[0][1] == "flight_started"
+    assert any(event[1] == "failure_occurred" for event in projections)
+    assert not any(event[1] == "flight_completed" for event in projections)
+    final = model.snapshot()
+    assert final["in_flight_count"] == 0
+    assert final["grounded_for_repair_count"] == 1
+    assert final["stale_scheduled_event_count"] == 1

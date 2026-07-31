@@ -451,16 +451,165 @@ class AircraftSupportModel(mesa.Model):
         self._schedule(at, PHASE_REQUEST_TRIGGER, "flight_departure", aircraft_id=aircraft.aircraft_id, token=aircraft.flight_generation)
 
     def _process_until(self, target: float) -> None:
+        while self._scheduled and self._scheduled[0][0] <= target:
+            at, _, _, event = heapq.heappop(self._scheduled)
+            self._integrate_to(at)
+            self.sim_time_days = at
+            self.processed_scheduled_event_count += 1
+            self._processing_time = at
+            self._processing_phase = event.phase
+            try:
+                self._handle_scheduled(event)
+            finally:
+                self._processing_time = None
+                self._processing_phase = None
         self._integrate_to(target)
         self.sim_time_days = target
 
     def _integrate_to(self, target: float) -> None:
         if target < self._last_integrated_time:
             raise RuntimeError("simulation time moved backwards")
+        start = max(self._last_integrated_time, float(self.warmup_days))
+        end = min(float(target), float(self.horizon_days))
+        duration = max(0.0, end - start)
+        if duration:
+            for aircraft in self.aircraft.values():
+                self._aircraft_state_days[aircraft.state] += duration
+            for team in self.teams.values():
+                self._team_state_days[team.state] += duration
+            for hangar in self.hangars.values():
+                self._hangar_state_days[hangar.state] += duration
+            self._part_stock_days += self._last_part_stock * duration
         self._last_integrated_time = target
 
     def _handle_scheduled(self, event: _ScheduledEvent) -> None:
+        if event.event_type == "flight_departure":
+            self._handle_flight_departure(event)
+        elif event.event_type == "flight_completion":
+            self._handle_flight_completion(event)
+        elif event.event_type == "failure_trigger":
+            self._handle_failure(event)
+        elif event.event_type == "maintenance_due_trigger":
+            self._handle_maintenance_due(event)
+        elif event.event_type == "part_arrival":
+            self._handle_part_arrival(event)
+        elif event.event_type == "dispatch":
+            self._dispatch_times.discard(event.sim_time_days)
+            self._dispatch()
+        elif event.event_type == "work_completion":
+            self._handle_completion(event.work_order_id)
+        else:
+            raise RuntimeError(f"unknown scheduled event {event.event_type}")
+
+    def _schedule_next_flight(self, aircraft: AircraftAgent) -> None:
+        boundary = math.floor(self.sim_time_days) + 1.0
+        if boundary >= float(self.horizon_days):
+            return
+        self._schedule_flight(aircraft, at=boundary)
+
+    def _handle_flight_departure(self, event: _ScheduledEvent) -> None:
+        aircraft = self.aircraft[event.aircraft_id or ""]
+        if event.token != aircraft.flight_generation or aircraft.state is not AircraftState.OPERATING:
+            self.stale_scheduled_event_count += 1
+            return
+        before = aircraft.state.value
+        aircraft.state = AircraftState.IN_FLIGHT
+        self._emit("flight_started", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+        block_days = float(self.parameters["missions_per_day"]) * float(self.parameters["mission_flying_hours"]) / 24.0
+        aircraft.flight_generation += 1
+        self._schedule(self.sim_time_days + block_days, PHASE_WORK_COMPLETION, "flight_completion", aircraft_id=aircraft.aircraft_id, token=aircraft.flight_generation)
+        self._schedule_failure_on_flight_entry(aircraft)
+
+    def _handle_flight_completion(self, event: _ScheduledEvent) -> None:
+        aircraft = self.aircraft[event.aircraft_id or ""]
+        if event.token != aircraft.flight_generation or aircraft.state is not AircraftState.IN_FLIGHT:
+            self.stale_scheduled_event_count += 1
+            return
+        before = aircraft.state.value
+        aircraft.state = AircraftState.OPERATING
+        aircraft.flight_generation += 1
+        aircraft.failure_generation += 1
+        self.flight_count += int(self.parameters["missions_per_day"])
+        self._emit("flight_completed", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+        self._schedule_next_flight(aircraft)
+        if self._peek_work_exists():
+            self._ensure_dispatch()
+
+    def _schedule_failure_on_flight_entry(self, aircraft: AircraftAgent) -> None:
+        aircraft.failure_generation += 1
+        self.failure_delay_sample_count += 1
+        scripted = self._fixture_failure.get(aircraft.aircraft_id)
+        if scripted and scripted[0] < self.sim_time_days + float(self.parameters["missions_per_day"]) * float(self.parameters["mission_flying_hours"]) / 24.0:
+            failure_at = float(scripted.pop(0))
+        else:
+            failure_at = self.sim_time_days + self._random_streams["failure"].expovariate(float(self.parameters["failure_rate_per_flying_hour"]) * 24.0)
+        if failure_at < self.sim_time_days:
+            raise ValueError("fixture failure time cannot precede flight entry")
+        self._schedule(failure_at, PHASE_REQUEST_TRIGGER, "failure_trigger", aircraft_id=aircraft.aircraft_id, token=aircraft.failure_generation)
+
+    def _handle_failure(self, event: _ScheduledEvent) -> None:
+        aircraft = self.aircraft[event.aircraft_id or ""]
+        if event.token != aircraft.failure_generation or aircraft.state is not AircraftState.IN_FLIGHT:
+            self.stale_scheduled_event_count += 1
+            return
+        before = aircraft.state.value
+        aircraft.state = AircraftState.GROUNDED_FOR_REPAIR
+        aircraft.flight_generation += 1
+        aircraft.failure_generation += 1
+        domain = self._emit("failure_occurred", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+        self._emit("aircraft_grounded", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
+        if self._in_measurement_origin(self.sim_time_days):
+            self.failure_count += 1
+            self._open_corrective_waits[domain["event_id"]] = self.sim_time_days
+        self._new_order(RequestKind.CORRECTIVE, aircraft, self.sim_time_days, domain["event_id"])
+        self._ensure_dispatch()
+
+    def _new_order(self, request_kind: RequestKind, aircraft: AircraftAgent, requested_at: float, source_event_id: str, *, correlation_id: str | None = None, emit_queued: bool = True) -> WorkOrder:
+        self._work_sequence += 1
+        self._queue_sequence += 1
+        order = WorkOrder(
+            work_order_id=f"work-{self._work_sequence:08d}",
+            request_kind=request_kind,
+            aircraft_id=aircraft.aircraft_id,
+            requested_at_days=float(requested_at),
+            source_event_id=source_event_id,
+            enqueue_sequence=self._queue_sequence,
+            correlation_id=correlation_id,
+        )
+        self.work_orders[order.work_order_id] = order
+        if request_kind is RequestKind.CORRECTIVE:
+            aircraft.active_corrective_order_id = order.work_order_id
+            queue = self._corrective_queue
+        else:
+            aircraft.active_planned_order_id = order.work_order_id
+            queue = self._scheduled_queue
+        heapq.heappush(queue, (order.requested_at_days, order.enqueue_sequence, order.work_order_id))
+        if emit_queued:
+            self._emit("request_queued", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, work_order_id=order.work_order_id, correlation_id=correlation_id, payload={"request_kind": request_kind.value})
+        return order
+
+    def _ensure_dispatch(self) -> None:
+        if self.sim_time_days not in self._dispatch_times:
+            self._dispatch_times.add(self.sim_time_days)
+            self._schedule(self.sim_time_days, PHASE_DISPATCH, "dispatch")
+
+    def _peek_work_exists(self) -> bool:
+        return any(order.status in {WorkStatus.QUEUED, WorkStatus.BLOCKED_ON_PART} for order in self.work_orders.values())
+
+    def _dispatch(self) -> None:
+        pass
+
+    def _handle_maintenance_due(self, event: _ScheduledEvent) -> None:
         return None
+
+    def _handle_part_arrival(self, event: _ScheduledEvent) -> None:
+        return None
+
+    def _handle_completion(self, work_order_id: str | None) -> None:
+        return None
+
+    def _in_measurement_origin(self, time_days: float) -> bool:
+        return self.warmup_days <= time_days < self.horizon_days
 
     def _emit(self, event_type: str, phase: int, *, aircraft_id: str | None = None, team_id: str | None = None, work_order_id: str | None = None, part_order_id: str | None = None, correlation_id: str | None = None, before_state: str | None = None, after_state: str | None = None, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         self._domain_sequence += 1
@@ -496,8 +645,103 @@ class AircraftSupportModel(mesa.Model):
         self._process_until(float(self._day_index))
         self._emit_daily_snapshot()
 
-    def snapshot(self) -> dict[str, Any]:
-        return {"sim_time_days": self.sim_time_days}
+    def snapshot(self) -> dict[str, int | float]:
+        elapsed = max(0.0, min(self.sim_time_days, float(self.horizon_days)) - float(self.warmup_days))
+        operating_days = self._aircraft_state_days[AircraftState.OPERATING]
+        in_flight_days = self._aircraft_state_days[AircraftState.IN_FLIGHT]
+        grounded_repair = self._aircraft_state_days[AircraftState.GROUNDED_FOR_REPAIR]
+        grounded_maint = self._aircraft_state_days[AircraftState.GROUNDED_FOR_MAINTENANCE]
+        grounded_part = self._aircraft_state_days[AircraftState.GROUNDED_FOR_PART]
+        availability_numerator = operating_days + in_flight_days
+        availability_denominator = int(self.parameters["aircraft_count"]) * elapsed
+        team_working = self._team_state_days[TeamState.WORKING]
+        team_utilization_numerator = team_working
+        team_utilization_denominator = int(self.parameters["team_count"]) * elapsed
+        hangar_occupied = self._hangar_state_days[HangarState.OCCUPIED]
+        hangar_utilization_numerator = hangar_occupied
+        hangar_utilization_denominator = int(self.parameters["hangar_count"]) * elapsed
+        availability = availability_numerator / availability_denominator if availability_denominator else 1.0
+        team_utilization = team_utilization_numerator / team_utilization_denominator if team_utilization_denominator else 0.0
+        hangar_utilization = hangar_utilization_numerator / hangar_utilization_denominator if hangar_utilization_denominator else 0.0
+        team_cost = int(self.parameters["team_count"]) * float(self.parameters["team_cost_per_day"]) * elapsed
+        aircraft_counts = {state: sum(a.state is state for a in self.aircraft.values()) for state in AircraftState}
+        team_counts = {state: sum(t.state is state for t in self.teams.values()) for state in TeamState}
+        hangar_counts = {state: sum(h.state is state for h in self.hangars.values()) for state in HangarState}
+        corrective_queue = sum(o.status in {WorkStatus.QUEUED, WorkStatus.BLOCKED_ON_PART} and o.request_kind is RequestKind.CORRECTIVE for o in self.work_orders.values())
+        scheduled_queue = sum(o.status is WorkStatus.QUEUED and o.request_kind is RequestKind.SCHEDULED for o in self.work_orders.values())
+        mission_required = int(self.parameters["aircraft_count"]) * int(self.parameters["missions_per_day"]) * elapsed
+        part_procurement = float(self.parameters["part_unit_cost"]) * self.parts_consumed
+        aog_penalty = float(self.parameters["aog_penalty_per_day"]) * grounded_part
+        holding_cost = float(self.parameters["part_holding_cost_per_day"]) * self._part_stock_days
+        return {
+            "sim_time_days": self.sim_time_days,
+            "aircraft_count": int(self.parameters["aircraft_count"]),
+            "team_count": int(self.parameters["team_count"]),
+            "hangar_count": int(self.parameters["hangar_count"]),
+            "operating_count": aircraft_counts[AircraftState.OPERATING],
+            "in_flight_count": aircraft_counts[AircraftState.IN_FLIGHT],
+            "grounded_for_repair_count": aircraft_counts[AircraftState.GROUNDED_FOR_REPAIR],
+            "grounded_for_maintenance_count": aircraft_counts[AircraftState.GROUNDED_FOR_MAINTENANCE],
+            "grounded_for_part_count": aircraft_counts[AircraftState.GROUNDED_FOR_PART],
+            "idle_team_count": team_counts[TeamState.IDLE],
+            "working_team_count": team_counts[TeamState.WORKING],
+            "free_hangar_count": hangar_counts[HangarState.FREE],
+            "occupied_hangar_count": hangar_counts[HangarState.OCCUPIED],
+            "corrective_queue_length": corrective_queue,
+            "scheduled_queue_length": scheduled_queue,
+            "part_stock": self.part_stock,
+            "part_orders_in_transit": self.part_in_transit,
+            "operating_aircraft_days": operating_days,
+            "in_flight_aircraft_days": in_flight_days,
+            "grounded_for_repair_aircraft_days": grounded_repair,
+            "grounded_for_maintenance_aircraft_days": grounded_maint,
+            "grounded_for_part_aircraft_days": grounded_part,
+            "availability_numerator": availability_numerator,
+            "availability_denominator": availability_denominator,
+            "availability_fraction": availability,
+            "team_utilization_numerator": team_utilization_numerator,
+            "team_utilization_denominator": team_utilization_denominator,
+            "team_utilization_fraction": team_utilization,
+            "hangar_utilization_numerator": hangar_utilization_numerator,
+            "hangar_utilization_denominator": hangar_utilization_denominator,
+            "hangar_utilization_fraction": hangar_utilization,
+            "measurement_window_elapsed_days": elapsed,
+            "measurement_window_observed": int(elapsed > 0),
+            "corrective_wait_sample_count": len(self._corrective_waits),
+            "corrective_wait_censored_count": len(self._open_corrective_waits),
+            "corrective_wait_mean_days": sum(self._corrective_waits) / len(self._corrective_waits) if self._corrective_waits else 0.0,
+            "corrective_wait_p95_days": self._p95(self._corrective_waits),
+            "maintenance_overdue_sample_count": len(self._maintenance_waits),
+            "maintenance_overdue_censored_count": len(self._open_maintenance_waits),
+            "maintenance_overdue_mean_days": sum(self._maintenance_waits) / len(self._maintenance_waits) if self._maintenance_waits else 0.0,
+            "maintenance_overdue_p95_days": self._p95(self._maintenance_waits),
+            "flight_count": self.flight_count,
+            "mission_required": int(mission_required),
+            "mission_completion_fraction": self.flight_count / mission_required if mission_required else 0.0,
+            "failure_count": self.failure_count,
+            "repair_count": self.repair_count,
+            "maintenance_count": self.maintenance_count,
+            "parts_consumed": self.parts_consumed,
+            "part_orders_placed": self.part_orders_placed,
+            "failure_delay_sample_count": self.failure_delay_sample_count,
+            "stale_scheduled_event_count": self.stale_scheduled_event_count,
+            "processed_scheduled_event_count": self.processed_scheduled_event_count,
+            "pending_scheduled_event_count": len(self._scheduled),
+            "team_cost": team_cost,
+            "work_cost": self._work_cost,
+            "part_procurement_cost": part_procurement,
+            "aog_penalty_cost": aog_penalty,
+            "part_holding_cost": holding_cost,
+            "total_cost": team_cost + self._work_cost + part_procurement + aog_penalty + holding_cost,
+            "operating_revenue": operating_days * float(self.parameters["daily_revenue_per_operating_aircraft"]),
+        }
+
+    @staticmethod
+    def _p95(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        return ordered[math.ceil(0.95 * len(ordered)) - 1]
 
     def drain_domain_events(self) -> list[dict[str, Any]]:
         events = self._domain_buffer
