@@ -20,3 +20,6 @@ outputs/simulation-replay/*
 workspaces/
 .riff-workspaces/
 .riff-product/
+
+# local isolated worktrees
+.worktrees/
