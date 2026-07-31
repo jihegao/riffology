@@ -135,3 +135,49 @@ def test_flight_lifecycle_and_failure_invalidates_flight_completion() -> None:
     assert final["in_flight_count"] == 0
     assert final["grounded_for_repair_count"] == 1
     assert final["stale_scheduled_event_count"] == 1
+
+
+def test_flight_completion_and_warmup_window_gates_flight_count() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=4,
+        warmup_days=2,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    _run_to_horizon(model)
+    final = model.snapshot()
+    assert final["flight_count"] == 2  # completions at 2.25 and 3.25 are in [2,4)
+    assert final["mission_required"] == 2
+    assert final["mission_completion_fraction"] == pytest.approx(1.0)
+    assert final["operating_count"] == 1
+    assert final["stale_scheduled_event_count"] == 0
+
+
+def test_fixture_failure_beyond_flight_never_fires_randomly() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=4,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _run_to_horizon(model)
+    assert not any(e["event_type"] == "failure_occurred" for e in _mechanism_events(events))
+    final = model.snapshot()
+    assert final["failure_count"] == 0
+    assert final["operating_count"] == 1

@@ -529,7 +529,8 @@ class AircraftSupportModel(mesa.Model):
         aircraft.state = AircraftState.OPERATING
         aircraft.flight_generation += 1
         aircraft.failure_generation += 1
-        self.flight_count += int(self.parameters["missions_per_day"])
+        if self._in_measurement_completion(self.sim_time_days):
+            self.flight_count += int(self.parameters["missions_per_day"])
         self._emit("flight_completed", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
         self._schedule_next_flight(aircraft)
         if self._peek_work_exists():
@@ -538,13 +539,14 @@ class AircraftSupportModel(mesa.Model):
     def _schedule_failure_on_flight_entry(self, aircraft: AircraftAgent) -> None:
         aircraft.failure_generation += 1
         self.failure_delay_sample_count += 1
+        landing = self.sim_time_days + float(self.parameters["missions_per_day"]) * float(self.parameters["mission_flying_hours"]) / 24.0
         scripted = self._fixture_failure.get(aircraft.aircraft_id)
-        if scripted and scripted[0] < self.sim_time_days + float(self.parameters["missions_per_day"]) * float(self.parameters["mission_flying_hours"]) / 24.0:
-            failure_at = float(scripted.pop(0))
-        else:
-            failure_at = self.sim_time_days + self._random_streams["failure"].expovariate(float(self.parameters["failure_rate_per_flying_hour"]) * 24.0)
-        if failure_at < self.sim_time_days:
-            raise ValueError("fixture failure time cannot precede flight entry")
+        if scripted:
+            if self.sim_time_days <= scripted[0] < landing:
+                failure_at = float(scripted.pop(0))
+                self._schedule(failure_at, PHASE_REQUEST_TRIGGER, "failure_trigger", aircraft_id=aircraft.aircraft_id, token=aircraft.failure_generation)
+            return
+        failure_at = self.sim_time_days + self._random_streams["failure"].expovariate(float(self.parameters["failure_rate_per_flying_hour"]) * 24.0)
         self._schedule(failure_at, PHASE_REQUEST_TRIGGER, "failure_trigger", aircraft_id=aircraft.aircraft_id, token=aircraft.failure_generation)
 
     def _handle_failure(self, event: _ScheduledEvent) -> None:
@@ -609,6 +611,9 @@ class AircraftSupportModel(mesa.Model):
         return None
 
     def _in_measurement_origin(self, time_days: float) -> bool:
+        return self.warmup_days <= time_days < self.horizon_days
+
+    def _in_measurement_completion(self, time_days: float) -> bool:
         return self.warmup_days <= time_days < self.horizon_days
 
     def _emit(self, event_type: str, phase: int, *, aircraft_id: str | None = None, team_id: str | None = None, work_order_id: str | None = None, part_order_id: str | None = None, correlation_id: str | None = None, before_state: str | None = None, after_state: str | None = None, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
