@@ -230,8 +230,6 @@ def test_maintenance_due_while_in_flight_queues_and_starts_on_landing() -> None:
     assert len(due) == 1 and due[0]["sim_time_days"] == pytest.approx(0.1)
     started = [e for e in events if e["event_type"] == "maintenance_started"]
     assert len(started) == 1 and started[0]["sim_time_days"] == pytest.approx(0.25)
-    # maintenance starts only after the aircraft lands (in_flight until 0.25)
-    assert (final_in_flight_before_start := True)
 
 
 def test_hangar_capacity_bounds_concurrent_scheduled_work() -> None:
@@ -463,3 +461,90 @@ def test_same_crew_maintenance_continues_after_overdue_repair() -> None:
     assert final["maintenance_count"] == 1
     assert final["repair_count"] == 1
     assert final["operating_count"] == 1
+
+
+def test_same_crew_continuation_with_no_free_hangar_queues_and_recovers() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.1], "aircraft-0002": [0.1]},
+        failure_times_days={"aircraft-0001": [0.2, 10.0], "aircraft-0002": [10.0]},
+        repair_durations_days=[0.25],
+        scheduled_durations_days=[0.25, 0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(
+            aircraft_count=2,
+            team_count=2,
+            hangar_count=1,
+            part_initial_stock=2,
+            part_reorder_point=0,
+            part_order_quantity=1,
+            part_lead_time_days=0.1,
+        ),
+        horizon_days=2,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _run_to_horizon(model)
+    final = model.snapshot()
+    assert final["scheduled_queue_length"] == 0
+    assert final["operating_count"] == 2
+    assert final["maintenance_count"] >= 2
+    assert not any(e["event_type"] == "part_backordered" for e in _mechanism_events(events))
+
+
+def test_part_holding_cost_tracks_consumption() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(
+            aircraft_count=1,
+            part_initial_stock=3,
+            part_reorder_point=0,
+            part_order_quantity=1,
+            part_lead_time_days=0.1,
+            part_holding_cost_per_day=2,
+        ),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    _run_to_horizon(model)
+    final = model.snapshot()
+    assert final["part_stock"] == 3
+    assert final["part_holding_cost"] == pytest.approx(6.0)
+
+
+def test_part_holding_cost_after_consumption_drops_stock() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [10.0]},
+        failure_times_days={"aircraft-0001": [0.1]},
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(
+            aircraft_count=1,
+            part_initial_stock=2,
+            part_reorder_point=0,
+            part_order_quantity=1,
+            part_lead_time_days=0.1,
+            part_holding_cost_per_day=2,
+        ),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    _run_to_horizon(model)
+    final = model.snapshot()
+    assert final["part_stock"] == 1
+    assert final["part_holding_cost"] == pytest.approx(2.2)

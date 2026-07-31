@@ -685,6 +685,7 @@ class AircraftSupportModel(mesa.Model):
         self._emit("team_assigned", PHASE_DISPATCH, aircraft_id=aircraft.aircraft_id, team_id=team.team_id, work_order_id=order.work_order_id, payload={"request_kind": order.request_kind.value})
         if order.request_kind is RequestKind.CORRECTIVE:
             self.part_stock -= 1
+            self._last_part_stock = float(self.part_stock)
             self.parts_consumed += 1
             order.operation_kind = OperationKind.REPAIR
             before = aircraft.state.value
@@ -754,6 +755,8 @@ class AircraftSupportModel(mesa.Model):
         if event.part_order_id is None:
             raise RuntimeError("part arrival is missing order identity")
         part_order = self.part_orders[event.part_order_id]
+        if part_order.received:
+            return
         part_order.received = True
         self.part_in_transit -= part_order.quantity
         self.part_stock += part_order.quantity
@@ -816,7 +819,10 @@ class AircraftSupportModel(mesa.Model):
     def _start_same_crew_maintenance(self, aircraft: AircraftAgent, team: MaintenanceTeamAgent, completed_corrective: WorkOrder) -> None:
         free_hangar = next((h for h in self.hangars.values() if h.state is HangarState.FREE), None)
         if free_hangar is None:
+            before = aircraft.state.value
             self._release_resources(aircraft, team, None)
+            aircraft.state = AircraftState.OPERATING
+            self._emit("aircraft_released", PHASE_WORK_COMPLETION, aircraft_id=aircraft.aircraft_id, before_state=before, after_state=aircraft.state.value)
             self._new_order(RequestKind.SCHEDULED, aircraft, self.sim_time_days, aircraft.maintenance_due_event_id or "maintenance-due", emit_queued=True)
             self._ensure_dispatch()
             return
