@@ -799,7 +799,10 @@ class AircraftSupportModel(mesa.Model):
     def _next_due_after_completion(self, aircraft: AircraftAgent) -> float:
         scripted = self._fixture_due.get(aircraft.aircraft_id)
         if scripted:
-            return float(scripted.pop(0))
+            while scripted and scripted[0] <= self.sim_time_days:
+                scripted.pop(0)
+            if scripted:
+                return float(scripted[0])
         return self.sim_time_days + float(self.parameters["scheduled_maintenance_interval_days"])
 
     def _in_measurement_origin(self, time_days: float) -> bool:

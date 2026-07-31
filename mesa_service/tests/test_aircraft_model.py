@@ -256,3 +256,27 @@ def test_hangar_capacity_bounds_concurrent_scheduled_work() -> None:
     final = model.snapshot()
     assert final["maintenance_count"] == 2
     assert final["scheduled_queue_length"] == 0
+
+
+def test_past_scripted_due_does_not_crash_completion_reschedule() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.0, 0.3]},
+        failure_times_days={"aircraft-0001": [10.0]},
+        repair_durations_days=[],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1),
+        horizon_days=1,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _run_to_horizon(model)
+    due = [e for e in _mechanism_events(events) if e["event_type"] == "maintenance_due"]
+    assert len(due) == 1
+    assert due[0]["sim_time_days"] == pytest.approx(0.0)
+    assert model._fixture_due == {"aircraft-0001": []}
+    final = model.snapshot()
+    assert final["operating_count"] == 1
