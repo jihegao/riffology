@@ -237,3 +237,272 @@ class _ScheduledEvent:
     work_order_id: str | None = None
     part_order_id: str | None = None
     token: int | None = None
+
+
+class AircraftAgent(mesa.Agent):
+    def __init__(self, model: "AircraftSupportModel", aircraft_id: str) -> None:
+        super().__init__(model)
+        self.aircraft_id = aircraft_id
+        self.state = AircraftState.OPERATING
+        self.time_last_maintenance_days = 0.0
+        self.maintenance_due_at_days = math.inf
+        self.maintenance_due_event_id: str | None = None
+        self.failure_generation = 0
+        self.flight_generation = 0
+        self.maintenance_generation = 0
+        self.active_corrective_order_id: str | None = None
+        self.active_planned_order_id: str | None = None
+        self.assigned_team_id: str | None = None
+
+
+class MaintenanceTeamAgent(mesa.Agent):
+    def __init__(self, model: "AircraftSupportModel", team_id: str) -> None:
+        super().__init__(model)
+        self.team_id = team_id
+        self.state = TeamState.IDLE
+        self.current_work_order_id: str | None = None
+
+
+class HangarSlot(mesa.Agent):
+    def __init__(self, model: "AircraftSupportModel", hangar_id: str) -> None:
+        super().__init__(model)
+        self.hangar_id = hangar_id
+        self.state = HangarState.FREE
+        self.current_work_order_id: str | None = None
+
+
+class AircraftSupportModel(mesa.Model):
+    """Mesa model with fractional-day mechanics and daily public stepping."""
+
+    def __init__(
+        self,
+        *,
+        parameters: Mapping[str, Any],
+        horizon_days: int,
+        warmup_days: int,
+        seed: int,
+        scenario_fixture: ScenarioFixture | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        identity: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.parameters = self._validate_parameters(parameters)
+        if isinstance(horizon_days, bool) or not isinstance(horizon_days, int) or not 1 <= horizon_days <= 3660:
+            raise ValueError("horizon_days must be an integer between 1 and 3660")
+        if isinstance(warmup_days, bool) or not isinstance(warmup_days, int) or not 0 <= warmup_days < horizon_days:
+            raise ValueError("warmup_days must be an integer below horizon_days")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError("seed must be an integer")
+        super().__init__(rng=seed)
+        self.horizon_days = horizon_days
+        self.warmup_days = warmup_days
+        self.seed = seed
+        self.sim_time_days = 0.0
+        self._day_index = 0
+        self._fixture = copy.deepcopy(scenario_fixture)
+        self._fixture_due = {key: list(value) for key, value in (self._fixture.maintenance_due_times_days.items() if self._fixture else [])}
+        self._fixture_failure = {key: list(value) for key, value in (self._fixture.failure_times_days.items() if self._fixture else [])}
+        self._fixture_repair = list(self._fixture.repair_durations_days) if self._fixture else []
+        self._fixture_scheduled = list(self._fixture.scheduled_durations_days) if self._fixture else []
+        self._event_sink = event_sink
+        self._identity = dict(identity or {})
+        self._domain_buffer: list[dict[str, Any]] = []
+        self._domain_sequence = 0
+        self._schedule_sequence = 0
+        self._work_sequence = 0
+        self._queue_sequence = 0
+        self._part_order_sequence = 0
+        self._scheduled: list[tuple[float, int, int, _ScheduledEvent]] = []
+        self._processing_time: float | None = None
+        self._processing_phase: int | None = None
+        self._dispatch_times: set[float] = set()
+        self._corrective_queue: list[tuple[float, int, str]] = []
+        self._scheduled_queue: list[tuple[float, int, str]] = []
+        self.work_orders: dict[str, WorkOrder] = {}
+        self.part_orders: dict[str, PartOrder] = {}
+        self.part_stock = int(self.parameters["part_initial_stock"])
+        self.part_in_transit = 0
+        self.stale_scheduled_event_count = 0
+        self.processed_scheduled_event_count = 0
+        self.flight_count = 0
+        self.failure_count = 0
+        self.repair_count = 0
+        self.maintenance_count = 0
+        self.parts_consumed = 0
+        self.part_orders_placed = 0
+        self.failure_delay_sample_count = 0
+        self._last_integrated_time = 0.0
+        self._aircraft_state_days = {state: 0.0 for state in AircraftState}
+        self._team_state_days = {state: 0.0 for state in TeamState}
+        self._hangar_state_days = {state: 0.0 for state in HangarState}
+        self._part_stock_days = 0.0
+        self._last_part_stock = float(self.part_stock)
+        self._corrective_waits: list[float] = []
+        self._maintenance_waits: list[float] = []
+        self._open_corrective_waits: dict[str, float] = {}
+        self._open_maintenance_waits: dict[str, float] = {}
+        self._work_cost = 0.0
+        self._random_streams = {name: random.Random(self._stream_seed(name)) for name in MODEL_SPEC_DEFINITIONS["named_random_streams"]}
+
+        self.aircraft: dict[str, AircraftAgent] = {}
+        self.teams: dict[str, MaintenanceTeamAgent] = {}
+        self.hangars: dict[str, HangarSlot] = {}
+        self._create_agents()
+        self._initialize_events()
+        self._process_until(0.0)
+        self._emit_daily_snapshot()
+
+    @staticmethod
+    def _validate_parameters(raw: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            raise TypeError("parameters must be a mapping")
+        if set(raw) != set(PARAMETER_IDS):
+            raise ValueError("parameters must contain the exact aircraft-support model parameter set")
+        values = dict(raw)
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+        for name in ("aircraft_count", "team_count", "hangar_count", "missions_per_day", "part_initial_stock", "part_reorder_point", "part_order_quantity"):
+            if not isinstance(values[name], int):
+                raise TypeError(f"{name} must be an integer")
+        if not 1 <= values["aircraft_count"] <= 100:
+            raise ValueError("aircraft_count must be between 1 and 100")
+        if not 1 <= values["team_count"] <= 20:
+            raise ValueError("team_count must be between 1 and 20")
+        if not 1 <= values["hangar_count"] <= 20:
+            raise ValueError("hangar_count must be between 1 and 20")
+        if not 1 <= values["missions_per_day"] <= 10:
+            raise ValueError("missions_per_day must be between 1 and 10")
+        if not 0 < values["mission_flying_hours"] <= 24:
+            raise ValueError("mission_flying_hours must be in (0, 24]")
+        if values["failure_rate_per_flying_hour"] <= 0:
+            raise ValueError("failure rate must be positive")
+        if values["scheduled_maintenance_interval_days"] <= 0:
+            raise ValueError("scheduled maintenance interval must be positive")
+        for prefix in ("repair", "scheduled"):
+            low = float(values[f"{prefix}_low_hours"])
+            mode = float(values[f"{prefix}_mode_hours"])
+            high = float(values[f"{prefix}_high_hours"])
+            if low <= 0 or not low <= mode <= high:
+                raise ValueError(f"{prefix} triangular parameters must satisfy 0 < low <= mode <= high")
+        if values["part_order_quantity"] < 1:
+            raise ValueError("part_order_quantity must be at least 1")
+        if values["part_reorder_point"] < 0:
+            raise ValueError("part_reorder_point must be non-negative")
+        if values["part_initial_stock"] < 0:
+            raise ValueError("part_initial_stock must be non-negative")
+        if values["part_lead_time_days"] <= 0:
+            raise ValueError("part lead time must be positive")
+        if not 0 <= values["minimum_availability_fraction"] <= 1:
+            raise ValueError("minimum availability must be between zero and one")
+        for name in ("part_unit_cost", "part_holding_cost_per_day", "team_cost_per_day", "repair_cost", "scheduled_maintenance_cost", "aog_penalty_per_day", "daily_revenue_per_operating_aircraft"):
+            if values[name] < 0:
+                raise ValueError(f"{name} must be non-negative")
+        return values
+
+    def _stream_seed(self, name: str) -> int:
+        material = f"{MODEL_PROTOCOL_VERSION}:{self.seed}:{name}".encode()
+        return int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
+
+    def _create_agents(self) -> None:
+        for index in range(1, int(self.parameters["aircraft_count"]) + 1):
+            aircraft_id = f"aircraft-{index:04d}"
+            self.aircraft[aircraft_id] = AircraftAgent(self, aircraft_id)
+        for index in range(1, int(self.parameters["team_count"]) + 1):
+            team_id = f"team-{index:02d}"
+            self.teams[team_id] = MaintenanceTeamAgent(self, team_id)
+        for index in range(1, int(self.parameters["hangar_count"]) + 1):
+            hangar_id = f"hangar-{index:02d}"
+            self.hangars[hangar_id] = HangarSlot(self, hangar_id)
+
+    def _initialize_events(self) -> None:
+        initial_rng = self._random_streams["initial_maintenance"]
+        period = float(self.parameters["scheduled_maintenance_interval_days"])
+        for aircraft_id in sorted(self.aircraft):
+            aircraft = self.aircraft[aircraft_id]
+            scripted = self._fixture_due.get(aircraft_id)
+            if scripted:
+                due = float(scripted.pop(0))
+                aircraft.time_last_maintenance_days = due - period
+            else:
+                aircraft.time_last_maintenance_days = initial_rng.uniform(-period, 0.0)
+                due = aircraft.time_last_maintenance_days + period
+            self._schedule_maintenance_due(aircraft, due)
+            self._schedule_flight(aircraft, at=0.0)
+
+    def _schedule(self, at: float, phase: int, event_type: str, *, aircraft_id: str | None = None, team_id: str | None = None, work_order_id: str | None = None, part_order_id: str | None = None, token: int | None = None) -> None:
+        at = float(at)
+        if not math.isfinite(at) or at < self.sim_time_days:
+            raise RuntimeError("scheduled event time must be finite and non-decreasing")
+        if self._processing_time == at and self._processing_phase is not None and phase < self._processing_phase:
+            raise RuntimeError("cannot schedule into an already-finished lower phase at the same simulation time")
+        self._schedule_sequence += 1
+        event = _ScheduledEvent(at, phase, self._schedule_sequence, event_type, aircraft_id, team_id, work_order_id, part_order_id, token)
+        heapq.heappush(self._scheduled, (at, phase, -self._schedule_sequence, event))
+
+    def _schedule_maintenance_due(self, aircraft: AircraftAgent, due: float) -> None:
+        aircraft.maintenance_generation += 1
+        aircraft.maintenance_due_at_days = float(due)
+        self._schedule(due, PHASE_REQUEST_TRIGGER, "maintenance_due_trigger", aircraft_id=aircraft.aircraft_id, token=aircraft.maintenance_generation)
+
+    def _schedule_flight(self, aircraft: AircraftAgent, *, at: float) -> None:
+        aircraft.flight_generation += 1
+        self._schedule(at, PHASE_REQUEST_TRIGGER, "flight_departure", aircraft_id=aircraft.aircraft_id, token=aircraft.flight_generation)
+
+    def _process_until(self, target: float) -> None:
+        self._integrate_to(target)
+        self.sim_time_days = target
+
+    def _integrate_to(self, target: float) -> None:
+        if target < self._last_integrated_time:
+            raise RuntimeError("simulation time moved backwards")
+        self._last_integrated_time = target
+
+    def _handle_scheduled(self, event: _ScheduledEvent) -> None:
+        return None
+
+    def _emit(self, event_type: str, phase: int, *, aircraft_id: str | None = None, team_id: str | None = None, work_order_id: str | None = None, part_order_id: str | None = None, correlation_id: str | None = None, before_state: str | None = None, after_state: str | None = None, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        self._domain_sequence += 1
+        event = {
+            **self._identity,
+            "event_id": f"event-{self._domain_sequence:08d}",
+            "sequence": self._domain_sequence,
+            "sim_time_days": self.sim_time_days,
+            "event_type": event_type,
+            "phase": phase,
+            "aircraft_id": aircraft_id,
+            "team_id": team_id,
+            "work_order_id": work_order_id,
+            "part_order_id": part_order_id,
+            "correlation_id": correlation_id,
+            "before_state": before_state,
+            "after_state": after_state,
+            "payload": dict(payload or {}),
+        }
+        if self._event_sink is None:
+            self._domain_buffer.append(event)
+        else:
+            self._event_sink(event)
+        return event
+
+    def _emit_daily_snapshot(self) -> None:
+        self._emit("daily_snapshot", PHASE_DAILY_SNAPSHOT, payload={"snapshot": self.snapshot()})
+
+    def step(self) -> None:
+        if self._day_index >= self.horizon_days:
+            raise RuntimeError("model has reached its horizon")
+        self._day_index += 1
+        self._process_until(float(self._day_index))
+        self._emit_daily_snapshot()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"sim_time_days": self.sim_time_days}
+
+    def drain_domain_events(self) -> list[dict[str, Any]]:
+        events = self._domain_buffer
+        self._domain_buffer = []
+        return events
+
+    def export_model_spec(self) -> dict[str, Any]:
+        return copy.deepcopy(MODEL_SPEC_DEFINITIONS)
