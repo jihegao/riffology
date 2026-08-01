@@ -58,7 +58,7 @@
   <text x="1233" y="145" text-anchor="middle" class="sans green2" font-size="9" font-weight="700">受信来源</text>
   <circle cx="1292" cy="140" r="4" fill="#2d7461"/>
   <text x="1303" y="144" class="sans muted t10">Agent</text>
-  <text x="1410" y="145" class="sans muted t11">OpenCode 1.18.9</text>
+  <text x="1410" y="145" class="sans muted t11">OpenCode 1.18.11</text>
   <rect x="1518" y="124" width="70" height="32" rx="8" fill="#fff" stroke="#c6cfca"/>
   <text x="1553" y="145" text-anchor="middle" class="sans ink t11">文件 ↗</text>
 

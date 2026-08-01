@@ -221,4 +221,3 @@ Git push is not equivalent to the required end-to-end evidence.
 - “Agent-oriented” describes the product UI; operational APIs and CLI remain.
 - Existing untracked prototype files, `outputs/`, and unrelated user work are
   preserved unless explicitly brought into a stage PR.
-

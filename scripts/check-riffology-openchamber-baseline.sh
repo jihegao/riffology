@@ -28,10 +28,19 @@ if (manifest.productBrand !== "Riffology") {
 if (manifest.upstream.commit !== "18fefc997749445b1281f565cefa0cfa86504bf1") {
   throw new Error("unexpected OpenChamber commit");
 }
+if (manifest.upstream.opencodeSdk !== "1.18.9") {
+  throw new Error("unexpected SDK version in the pinned upstream snapshot");
+}
+if (manifest.fork.repository !== "https://github.com/jihegao/riffology-openchamber" || manifest.fork.pullRequest !== 1) {
+  throw new Error("unexpected Riffology fork provenance");
+}
+if (!/^[0-9a-f]{40}$/.test(manifest.fork.reviewedHead)) {
+  throw new Error("invalid reviewed fork head");
+}
 if (manifest.toolchain.node !== ">=22" || manifest.toolchain.bun !== "1.3.14") {
   throw new Error("unexpected Node/Bun baseline");
 }
-if (manifest.toolchain.opencodeSdk !== "1.18.9" || manifest.toolchain.opencodeServer !== "1.18.9") {
+if (manifest.toolchain.opencodeSdk !== "1.18.11" || manifest.toolchain.opencodeServer !== "1.18.11") {
   throw new Error("unexpected reviewed OpenCode compatibility tuple");
 }
 

@@ -5,11 +5,11 @@
   "visualBaseline": {
     "svg": {
       "path": "docs/prototypes/openchamber-browser-workbench.svg",
-      "sha256": "791436ac8edc52f7205a096ed690e1656d3a3d332f2918508e0ade325ec1f35f"
+      "sha256": "20831d910afb07b86d59288aade9bf1edc6e349f4582ce8894600a6ffb72ece1"
     },
     "png": {
       "path": "docs/prototypes/openchamber-browser-workbench.png",
-      "sha256": "3a025b281de83c17a770b9486f499e17e4758b6169cb43adfb2cb86359954e63",
+      "sha256": "8f7834589f58c2bbd1a74a7d62ae786c9434ad6e644da9ce4f1c2cc0322dab03",
       "width": 1800,
       "height": 1180
     }
@@ -17,14 +17,20 @@
   "upstream": {
     "repository": "https://github.com/openchamber/openchamber",
     "commit": "18fefc997749445b1281f565cefa0cfa86504bf1",
+    "opencodeSdk": "1.18.9",
     "forkRequirement": "Separate Riffology-owned fork; retain upstream MIT license/NOTICE and UPSTREAM_DELTA.md ledger before importing patches."
+  },
+  "fork": {
+    "repository": "https://github.com/jihegao/riffology-openchamber",
+    "pullRequest": 1,
+    "reviewedHead": "fed45e216b7e27e88f737568be2aaef1ace6a897"
   },
   "toolchain": {
     "node": ">=22",
     "bun": "1.3.14",
-    "opencodeSdk": "1.18.9",
-    "opencodeServer": "1.18.9",
-    "compatibilityState": "reviewed target; verify the exact runtime tuple in the fork before Stage 2"
+    "opencodeSdk": "1.18.11",
+    "opencodeServer": "1.18.11",
+    "compatibilityState": "verified Stage 1 closeout tuple: fork SDK frozen install/type-check/build plus local CLI/Server health, path, and provider-discovery smoke"
   },
   "publicSurfaceDenylist": [
     "terminal_shell_execution",
