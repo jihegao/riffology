@@ -7,7 +7,7 @@
 - Source of truth: [`product-requirements.md`](../product-requirements.md), active
   stage documents, and merged code/tests; this directory does not define
   approved product behavior or implementation status
-- Last reviewed: 2026-07-28
+- Last reviewed: 2026-08-01
 
 ## Purpose and authority boundary
 
@@ -24,12 +24,25 @@
 | Project workbench overview | 支撑 Project 创建、计划与运行结果的整体工作台讨论 | [`project-workbench-overview.svg`](project-workbench-overview.svg) | [`project-workbench-overview.png`](project-workbench-overview.png) |
 | User-story flow | 将主要用户故事延伸为六个相互衔接的界面状态 | [`user-story-flow.svg`](user-story-flow.svg) | [`user-story-flow.png`](user-story-flow.png) |
 | Model design: generated structural views and auxiliary rail | 当前对话建模方向：LLM 根据 Model 动态生成类图、泳道图、数据流图等合适视图，右侧附加栏承载文件预览和 diff review | [`model-design-class-swimlane-rail.svg`](model-design-class-swimlane-rail.svg) | [`model-design-class-swimlane-rail.png`](model-design-class-swimlane-rail.png) |
+| Riffology OpenChamber Workbench target | 已批准的产品壳迁移：左侧采用 Riffology 品牌的 OpenChamber/OpenCode 会话体验，右侧为带可折叠项目文件树的连续浏览器/文件查看区；Riff 继续持有领域权威 | [`openchamber-browser-workbench.svg`](openchamber-browser-workbench.svg) | [`openchamber-browser-workbench.png`](openchamber-browser-workbench.png) |
 
 `model-design-class-swimlane-rail` 是当前 Model 设计讨论的主原型。此前以普通
 结构化卡片为主的中间稿已被这一方向替代，因此不纳入本目录。
 
+`openchamber-browser-workbench` 对应
+[`Riffology OpenChamber Workbench migration plan`](../openchamber-browser-workbench-migration-plan.md)，
+是已批准的分阶段目标界面。它仍不是当前实现或验收证据；各阶段只有在合并代码和
+测试通过后才可声明交付。
+
 ## Interaction decisions captured
 
+- 最左项目栏顶部的 `+` 用于新建项目；当前会话栏内提供“新会话”，顶栏提供“文件”入口。
+- 浏览器导航、地址、来源信任与控制状态合并到全局顶栏，地址区域在最右文件栏前
+  结束；页面与文件栏从顶栏下方平行展开。
+- Browser Workbench 右侧不设置固定的控制权、动作追踪或权威说明横栏，页面与
+  当前文件共用一个连续查看区；审批和动作反馈回到左侧会话上下文。
+- 右侧项目文件树可隐藏或展开，点击 HTML、Markdown、JSON、CSV 后在同一查看区
+  安全渲染；文件树和渲染结果不等同于持久化修改。
 - Conversation 始终保留在左侧，Model/Project 工作区根据当前对象和任务动态变化。
 - 进入 Model/Project 后，Conversation 从顶栏下方延伸到页面底部，消息输入框
   固定在最底部；不重复显示项目标题或“持续上下文”“模型结构讨论”等说明文字。
