@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
-import type { ProjectWorkspaceDto } from "./types";
+import type { BrowserSessionDto, ProjectWorkspaceDto } from "./types";
 
 type WorkbenchFile = Readonly<{
   key: string;
@@ -36,12 +36,22 @@ export function RiffologyWorkbenchViewer({
   filesOpen,
   onFilesOpenChange,
   fileToggleRef,
+  browser,
+  browserScreenshot,
+  browserError,
+  browserBusy,
+  onBrowserReconnect,
 }: Readonly<{
   client: ProductClient;
   workspace: ProjectWorkspaceDto;
   filesOpen: boolean;
   onFilesOpenChange: (open: boolean) => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
+  browser?: BrowserSessionDto;
+  browserScreenshot?: string;
+  browserError?: string;
+  browserBusy: boolean;
+  onBrowserReconnect: () => void;
 }>) {
   const files = workspace.files.flatMap((file): WorkbenchFile[] => {
     const relativePath = safeRelativePath(file.relativePath);
@@ -112,7 +122,15 @@ export function RiffologyWorkbenchViewer({
         <strong>{selected.relativePath}</strong>
         <span>{fileKind(selected.mediaType)}</span>
       </header>}
-      {!selected && <ViewerEmpty projectName={workspace.owner.name} fileCount={files.length} />}
+      {!selected && <BrowserViewer
+        projectName={workspace.owner.name}
+        fileCount={files.length}
+        browser={browser}
+        screenshot={browserScreenshot}
+        error={browserError}
+        busy={browserBusy}
+        onReconnect={onBrowserReconnect}
+      />}
       {selected && loading && <ViewerState title="正在读取受限文件投影…" />}
       {selected && !loading && error && <ViewerState title="文件不可用" detail={error} />}
       {selected && !loading && !error && resource && <div className="riffology-renderer-wrap">
@@ -131,11 +149,52 @@ export function RiffologyWorkbenchViewer({
   </>;
 }
 
-function ViewerEmpty({ projectName, fileCount }: Readonly<{ projectName: string; fileCount: number }>) {
+function BrowserViewer({
+  projectName,
+  fileCount,
+  browser,
+  screenshot,
+  error,
+  busy,
+  onReconnect,
+}: Readonly<{
+  projectName: string;
+  fileCount: number;
+  browser?: BrowserSessionDto;
+  screenshot?: string;
+  error?: string;
+  busy: boolean;
+  onReconnect: () => void;
+}>) {
+  if (screenshot && browser?.recoveryState === "ready") {
+    return <div className="riffology-browser-observation" role="status">
+      <img src={screenshot} alt={`${projectName} 的受信浏览器页面观察`} />
+      <small>只读 Chromium 观察 · 页面 generation {browser.pageGeneration}</small>
+    </div>;
+  }
+  if (busy) return <ViewerState title="正在连接本地浏览器…" />;
+  if (browser?.recoveryState === "disconnected" || browser?.recoveryState === "unavailable") {
+    return <div className="riffology-viewer-state" role="status">
+      <h2>浏览器连接已中断</h2>
+      <p>{error ?? "可以恢复同一 Conversation generation 的受信页面。"}</p>
+      <button type="button" onClick={onReconnect}>重新连接</button>
+    </div>;
+  }
+  if (browser?.recoveryState === "expired") {
+    return <ViewerState title="浏览器会话已过期" detail="刷新工作台以创建新的只读观察会话。" />;
+  }
+  return <ViewerEmpty projectName={projectName} fileCount={fileCount} detail={error} />;
+}
+
+function ViewerEmpty({ projectName, fileCount, detail }: Readonly<{
+  projectName: string;
+  fileCount: number;
+  detail?: string;
+}>) {
   return <div className="riffology-viewer-empty" role="status">
     <p className="product-eyebrow">RIFF PROJECT · READ ONLY</p>
     <h1>{projectName}</h1>
-    <p>从最右侧文件栏选择一个已声明的 Project 快照文件。</p>
+    <p>{detail ?? "从最右侧文件栏选择一个已声明的 Project 快照文件。"}</p>
     <small>{fileCount} 个可用文件 · 内容由 Riff 的只读 renderable 投影提供。</small>
   </div>;
 }

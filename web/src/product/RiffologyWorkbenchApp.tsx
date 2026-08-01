@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObjec
 import { defaultProductClient, type ProductClient, type ProductRecoveryStatus } from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { RiffologyWorkbenchViewer } from "./RiffologyWorkbenchViewer";
-import type { HomeDto, ProjectSummary, ProjectWorkspaceDto, WorkspaceDto } from "./types";
+import type {
+  BrowserSessionDto,
+  HomeDto,
+  ProjectSummary,
+  ProjectWorkspaceDto,
+  WorkspaceDto,
+} from "./types";
 
 type WorkbenchRoute =
   | Readonly<{ page: "new"; workspaceKey: string }>
@@ -65,6 +71,11 @@ export function RiffologyWorkbenchApp({
   const [workspace, setWorkspace] = useState<WorkspaceDto>();
   const [error, setError] = useState<string>();
   const [filesOpen, setFilesOpen] = useState(() => !compactWorkbench());
+  const [browser, setBrowser] = useState<BrowserSessionDto>();
+  const [browserScreenshot, setBrowserScreenshot] = useState<string>();
+  const [browserError, setBrowserError] = useState<string>();
+  const [browserBusy, setBrowserBusy] = useState(false);
+  const browserRequestRef = useRef(0);
   const fileToggleRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
@@ -114,6 +125,74 @@ export function RiffologyWorkbenchApp({
     ? home?.projects.find((project) => project.id === route.projectId)
     : undefined;
   const projectWorkspace = isProjectWorkspace(workspace) ? workspace : undefined;
+  const currentConversation = route.page === "project" && projectWorkspace
+    ? projectWorkspace.conversations.find((item) => item.id === route.conversationId)
+      ?? projectWorkspace.conversations[0]
+    : undefined;
+
+  const browserScreenshotData = useCallback(async (
+    conversationId: string,
+    state: BrowserSessionDto,
+  ): Promise<string | undefined> => {
+    if (!client.browserScreenshot || state.recoveryState !== "ready") {
+      return undefined;
+    }
+    const screenshot = await client.browserScreenshot(conversationId, state);
+    return `data:${screenshot.contentType};base64,${screenshot.pngBase64}`;
+  }, [client]);
+
+  useEffect(() => {
+    let active = true;
+    const requestId = ++browserRequestRef.current;
+    setBrowser(undefined);
+    setBrowserScreenshot(undefined);
+    setBrowserError(undefined);
+    if (!currentConversation || !client.browserOpen) return () => { active = false; };
+    setBrowserBusy(true);
+    void (async () => {
+      const existing = await client.browserState?.(currentConversation.id);
+      const state = !existing || existing.recoveryState === "closed"
+        || existing.recoveryState === "expired"
+        ? await client.browserOpen!(currentConversation.id, "riff-app")
+        : existing;
+      const screenshot = await browserScreenshotData(currentConversation.id, state);
+      if (!active || requestId !== browserRequestRef.current) return;
+      setBrowser(state);
+      setBrowserScreenshot(screenshot);
+    })()
+      .catch((cause) => {
+        if (active && requestId === browserRequestRef.current) {
+          setBrowserError(cause instanceof Error ? cause.message : "浏览器观察不可用。");
+        }
+      })
+      .finally(() => {
+        if (active && requestId === browserRequestRef.current) setBrowserBusy(false);
+      });
+    return () => { active = false; };
+  }, [client, currentConversation?.id, browserScreenshotData]);
+
+  const browserAction = async (action: "back" | "reload" | "reconnect") => {
+    if (!currentConversation || !browser) return;
+    const operation = action === "back" ? client.browserBack
+      : action === "reload" ? client.browserReload : client.browserReconnect;
+    if (!operation) return;
+    const requestId = ++browserRequestRef.current;
+    setBrowserBusy(true);
+    setBrowserError(undefined);
+    try {
+      const next = await operation.call(client, currentConversation.id, browser);
+      const screenshot = await browserScreenshotData(currentConversation.id, next);
+      if (requestId !== browserRequestRef.current) return;
+      setBrowser(next);
+      setBrowserScreenshot(screenshot);
+    } catch (cause) {
+      if (requestId === browserRequestRef.current) {
+        setBrowserError(cause instanceof Error ? cause.message : "浏览器观察不可用。");
+      }
+    } finally {
+      if (requestId === browserRequestRef.current) setBrowserBusy(false);
+    }
+  };
 
   return (
     <div className="riffology-workbench-app">
@@ -129,6 +208,10 @@ export function RiffologyWorkbenchApp({
           filesOpen={filesOpen}
           onFilesOpenChange={setFilesOpen}
           fileToggleRef={fileToggleRef}
+          browser={browser}
+          browserBusy={browserBusy}
+          onBrowserBack={() => void browserAction("back")}
+          onBrowserReload={() => void browserAction("reload")}
         />
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
@@ -171,7 +254,12 @@ export function RiffologyWorkbenchApp({
             </aside>
             <RiffologyWorkbenchViewer client={client} workspace={projectWorkspace}
               filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
-              fileToggleRef={fileToggleRef} />
+              fileToggleRef={fileToggleRef}
+              browser={browser}
+              browserScreenshot={browserScreenshot}
+              browserError={browserError}
+              browserBusy={browserBusy}
+              onBrowserReconnect={() => void browserAction("reconnect")} />
           </>
         )}
       </main>
@@ -185,12 +273,20 @@ function WorkbenchChrome({
   filesOpen,
   onFilesOpenChange,
   fileToggleRef,
+  browser,
+  browserBusy,
+  onBrowserBack,
+  onBrowserReload,
 }: Readonly<{
   route: WorkbenchRoute;
   workspace?: WorkspaceDto;
   filesOpen: boolean;
   onFilesOpenChange: (open: boolean) => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
+  browser?: BrowserSessionDto;
+  browserBusy: boolean;
+  onBrowserBack: () => void;
+  onBrowserReload: () => void;
 }>) {
   const projectPath = route.page === "project"
     ? `riff://project/${encodeURIComponent(route.projectId)}` : "riff://unbound-workspace";
@@ -208,12 +304,18 @@ function WorkbenchChrome({
         : "新项目 / Agent 引导"}
     </span>
     <nav aria-label="浏览器导航" className="riffology-browser-navigation">
-      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="后退">←</button>
-      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="前进">→</button>
-      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="刷新">↻</button>
+      <button type="button" disabled={!browser?.canGoBack || browserBusy}
+        onClick={onBrowserBack} aria-label="后退">←</button>
+      <button type="button" disabled title="前进将在后续浏览历史阶段提供" aria-label="前进">→</button>
+      <button type="button" disabled={!browser?.canReload || browserBusy}
+        onClick={onBrowserReload} aria-label="刷新">↻</button>
     </nav>
-    <output className="riffology-url-projection" aria-label="页面地址">{projectPath}</output>
-    <span className="riffology-trust-state" aria-label="受信状态">受信 Riff</span>
+    <output className="riffology-url-projection" aria-label="页面地址">
+      {browser?.projectedUrl ?? projectPath}
+    </output>
+    <span className="riffology-trust-state" aria-label="受信状态">
+      {!browser || browser.trustState === "trusted_riff" ? "受信 Riff" : "未连接"}
+    </span>
     <button type="button" className="riffology-agent-state" disabled aria-label={`Agent 状态：${agentState}`}>Agent · {agentState}</button>
     <span className="riffology-opencode-version" aria-label="OpenCode 基线版本">OpenCode 1.18.11</span>
     <button ref={fileToggleRef} type="button" className="riffology-file-toggle" disabled={route.page !== "project"}

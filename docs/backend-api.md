@@ -5,7 +5,7 @@
 - Scope: implemented Stage 2 through A4-5 HTTP/API, Issue #56 PR 1–5,
   startup/recovery boundaries, and retained legacy API history
 - Source of truth: merged server/Store implementation and the Riff MVP PRD
-- Last reviewed: 2026-07-26
+- Last reviewed: 2026-08-02
 
 The passed A4-6 local cumulative gate and continuous Chromium exit cover
 browser admission, same-root restart, and provider-down read-only projection
@@ -608,6 +608,29 @@ The implemented contracts are specified in
   matching 15-minute lifetimes, HTTPS `Secure`, and generation rotation plus
   old app/frame/WebSocket/Visual-Agent revocation before response.
 - The local app session is browser admission, not a user/account principal.
+
+### Riffology workbench Browser Broker observation
+
+The Riffology migration's Stage 4 Browser Broker is separate from the Run
+visual frame capability described above. Its routes are
+`/api/conversations/{conversationId}/browser`, plus the `open`, `reload`,
+`back`, `screenshot`, `close`, `restart`, and `reconnect` children documented
+in [`riffology-openchamber-stage-4.md`](riffology-openchamber-stage-4.md).
+
+`open` accepts exactly one server-known alias and no URL. Navigation mutations
+require the current Conversation generation and page generation. The DTO
+exposes only projected page/trust/control/recovery facts; screenshot bytes are
+a separate bounded response. The existing app-session admission authorizes
+these HTTP requests, while the Broker's isolated context independently blocks
+non-declared origins, redirect escape, WebSockets, downloads, and
+page-originated Product mutations.
+
+Targets are opaque records created by a server-only registration factory. The
+default `riff-app` target is an expiring tokenized HTML observation with no
+script or SPA bootstrap; its fixed semantic projection never exposes the token.
+Same-Conversation operations serialize, durable Conversation generation is
+rechecked after every awaited operation, and page generations use a random
+per-process epoch so pre-restart DTOs cannot collide with reconstructed pages.
 
 The exact collection queries are absent or one
 `lifecycle=active|archived|trashed`; duplicates and unknown queries fail.

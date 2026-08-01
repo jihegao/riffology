@@ -25,6 +25,8 @@ import type {
   ActionRecord,
   SkillUse,
   WorkspaceDto,
+  BrowserSessionDto,
+  BrowserScreenshotDto,
 } from "./types";
 import type { RendererResource } from "./RendererRegistry";
 
@@ -90,6 +92,14 @@ export interface ProductClient {
   }>): Promise<ModelMutationReceipt>;
   projectFileRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   projectFileWorkbenchRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
+  browserState?(conversationId: string): Promise<BrowserSessionDto>;
+  browserOpen?(conversationId: string, alias: "riff-app" | "riff-visual" | "riff-artifact"): Promise<BrowserSessionDto>;
+  browserReload?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserBack?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserScreenshot?(conversationId: string, state: BrowserSessionDto): Promise<BrowserScreenshotDto>;
+  browserClose?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserRestart?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserReconnect?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   downloadModelFile(modelId: string, fileId: string): Promise<void>;
   createExperiment(input: Readonly<{
     projectId: string;
@@ -398,6 +408,70 @@ export class HttpProductClient implements ProductClient {
   projectFileWorkbenchRenderable(projectId: string, fileRef: string): Promise<RendererResource> {
     return this.#request(
       `/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fileRef)}/workbench-renderable`,
+    );
+  }
+
+  browserState(conversationId: string): Promise<BrowserSessionDto> {
+    return this.#request(`/api/conversations/${encodeURIComponent(conversationId)}/browser`);
+  }
+
+  browserOpen(
+    conversationId: string,
+    alias: "riff-app" | "riff-visual" | "riff-artifact",
+  ): Promise<BrowserSessionDto> {
+    return this.#request(`/api/conversations/${encodeURIComponent(conversationId)}/browser/open`, {
+      method: "POST",
+      body: JSON.stringify({ alias }),
+    });
+  }
+
+  browserReload(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "reload", state);
+  }
+
+  browserBack(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "back", state);
+  }
+
+  browserClose(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "close", state);
+  }
+
+  browserRestart(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "restart", state);
+  }
+
+  browserReconnect(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "reconnect", state);
+  }
+
+  browserScreenshot(
+    conversationId: string,
+    state: BrowserSessionDto,
+  ): Promise<BrowserScreenshotDto> {
+    const query = new URLSearchParams({
+      conversationGeneration: String(state.conversationGeneration),
+      pageGeneration: String(state.pageGeneration),
+    });
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(conversationId)}/browser/screenshot?${query}`,
+    );
+  }
+
+  #browserOperation(
+    conversationId: string,
+    action: "reload" | "back" | "close" | "restart" | "reconnect",
+    state: BrowserSessionDto,
+  ): Promise<BrowserSessionDto> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(conversationId)}/browser/${action}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          conversationGeneration: state.conversationGeneration,
+          pageGeneration: state.pageGeneration,
+        }),
+      },
     );
   }
 

@@ -92,6 +92,15 @@ import {
   runLegacyStatePreflight,
   type LegacyPreflightReport,
 } from "./legacy-state-preflight.ts";
+import {
+  LocalBrowserBroker,
+  LocalBrowserBrokerError,
+  RIFF_BROWSER_ALIASES,
+  registerLocalBrowserTarget,
+  type BrowserConversationScope,
+  type BrowserTargetResolver,
+  type RiffBrowserAlias,
+} from "./local-browser-broker.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -258,7 +267,69 @@ export type BackendOptions = {
   }>;
   repositoryRoot?: string;
   staticWebRoot?: string;
+  workbenchBrowserBroker?: LocalBrowserBroker;
+  workbenchBrowserTargetResolver?: BrowserTargetResolver;
+  workbenchBrowserTtlMs?: number;
 };
+
+type WorkbenchObservationTarget = Readonly<{
+  scope: BrowserConversationScope;
+  projectId: string;
+  expiresAtMs: number;
+}>;
+
+/** Process-local registry for the unguessable, expiring read-only observation route. */
+export class WorkbenchObservationTargetRegistry {
+  readonly #targets = new Map<string, WorkbenchObservationTarget>();
+  readonly #ttlMs: number;
+  readonly #now: () => number;
+
+  constructor(ttlMs = 15 * 60_000, now: () => number = Date.now) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 60 * 60_000) {
+      throw new Error("Workbench observation TTL is invalid.");
+    }
+    this.#ttlMs = ttlMs;
+    this.#now = now;
+  }
+
+  register(scope: BrowserConversationScope, projectId: string): string {
+    this.revokeConversation(scope.conversationId);
+    let token: string;
+    do token = randomBytes(32).toString("base64url"); while (this.#targets.has(token));
+    this.#targets.set(token, Object.freeze({
+      scope: Object.freeze({ ...scope }),
+      projectId,
+      expiresAtMs: this.#now() + this.#ttlMs,
+    }));
+    return token;
+  }
+
+  resolve(token: string): WorkbenchObservationTarget | null {
+    const target = this.#targets.get(token);
+    if (!target || target.expiresAtMs <= this.#now()) {
+      if (target) this.#targets.delete(token);
+      return null;
+    }
+    return target;
+  }
+
+  revoke(scope: BrowserConversationScope): void {
+    for (const [token, target] of this.#targets) {
+      if (target.scope.conversationId === scope.conversationId
+        && target.scope.conversationGeneration === scope.conversationGeneration) {
+        this.#targets.delete(token);
+      }
+    }
+  }
+
+  revokeConversation(conversationId: string): void {
+    for (const [token, target] of this.#targets) {
+      if (target.scope.conversationId === conversationId) this.#targets.delete(token);
+    }
+  }
+
+  clear(): void { this.#targets.clear(); }
+}
 
 export type BrowserFrameListenerInspector = (
   target: HealthyVisualFrameTarget,
@@ -466,12 +537,17 @@ export class BackendApp {
   #browserFrames?: BrowserFrameCapability;
   #browserWebSockets?: BrowserWebSocketBridge;
   #browserBrokerOrigin?: string;
+  #workbenchBrowserBroker?: LocalBrowserBroker;
+  readonly #workbenchObservationTargets: WorkbenchObservationTargetRegistry;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
 
   constructor(options: BackendOptions) {
     this.options = options;
+    this.#workbenchObservationTargets = new WorkbenchObservationTargetRegistry(
+      options.workbenchBrowserTtlMs,
+    );
     this.#productMode = Boolean(
       options.productOnly || options.productStore || options.a2ProductRoot,
     );
@@ -803,6 +879,27 @@ export class BackendApp {
                 this.#authorityDeletionFence.issuanceAllowed(scope),
             });
             this.#browserWebSockets = new BrowserWebSocketBridge();
+            this.#workbenchBrowserBroker = this.options.workbenchBrowserBroker
+              ?? new LocalBrowserBroker({
+                ttlMs: this.options.workbenchBrowserTtlMs,
+                resolveTarget: async (alias, scope) => {
+                  const configured = await this.options.workbenchBrowserTargetResolver?.(alias, scope);
+                  if (configured) return configured;
+                  if (alias !== "riff-app" || !this.productStore) return null;
+                  const conversation = this.productStore.getConversation(scope.conversationId);
+                  if (conversation.owner.kind !== "project") return null;
+                  const token = this.#workbenchObservationTargets.register(
+                    scope,
+                    conversation.owner.id,
+                  );
+                  return registerLocalBrowserTarget({
+                    alias,
+                    url: `${app.origin}/browser/observe/${token}`,
+                    projectedUrl: `riff-app://projects/${encodeURIComponent(conversation.owner.id)}`
+                      + `?conversation=${encodeURIComponent(scope.conversationId)}`,
+                  });
+                },
+              });
           },
           appHandler: async (request, response, address) => {
             if (await this.#handleBrowserFramePlatform(request, response, address)) return;
@@ -819,6 +916,9 @@ export class BackendApp {
         this.#browserFrames = undefined;
         this.#browserWebSockets = undefined;
         this.#browserBrokerOrigin = undefined;
+        await this.#workbenchBrowserBroker?.shutdown().catch(() => undefined);
+        this.#workbenchBrowserBroker = undefined;
+        this.#workbenchObservationTargets.clear();
         throw error;
       }
       this.#browserNetwork = network;
@@ -862,6 +962,14 @@ export class BackendApp {
         this.#browserFrames = undefined;
         this.#browserWebSockets = undefined;
         this.#browserBrokerOrigin = undefined;
+        try {
+          await this.#workbenchBrowserBroker?.shutdown();
+        } catch (error) {
+          listenerError ??= error;
+        } finally {
+          this.#workbenchBrowserBroker = undefined;
+          this.#workbenchObservationTargets.clear();
+        }
         try {
           await this.#browserNetwork.close();
         } catch (error) {
@@ -993,9 +1101,10 @@ export class BackendApp {
   ): Promise<boolean> {
     const url = new URL(request.url ?? "/", address.origin);
       const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
+      const observationPage = /^\/browser\/observe\/([A-Za-z0-9_-]{43})$/u.exec(url.pathname);
       const bootstrap = url.pathname === "/api/browser-session/bootstrap";
       const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
-      if (!hostPage && !bootstrap && !match) return false;
+      if (!hostPage && !observationPage && !bootstrap && !match) return false;
       if (this.#recoveryStatus && !bootstrap) {
         privateApiJson(response, 503, {
           accepted: false,
@@ -1007,6 +1116,32 @@ export class BackendApp {
         return true;
       }
     try {
+      if (observationPage) {
+        if (url.search !== "" || request.method !== "GET" && request.method !== "HEAD") {
+          throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        }
+        const declared = this.#workbenchObservationTargets.resolve(observationPage[1]!);
+        if (!declared || !this.productStore) {
+          throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        }
+        const runtime = await this.productStore.getConversationRuntime(
+          declared.scope.conversationId,
+        );
+        const conversation = this.productStore.getConversation(declared.scope.conversationId);
+        if (!runtime.session
+          || runtime.session.generation !== declared.scope.conversationGeneration
+          || conversation.owner.kind !== "project"
+          || conversation.owner.id !== declared.projectId) {
+          this.#workbenchObservationTargets.revoke(declared.scope);
+          throw new BrowserFrameCapabilityError(409, "browser_conversation_stale");
+        }
+        browserWorkbenchObservationPage(response, request.method, {
+          projectId: declared.projectId,
+          conversationId: declared.scope.conversationId,
+          conversationGeneration: declared.scope.conversationGeneration,
+        });
+        return true;
+      }
       if (hostPage) {
         if (url.search !== "") throw new BrowserFrameCapabilityError(404, "browser_session_denied");
         decodeBrowserPathId(hostPage[1]!);
@@ -1245,6 +1380,149 @@ export class BackendApp {
     networkJson(response, denied.status, body);
   }
 
+  async #handleWorkbenchBrowser(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    parts: string[],
+  ): Promise<boolean> {
+    if (parts[0] !== "api" || parts[1] !== "conversations" || !parts[2]
+      || parts[3] !== "browser") return false;
+    const action = parts[4];
+    if (parts.length > 5 || action && ![
+      "open", "reload", "back", "screenshot", "close", "restart", "reconnect",
+    ].includes(action)) {
+      return false;
+    }
+    const frames = this.#browserFrames;
+    const address = this.#browserNetwork?.app;
+    const broker = this.#workbenchBrowserBroker;
+    if (this.#listenerMode !== "browser" || !frames || !address || !broker) {
+      throw new ApiError(503, "browser_broker_unavailable", "The local Browser Broker is unavailable.");
+    }
+    try {
+      if (request.method === "GET") frames.authorizeAppRead(browserAdmission(request, address));
+      else if (request.method === "POST") frames.authorizeAppMutation(browserAdmission(request, address));
+      else throw new ApiError(405, "method_not_allowed", "The browser route does not allow this method.");
+
+      if (!action && request.method === "GET") {
+        exactQueryKeys(url, []);
+        const scope = await this.#currentBrowserScope(parts[2]);
+        const dto = await broker.state(scope);
+        await this.#revalidateBrowserScope(scope);
+        privateApiJson(response, 200, dto);
+        return true;
+      }
+      if (action === "screenshot" && request.method === "GET") {
+        exactQueryKeys(url, ["conversationGeneration", "pageGeneration"]);
+        const conversationGeneration = strictRequiredQueryInteger(
+          url,
+          "conversationGeneration",
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const pageGeneration = strictRequiredQueryInteger(
+          url,
+          "pageGeneration",
+          0,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const scope = await this.#currentBrowserScope(parts[2], conversationGeneration);
+        const dto = await broker.screenshot(scope, pageGeneration);
+        await this.#revalidateBrowserScope(scope);
+        privateApiJson(response, 200, dto);
+        return true;
+      }
+      if (request.method !== "POST") {
+        throw new ApiError(405, "method_not_allowed", "The browser route does not allow this method.");
+      }
+      exactQueryKeys(url, []);
+      if (action === "open") {
+        const body = await exactWorkbenchBrowserJson(request, ["alias"]);
+        if (typeof body.alias !== "string"
+          || !RIFF_BROWSER_ALIASES.includes(body.alias as RiffBrowserAlias)) {
+          throw new ApiError(422, "browser_alias_denied", "The browser alias is not declared.");
+        }
+        const scope = await this.#currentBrowserScope(parts[2]);
+        const dto = await broker.open(scope, body.alias as RiffBrowserAlias);
+        await this.#revalidateBrowserScope(scope);
+        privateApiJson(response, 200, dto);
+        return true;
+      }
+      if (!action) throw new ApiError(404, "not_found", "The browser route was not found.");
+      const body = await exactWorkbenchBrowserJson(
+        request,
+        ["conversationGeneration", "pageGeneration"],
+      );
+      const conversationGeneration = exactBrowserInteger(
+        body.conversationGeneration,
+        1,
+        Number.MAX_SAFE_INTEGER,
+      );
+      const pageGeneration = exactBrowserInteger(body.pageGeneration, 0, Number.MAX_SAFE_INTEGER);
+      const scope = await this.#currentBrowserScope(parts[2], conversationGeneration);
+      const dto = action === "reload" ? await broker.reload(scope, pageGeneration)
+        : action === "back" ? await broker.back(scope, pageGeneration)
+          : action === "close" ? await broker.closeSession(scope, pageGeneration)
+            : action === "restart" ? await broker.restart(scope, pageGeneration)
+              : await broker.reconnect(scope, pageGeneration);
+      await this.#revalidateBrowserScope(scope);
+      if (action === "close") this.#revokeWorkbenchObservationTargets(scope);
+      privateApiJson(response, 200, dto);
+      return true;
+    } catch (error) {
+      if (error instanceof LocalBrowserBrokerError) {
+        throw new ApiError(error.status, error.code, error.message);
+      }
+      if (error instanceof BrowserFrameCapabilityError) {
+        throw new ApiError(error.status, error.code, "The browser session was denied.");
+      }
+      throw error;
+    }
+  }
+
+  async #currentBrowserScope(
+    conversationId: string,
+    expectedGeneration?: number,
+  ): Promise<BrowserConversationScope> {
+    const runtime = await this.productStore?.getConversationRuntime(conversationId);
+    if (!runtime?.session) {
+      throw new ApiError(
+        409,
+        "browser_conversation_unavailable",
+        "The conversation does not have a current generation.",
+      );
+    }
+    if (expectedGeneration !== undefined && runtime.session.generation !== expectedGeneration) {
+      await this.#workbenchBrowserBroker?.revoke(Object.freeze({
+        conversationId,
+        conversationGeneration: expectedGeneration,
+      }));
+      this.#revokeWorkbenchObservationTargets(Object.freeze({
+        conversationId,
+        conversationGeneration: expectedGeneration,
+      }));
+      throw new ApiError(409, "browser_conversation_stale", "The conversation generation changed.");
+    }
+    return Object.freeze({
+      conversationId,
+      conversationGeneration: runtime.session.generation,
+    });
+  }
+
+  async #revalidateBrowserScope(scope: BrowserConversationScope): Promise<void> {
+    const runtime = await this.productStore?.getConversationRuntime(scope.conversationId);
+    if (!runtime?.session || runtime.session.generation !== scope.conversationGeneration) {
+      await this.#workbenchBrowserBroker?.revoke(scope);
+      this.#revokeWorkbenchObservationTargets(scope);
+      throw new ApiError(409, "browser_conversation_stale", "The conversation generation changed.");
+    }
+  }
+
+  #revokeWorkbenchObservationTargets(scope: BrowserConversationScope): void {
+    this.#workbenchObservationTargets.revoke(scope);
+  }
+
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
     try {
@@ -1277,6 +1555,7 @@ export class BackendApp {
           );
         }
       }
+      if (await this.#handleWorkbenchBrowser(request, response, url, parts)) return;
       if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
       if (this.#productMode) {
         throw new ApiError(404, "not_found", "The requested Product route was not found.");
@@ -1796,6 +2075,56 @@ const browserVisualHostPage = (
   response.end(method === "HEAD" ? undefined : bytes);
 };
 
+const browserWorkbenchObservationPage = (
+  response: ServerResponse,
+  method: string | undefined,
+  projection: Readonly<{
+    projectId: string;
+    conversationId: string;
+    conversationGeneration: number;
+  }>,
+): void => {
+  const source = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riffology project observation</title>
+<style>body{margin:0;padding:48px;font:16px/1.5 system-ui,sans-serif;background:#fff;color:#1d1d1f}main{max-width:760px;margin:auto}h1{font-size:32px}dl{display:grid;grid-template-columns:max-content 1fr;gap:8px 20px}dt{color:#62666d}dd{margin:0;overflow-wrap:anywhere}</style>
+</head>
+<body>
+<main data-riff-observation="project">
+<p>Riffology · read-only observation</p>
+<h1>Project workspace</h1>
+<dl>
+<dt>Project</dt><dd>${escapeObservationHtml(projection.projectId)}</dd>
+<dt>Conversation</dt><dd>${escapeObservationHtml(projection.conversationId)}</dd>
+<dt>Generation</dt><dd>${projection.conversationGeneration}</dd>
+</dl>
+</main>
+</body>
+</html>`;
+  const bytes = Buffer.from(source);
+  response.writeHead(200, {
+    "cache-control": "private, no-store",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "content-length": bytes.byteLength,
+    "content-type": "text/html; charset=utf-8",
+    "cross-origin-resource-policy": "same-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(method === "HEAD" ? undefined : bytes);
+};
+
+const escapeObservationHtml = (value: string): string => value
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&#39;");
+
 const networkJsonWithHeaders = (
   response: ServerResponse,
   status: number,
@@ -1977,6 +2306,46 @@ const strictQueryInteger = (url: URL, name: string, fallback: number, minimum: n
   const raw = url.searchParams.get(name); if (raw === null) return fallback;
   if (!(minimum < 0 && raw === "-1") && !/^(?:0|[1-9]\d*)$/u.test(raw)) throw new ApiError(422, "invalid_request", `Query parameter ${name} must be an integer.`);
   const value = Number(raw); if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new ApiError(422, "invalid_request", `Query parameter ${name} is out of range.`);
+  return value;
+};
+
+const strictRequiredQueryInteger = (
+  url: URL,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number => {
+  const raw = url.searchParams.get(name);
+  if (raw === null || !/^(?:0|[1-9]\d*)$/u.test(raw)) {
+    throw new ApiError(422, "invalid_browser_request", "The browser query is invalid.");
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new ApiError(422, "invalid_browser_request", "The browser query is invalid.");
+  }
+  return value;
+};
+
+const exactBrowserInteger = (value: unknown, minimum: number, maximum: number): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new ApiError(422, "invalid_browser_request", "The browser generation is invalid.");
+  }
+  return value as number;
+};
+
+const exactWorkbenchBrowserJson = async (
+  request: IncomingMessage,
+  keys: readonly string[],
+): Promise<Record<string, unknown>> => {
+  const contentType = rawBrowserHeader(request, "content-type");
+  if (contentType !== "application/json") {
+    throw new ApiError(415, "unsupported_media_type", "Use application/json.");
+  }
+  const text = await bodyText(request, 4_096);
+  let value: unknown;
+  try { value = parseCanonicalJsonV2(text); }
+  catch { throw new ApiError(422, "invalid_browser_request", "The browser request must be strict JSON."); }
+  exactObject(value, [...keys]);
   return value;
 };
 
