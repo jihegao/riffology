@@ -1,0 +1,238 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1180" viewBox="0 0 1800 1180">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#102720" flood-opacity=".13"/>
+    </filter>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="5" stdDeviation="9" flood-color="#142d26" flood-opacity=".15"/>
+    </filter>
+    <linearGradient id="pageGlow" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#edf6f1"/>
+      <stop offset="1" stop-color="#f8f4e9"/>
+    </linearGradient>
+    <linearGradient id="browserHero" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#183f36"/>
+      <stop offset="1" stop-color="#316e5d"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#667a73"/>
+    </marker>
+    <style>
+      .sans{font-family:Inter,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+      .mono{font-family:"SFMono-Regular",Consolas,Menlo,monospace}
+      .ink{fill:#172823}.muted{fill:#66766f}.soft{fill:#89958f}.white{fill:#fff}
+      .t10{font-size:10px}.t11{font-size:11px}.t12{font-size:12px}.t13{font-size:13px}.t14{font-size:14px}.t15{font-size:15px}.t16{font-size:16px}
+      .h1{font-size:31px;font-weight:760}.h2{font-size:21px;font-weight:760}.h3{font-size:16px;font-weight:760}
+      .label{font-size:10px;font-weight:760;letter-spacing:.12em}
+      .line{stroke:#d7ddd9;stroke-width:1}.line2{stroke:#bdc9c3;stroke-width:1.2}
+      .card{fill:#fff;stroke:#d2d9d5;stroke-width:1}.subtle{fill:#f7f6f1;stroke:#d7ddd9;stroke-width:1}
+      .green{fill:#183f36}.green2{fill:#2d7461}.pale{fill:#e5f0eb}.amber{fill:#f5ead2}.red{fill:#f5e1dd}.blue{fill:#e5edf6}
+      .dash{stroke:#73847d;stroke-width:1.3;stroke-dasharray:6 5;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+
+  <rect width="1800" height="1180" fill="#ece8df"/>
+  <text x="52" y="54" class="sans ink h1">Riffology Browser Workbench · 迁移目标原型</text>
+  <text x="52" y="83" class="sans muted t16">左侧保留原生 OpenCode 会话体验；右侧由人和 Agent 共享一个受控浏览器。Riff 仍是 Model / Project / Run 权威。</text>
+
+  <rect x="52" y="110" width="1560" height="980" rx="25" fill="#faf9f5" stroke="#cbd4cf" filter="url(#shadow)"/>
+
+  <!-- global header -->
+  <rect x="52" y="110" width="1560" height="60" rx="25" fill="#fbfaf7"/>
+  <line x1="52" y1="170" x2="1612" y2="170" class="line"/>
+  <rect x="74" y="125" width="31" height="31" rx="9" class="green"/>
+  <path d="M84 135h11v11H84z" fill="none" stroke="#fff" stroke-width="1.5"/>
+  <path d="M88 139h11v11H88z" fill="none" stroke="#d9efe6" stroke-width="1.5"/>
+  <text x="118" y="146" class="sans ink t15" font-weight="760">Riffology</text>
+  <rect x="340" y="126" width="246" height="30" rx="8" fill="#eef1ee"/>
+  <circle cx="357" cy="141" r="5" fill="#2d7461"/>
+  <text x="370" y="145" class="sans muted t11">aircraft-support / Project Conversation</text>
+  <text x="612" y="148" class="sans muted t15">‹</text>
+  <text x="634" y="148" class="sans muted t15">›</text>
+  <text x="659" y="147" class="sans muted t13">↻</text>
+  <rect x="682" y="124" width="500" height="32" rx="9" fill="#fff" stroke="#cbd4cf"/>
+  <rect x="695" y="133" width="14" height="14" rx="7" class="pale"/>
+  <text x="702" y="144" text-anchor="middle" class="sans green2" font-size="9">✓</text>
+  <text x="719" y="145" class="mono ink" font-size="9">visual.demo.gaojihe.cn/runs/run_004/replay</text>
+  <rect x="1192" y="124" width="82" height="32" rx="9" class="pale"/>
+  <text x="1233" y="145" text-anchor="middle" class="sans green2" font-size="9" font-weight="700">受信来源</text>
+  <circle cx="1292" cy="140" r="4" fill="#2d7461"/>
+  <text x="1303" y="144" class="sans muted t10">Agent</text>
+  <text x="1410" y="145" class="sans muted t11">OpenCode 1.18.9</text>
+  <rect x="1518" y="124" width="70" height="32" rx="8" fill="#fff" stroke="#c6cfca"/>
+  <text x="1553" y="145" text-anchor="middle" class="sans ink t11">文件 ↗</text>
+
+  <!-- project rail -->
+  <rect x="52" y="170" width="74" height="920" fill="#ecebe6"/>
+  <line x1="126" y1="170" x2="126" y2="1090" class="line"/>
+  <rect x="68" y="188" width="42" height="42" rx="12" class="green"/>
+  <text x="89" y="215" text-anchor="middle" class="sans white t16" font-weight="700">＋</text>
+  <text x="89" y="242" text-anchor="middle" class="sans muted" font-size="9">新项目</text>
+  <rect x="68" y="256" width="42" height="42" rx="12" fill="#fff" stroke="#cbd4cf"/>
+  <text x="89" y="282" text-anchor="middle" class="sans ink t13" font-weight="800">AS</text>
+  <circle cx="105" cy="261" r="4" fill="#2d7461" stroke="#ecebe6" stroke-width="2"/>
+  <rect x="68" y="311" width="42" height="42" rx="12" fill="#fff" stroke="#cbd4cf"/>
+  <text x="89" y="337" text-anchor="middle" class="sans muted t12" font-weight="800">QN</text>
+  <line x1="68" y1="365" x2="110" y2="365" class="line2"/>
+  <circle cx="89" cy="1019" r="19" fill="#dce6e1"/>
+  <text x="89" y="1024" text-anchor="middle" class="sans ink t11" font-weight="760">JG</text>
+  <circle cx="105" cy="1006" r="5" fill="#2d7461" stroke="#ecebe6" stroke-width="2"/>
+
+  <!-- chat pane -->
+  <rect x="126" y="170" width="472" height="920" fill="#f7f6f2"/>
+  <line x1="598" y1="170" x2="598" y2="1090" class="line"/>
+  <rect x="126" y="170" width="472" height="62" fill="#f4f3ee"/>
+  <text x="150" y="196" class="sans ink t13" font-weight="760">优化保障资源分配</text>
+  <text x="150" y="216" class="sans muted t10">build · deepseek-v4-flash · context 38%</text>
+  <rect x="486" y="181" width="84" height="28" rx="8" fill="#fff" stroke="#c6cfca"/>
+  <text x="528" y="200" text-anchor="middle" class="sans ink t10" font-weight="700">＋ 新会话</text>
+
+  <!-- chat timeline -->
+  <text x="150" y="265" class="sans soft label">TODAY · 16:42</text>
+  <rect x="244" y="282" width="330" height="74" rx="15" fill="#dfeae5"/>
+  <text x="260" y="305" class="sans muted t10" font-weight="700">你</text>
+  <text x="260" y="327" class="sans ink t12">打开当前保障仿真结果，检查维修队列</text>
+  <text x="260" y="345" class="sans ink t12">是否出现明显拥塞。</text>
+
+  <rect x="150" y="376" width="420" height="80" rx="14" class="card"/>
+  <text x="168" y="400" class="sans muted t10" font-weight="760">ASSISTANT</text>
+  <text x="168" y="425" class="sans ink t12">我会读取当前 Run，然后在共享浏览器中</text>
+  <text x="168" y="444" class="sans ink t12">打开受限回放视图并检查队列峰值。</text>
+
+  <rect x="150" y="472" width="420" height="72" rx="12" class="subtle"/>
+  <rect x="168" y="489" width="28" height="28" rx="7" class="pale"/>
+  <text x="182" y="507" text-anchor="middle" class="sans green2 t11" font-weight="800">R</text>
+  <text x="207" y="500" class="mono ink t10" font-weight="700">riff_read_run</text>
+  <text x="207" y="520" class="sans muted t10">run_2026_08_01_004 · succeeded</text>
+  <rect x="502" y="490" width="48" height="22" rx="6" class="pale"/>
+  <text x="526" y="505" text-anchor="middle" class="sans green2 t9" font-size="9">完成</text>
+
+  <rect x="150" y="558" width="420" height="96" rx="12" fill="#edf2f7" stroke="#c8d4e1"/>
+  <rect x="168" y="576" width="28" height="28" rx="7" class="blue"/>
+  <text x="182" y="594" text-anchor="middle" class="sans ink t11">◎</text>
+  <text x="207" y="586" class="mono ink t10" font-weight="700">browser_open</text>
+  <text x="207" y="606" class="sans muted t10">visual.demo.gaojihe.cn/run/004</text>
+  <text x="168" y="633" class="sans ink t11">已打开共享浏览器 · generation 18</text>
+  <rect x="494" y="576" width="56" height="22" rx="6" fill="#dce8f4"/>
+  <text x="522" y="591" text-anchor="middle" class="sans ink" font-size="9">可见</text>
+
+  <rect x="150" y="670" width="420" height="118" rx="13" fill="#f5ead2" stroke="#d6b56f"/>
+  <text x="168" y="696" class="sans ink t11" font-weight="760">需要确认 · 浏览器交互</text>
+  <text x="168" y="720" class="sans muted t10">Agent 准备切换到“维修队列”并导出截图。</text>
+  <text x="168" y="739" class="sans muted t10">目标：已批准 Riff Visual · 不提交外部表单</text>
+  <rect x="168" y="754" width="72" height="26" rx="7" fill="#fff" stroke="#c9ad70"/>
+  <text x="204" y="772" text-anchor="middle" class="sans ink t10">拒绝</text>
+  <rect x="248" y="754" width="88" height="26" rx="7" class="green"/>
+  <text x="292" y="772" text-anchor="middle" class="sans white t10" font-weight="700">允许一次</text>
+
+  <rect x="150" y="808" width="420" height="92" rx="14" class="card"/>
+  <text x="168" y="832" class="sans muted t10" font-weight="760">ASSISTANT</text>
+  <text x="168" y="855" class="sans ink t11">右侧已定位到维修队列。18:00–22:00</text>
+  <text x="168" y="874" class="sans ink t11">出现持续积压；结论仍需 Run 输出验证。</text>
+  <text x="168" y="891" class="sans green2 t10">查看 durable Run evidence →</text>
+
+  <!-- composer -->
+  <rect x="126" y="920" width="472" height="170" fill="#f7f6f2"/>
+  <line x1="126" y1="920" x2="598" y2="920" class="line"/>
+  <rect x="150" y="942" width="420" height="116" rx="15" fill="#fff" stroke="#aebbb5"/>
+  <text x="168" y="969" class="sans soft t11">继续提问，或让 Agent 操作右侧浏览器…</text>
+  <rect x="168" y="1010" width="28" height="28" rx="7" fill="#eef1ee"/>
+  <text x="182" y="1029" text-anchor="middle" class="sans muted t14">＋</text>
+  <text x="207" y="1027" class="sans muted t10">Build</text>
+  <text x="260" y="1027" class="sans muted t10">DeepSeek V4 Flash⌄</text>
+  <rect x="500" y="1002" width="52" height="39" rx="10" class="green"/>
+  <path d="M519 1026l8-8 8 8M527 1018v15" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="151" y="1078" class="sans muted t10">/ 命令 · @ 引用文件 · Enter 发送</text>
+
+  <!-- unified browser and project-file workspace -->
+  <rect x="598" y="170" width="1014" height="920" fill="#fff"/>
+
+  <!-- full-height file tree, docked to the far right -->
+  <g transform="translate(742 -66)">
+  <rect x="622" y="250" width="224" height="874" rx="13" fill="#f4f3ee" stroke="#cfd8d3"/>
+  <text x="642" y="280" class="sans muted label">PROJECT FILES</text>
+  <rect x="804" y="263" width="28" height="28" rx="7" fill="#fff" stroke="#cbd4cf"/>
+  <text x="818" y="282" text-anchor="middle" class="sans muted t14">‹</text>
+  <line x1="638" y1="302" x2="830" y2="302" class="line"/>
+  <text x="642" y="329" class="sans ink t11" font-weight="720">⌄ visuals</text>
+  <rect x="638" y="340" width="194" height="38" rx="8" fill="#dcebe5"/>
+  <text x="654" y="364" class="sans ink t10" font-weight="720">▧ run-replay.html</text>
+  <rect x="788" y="349" width="34" height="20" rx="5" fill="#fff"/>
+  <text x="805" y="363" text-anchor="middle" class="sans green2" font-size="8" font-weight="760">HTML</text>
+  <text x="642" y="408" class="sans ink t11" font-weight="720">⌄ analysis</text>
+  <text x="654" y="438" class="sans muted t10">▤ summary.md</text>
+  <text x="799" y="438" class="sans soft" font-size="8">MD</text>
+  <text x="642" y="476" class="sans ink t11" font-weight="720">⌄ outputs</text>
+  <text x="654" y="506" class="sans muted t10">{} metrics.json</text>
+  <text x="793" y="506" class="sans soft" font-size="8">JSON</text>
+  <text x="654" y="536" class="sans muted t10">▦ queue.csv</text>
+  <text x="799" y="536" class="sans soft" font-size="8">CSV</text>
+  <text x="642" y="574" class="sans ink t11" font-weight="720">› model</text>
+  <text x="642" y="612" class="sans ink t11" font-weight="720">› docs</text>
+  <line x1="638" y1="1076" x2="830" y2="1076" class="line"/>
+  <circle cx="647" cy="1099" r="4" fill="#2d7461"/>
+  <text x="658" y="1103" class="sans muted" font-size="9">项目结构 · 只读投影</text>
+  </g>
+
+  <!-- one continuous file/page viewer -->
+  <g transform="translate(-236 -66)">
+  <rect x="858" y="250" width="730" height="874" rx="13" fill="url(#pageGlow)" stroke="#cfd8d3"/>
+  <rect x="858" y="250" width="730" height="54" rx="13" fill="#fbfbf8"/>
+  <text x="882" y="282" class="mono ink t11" font-weight="700">visuals/run-replay.html</text>
+  <rect x="1104" y="266" width="44" height="22" rx="6" class="pale"/>
+  <text x="1126" y="281" text-anchor="middle" class="sans green2" font-size="8" font-weight="760">HTML</text>
+  <line x1="858" y1="304" x2="1588" y2="304" class="line"/>
+
+  <!-- rendered HTML page -->
+  <rect x="858" y="304" width="730" height="108" fill="url(#browserHero)"/>
+  <text x="886" y="337" class="sans white t10" font-weight="720" letter-spacing="1.2">AIRCRAFT SUPPORT · RUN REPLAY</text>
+  <text x="886" y="373" class="sans white h2">维修保障资源仿真</text>
+  <text x="886" y="396" class="sans white t10" opacity=".72">run_2026_08_01_004 · 24h scenario</text>
+  <rect x="1452" y="332" width="108" height="34" rx="8" fill="#fff"/>
+  <text x="1506" y="354" text-anchor="middle" class="sans green2 t10" font-weight="720">Run succeeded</text>
+
+  <!-- metrics -->
+  <rect x="882" y="436" width="208" height="92" rx="12" class="card"/>
+  <text x="900" y="461" class="sans muted t10">任务完成率</text>
+  <text x="900" y="496" class="sans ink h2">92.6%</text>
+  <text x="1022" y="496" class="sans green2 t10">+3.1%</text>
+  <rect x="1103" y="436" width="208" height="92" rx="12" class="card"/>
+  <text x="1121" y="461" class="sans muted t10">平均维修等待</text>
+  <text x="1121" y="496" class="sans ink h2">4.8 h</text>
+  <text x="1245" y="496" class="sans muted t10">p95 11.2 h</text>
+  <rect x="1324" y="436" width="240" height="92" rx="12" fill="#f7e6df" stroke="#dfb5a5"/>
+  <text x="1342" y="461" class="sans muted t10">队列峰值</text>
+  <text x="1342" y="496" class="sans ink h2">17</text>
+  <text x="1395" y="496" class="sans" fill="#a24b35" font-size="10">18:00–22:00 拥塞</text>
+
+  <!-- full-width chart -->
+  <rect x="882" y="550" width="682" height="452" rx="13" class="card"/>
+  <text x="906" y="581" class="sans ink t12" font-weight="760">维修队列长度</text>
+  <text x="1538" y="581" text-anchor="end" class="sans muted t10">00:00 — 24:00</text>
+  <line x1="930" y1="936" x2="1528" y2="936" class="line2"/>
+  <line x1="930" y1="624" x2="930" y2="936" class="line2"/>
+  <line x1="930" y1="858" x2="1528" y2="858" class="line"/>
+  <line x1="930" y1="780" x2="1528" y2="780" class="line"/>
+  <line x1="930" y1="702" x2="1528" y2="702" class="line"/>
+  <text x="916" y="940" text-anchor="end" class="sans muted t10">0</text>
+  <text x="916" y="862" text-anchor="end" class="sans muted t10">5</text>
+  <text x="916" y="784" text-anchor="end" class="sans muted t10">10</text>
+  <text x="916" y="706" text-anchor="end" class="sans muted t10">15</text>
+  <path d="M930 914 C980 902 1020 884 1060 858 S1130 816 1170 828 S1240 786 1280 746 S1350 672 1390 686 S1450 644 1480 677 S1510 724 1528 738" fill="none" stroke="#2d7461" stroke-width="3"/>
+  <path d="M930 914 C980 902 1020 884 1060 858 S1130 816 1170 828 S1240 786 1280 746 S1350 672 1390 686 S1450 644 1480 677 S1510 724 1528 738 L1528 936 L930 936Z" fill="#6ca58f" fill-opacity=".13"/>
+  <rect x="1328" y="614" width="158" height="48" rx="9" fill="#fff3d9" stroke="#d8b76f"/>
+  <text x="1342" y="634" class="sans ink t10" font-weight="720">正在定位队列峰值</text>
+  <text x="1342" y="651" class="sans muted" font-size="9">18:00 · 17 waiting</text>
+  <path d="M1403 662L1391 686" class="dash"/>
+  <circle cx="1390" cy="686" r="10" fill="#f1b84f" fill-opacity=".35" stroke="#bd8423" stroke-width="2"/>
+  <text x="930" y="963" class="sans muted t10">00</text>
+  <text x="1078" y="963" class="sans muted t10">06</text>
+  <text x="1226" y="963" class="sans muted t10">12</text>
+  <text x="1374" y="963" class="sans muted t10">18</text>
+  <text x="1518" y="963" class="sans muted t10">24</text>
+  <rect x="904" y="978" width="638" height="1" fill="#e0e5e2"/>
+  <text x="906" y="995" class="sans muted" font-size="9">source: outputs/run_004/output-v2.json · digest verified</text>
+  </g>
+
+  <text x="52" y="1134" class="sans muted t11">PROPOSED · 非实现证据 · OpenCode 会话交互参考 · 2026-08-01</text>
+</svg>

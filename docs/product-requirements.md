@@ -1,10 +1,10 @@
-# Riff MVP 产品需求文档（PRD）
+# Riffology 产品需求文档（PRD）
 
 - Status: active
 - Role: normative contract
-- Scope: Riff 本地单用户 MVP（原交付代号 Milestone A）及已批准的后续产品细化
+- Scope: Riffology 本地单用户 MVP（原交付代号 Milestone A）及已批准的后续产品细化
 - Source of truth: 本文档是产品目标与需求的唯一权威；合并代码与测试是实现状态的权威
-- Last reviewed: 2026-07-28
+- Last reviewed: 2026-08-01
 
 ## 1. 文档权威与职责分工
 
@@ -40,7 +40,8 @@
 
 ## 2. 产品概述
 
-Riff 是一个本地运行的 AI 原生仿真工作平台。它帮助用户把业务问题、约束、
+Riffology 是面向用户的产品名称；Riff 是其保留的本地领域运行时、存储和 API
+名称。Riffology 是一个本地运行的 AI 原生仿真工作平台。它帮助用户把业务问题、约束、
 数据和不确定假设转化为可执行的仿真模型和可重复实验，再检查计算产物并沿用
 同一上下文继续讨论。
 
@@ -50,6 +51,12 @@ Riff 是一个本地运行的 AI 原生仿真工作平台。它帮助用户把�
 左侧：持续、可恢复的仿真对话
 右侧：当前 Model 或 Project 工作区
 ```
+
+已批准的后续工作台方向会以 Riffology 品牌提供 OpenChamber 派生的会话壳、
+受限共享浏览器和最右文件栏；它的阶段合同见
+[`openchamber-browser-workbench-migration-plan.md`](openchamber-browser-workbench-migration-plan.md)。
+这不改变本 PRD 中 Riff Store 对 Model、Project、Experiment、Run 和 outputs 的
+权威，也不把尚未合并的工作台功能表述为当前实现。
 
 风机维护是第一个普通 Model 和示例 Project，不是独立产品模式、固定页面结构，
 也不能成为通用产品类型命名的来源。

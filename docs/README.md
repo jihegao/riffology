@@ -4,7 +4,7 @@
 - Role: normative contract
 - Scope: repository documentation roles, authority, navigation, and maintenance rules
 - Source of truth: this index for documentation governance; linked documents for their declared scope
-- Last reviewed: 2026-07-28
+- Last reviewed: 2026-08-01
 
 ## Authority order
 
@@ -156,6 +156,13 @@ A4-6 revision-scoped evidence is retained through the stable
 - [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md):
   active post-MVP shared-shell refinement for full-height Conversation,
   weak-contract generated Model views, and file/change review.
+- [`openchamber-browser-workbench-migration-plan.md`](openchamber-browser-workbench-migration-plan.md):
+  approved staged migration design for the Riffology OpenChamber-derived
+  conversation shell, a shared controlled browser, retained Riff domain
+  authority, seven local-only PR gates, and configuration-level rollback.
+- [`riffology-openchamber-stage-1-baseline.md`](riffology-openchamber-stage-1-baseline.md):
+  Stage 1 design digest, reproducible validation, upstream/toolchain tuple,
+  disabled-surface contract, and required fork-license/delta ledger.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.
