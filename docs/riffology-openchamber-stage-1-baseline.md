@@ -86,8 +86,9 @@ this local Web-shell build claim.
 
 The fork retains the upstream MIT `LICENSE`, adds `UPSTREAM_DELTA.md` plus a
 read-only provenance/toolchain check, and is published at
-`https://github.com/jihegao/riffology-openchamber` with linked PR 1. Its frozen
-lockfile resolves SDK 1.18.11; Web/UI/VS Code type-checks and the Web build pass.
+`https://github.com/jihegao/riffology-openchamber`. Linked PR 1 merged as
+`7d999fdece9fbf1d99483c711502f5c929a905f6`. Its frozen lockfile resolves SDK
+1.18.11; Web/UI/VS Code type-checks and the Web build pass.
 
 The workstation OpenCode executable was upgraded from Homebrew 1.18.8 to the
 official arm64 1.18.11 release installed at `~/.local/bin/opencode`. A pure

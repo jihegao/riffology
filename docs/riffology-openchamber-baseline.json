@@ -23,7 +23,8 @@
   "fork": {
     "repository": "https://github.com/jihegao/riffology-openchamber",
     "pullRequest": 1,
-    "reviewedHead": "fed45e216b7e27e88f737568be2aaef1ace6a897"
+    "reviewedHead": "fed45e216b7e27e88f737568be2aaef1ace6a897",
+    "mergeCommit": "7d999fdece9fbf1d99483c711502f5c929a905f6"
   },
   "toolchain": {
     "node": ">=22",

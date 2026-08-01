@@ -37,6 +37,9 @@ if (manifest.fork.repository !== "https://github.com/jihegao/riffology-openchamb
 if (!/^[0-9a-f]{40}$/.test(manifest.fork.reviewedHead)) {
   throw new Error("invalid reviewed fork head");
 }
+if (!/^[0-9a-f]{40}$/.test(manifest.fork.mergeCommit)) {
+  throw new Error("invalid fork merge commit");
+}
 if (manifest.toolchain.node !== ">=22" || manifest.toolchain.bun !== "1.3.14") {
   throw new Error("unexpected Node/Bun baseline");
 }
