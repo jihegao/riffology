@@ -6,6 +6,7 @@ import type { ProductClient } from "./product/api";
 import type {
   ConversationBundle,
   HomeDto,
+  ProjectWorkspaceDto,
   ProviderDiscovery,
   WorkspaceDto,
 } from "./product/types";
@@ -114,6 +115,26 @@ const workspace: WorkspaceDto = {
   }],
 };
 
+const projectWorkspace: ProjectWorkspaceDto = {
+  owner: {
+    id: "project-one",
+    name: "Baseline study",
+    kind: "project",
+    lifecycleState: "active",
+  },
+  sourceModelId: "model-one",
+  modelSnapshotDigest: "snapshot-digest",
+  execution: workspace.execution,
+  executionDescriptionDigest: "execution-digest",
+  files: [],
+  conversations: workspace.conversations.map((conversation) => ({
+    ...conversation,
+    owner: { kind: "project" as const, id: "project-one" },
+  })),
+  experimentConfigurations: [],
+  runs: [],
+};
+
 const client = (): ProductClient => ({
   recoveryStatus: vi.fn(async () => ({
     state: "ready" as const,
@@ -128,7 +149,7 @@ const client = (): ProductClient => ({
   createProject: vi.fn(async () => ({
     project: { id: "created-project", name: "Created", lifecycleState: "active" as const },
   })),
-  workspace: vi.fn(async () => workspace),
+  workspace: vi.fn(async (ownerKind) => ownerKind === "project" ? projectWorkspace : workspace),
   startTechnicalCheck: vi.fn(async () => ({
     id: "check-one",
     modelId: "model-one",
@@ -981,9 +1002,44 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByRole("button", { name: "新项目" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "＋ 新会话" })).toBeEnabled();
     expect(screen.getByRole("complementary", { name: "项目对话" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "当前项目工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "项目文件与页面查看器" })).toBeInTheDocument();
     expect(screen.queryByText("Terminal")).not.toBeInTheDocument();
     expect(screen.queryByText("Share")).not.toBeInTheDocument();
+  });
+
+  it("shows the Stage 3 file rail and renders only a bounded Project file projection", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.workspace = vi.fn(async () => ({
+      owner: { id: "project-one", name: "Baseline study", kind: "project" as const, lifecycleState: "active" as const },
+      sourceModelId: "model-one", modelSnapshotDigest: "snapshot-digest", execution: workspace.execution,
+      executionDescriptionDigest: "execution-digest",
+      files: [
+        { fileRef: "snapshot-file", relativePath: "analysis/overview.md", mediaType: "text/markdown", sizeBytes: 19, sha256: "f".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
+        { fileRef: "html-file", relativePath: "visuals/replay.html", mediaType: "text/html", sizeBytes: 41, sha256: "e".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
+        { fileRef: "invalid-absolute", relativePath: "/Users/example/secret.md", mediaType: "text/markdown", sizeBytes: 1, sha256: "d".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
+        { fileRef: "invalid-parent", relativePath: "../secret.json", mediaType: "application/json", sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
+      ],
+      conversations: workspace.conversations.map((item) => ({ ...item, owner: { kind: "project" as const, id: "project-one" } })),
+      experimentConfigurations: [], runs: [],
+    }));
+    productClient.projectFileWorkbenchRenderable = vi.fn(async () => ({
+      kind: "markdown" as const, title: "analysis/overview.md", text: "# Snapshot overview",
+    }));
+    render(<App client={productClient} />);
+
+    expect(await screen.findByRole("navigation", { name: "浏览器导航" })).toBeInTheDocument();
+    expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff://project/project-one");
+    expect(screen.getByText("OpenCode 1.18.11")).toBeInTheDocument();
+    expect(screen.getByText("analysis")).toBeInTheDocument();
+    expect(screen.getByText("visuals")).toBeInTheDocument();
+    expect(screen.queryByText(/Users|secret/u)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^overview\.md/u }));
+    expect(await screen.findByRole("heading", { name: "Snapshot overview" })).toBeInTheDocument();
+    expect(productClient.projectFileWorkbenchRenderable).toHaveBeenCalledWith("project-one", "snapshot-file");
+    await user.click(screen.getByRole("button", { name: "收起文件栏" }));
+    expect(screen.getByRole("button", { name: "文件 ↗" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("restores an explicit non-authoritative new-project draft after refresh", async () => {

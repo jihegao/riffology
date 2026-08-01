@@ -263,6 +263,16 @@ export class MilestoneA2Api {
       );
       return true;
     }
+    if (request.method === "GET" && parts.length === 6
+      && parts[1] === "projects" && parts[3] === "files"
+      && parts[5] === "workbench-renderable") {
+      privateJson(
+        response,
+        200,
+        this.service.projectFileWorkbenchRenderable(parts[2], parts[4]),
+      );
+      return true;
+    }
     if (parts.length >= 4 && parts[1] === "projects" && parts[3] === "runs") {
       const projectId = parts[2];
       if (request.method === "POST" && parts.length === 4) {

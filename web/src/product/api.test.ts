@@ -133,6 +133,7 @@ describe("Product browser client", () => {
       expectedChangeSetDigest: "a".repeat(64),
     });
     await client.projectFileRenderable("project / one", "file / ref");
+    await client.projectFileWorkbenchRenderable("project / one", "file / ref");
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/browser-session/bootstrap",
@@ -142,6 +143,7 @@ describe("Product browser client", () => {
       "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/apply",
       "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/reject",
       "/api/projects/project%20%2F%20one/files/file%20%2F%20ref/renderable",
+      "/api/projects/project%20%2F%20one/files/file%20%2F%20ref/workbench-renderable",
     ]);
     expect(JSON.parse(calls[4]?.body ?? "{}")).toEqual({
       commandId: "apply-command",

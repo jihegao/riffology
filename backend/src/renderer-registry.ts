@@ -1,6 +1,7 @@
 import { parseCanonicalJsonV2 } from "./canonical-json-v2.ts";
 
 export type RendererDto =
+  | Readonly<{ kind: "safe_html"; title: string; html: string }>
   | Readonly<{ kind: "markdown"; title: string; text: string }>
   | Readonly<{ kind: "code"; title: string; language: string; text: string }>
   | Readonly<{ kind: "json"; title: string; value: unknown }>
@@ -110,6 +111,22 @@ export const rendererDto = (input: Readonly<{
   });
 };
 
+export const workbenchRendererDto = (input: Readonly<{
+  title: string;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  bytes: Uint8Array;
+}>): RendererDto => {
+  if (input.mediaType.toLowerCase() !== "text/html") return rendererDto(input);
+  if (input.bytes.byteLength !== input.sizeBytes || input.sizeBytes > 1_048_576) {
+    limit("HTML exceeds the renderer byte limit.");
+  }
+  const html = utf8(input.bytes);
+  safeHtml(html);
+  return Object.freeze({ kind: "safe_html", title: safeLabel(input.title, 300, "Resource"), html });
+};
+
 const CODE_MEDIA_TYPES = new Set([
   "text/plain",
   "text/x-python",
@@ -117,6 +134,21 @@ const CODE_MEDIA_TYPES = new Set([
   "text/typescript",
 ]);
 const ACTIVE_MEDIA_TYPES = new Set(["text/html", "image/svg+xml"]);
+
+const safeHtml = (html: string): void => {
+  if (html.length > 1_048_576 || html.split(/\r?\n/u).length > 20_000) {
+    limit("HTML exceeds the renderer structure limit.");
+  }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(html)) {
+    throw new RendererRegistryError("HTML contains invalid control characters.");
+  }
+  if (/<\/?(?:script|form|iframe|object|embed|base|meta|link|frame|frameset|portal|input|button|textarea|select|option|svg|math)\b/iu.test(html)
+    || /[\s/]on[a-z0-9_-]+\s*=/iu.test(html)
+    || /\b(?:href|src|srcset|action|formaction|poster|data|background|cite|ping)\s*=/iu.test(html)
+    || /(?:\burl\s*\(|@import\b|\bexpression\s*\(|\bbehavior\s*:|-moz-binding\s*:)/iu.test(html)) {
+    throw new RendererRegistryError("HTML contains active content or an external URL.");
+  }
+};
 
 const utf8 = (bytes: Uint8Array): string => {
   try {

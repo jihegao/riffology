@@ -89,6 +89,7 @@ export interface ProductClient {
     expectedChangeSetDigest: string;
   }>): Promise<ModelMutationReceipt>;
   projectFileRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
+  projectFileWorkbenchRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   downloadModelFile(modelId: string, fileId: string): Promise<void>;
   createExperiment(input: Readonly<{
     projectId: string;
@@ -391,6 +392,12 @@ export class HttpProductClient implements ProductClient {
   projectFileRenderable(projectId: string, fileRef: string): Promise<RendererResource> {
     return this.#request(
       `/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fileRef)}/renderable`,
+    );
+  }
+
+  projectFileWorkbenchRenderable(projectId: string, fileRef: string): Promise<RendererResource> {
+    return this.#request(
+      `/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fileRef)}/workbench-renderable`,
     );
   }
 

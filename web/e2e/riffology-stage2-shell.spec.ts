@@ -19,9 +19,13 @@ test("Riffology Stage 2 shell keeps project and conversation actions distinct", 
   await expect(page.getByRole("button", { name: "新项目" })).toBeVisible();
   await expect(page.getByRole("button", { name: "＋ 新会话" })).toBeDisabled();
   await expect(page.getByRole("complementary", { name: "项目对话" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "当前项目工作区" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "浏览器导航" })).toBeVisible();
+  await expect(page.getByLabel("页面地址")).toContainText("riff://project/");
+  await expect(page.getByText("OpenCode 1.18.11")).toBeVisible();
+  await expect(page.getByRole("region", { name: "项目文件与页面查看器" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "项目文件" })).toBeVisible();
   await expect(page.getByText("No active Conversations yet.")).toBeVisible();
-  await expect(page.getByText(/中央浏览器与文件查看将在阶段 3–4 接入/u)).toBeVisible();
+  await expect(page.getByText(/从最右侧文件栏选择/u)).toBeVisible();
   await expect(page.getByText("Terminal", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Share", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Tunnel", { exact: true })).toHaveCount(0);
@@ -52,6 +56,8 @@ test("Riffology Stage 2 shell keeps project and conversation actions distinct", 
   expect(desktop.railWidth).toBe(74);
   expect(desktop.chatWidth).toBe(472);
   expect(desktop.chatBottom).toBeLessThanOrEqual(desktop.viewportHeight);
+  const fileRail = await page.locator(".riffology-file-rail").boundingBox();
+  expect(fileRail?.width).toBe(224);
   await page.screenshot({ path: testInfo.outputPath("riffology-stage2-1800x1180.png") });
 
   const cdp = await page.context().newCDPSession(page);

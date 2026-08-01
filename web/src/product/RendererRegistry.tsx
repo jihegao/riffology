@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 
 export type RendererResource =
+  | Readonly<{ kind: "safe_html"; title: string; html: string }>
   | Readonly<{ kind: "markdown"; title: string; text: string }>
   | Readonly<{ kind: "code"; title: string; language: string; text: string }>
   | Readonly<{ kind: "json"; title: string; value: unknown }>
@@ -75,6 +76,8 @@ export function RendererRegistry({
     );
   }
   switch (resource.kind) {
+    case "safe_html":
+      return <SandboxedHtmlRenderer resource={resource} />;
     case "markdown":
       return <MarkdownRenderer resource={resource} />;
     case "code":
@@ -133,6 +136,29 @@ const MarkdownRenderer = ({
     </div>
   </section>
 );
+
+const SandboxedHtmlRenderer = ({
+  resource,
+}: Readonly<{ resource: Extract<RendererResource, { kind: "safe_html" }> }>) => (
+  <section className="product-renderer">
+    <h3>{resource.title}</h3>
+    <iframe className="product-sandboxed-html" title={resource.title} sandbox=""
+      referrerPolicy="no-referrer" srcDoc={sandboxedHtmlDocument(resource.html)} />
+  </section>
+);
+
+const HTML_SANDBOX_CSP = "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src 'none'; form-action 'none'; frame-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; script-src 'none'; style-src 'unsafe-inline'";
+const HTML_SANDBOX_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_SANDBOX_CSP}">`;
+
+const sandboxedHtmlDocument = (html: string): string => {
+  if (/<head(?:\s[^>]*)?>/iu.test(html)) {
+    return html.replace(/<head(?:\s[^>]*)?>/iu, (head) => `${head}${HTML_SANDBOX_META}`);
+  }
+  if (/<html(?:\s[^>]*)?>/iu.test(html)) {
+    return html.replace(/<html(?:\s[^>]*)?>/iu, (root) => `${root}<head>${HTML_SANDBOX_META}</head>`);
+  }
+  return `<!doctype html><html><head>${HTML_SANDBOX_META}</head><body>${html}</body></html>`;
+};
 
 const TableRenderer = ({
   resource,
@@ -396,6 +422,8 @@ const rendererShape = (value: unknown): value is RendererResource => {
   const resource = value as Record<string, unknown>;
   if (typeof resource.kind !== "string" || typeof resource.title !== "string") return false;
   switch (resource.kind) {
+    case "safe_html":
+      return typeof resource.html === "string";
     case "markdown":
       return typeof resource.text === "string";
     case "code":
@@ -475,8 +503,9 @@ const rendererTitle = (value: unknown): string =>
     : "Unavailable view";
 
 const rendererIssue = (resource: RendererResource): string | null => {
-  if (resource.kind === "markdown" || resource.kind === "code") {
-    if (new TextEncoder().encode(resource.text).byteLength > 1_048_576) {
+  if (resource.kind === "markdown" || resource.kind === "code" || resource.kind === "safe_html") {
+    const text = resource.kind === "safe_html" ? resource.html : resource.text;
+    if (new TextEncoder().encode(text).byteLength > 1_048_576) {
       return "renderer_limit_exceeded: this text is too large to render safely.";
     }
     if (resource.kind === "code" && resource.text.split(/\r?\n/u).length > 20_000) {
@@ -484,6 +513,9 @@ const rendererIssue = (resource: RendererResource): string | null => {
     }
     if (resource.kind === "markdown" && resource.text.split(/\r?\n/u).length > 50_000) {
       return "renderer_limit_exceeded: this Markdown has too many nodes.";
+    }
+    if (resource.kind === "safe_html" && resource.html.split(/\r?\n/u).length > 20_000) {
+      return "renderer_limit_exceeded: this HTML has too many lines.";
     }
   }
   if (resource.kind === "table"

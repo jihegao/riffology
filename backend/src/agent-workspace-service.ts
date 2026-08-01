@@ -89,6 +89,7 @@ import { PRODUCT_DIAGNOSTIC_EVENT_LIMITS } from "./product-run-limits.ts";
 import { MutationRecoveryError } from "./mutation-coordinator.ts";
 import {
   rendererDto,
+  workbenchRendererDto,
   RendererRegistryError,
   type RendererDto,
 } from "./renderer-registry.ts";
@@ -870,6 +871,14 @@ export class AgentWorkspaceService {
   }
 
   projectFileRenderable(projectIdInput: string, fileRefInput: string): RendererDto {
+    return this.#projectFileRenderable(projectIdInput, fileRefInput, false);
+  }
+
+  projectFileWorkbenchRenderable(projectIdInput: string, fileRefInput: string): RendererDto {
+    return this.#projectFileRenderable(projectIdInput, fileRefInput, true);
+  }
+
+  #projectFileRenderable(projectIdInput: string, fileRefInput: string, allowSafeHtml: boolean): RendererDto {
     const projectId = boundedId(projectIdInput);
     const fileRef = boundedId(fileRefInput);
     try {
@@ -879,13 +888,14 @@ export class AgentWorkspaceService {
       if (!file) {
         throw new ApiError(404, "resource_not_found", "The Project file does not exist.");
       }
-      return rendererDto({
+      const renderable = (allowSafeHtml ? workbenchRendererDto : rendererDto)({
         title: projectLogicalPath(file.relativePath),
         mediaType: file.mediaType,
         sizeBytes: file.sizeBytes,
         sha256: file.sha256,
         bytes: this.store.readObjectFile(file.id),
       });
+      return renderable;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       if (error instanceof RendererRegistryError) {

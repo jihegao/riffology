@@ -166,6 +166,9 @@ A4-6 revision-scoped evidence is retained through the stable
 - [`riffology-openchamber-stage-2.md`](riffology-openchamber-stage-2.md):
   non-default Riffology shell and Conversation-area implementation boundary,
   client-only unbound workspace projection, and focused browser evidence.
+- [`riffology-openchamber-stage-3.md`](riffology-openchamber-stage-3.md):
+  global browser frame, far-right read-only Project file tree, bounded central
+  viewer, OpenCode 1.18.11 compatibility baseline, and Stage 3 evidence.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.
