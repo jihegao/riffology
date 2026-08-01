@@ -589,3 +589,10 @@ def test_parameter_schema_required_matches_parameter_ids() -> None:
     schema = json.loads(asset.read_text())
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"]) == set(module.PARAMETER_IDS)
+
+
+def test_package_exports() -> None:
+    package = importlib.import_module("mesa_service.models.aircraft_support")
+    assert package.AircraftSupportModel is not None
+    assert package.ScenarioFixture is not None
+    assert package.MODEL_SPEC_DEFINITIONS["model_id"] == "aircraft-support"
