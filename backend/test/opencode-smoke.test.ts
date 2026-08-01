@@ -40,7 +40,7 @@ test("optional installed OpenCode pure-server discovery smoke uses no provider c
   assert.ok(Array.isArray(providers.providers));
 });
 
-test("opt-in installed OpenCode 1.18.4 completes two scoped MCP tools before idle reconciliation and revocation", {
+test("opt-in installed OpenCode 1.18.11 completes two scoped MCP tools before idle reconciliation and revocation", {
   skip: !runLiveMultiToolSmoke,
   timeout: 120_000,
 }, async (t) => {
@@ -68,7 +68,7 @@ test("opt-in installed OpenCode 1.18.4 completes two scoped MCP tools before idl
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForHealth(`${baseUrl}/global/health`);
   const health = await readJson(`${baseUrl}/global/health`);
-  assert.equal(health.version, "1.18.4", "the live smoke is intentionally pinned to the supported OpenCode binary");
+  assert.equal(health.version, "1.18.11", "the live smoke is intentionally pinned to the supported OpenCode binary");
 
   const [providerId, ...modelSegments] = liveMultiToolModel.split("/");
   const modelId = modelSegments.join("/");
@@ -79,7 +79,7 @@ test("opt-in installed OpenCode 1.18.4 completes two scoped MCP tools before idl
   const adapter = new HttpOpenCodeAdapter({
     baseUrl,
     workdir,
-    expectedVersion: "1.18.4",
+    expectedVersion: "1.18.11",
     model: liveMultiToolModel,
     allowedProviders: [providerId],
     requestTimeoutMs: 90_000,

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { defaultProductClient, type ProductClient, type ProductRecoveryStatus } from "./api";
 import { ConversationPane } from "./ConversationPane";
-import type { HomeDto, ProjectSummary, WorkspaceDto } from "./types";
+import { RiffologyWorkbenchViewer } from "./RiffologyWorkbenchViewer";
+import type { HomeDto, ProjectSummary, ProjectWorkspaceDto, WorkspaceDto } from "./types";
 
 type WorkbenchRoute =
   | Readonly<{ page: "new"; workspaceKey: string }>
@@ -63,6 +64,8 @@ export function RiffologyWorkbenchApp({
   const [home, setHome] = useState<HomeDto>();
   const [workspace, setWorkspace] = useState<WorkspaceDto>();
   const [error, setError] = useState<string>();
+  const [filesOpen, setFilesOpen] = useState(() => !compactWorkbench());
+  const fileToggleRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
     setError(undefined);
@@ -98,9 +101,19 @@ export function RiffologyWorkbenchApp({
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const query = globalThis.matchMedia?.("(max-width: 760px)");
+    if (!query) return;
+    const closeForCompactLayout = () => { if (query.matches) setFilesOpen(false); };
+    closeForCompactLayout();
+    query.addEventListener("change", closeForCompactLayout);
+    return () => query.removeEventListener("change", closeForCompactLayout);
+  }, []);
+
   const currentProject = route.page === "project"
     ? home?.projects.find((project) => project.id === route.projectId)
     : undefined;
+  const projectWorkspace = isProjectWorkspace(workspace) ? workspace : undefined;
 
   return (
     <div className="riffology-workbench-app">
@@ -110,6 +123,13 @@ export function RiffologyWorkbenchApp({
           <span aria-hidden="true" className="riffology-workbench-mark">R</span>
           <strong>Riffology</strong>
         </a>
+        <WorkbenchChrome
+          route={route}
+          workspace={workspace}
+          filesOpen={filesOpen}
+          onFilesOpenChange={setFilesOpen}
+          fileToggleRef={fileToggleRef}
+        />
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
         <ProjectRail
@@ -131,7 +151,7 @@ export function RiffologyWorkbenchApp({
           <UnboundProjectWorkspace workspaceKey={route.workspaceKey} />
         )}
         {recovery !== "checking" && recovery.state === "ready" && !error
-          && route.page === "project" && workspace && currentProject && (
+          && route.page === "project" && projectWorkspace && currentProject && (
           <>
             <aside className="riffology-chat-pane" aria-label="项目对话">
               <ConversationPane
@@ -141,7 +161,7 @@ export function RiffologyWorkbenchApp({
                 selectedConversationId={route.conversationId}
                 onOwnerChanged={load}
                 presentation="riffology"
-                ownerName={workspace.owner.name}
+                ownerName={projectWorkspace.owner.name}
                 navigateConversation={(conversationId) => {
                   navigateWorkbench(workbenchProjectHref(route.projectId, conversationId));
                 }}
@@ -149,21 +169,64 @@ export function RiffologyWorkbenchApp({
                   workbenchProjectHref(route.projectId, conversationId)}
               />
             </aside>
-            <section className="riffology-stage2-viewer riffology-bound-viewer"
-              aria-label="当前项目工作区">
-              <p className="product-eyebrow">RIFF PROJECT · BOUND</p>
-              <h1>{workspace.owner.name}</h1>
-              <p>{workspace.owner.lifecycleState} · {currentProject.modelSnapshotDigest}</p>
-              <div className="riffology-stage2-placeholder" role="status">
-                中央浏览器与文件查看将在阶段 3–4 接入；这里不提前暴露旧 Models、Projects、文件编辑或 Run 按钮。
-              </div>
-            </section>
+            <RiffologyWorkbenchViewer client={client} workspace={projectWorkspace}
+              filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
+              fileToggleRef={fileToggleRef} />
           </>
         )}
       </main>
     </div>
   );
 }
+
+function WorkbenchChrome({
+  route,
+  workspace,
+  filesOpen,
+  onFilesOpenChange,
+  fileToggleRef,
+}: Readonly<{
+  route: WorkbenchRoute;
+  workspace?: WorkspaceDto;
+  filesOpen: boolean;
+  onFilesOpenChange: (open: boolean) => void;
+  fileToggleRef: RefObject<HTMLButtonElement | null>;
+}>) {
+  const projectPath = route.page === "project"
+    ? `riff://project/${encodeURIComponent(route.projectId)}` : "riff://unbound-workspace";
+  const conversation = route.page === "project" && workspace?.owner.kind === "project"
+    ? workspace.conversations.find((item) => item.id === route.conversationId) ?? workspace.conversations[0]
+    : undefined;
+  const agentState = conversation?.sessionState === "available" ? "可用"
+    : conversation?.sessionState === "connecting" ? "连接中"
+      : conversation?.sessionState === "read_only" ? "只读" : "未接管";
+  return <div className="riffology-workbench-chrome">
+    <span className="riffology-context-projection">
+      <i aria-hidden="true" />
+      {workspace?.owner.kind === "project"
+        ? `${workspace.owner.name} / Project Conversation`
+        : "新项目 / Agent 引导"}
+    </span>
+    <nav aria-label="浏览器导航" className="riffology-browser-navigation">
+      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="后退">←</button>
+      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="前进">→</button>
+      <button type="button" disabled title="Browser Broker 将在阶段 4 接入" aria-label="刷新">↻</button>
+    </nav>
+    <output className="riffology-url-projection" aria-label="页面地址">{projectPath}</output>
+    <span className="riffology-trust-state" aria-label="受信状态">受信 Riff</span>
+    <button type="button" className="riffology-agent-state" disabled aria-label={`Agent 状态：${agentState}`}>Agent · {agentState}</button>
+    <span className="riffology-opencode-version" aria-label="OpenCode 基线版本">OpenCode 1.18.11</span>
+    <button ref={fileToggleRef} type="button" className="riffology-file-toggle" disabled={route.page !== "project"}
+      aria-expanded={route.page === "project" ? filesOpen : undefined}
+      aria-controls="riffology-project-files" onClick={() => onFilesOpenChange(!filesOpen)}>文件 ↗</button>
+  </div>;
+}
+
+const compactWorkbench = (): boolean =>
+  typeof globalThis.matchMedia === "function" && globalThis.matchMedia("(max-width: 760px)").matches;
+
+const isProjectWorkspace = (workspace?: WorkspaceDto): workspace is ProjectWorkspaceDto =>
+  workspace?.owner.kind === "project";
 
 function ProjectRail({ projects, currentProjectId, unbound }: Readonly<{
   projects: readonly ProjectSummary[];

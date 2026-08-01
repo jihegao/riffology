@@ -474,7 +474,7 @@ MVP 在本地 macOS 运行：
 | NFR-SEC-01 | Provider credential、ambient credential、OpenCode session ID、process identity、任意 path 和 child port 不得投影给 browser。 |
 | NFR-SEC-02 | Model/Run 进程必须获得最小 path 权限、清理环境、默认无网络、取消能力和有限 resource/output/time。 |
 | NFR-SEC-03 | Playwright 必须在全新隔离 browser context 中仅连接当前健康 Project visual peer；不得接受 caller URL、raw selector、script、download、跨 peer redirect 或共享 browser state，不得发送 credential/cookie/authorization，也不得把页面 artifact 作为工具结果投影。 |
-| NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.4`）；Product backend 必须从 durable Conversation owner 派生精确 Model workspace 或 Project `model-snapshot/`，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
+| NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.11`）；Product backend 必须从 durable Conversation owner 派生精确 Model workspace 或 Project `model-snapshot/`，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
 | NFR-SCOPE-01 | Conversations、documents、attachments、tools、Runs、outputs、visual capabilities 和 Playwright 必须 owner-scoped，并拒绝跨对象使用。 |
 | NFR-IDEM-01 | 重试 create/start/cancel/finalize command 不得产生重复持久副作用。 |
 | NFR-HONEST-01 | UI 和 Agent 必须区分 target、pending、running、completed、cancelled、failed、read-only 和 recovery-required，不乐观推断。 |

@@ -16,6 +16,18 @@ describe("safe renderer registry", () => {
     expect(screen.getByRole("link", { name: /docs/u })).toHaveAttribute("rel", "noopener noreferrer");
   });
 
+  it("loads only server-approved HTML into an originless sandbox", () => {
+    render(<RendererRegistry resource={{
+      kind: "safe_html", title: "Preview", html: "<main>Safe preview</main>",
+    }} />);
+    const frame = screen.getByTitle("Preview");
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(frame.getAttribute("srcdoc")).toContain("Content-Security-Policy");
+    expect(frame.getAttribute("srcdoc")).toContain("default-src 'none'");
+    expect(frame.getAttribute("srcdoc")).toContain("<main>Safe preview</main>");
+  });
+
   it("gives chart and diagram data semantic table fallbacks", () => {
     const { rerender } = render(<RendererRegistry resource={{
       kind: "chart",

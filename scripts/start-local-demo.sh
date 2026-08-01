@@ -19,7 +19,7 @@ export RIFF_SKIP_OPENCODE="${RIFF_SKIP_OPENCODE:-true}"
 export PORT="${PORT:-8787}"
 export RIFF_VISUAL_BROKER_PORT="${RIFF_VISUAL_BROKER_PORT:-8788}"
 export RIFF_MODEL_PYTHON="${RIFF_MODEL_PYTHON:-$ROOT_DIR/mesa_service/.venv/bin/python}"
-export OPENCODE_EXPECTED_VERSION="${OPENCODE_EXPECTED_VERSION:-1.18.4}"
+export OPENCODE_EXPECTED_VERSION="${OPENCODE_EXPECTED_VERSION:-1.18.11}"
 
 # OpenCode is a separately managed loopback service, so its default profile
 # directory cannot be inferred from this script's caller. Resolve a valid value

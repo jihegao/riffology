@@ -17,7 +17,7 @@ const QUALIFIED_MODEL_ID =
 const [PROVIDER_ID, ...MODEL_SEGMENTS] = QUALIFIED_MODEL_ID.split("/");
 const PROVIDER_MODEL_ID = MODEL_SEGMENTS.join("/");
 const EXPECTED_OPENCODE_VERSION =
-  process.env.OPENCODE_EXPECTED_VERSION ?? "1.18.4";
+  process.env.OPENCODE_EXPECTED_VERSION ?? "1.18.11";
 const REPOSITORY_ROOT = resolve(import.meta.dirname, "../..");
 const MODEL_ID = "model_issue_56_wind_visual";
 const CONVERSATION_ID = "conversation_issue_56_wind_visual";

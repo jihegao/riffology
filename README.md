@@ -292,8 +292,8 @@ server credentials:
 OPENCODE_API_KEY=your-provider-key          # consumed by your local OpenCode provider configuration
 OPENCODE_MODEL=provider_id/model_id
 OPENCODE_URL=http://127.0.0.1:4096
-# Exact server version required by this Product startup contract (the launcher defaults to 1.18.4).
-OPENCODE_EXPECTED_VERSION=1.18.4
+# Exact server version required by this Product startup contract (the launcher defaults to 1.18.11).
+OPENCODE_EXPECTED_VERSION=1.18.11
 # Canonical absolute directory opened by the local OpenCode Server.
 OPENCODE_WORKDIR=/absolute/path/to/developer-repo-root
 OPENCODE_ALLOWED_PROVIDERS=provider_id
@@ -334,7 +334,7 @@ profile exists.
 
 Live readiness requires all of the following from the configured loopback
 server: successful `/global/health`, an exact version equal to
-`OPENCODE_EXPECTED_VERSION` (the launcher defaults it to `1.18.4`), and
+`OPENCODE_EXPECTED_VERSION` (the launcher defaults it to `1.18.11`), and
 directory-scoped `/path` resolving to the requested canonical work directory.
 Riff repeats version/path identity checks before location-sensitive operations,
 so a server restarted at the same URL cannot retain cached authority after its
@@ -372,7 +372,7 @@ OPENCODE_LIVE_SMOKE_MODEL=provider/model \
 node --experimental-strip-types --test test/opencode-smoke.test.ts
 ```
 
-It pins OpenCode `1.18.4`, starts a real pure server, binds a controlled
+It pins OpenCode `1.18.11`, starts a real pure server, binds a controlled
 capability-scoped MCP, and requires two ordered tool calls before terminal
 reconciliation and revocation. The default test suite skips this credentialed
 case.

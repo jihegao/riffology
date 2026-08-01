@@ -53,7 +53,7 @@ test("Riffology Stage 2 creates, switches, and refreshes bound project Conversat
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("complementary", { name: "项目对话" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "当前项目工作区" })).toBeHidden();
+  await expect(page.getByRole("region", { name: "项目文件与页面查看器" })).toBeHidden();
   const mobileFit = await page.evaluate(() => {
     const composer = document.querySelector<HTMLElement>(".product-composer-dock")!;
     return {

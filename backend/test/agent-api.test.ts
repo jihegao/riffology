@@ -955,6 +955,12 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
   assert.equal(projectRenderable.status, 200);
   const projectResource = await projectRenderable.json() as any;
   assert.equal(typeof projectResource.kind, "string");
+  const workbenchRenderable = await apiFetch(
+    `${baseUrl}/api/projects/${project.project.id}/files/${workspace.files[0].fileRef}/workbench-renderable`,
+  );
+  assert.equal(workbenchRenderable.status, 200);
+  const workbenchResource = await workbenchRenderable.json() as any;
+  assert.equal(typeof workbenchResource.kind, "string");
   const otherProjectResponse = await post(`${baseUrl}/api/projects`, {
     commandId: "new-project-other",
     name: "Other Scenario Project",
@@ -966,8 +972,12 @@ test("A3 New project creates a fixed Model copy and exposes a sanitized workspac
     `${baseUrl}/api/projects/${otherProject.project.id}/files/${workspace.files[0].fileRef}/renderable`,
   );
   assert.equal(crossProjectRenderable.status, 404);
+  const crossProjectWorkbenchRenderable = await apiFetch(
+    `${baseUrl}/api/projects/${otherProject.project.id}/files/${workspace.files[0].fileRef}/workbench-renderable`,
+  );
+  assert.equal(crossProjectWorkbenchRenderable.status, 404);
   assert.doesNotMatch(
-    JSON.stringify({ workspace, projectResource }),
+    JSON.stringify({ workspace, projectResource, workbenchResource }),
     /\/Users\/|\/private\/|workspacePath|objectFileId|sessionId|capability/u,
   );
   assert.deepEqual(workspace.conversations, []);

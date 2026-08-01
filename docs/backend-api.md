@@ -28,7 +28,7 @@ files.
 
 When live OpenCode is enabled, the backend considers the adapter ready only
 after loopback reachability and `/global/health`, an exact health version equal
-to configured `OPENCODE_EXPECTED_VERSION` (the launcher default is `1.18.4`),
+to configured `OPENCODE_EXPECTED_VERSION` (the launcher default is `1.18.11`),
 and directory-scoped `/path` whose canonical directory equals the server-derived
 owner workspace. Riff repeats these identity checks before session reuse,
 creation, prompting, abort, event, and MCP operations; cached readiness is not a
@@ -64,7 +64,7 @@ turn because the stream has no prompt/message cursor. Current-user assistant
 messages and target status remain the terminal success/failure authority and
 completion fallback.
 
-The opt-in installed-server integration gate runs OpenCode `1.18.4` with a
+The opt-in installed-server integration gate runs OpenCode `1.18.11` with a
 controlled capability-scoped MCP and requires two ordered tool calls before
 idle reconciliation and revocation:
 
@@ -255,6 +255,7 @@ The implemented Stage 2 and Stage 3 routes are:
 | `POST /api/projects` | Create a server-owned fixed copy from an active technically executable Model. |
 | `GET /api/projects/{projectId}/workspace` | Return the allowlisted copied execution metadata, conversations, experiments, runs, indexed output projections, and opaque read-only file references. It exposes neither object IDs nor storage paths. |
 | `GET /api/projects/{projectId}/files/{fileRef}/renderable` | Render one copied Project file through the bounded read-only renderer selected by the server-derived opaque reference. |
+| `GET /api/projects/{projectId}/files/{fileRef}/workbench-renderable` | Stage-3-only read projection for the Riffology file viewer. It has the same opaque Project snapshot scope and bounds; HTML is returned only after the extra inert-document admission checks and must be shown in an originless sandbox. The older `renderable` route continues to expose HTML as opaque active content. |
 | `POST /api/projects/{projectId}/experiment-configs` | Validate and canonicalize `ExperimentConfigurationV1`, expand its exact plan, and persist an immutable create-command response receipt. |
 | `PATCH /api/projects/{projectId}/experiment-configs/{configId}` | Require `commandId`, `expectedConfigurationDigest`, and `expectedRecordDigest`; apply both CAS guards and preserve exact historical response replay. |
 | `POST /api/projects/{projectId}/runs` | Replan and freeze the named experiment, apply server-owned limits, atomically create/replay the queued run receipt, and admit its declared supported batch or visual run kind to the shared dispatcher. |

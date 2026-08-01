@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   rendererDto,
+  workbenchRendererDto,
   RendererRegistryError,
 } from "../src/renderer-registry.ts";
 
@@ -11,6 +12,27 @@ const render = (mediaType: string, text: string) => rendererDto({
   sizeBytes: Buffer.byteLength(text),
   sha256: "a".repeat(64),
   bytes: Buffer.from(text),
+});
+
+test("workbench HTML projection is isolated to declared inert documents", () => {
+  const input = (text: string) => ({
+    title: "preview.html",
+    mediaType: "text/html",
+    sizeBytes: Buffer.byteLength(text),
+    sha256: "b".repeat(64),
+    bytes: Buffer.from(text),
+  });
+  assert.deepEqual(workbenchRendererDto(input("<main><h1>Preview</h1></main>")), {
+    kind: "safe_html", title: "preview.html", html: "<main><h1>Preview</h1></main>",
+  });
+  for (const unsafe of [
+    "<script>alert(1)</script>", "<form action='/save'></form>",
+    "<img src='https://example.invalid/pixel'>", "<p onclick='x()'>x</p>",
+    "<iframe src='/nested'></iframe>", "<img srcset='local.png 1x'>",
+    "<a href='/same-origin'>navigate</a>", "<style>@import '/leak.css';</style>",
+    "<img/onerror='alert(1)'>", "<p>nul\u0000byte</p>",
+  ]) assert.throws(() => workbenchRendererDto(input(unsafe)), RendererRegistryError);
+  assert.equal(workbenchRendererDto(input("<style>h1 { color: #245f50 }</style><h1>Styled</h1>")).kind, "safe_html");
 });
 
 test("renderer registry selects only declared safe media and preserves active content as opaque", () => {
