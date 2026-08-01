@@ -1042,6 +1042,97 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByRole("button", { name: "文件 ↗" })).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("projects the Stage 4 Browser Broker state into the global header and central viewer", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const opened = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 4,
+      pageGeneration: 8,
+      projectedUrl: "riff-app://projects/project-one?conversation=conversation-main",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: true,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    productClient.browserState = vi.fn(async () => opened);
+    productClient.browserOpen = vi.fn(async () => opened);
+    productClient.browserScreenshot = vi.fn(async (_conversationId, state) => ({
+      schemaVersion: 1 as const,
+      pageGeneration: state.pageGeneration,
+      contentType: "image/png" as const,
+      pngBase64: "iVBORw0KGgo=",
+    }));
+    productClient.browserBack = vi.fn(async () => ({
+      ...opened,
+      pageGeneration: 9,
+      projectedUrl: "riff-app://projects/project-one/history",
+      canGoBack: false,
+    }));
+    productClient.browserReload = vi.fn(async () => ({ ...opened, pageGeneration: 10 }));
+    render(<App client={productClient} />);
+
+    await waitFor(() => expect(screen.getByLabelText("页面地址"))
+      .toHaveTextContent("riff-app://projects/project-one?conversation=conversation-main"));
+    expect(screen.getByLabelText("受信状态")).toHaveTextContent("受信 Riff");
+    expect(await screen.findByRole("img", { name: "Baseline study 的受信浏览器页面观察" }))
+      .toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
+    expect(productClient.browserState).toHaveBeenCalledWith("conversation-main");
+    expect(productClient.browserOpen).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /click|type/iu })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "后退" }));
+    expect(productClient.browserBack).toHaveBeenCalledWith("conversation-main", opened);
+    await waitFor(() => expect(screen.getByLabelText("页面地址"))
+      .toHaveTextContent("riff-app://projects/project-one/history"));
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(productClient.browserReload).toHaveBeenCalled();
+  });
+
+  it("renews an expired Browser Broker observation only through explicit alias open", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const expired = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 4,
+      pageGeneration: 700,
+      projectedUrl: "riff-app://projects/project-one",
+      trustState: "none" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "expired" as const,
+      canGoBack: false,
+      canReload: false,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    const renewed = {
+      ...expired,
+      pageGeneration: 701,
+      trustState: "trusted_riff" as const,
+      recoveryState: "ready" as const,
+      canReload: true,
+      expiresAt: "2026-07-25T00:30:00.000Z",
+    };
+    productClient.browserState = vi.fn(async () => expired);
+    productClient.browserOpen = vi.fn(async () => renewed);
+    productClient.browserScreenshot = vi.fn(async (_conversationId, state) => ({
+      schemaVersion: 1 as const,
+      pageGeneration: state.pageGeneration,
+      contentType: "image/png" as const,
+      pngBase64: "iVBORw0KGgo=",
+    }));
+    render(<App client={productClient} />);
+
+    await waitFor(() => expect(productClient.browserOpen)
+      .toHaveBeenCalledWith("conversation-main", "riff-app"));
+    expect(productClient.browserScreenshot).toHaveBeenCalledWith("conversation-main", renewed);
+    expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff-app://projects/project-one");
+  });
+
   it("restores an explicit non-authoritative new-project draft after refresh", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/new");

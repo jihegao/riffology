@@ -4,7 +4,7 @@
 - Role: normative staged implementation contract
 - Scope: seven local-only PR stages for a Riffology-branded, OpenChamber-derived conversation shell with one controlled browser/file viewer
 - Source of truth: [`product-requirements.md`](product-requirements.md) for product behavior; merged code, tests, and Riff receipts for implementation state
-- Last reviewed: 2026-08-01
+- Last reviewed: 2026-08-02
 
 ## 1. Outcome and current status
 
@@ -125,6 +125,9 @@ Exit: the stable 1800×1180 region differs from the fixture by at most 1%; the
 1440×900, 390×844, and 200% reflow cases have no overflow.
 
 ### Stage 4 — Local Browser Broker observation
+
+Implementation contract and verification details:
+[`riffology-openchamber-stage-4.md`](riffology-openchamber-stage-4.md).
 
 - Add an independent Broker using isolated local Playwright Chromium.
 - Give each Conversation generation exactly one browser session.

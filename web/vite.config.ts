@@ -17,7 +17,7 @@ const productCsp = [
   "connect-src 'self'",
   `frame-src http://localhost:${visualBrokerPort}`,
   "font-src 'self'",
-  "img-src 'self'",
+  "img-src 'self' data:",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

@@ -105,6 +105,34 @@ export type ConversationSummary = Readonly<{
   updatedAt: string;
 }>;
 
+export type BrowserRecoveryState =
+  | "ready"
+  | "closed"
+  | "expired"
+  | "disconnected"
+  | "unavailable";
+
+export type BrowserSessionDto = Readonly<{
+  schemaVersion: 1;
+  conversationGeneration: number;
+  pageGeneration: number;
+  projectedUrl: string | null;
+  trustState: "trusted_riff" | "none";
+  controlMode: "observer";
+  remainingBudget: null;
+  recoveryState: BrowserRecoveryState;
+  canGoBack: boolean;
+  canReload: boolean;
+  expiresAt: string | null;
+}>;
+
+export type BrowserScreenshotDto = Readonly<{
+  schemaVersion: 1;
+  pageGeneration: number;
+  contentType: "image/png";
+  pngBase64: string;
+}>;
+
 export type ConversationMessage = Readonly<{
   id: string;
   ordinal: number;

@@ -554,6 +554,62 @@ describe("Product browser client", () => {
     });
   });
 
+  it("uses only projected aliases and generations for workbench Browser observation", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const state = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 3,
+      pageGeneration: 5,
+      projectedUrl: "riff-app://project",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-08-02T00:15:00.000Z",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      if (String(input).endsWith("/bootstrap")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-08-02T00:15:00.000Z",
+        }), { status: 201 });
+      }
+      if (String(input).includes("/screenshot?")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          pageGeneration: 5,
+          contentType: "image/png",
+          pngBase64: "iVBORw0KGgo=",
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify(state), { status: 200 });
+    }));
+    const client = new HttpProductClient();
+
+    const opened = await client.browserOpen("conversation / one", "riff-app");
+    await client.browserReload("conversation / one", opened);
+    await client.browserScreenshot("conversation / one", opened);
+
+    expect(calls[1]?.input).toBe(
+      "/api/conversations/conversation%20%2F%20one/browser/open",
+    );
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({ alias: "riff-app" });
+    expect(String(calls[1]?.init?.body)).not.toMatch(/url|host|port|token/iu);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+      conversationGeneration: 3,
+      pageGeneration: 5,
+    });
+    expect(calls[3]?.input).toContain(
+      "conversationGeneration=3&pageGeneration=5",
+    );
+  });
+
   it("derives the exact visual host page from the bootstrapped platform origin", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       schemaVersion: 1,
