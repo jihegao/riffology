@@ -96,3 +96,9 @@ loopback Server reported healthy version 1.18.11, projected the exact
 Provider discovery through the existing Riff adapter smoke. This closes the
 Stage 1 CLI/Server readiness mismatch without changing the existing Riff
 Product default-version contract.
+
+The runtime evidence is reproducible without Provider credentials:
+
+```sh
+bash scripts/check-opencode-1.18.11-runtime.sh
+```
