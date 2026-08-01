@@ -34,6 +34,7 @@ describe("safe renderer registry", () => {
       edges: [{ from: "a", to: "b", label: "produces" }],
     }} />);
     expect(screen.getByRole("table", { name: "Accessible connections for Flow" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Flow: Input reaches output." })).toBeInTheDocument();
   });
 
   it("reports a stable limit error without rendering an oversized table", () => {
@@ -75,6 +76,7 @@ describe("safe renderer registry", () => {
     expect(screen.getByRole("table", {
       name: "Accessible connections for Agent-chosen structure",
     })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Agent-chosen structure: A grouped projection." })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "code/flow.py" }));
     expect(onSourceReference).toHaveBeenCalledWith("code/flow.py");
   });

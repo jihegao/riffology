@@ -259,6 +259,29 @@ describe("dynamic Model workspace", () => {
     }
   });
 
+  it("reloads generated views when the owner workspace refreshes without a digest change", async () => {
+    const productClient = modelClient(null);
+    productClient.generatedViews = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(generatedSet(["Published class diagram"]));
+    const refresh = vi.fn(async () => {});
+    const rendered = render(<WorkspacePane
+      client={productClient}
+      workspace={modelWorkspace()}
+      refresh={refresh}
+    />);
+
+    expect(await screen.findByText("No generated views")).toBeInTheDocument();
+    rendered.rerender(<WorkspacePane
+      client={productClient}
+      workspace={modelWorkspace()}
+      refresh={refresh}
+    />);
+
+    expect(await screen.findByText("Published class diagram")).toBeInTheDocument();
+    expect(productClient.generatedViews).toHaveBeenCalledTimes(2);
+  });
+
   it("shows stale projections read-only and discards a late renderable after view selection", async () => {
     let resolveFirst!: (value: unknown) => void;
     const first = new Promise<unknown>((resolve) => { resolveFirst = resolve; });

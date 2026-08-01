@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 
 export type RendererResource =
   | Readonly<{ kind: "markdown"; title: string; text: string }>
@@ -203,6 +203,7 @@ const DiagramRenderer = ({
     <section className="product-renderer">
       <h3>{resource.title}</h3>
       <p>{resource.summary}</p>
+      <DiagramGraph resource={resource} />
       <div className="product-diagram-canvas" role="group" aria-label={resource.summary}>
         {(resource.groups ?? []).map((group) => (
           <section className="product-diagram-group" key={group.id} aria-label={group.label}>
@@ -299,6 +300,73 @@ const DiagramNode = ({
     />
   </article>
 );
+
+const DiagramGraph = ({
+  resource,
+}: Readonly<{ resource: Extract<RendererResource, { kind: "diagram" }> }>) => {
+  const markerId = useId();
+  const lanes = resource.groups?.map((group) => ({
+    ...group,
+    nodes: resource.nodes.filter((node) => node.groupId === group.id),
+  })).filter((group) => group.nodes.length > 0) ?? [];
+  const isSwimlane = lanes.length > 0;
+  const columns = isSwimlane
+    ? Math.max(1, ...lanes.map((lane) => lane.nodes.length))
+    : Math.min(3, Math.max(1, resource.nodes.length));
+  const positions = new Map(resource.nodes.map((node, index) => {
+    const laneIndex = lanes.findIndex((lane) => lane.id === node.groupId);
+    const nodeIndex = laneIndex < 0 ? index : lanes[laneIndex]!.nodes.indexOf(node);
+    return [node.id, {
+      x: isSwimlane ? 170 + nodeIndex * 220 : 120 + (index % columns) * 260,
+      y: isSwimlane ? 82 + laneIndex * 126 : 80 + Math.floor(index / columns) * 170,
+    }];
+  }));
+  const rows = isSwimlane ? lanes.length : Math.max(1, Math.ceil(resource.nodes.length / columns));
+  const width = Math.max(360, isSwimlane ? 170 + columns * 220 : columns * 260);
+  const height = Math.max(180, isSwimlane ? rows * 126 : rows * 170);
+  return (
+    <svg
+      className="product-diagram-graph"
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label={`${resource.title}: ${resource.summary}`}
+    >
+      <defs>
+        <marker id={markerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" />
+        </marker>
+      </defs>
+      {isSwimlane && lanes.map((lane, index) => (
+        <g className="product-diagram-lane" key={lane.id}>
+          <rect x="4" y={index * 126 + 6} width={width - 8} height="114" rx="10" />
+          <text x="16" y={index * 126 + 66}>{lane.label}</text>
+        </g>
+      ))}
+      {resource.edges.map((edge, index) => {
+        const from = positions.get(edge.from);
+        const to = positions.get(edge.to);
+        if (!from || !to) return null;
+        const midX = (from.x + to.x) / 2;
+        const midY = (from.y + to.y) / 2;
+        return (
+          <g className="product-diagram-edge" key={`${edge.from}:${edge.to}:${index}`}>
+            <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} markerEnd={`url(#${markerId})`} />
+            {edge.label && <text x={midX} y={midY - 7}>{edge.label}</text>}
+          </g>
+        );
+      })}
+      {resource.nodes.map((node) => {
+        const position = positions.get(node.id)!;
+        return (
+          <g className="product-diagram-graph-node" key={node.id} transform={`translate(${position.x - 96} ${position.y - 34})`}>
+            <rect width="192" height="68" rx="10" />
+            <text x="96" y="39" textAnchor="middle">{node.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
 
 const SourceReferences = ({
   references,

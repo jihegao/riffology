@@ -23,8 +23,9 @@ export type RendererDto =
       kind: "diagram";
       title: string;
       summary: string;
-      nodes: readonly Readonly<{ id: string; label: string }>[];
-      edges: readonly Readonly<{ from: string; to: string; label?: string }>[];
+      nodes: readonly Readonly<{ id: string; label: string; groupId?: string; sourceRefs?: readonly string[] }>[];
+      edges: readonly Readonly<{ from: string; to: string; label?: string; sourceRefs?: readonly string[] }>[];
+      groups?: readonly Readonly<{ id: string; label: string; sourceRefs?: readonly string[] }>[];
     }>
   | Readonly<{
       kind: "attachment";
@@ -172,6 +173,8 @@ const diagramDto = (title: string, value: unknown): RendererDto => {
     return Object.freeze({
       id: safeLabel(node.id, 200, ""),
       label: safeLabel(node.label, 4_096, ""),
+      ...(typeof node.groupId === "string" ? { groupId: safeLabel(node.groupId, 200, "") } : {}),
+      ...(safeReferences(node.sourceRefs) ? { sourceRefs: Object.freeze(node.sourceRefs) } : {}),
     });
   }) : [];
   const edges = Array.isArray(record.edges) ? record.edges.map((item) => {
@@ -180,11 +183,23 @@ const diagramDto = (title: string, value: unknown): RendererDto => {
       from: safeLabel(edge.from, 200, ""),
       to: safeLabel(edge.to, 200, ""),
       ...(typeof edge.label === "string" ? { label: safeLabel(edge.label, 4_096, "") } : {}),
+      ...(safeReferences(edge.sourceRefs) ? { sourceRefs: Object.freeze(edge.sourceRefs) } : {}),
+    });
+  }) : [];
+  const groups = Array.isArray(record.groups) ? record.groups.map((item) => {
+    const group = object(item);
+    return Object.freeze({
+      id: safeLabel(group.id, 200, ""),
+      label: safeLabel(group.label, 4_096, ""),
+      ...(safeReferences(group.sourceRefs) ? { sourceRefs: Object.freeze(group.sourceRefs) } : {}),
     });
   }) : [];
   if (nodes.length > 2_000 || edges.length > 4_000) limit("Diagram exceeds the renderer graph limit.");
   const ids = new Set(nodes.map((node) => node.id));
-  if (ids.size !== nodes.length || edges.some((edge) => !ids.has(edge.from) || !ids.has(edge.to))) {
+  const groupIds = new Set(groups.map((group) => group.id));
+  if (ids.size !== nodes.length || groupIds.size !== groups.length
+    || nodes.some((node) => node.groupId !== undefined && !groupIds.has(node.groupId))
+    || edges.some((edge) => !ids.has(edge.from) || !ids.has(edge.to))) {
     limit("Diagram node and edge identities are invalid.");
   }
   return Object.freeze({
@@ -193,8 +208,14 @@ const diagramDto = (title: string, value: unknown): RendererDto => {
     summary: safeLabel(record.summary, 8_000, "Declared diagram."),
     nodes: Object.freeze(nodes),
     edges: Object.freeze(edges),
+    ...(groups.length ? { groups: Object.freeze(groups) } : {}),
   });
 };
+
+const safeReferences = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.length <= 256
+  && value.every((reference) => typeof reference === "string" && reference.length <= 4_096
+    && !/[\u0000-\u001f\u007f]/u.test(reference));
 
 const csvRows = (text: string): string[][] => {
   const rows: string[][] = [];

@@ -805,6 +805,23 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
   gap: .65rem;
   margin: .8rem 0;
 }
+.product-diagram-graph {
+  display: block;
+  width: 100%;
+  max-height: 32rem;
+  min-height: 12rem;
+  overflow: visible;
+  border: 1px solid #c7d1cc;
+  border-radius: .65rem;
+  background: #f8fbf9;
+}
+.product-diagram-edge line { stroke: #47715f; stroke-width: 2; }
+.product-diagram-edge marker path { fill: #47715f; }
+.product-diagram-edge text { fill: #315447; font-size: 12px; text-anchor: middle; paint-order: stroke; stroke: #f8fbf9; stroke-width: 4px; stroke-linejoin: round; }
+.product-diagram-lane rect { fill: #edf4ef; stroke: #b9cbc0; stroke-dasharray: 5 4; }
+.product-diagram-lane text { fill: #315447; font-size: 12px; font-weight: 700; writing-mode: vertical-rl; }
+.product-diagram-graph-node rect { fill: #fff; stroke: #47715f; stroke-width: 1.5; }
+.product-diagram-graph-node text { fill: #183d31; font-size: 13px; font-weight: 650; }
 .product-diagram-group {
   display: grid;
   gap: .55rem;

@@ -103,7 +103,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     ["requestKey", "changes"],
   ),
   riff_publish_model_generated_views: definition(
-    "Atomically replace the current Model's bounded generated-view set.",
+    "Atomically replace the current Model's bounded generated-view set. For a graphical class or relationship view, use mediaType application/vnd.riff.diagram+json and a JSON payload with summary, nodes [{id,label}], and edges [{from,to,label?}]. Do not publish SVG or HTML: active content is kept opaque for safety.",
     {
       requestKey: { type: "string" },
       views: {
@@ -268,7 +268,7 @@ export class AgentMcpServer {
       const params = record(request.params);
       const name = typeof params.name === "string" ? params.name : "";
       if (!isAgentToolName(name) || !grant.allowedTools.has(name)) throw new AgentToolPermissionError("That Agent tool is not available in this scope.");
-      const input = record(params.arguments ?? {});
+      const input = normalizeToolInput(name, record(params.arguments ?? {}));
       assertToolInputCannotOverrideScope(input);
       validateInput(name, input);
       const result = await this.#executor.execute(grant, name, input);
@@ -329,6 +329,31 @@ function definition(description: string, properties: Record<string, unknown>, re
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AgentToolPermissionError("Agent tool input must be a JSON object.");
   return value as Record<string, unknown>;
+}
+
+/**
+ * Some OpenCode providers serialize an array-valued tool argument as its JSON
+ * text instead of decoding it before forwarding the MCP request. Accept that
+ * narrow wire-format variation here, then apply the normal bounded schema
+ * validation below. No other field or server-owned scope is reconstructed.
+ */
+function normalizeToolInput(
+  name: AgentToolName,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (name !== "riff_publish_model_generated_views" || typeof input.views !== "string") {
+    return input;
+  }
+  if (Buffer.byteLength(input.views, "utf8") > 16 * 1024 * 1024) {
+    throw new AgentToolPermissionError("Agent generated views are invalid.");
+  }
+  try {
+    const views = JSON.parse(input.views) as unknown;
+    if (!Array.isArray(views)) throw new Error("views must be an array");
+    return { ...input, views };
+  } catch {
+    throw new AgentToolPermissionError("Agent generated views are invalid.");
+  }
 }
 
 function validateInput(name: AgentToolName, input: Record<string, unknown>): void {

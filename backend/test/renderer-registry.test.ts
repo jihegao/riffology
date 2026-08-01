@@ -54,6 +54,15 @@ test("chart and diagram renderers require bounded declared structures", () => {
   assert.equal(diagram.kind, "diagram");
   if (diagram.kind === "diagram") assert.equal(diagram.edges[0]?.label, "produces");
 
+  const grouped = render("application/vnd.riff.diagram+json", JSON.stringify({
+    summary: "A grouped process.",
+    groups: [{ id: "lane", label: "Model scheduling" }],
+    nodes: [{ id: "a", label: "Input", groupId: "lane" }],
+    edges: [],
+  }));
+  assert.equal(grouped.kind, "diagram");
+  if (grouped.kind === "diagram") assert.equal(grouped.nodes[0]?.groupId, "lane");
+
   assert.throws(
     () => render("application/vnd.riff.diagram+json", JSON.stringify({
       nodes: [{ id: "a", label: "Input" }],

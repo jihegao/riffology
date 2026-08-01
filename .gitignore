@@ -10,7 +10,13 @@ test-results/
 __pycache__/
 *.py[cod]
 .venv/
-outputs/
+outputs/*
+!outputs/model-design/
+outputs/model-design/*
+!outputs/model-design/.gitkeep
+!outputs/simulation-replay/
+outputs/simulation-replay/*
+!outputs/simulation-replay/.gitkeep
 workspaces/
 .riff-workspaces/
 .riff-product/

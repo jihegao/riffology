@@ -122,7 +122,7 @@ function ModelWorkspace({
   useEffect(() => {
     void loadAuxiliary();
     return () => { auxiliaryRequest.current += 1; };
-  }, [loadAuxiliary, workspace.digest]);
+  }, [loadAuxiliary, workspace]);
 
   const generatedViews = generatedState.key === capabilityKey
     ? generatedState.value

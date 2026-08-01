@@ -37,6 +37,58 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
 });
 
+test("generated-view publication accepts an OpenCode JSON-stringified views array", async () => {
+  let received: Record<string, unknown> | undefined;
+  const server = new AgentMcpServer({
+    async execute(_grant, _tool, input) {
+      received = input;
+      return { ok: true };
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_model",
+    owner: { kind: "model", id: "model_a" },
+    turnId: "turn_views",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "model", id: "model_a" }),
+  });
+  const views = [{
+    id: "view_class_diagram",
+    title: "Class diagram",
+    mediaType: "image/svg+xml",
+    payload: "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    sourceFileIds: ["file_model_code"],
+  }];
+
+  const response = await server.handle(capability, call(
+    "riff_publish_model_generated_views",
+    { requestKey: "publish_class_diagram", views: JSON.stringify(views) },
+  ));
+
+  assert.equal((response?.result as any).isError, undefined, JSON.stringify(response));
+  assert.deepEqual(received?.views, views);
+});
+
+test("generated-view publication rejects malformed serialized views before execution", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({ async execute() { calls += 1; return { ok: true }; } });
+  const capability = server.grant({
+    conversationId: "conversation_model",
+    owner: { kind: "model", id: "model_a" },
+    turnId: "turn_invalid_views",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "model", id: "model_a" }),
+  });
+
+  const response = await server.handle(capability, call(
+    "riff_publish_model_generated_views",
+    { requestKey: "invalid_views", views: "{not-json}" },
+  ));
+
+  assert.equal((response?.result as any).isError, true);
+  assert.equal(calls, 0);
+});
+
 test("screenshot observation is returned as bounded MCP image content", async () => {
   const server = new AgentMcpServer({
     async execute() {
