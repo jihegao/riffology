@@ -463,6 +463,47 @@ def test_same_crew_maintenance_continues_after_overdue_repair() -> None:
     assert final["operating_count"] == 1
 
 
+def test_failure_supersedes_queued_scheduled_order_and_avoids_duplicate_maintenance() -> None:
+    module = _aircraft_module()
+    fixture = module.ScenarioFixture(
+        maintenance_due_times_days={"aircraft-0001": [0.1]},
+        failure_times_days={"aircraft-0001": [0.2, 10.0]},
+        repair_durations_days=[0.5],
+        scheduled_durations_days=[0.25],
+    )
+    model = module.AircraftSupportModel(
+        parameters=_parameters(aircraft_count=1, part_initial_stock=2),
+        horizon_days=2,
+        warmup_days=0,
+        seed=2,
+        scenario_fixture=fixture,
+    )
+    events = _mechanism_events(_run_to_horizon(model))
+    superseded = [e for e in events if e["event_type"] == "request_superseded"]
+    assert len(superseded) == 1
+    assert superseded[0]["sim_time_days"] == pytest.approx(0.2)
+    assert superseded[0]["work_order_id"] == "work-00000001"
+    assert superseded[0]["payload"]["request_kind"] == "scheduled"
+    assert model.work_orders["work-00000001"].status is module.WorkStatus.SUPERSEDED
+    failure = [e for e in events if e["event_type"] == "failure_occurred"]
+    assert superseded[0]["sequence"] > failure[0]["sequence"]
+    corrective_queued = [e for e in events if e["event_type"] == "request_queued" and e["work_order_id"] == "work-00000002"]
+    assert len(corrective_queued) == 1
+    assert superseded[0]["sequence"] < corrective_queued[0]["sequence"]
+    started = [e for e in events if e["event_type"] == "maintenance_started"]
+    assert len(started) == 1
+    assert started[0]["payload"]["same_crew"] is True
+    stale_assigned = [e for e in events if e["event_type"] == "team_assigned" and e["work_order_id"] == "work-00000001"]
+    stale_started = [e for e in events if e["event_type"] == "maintenance_started" and e["work_order_id"] == "work-00000001"]
+    assert stale_assigned == []
+    assert stale_started == []
+    final = model.snapshot()
+    assert final["maintenance_count"] == 1
+    assert final["repair_count"] == 1
+    assert final["operating_count"] == 1
+    assert final["scheduled_queue_length"] == 0
+
+
 def test_same_crew_continuation_with_no_free_hangar_queues_and_recovers() -> None:
     module = _aircraft_module()
     fixture = module.ScenarioFixture(

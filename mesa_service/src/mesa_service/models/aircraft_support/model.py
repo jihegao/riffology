@@ -563,7 +563,14 @@ class AircraftSupportModel(mesa.Model):
         if self._in_measurement_origin(self.sim_time_days):
             self.failure_count += 1
             self._open_corrective_waits[domain["event_id"]] = self.sim_time_days
-        self._new_order(RequestKind.CORRECTIVE, aircraft, self.sim_time_days, domain["event_id"])
+        planned = self.work_orders.get(aircraft.active_planned_order_id or "")
+        if planned and planned.status in {WorkStatus.QUEUED, WorkStatus.ASSIGNED}:
+            planned.status = WorkStatus.SUPERSEDED
+            self._emit("request_superseded", PHASE_REQUEST_TRIGGER, aircraft_id=aircraft.aircraft_id, work_order_id=planned.work_order_id, payload={"request_kind": "scheduled"})
+            aircraft.active_planned_order_id = None
+        corrective = self._new_order(RequestKind.CORRECTIVE, aircraft, self.sim_time_days, domain["event_id"])
+        if planned and planned.status is WorkStatus.SUPERSEDED:
+            planned.superseded_by_order_id = corrective.work_order_id
         self._ensure_dispatch()
 
     def _new_order(self, request_kind: RequestKind, aircraft: AircraftAgent, requested_at: float, source_event_id: str, *, correlation_id: str | None = None, emit_queued: bool = True) -> WorkOrder:
@@ -636,6 +643,8 @@ class AircraftSupportModel(mesa.Model):
         while self._scheduled_queue:
             _, _, order_id = heapq.heappop(self._scheduled_queue)
             order = self.work_orders[order_id]
+            if order.status is WorkStatus.SUPERSEDED:
+                continue
             if order.status is WorkStatus.QUEUED:
                 aircraft = self.aircraft[order.aircraft_id]
                 if aircraft.state is not AircraftState.OPERATING:
