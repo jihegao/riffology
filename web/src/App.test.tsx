@@ -209,7 +209,10 @@ const client = (): ProductClient => ({
 });
 
 describe("Stage 4 Product entry", () => {
-  afterEach(() => history.replaceState({}, "", "/"));
+  afterEach(() => {
+    history.replaceState({}, "", "/");
+    sessionStorage.clear();
+  });
 
   it("renders separate Model and Project collections with all four entry types", async () => {
     render(<App client={client()} />);
@@ -967,5 +970,65 @@ describe("Stage 4 Product entry", () => {
       oldRequestKey: "turn-old",
       newRequestKey: expect.any(String),
     }));
+  });
+
+  it("keeps the Riffology Stage 2 workbench on a non-default route", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    render(<App client={client()} />);
+
+    expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
+    expect(screen.getByRole("navigation", { name: "项目工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新项目" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "＋ 新会话" })).toBeEnabled();
+    expect(screen.getByRole("complementary", { name: "项目对话" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "当前项目工作区" })).toBeInTheDocument();
+    expect(screen.queryByText("Terminal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Share")).not.toBeInTheDocument();
+  });
+
+  it("restores an explicit non-authoritative new-project draft after refresh", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/new");
+    const { unmount } = render(<App client={client()} />);
+
+    const draft = await screen.findByRole("textbox", { name: "项目目标" });
+    await user.type(draft, "比较两种维修队列配置");
+    await user.click(screen.getByRole("button", { name: "保存引导草稿" }));
+    expect(screen.getAllByText("比较两种维修队列配置")).toHaveLength(2);
+    expect(screen.getByText(/不是 Riff Model \/ Project 权威数据/u)).toBeInTheDocument();
+
+    unmount();
+    render(<App client={client()} />);
+    expect(await screen.findByDisplayValue("比较两种维修队列配置")).toBeInTheDocument();
+  });
+
+  it("fails the workbench composer and new-session action closed when Provider is read-only", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.providers = vi.fn(async () => ({
+      mode: "read_only" as const,
+      reason: "opencode_unavailable" as const,
+      providerModels: [] as const,
+    }));
+    productClient.conversationBundle = vi.fn(async () => ({
+      conversation: { ...workspace.conversations[0], sessionState: "read_only" as const },
+      messages: [{
+        id: "message-existing",
+        ordinal: 1,
+        role: "assistant" as const,
+        status: "complete" as const,
+        messageKind: "conversation" as const,
+        text: "Existing durable history",
+        createdAt: "2026-07-25T00:00:00.000Z",
+        updatedAt: "2026-07-25T00:00:00.000Z",
+      }],
+      attachments: [], documents: [], skillUses: [], actions: [],
+    }));
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("Existing durable history")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "＋ 新会话" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getAllByText(/provider is unavailable/u).length).toBeGreaterThan(0);
   });
 });

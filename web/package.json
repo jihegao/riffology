@@ -12,6 +12,7 @@
     "test:e2e": "npm run test:e2e:a4-2 && npm run test:e2e:a4-3 && npm run test:e2e:a4-4 && npm run test:e2e:a4-5 && npm run test:e2e:a4-6 && npm run test:e2e:a3 && npm run test:e2e:a3-2b && npm run test:e2e:a3-2c4",
     "test:e2e:product-entry": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test",
     "test:e2e:a4-2": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-home-shell.config.ts",
+    "test:e2e:riffology-stage2": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.riffology-stage2.config.ts && env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY A4_3_WEB_PORT=8804 A4_3_PLATFORM_PORT=8805 NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-conversation.config.ts --grep 'Riffology Stage 2'",
     "test:e2e:a4-3": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-conversation.config.ts",
     "test:e2e:a4-4": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-workspace.config.ts",
     "test:e2e:a4-5": "env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY NO_PROXY=127.0.0.1,localhost,::1,[::1] playwright test --config playwright.a4-recovery.config.ts",

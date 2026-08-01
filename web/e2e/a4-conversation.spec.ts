@@ -1,5 +1,109 @@
 import { expect, test } from "@playwright/test";
 
+test("Riffology Stage 2 creates, switches, and refreshes bound project Conversations", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  const projectHref = await page.getByRole("link", { name: "Open Project" }).first()
+    .getAttribute("href");
+  expect(projectHref).toMatch(/^\/projects\//u);
+  await page.goto(`/workbench${projectHref}`);
+
+  await createRiffologyConversation(page, "队列分析 A");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("记住 alpha 队列");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByLabel("Conversation messages")
+    .getByText(/retained: 记住 alpha 队列/u)).toBeVisible();
+
+  await createRiffologyConversation(page, "队列分析 B");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("记住 beta 队列");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByLabel("Conversation messages")
+    .getByText(/retained: 记住 beta 队列/u)).toBeVisible();
+
+  await page.getByRole("link", { name: "队列分析 A" }).click();
+  await expect(page).toHaveURL(/\/workbench\/projects\/[^?]+\?conversation=/u);
+  await expect(page.getByText("记住 alpha 队列", { exact: true })).toBeVisible();
+  const selectedUrl = page.url();
+  await page.reload();
+  await expect(page).toHaveURL(selectedUrl);
+  await expect(page.getByRole("link", { name: "队列分析 A" }))
+    .toHaveAttribute("aria-current", "page");
+  await expect(page.getByText("记住 alpha 队列", { exact: true })).toBeVisible();
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  const scaled = await page.evaluate(() => {
+    const composer = document.querySelector<HTMLElement>(".product-composer-dock")!;
+    const rail = document.querySelector<HTMLElement>(".riffology-project-rail")!;
+    const viewport = window.visualViewport;
+    return {
+      scale: viewport?.scale,
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      composerVisible: composer.getBoundingClientRect().height > 0,
+      railVisible: rail.getBoundingClientRect().width > 0,
+    };
+  });
+  expect(scaled.scale).toBe(2);
+  expect(scaled.scrollWidth).toBeLessThanOrEqual(scaled.clientWidth);
+  expect(scaled.composerVisible).toBe(true);
+  expect(scaled.railVisible).toBe(true);
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("complementary", { name: "项目对话" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "当前项目工作区" })).toBeHidden();
+  const mobileFit = await page.evaluate(() => {
+    const composer = document.querySelector<HTMLElement>(".product-composer-dock")!;
+    return {
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      composerBottom: Math.round(composer.getBoundingClientRect().bottom),
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(mobileFit.scrollWidth).toBeLessThanOrEqual(mobileFit.clientWidth);
+  expect(mobileFit.composerBottom).toBeLessThanOrEqual(mobileFit.viewportHeight);
+  await page.screenshot({
+    path: testInfo.outputPath("riffology-stage2-live-conversation-390x844.png"),
+    fullPage: false,
+  });
+
+  const assistantCount = await page.getByText(/^Assistant$/u).count();
+  await page.getByRole("textbox", { name: "Message", exact: true })
+    .fill("[fixture:provider-unavailable]");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Agent: read only", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await expect(page.getByText(/^Assistant$/u)).toHaveCount(assistantCount);
+});
+
+test("Riffology Stage 2 projects live tool and permission cards in the conversation rail", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1800, height: 1180 });
+  await page.goto("/");
+  const projectHref = await page.getByRole("link", { name: "Open Project" }).first()
+    .getAttribute("href");
+  await page.goto(`/workbench${projectHref}`);
+  await createRiffologyConversation(page, "工具与授权");
+  await page.getByLabel("Agent for this turn").selectOption("planner");
+  await page.getByRole("textbox", { name: "Message", exact: true })
+    .fill("[fixture:native-controls]");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByText("Agent: waiting for user")).toBeVisible();
+  await expect(page.getByText("Riff inspect workspace")).toBeVisible();
+  await expect(page.getByText("Workspace inspected")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Allow once & Resume" })).toBeVisible();
+  await page.getByRole("region", { name: "Agent runtime controls" }).scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath("riffology-stage2-tool-permission-1800x1180.png"),
+    fullPage: false,
+  });
+});
+
 test("A4-3 Conversations persist independently and fail read-only without fabricated replies", async ({
   page,
 }, testInfo) => {
@@ -312,6 +416,17 @@ const createConversation = async (
   await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("link", { name })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("link", { name })).toBeFocused();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+};
+
+const createRiffologyConversation = async (
+  page: import("@playwright/test").Page,
+  name: string,
+): Promise<void> => {
+  await page.getByRole("button", { name: "＋ 新会话" }).click();
+  await page.getByRole("dialog", { name: "新会话" }).getByLabel("Name").fill(name);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByRole("link", { name })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
 };
 

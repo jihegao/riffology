@@ -163,6 +163,9 @@ A4-6 revision-scoped evidence is retained through the stable
 - [`riffology-openchamber-stage-1-baseline.md`](riffology-openchamber-stage-1-baseline.md):
   Stage 1 design digest, reproducible validation, upstream/toolchain tuple,
   disabled-surface contract, and required fork-license/delta ledger.
+- [`riffology-openchamber-stage-2.md`](riffology-openchamber-stage-2.md):
+  non-default Riffology shell and Conversation-area implementation boundary,
+  client-only unbound workspace projection, and focused browser evidence.
 - [`milestone-a1-obsolete-state-removal-plan.md`](milestone-a1-obsolete-state-removal-plan.md):
   audited boundary between later tracked-code retirement and protected local
   state; it does not authorize deletion.

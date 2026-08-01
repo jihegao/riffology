@@ -37,12 +37,20 @@ export function ConversationPane({
   ownerId,
   selectedConversationId,
   onOwnerChanged,
+  presentation = "product",
+  ownerName,
+  navigateConversation,
+  conversationHref,
 }: Readonly<{
   client: ProductClient;
   ownerKind: OwnerKind;
   ownerId: string;
   selectedConversationId?: string;
   onOwnerChanged?: () => Promise<void> | void;
+  presentation?: "product" | "riffology";
+  ownerName?: string;
+  navigateConversation?: (conversationId?: string) => void;
+  conversationHref?: (conversationId: string) => string;
 }>) {
   const [collections, setCollections] =
     useState<ConversationCollections>(emptyCollections);
@@ -180,7 +188,8 @@ export function ConversationPane({
     selectedIdRef.current = conversationId;
     setBundle(undefined);
     setReadOnlyReason(undefined);
-    navigateProduct(workspaceHref(ownerKind, ownerId, conversationId));
+    if (navigateConversation) navigateConversation(conversationId);
+    else navigateProduct(workspaceHref(ownerKind, ownerId, conversationId));
   };
   const focusConversationNavigation = (conversationId?: string) => {
     requestAnimationFrame(() => {
@@ -216,6 +225,30 @@ export function ConversationPane({
   return (
     <div className="product-conversation-content" ref={paneRef}>
       <div className="product-conversation-toolbar" data-testid="conversation-toolbar">
+        {presentation === "riffology" && (
+          <div className="riffology-conversation-heading">
+            <div>
+              <strong>{selected?.name ?? ownerName ?? "项目对话"}</strong>
+              <span>{selected
+                ? `${selected.provider.providerId} · ${selected.provider.modelId}`
+                : "选择或创建会话"}</span>
+            </div>
+            <NewConversationForm
+              client={client}
+              ownerKind={ownerKind}
+              ownerId={ownerId}
+              providers={providers}
+              compact
+              disabled={providers?.mode === "read_only"}
+              onCreated={(conversation) => {
+                void refreshCollections().then(() => {
+                  selectConversation(conversation.id);
+                  focusConversationNavigation(conversation.id);
+                });
+              }}
+            />
+          </div>
+        )}
         <div className={`product-agent-status product-agent-status-${status}`} role="status">
           <strong>Agent: {status.replaceAll("_", " ")}</strong>
           <span>{statusDescription(status)}</span>
@@ -230,8 +263,9 @@ export function ConversationPane({
           conversations={collections.active}
           selectedId={selected?.id}
           onSelect={selectConversation}
+          hrefFor={conversationHref}
         />
-        <NewConversationForm
+        {presentation === "product" && <NewConversationForm
           client={client}
           ownerKind={ownerKind}
           ownerId={ownerId}
@@ -242,7 +276,7 @@ export function ConversationPane({
               focusConversationNavigation(conversation.id);
             });
           }}
-        />
+        />}
       </div>
       <div
         className="product-conversation-scroll-region"
@@ -264,7 +298,8 @@ export function ConversationPane({
                 selectedIdRef.current = undefined;
                 setBundle(undefined);
                 setReadOnlyReason(undefined);
-                navigateProduct(workspaceHref(ownerKind, ownerId));
+                if (navigateConversation) navigateConversation();
+                else navigateProduct(workspaceHref(ownerKind, ownerId));
                 focusConversationNavigation();
               } else {
                 await refreshConversation(activeBundle.conversation.id);
@@ -283,7 +318,7 @@ export function ConversationPane({
             onError={setError}
           />
           <Transcript bundle={activeBundle} runtime={runtime} />
-          <AttachmentForm
+          {presentation === "product" && <AttachmentForm
             client={client}
             conversationId={activeBundle.conversation.id}
             onUploaded={() => {
@@ -294,7 +329,7 @@ export function ConversationPane({
                 }
               });
             }}
-          />
+          />}
           </>
         )}
         <RecoveryLists
@@ -368,10 +403,12 @@ function ConversationList({
   conversations,
   selectedId,
   onSelect,
+  hrefFor,
 }: Readonly<{
   conversations: readonly ConversationSummary[];
   selectedId?: string;
   onSelect: (id: string) => void;
+  hrefFor?: (id: string) => string;
 }>) {
   if (conversations.length === 0) {
     return <p className="product-empty">No active Conversations yet.</p>;
@@ -382,11 +419,8 @@ function ConversationList({
         {conversations.map((conversation) => (
           <li key={conversation.id}>
             <a
-              href={workspaceHref(
-                conversation.owner.kind,
-                conversation.owner.id,
-                conversation.id,
-              )}
+              href={hrefFor?.(conversation.id) ?? workspaceHref(
+                conversation.owner.kind, conversation.owner.id, conversation.id)}
               aria-current={conversation.id === selectedId ? "page" : undefined}
               onClick={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey
@@ -410,12 +444,16 @@ function NewConversationForm({
   ownerId,
   providers,
   onCreated,
+  compact = false,
+  disabled = false,
 }: Readonly<{
   client: ProductClient;
   ownerKind: OwnerKind;
   ownerId: string;
   providers?: ProviderDiscovery;
   onCreated: (conversation: ConversationSummary) => void;
+  compact?: boolean;
+  disabled?: boolean;
 }>) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -463,9 +501,10 @@ function NewConversationForm({
         ref={triggerRef}
         type="button"
         className="product-secondary product-new-conversation"
+        disabled={disabled}
         onClick={() => setOpen(true)}
       >
-        New Conversation
+        {compact ? "＋ 新会话" : "New Conversation"}
       </button>
       {open && (
         <div
@@ -505,7 +544,7 @@ function NewConversationForm({
               className="product-conversation-form"
               onSubmit={(event) => void submit(event)}
             >
-              <strong id={titleId}>New Conversation</strong>
+              <strong id={titleId}>{compact ? "新会话" : "New Conversation"}</strong>
               <label>
                 Name
                 <input
@@ -871,11 +910,14 @@ function InteractionResponse({
     && submittedAnswers.length === interaction.questions.length
     && submittedAnswers.every((answer) => answer.some((value) => value.trim()));
   return (
-    <form className="product-interaction-card" onSubmit={(event) => {
-      event.preventDefault();
-      if (interaction.kind === "permission") void onPermission(decision);
-      else if (validAnswers) void onQuestion({ answers: submittedAnswers });
-    }}>
+    <form
+      className={`product-interaction-card product-interaction-card-${interaction.kind}`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (interaction.kind === "permission") void onPermission(decision);
+        else if (validAnswers) void onQuestion({ answers: submittedAnswers });
+      }}
+    >
       <span className="product-interaction-kind">
         {interaction.kind === "permission" ? "Permission required" : "Question"}
       </span>
