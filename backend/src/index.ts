@@ -28,6 +28,7 @@ try {
     a3PreinstalledWindRepositoryRoot: repositoryRoot,
     repositoryRoot,
     staticWebRoot,
+    staticLegacyProductRoutes: process.env.RIFF_LEGACY_PRODUCT_UI === "true",
     recoveryOnlyOnFailure: true,
     promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
   });
@@ -44,6 +45,7 @@ try {
     },
     repositoryRoot,
     staticWebRoot,
+    staticLegacyProductRoutes: process.env.RIFF_LEGACY_PRODUCT_UI === "true",
   });
 }
 

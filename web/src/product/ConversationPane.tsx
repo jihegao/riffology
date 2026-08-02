@@ -397,6 +397,10 @@ const OWNER_MUTATION_ACTIONS = new Set([
   "attachment_adopt",
   "experiment_configuration_update",
   "model_files_mutate",
+  "run_start",
+  "run_cancel",
+  "run_trash",
+  "run_restore",
 ]);
 
 function ConversationList({

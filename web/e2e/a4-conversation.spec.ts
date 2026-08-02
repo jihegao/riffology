@@ -4,10 +4,11 @@ test("Riffology Stage 2 creates, switches, and refreshes bound project Conversat
   page,
 }, testInfo) => {
   await page.goto("/");
-  const projectHref = await page.getByRole("link", { name: "Open Project" }).first()
-    .getAttribute("href");
-  expect(projectHref).toMatch(/^\/projects\//u);
-  await page.goto(`/workbench${projectHref}`);
+  const projectHref = await page.locator(
+    '.riffology-project-rail a[href^="/workbench/projects/"]',
+  ).first().getAttribute("href");
+  expect(projectHref).toMatch(/^\/workbench\/projects\//u);
+  await page.goto(projectHref!);
 
   await createRiffologyConversation(page, "队列分析 A");
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("记住 alpha 队列");
@@ -84,9 +85,10 @@ test("Riffology Stage 2 projects live tool and permission cards in the conversat
 }, testInfo) => {
   await page.setViewportSize({ width: 1800, height: 1180 });
   await page.goto("/");
-  const projectHref = await page.getByRole("link", { name: "Open Project" }).first()
-    .getAttribute("href");
-  await page.goto(`/workbench${projectHref}`);
+  const projectHref = await page.locator(
+    '.riffology-project-rail a[href^="/workbench/projects/"]',
+  ).first().getAttribute("href");
+  await page.goto(projectHref!);
   await createRiffologyConversation(page, "工具与授权");
   await page.getByLabel("Agent for this turn").selectOption("planner");
   await page.getByRole("textbox", { name: "Message", exact: true })

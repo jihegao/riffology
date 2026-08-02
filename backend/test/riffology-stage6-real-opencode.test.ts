@@ -52,7 +52,7 @@ test(`opt-in Riffology Stage 6 completes bootstrap, multi-turn Model/Project, an
   assert.equal(health.version, expectedVersion);
   const [providerId, ...modelParts] = liveModel.split("/");
   const modelId = modelParts.join("/");
-  const adapter = new HttpOpenCodeAdapter({
+  let adapter = new HttpOpenCodeAdapter({
     baseUrl,
     workdir: root,
     expectedVersion,
@@ -103,13 +103,13 @@ test(`opt-in Riffology Stage 6 completes bootstrap, multi-turn Model/Project, an
     stage: string;
     restartRecoveryActive: boolean;
   }> = [];
-  const observedAdapter = new Proxy(adapter, {
-    get(target, property) {
-      const value = Reflect.get(target, property, target);
+  const observeAdapter = (target: HttpOpenCodeAdapter) => new Proxy(target, {
+    get(adapterTarget, property) {
+      const value = Reflect.get(adapterTarget, property, adapterTarget);
       if (typeof value !== "function") return value;
       return async (...args: unknown[]) => {
         lastAdapterStage = String(property);
-        try { return await value.apply(target, args); }
+        try { return await value.apply(adapterTarget, args); }
         catch (error) {
           lastAdapterFailureCode = typeof (error as any)?.code === "string"
             ? (error as any).code : "non_api_error";
@@ -123,6 +123,7 @@ test(`opt-in Riffology Stage 6 completes bootstrap, multi-turn Model/Project, an
       };
     },
   });
+  let observedAdapter = observeAdapter(adapter);
   let service!: AgentWorkspaceService;
   const endpoint = await mcpEndpoint((capability, request) =>
     service.handleAgentMcp(capability, request));
@@ -268,8 +269,21 @@ test(`opt-in Riffology Stage 6 completes bootstrap, multi-turn Model/Project, an
   runtime = new AgentTurnRuntime(
     store, new SimulationSkillCatalog(skillRoot, []), { now: () => NOW },
   );
+  // A backend restart discards adapter-local MCP registrations and runtime
+  // boundaries while the separately managed OpenCode server keeps its own
+  // sessions and process-global MCP registry.
+  adapter = new HttpOpenCodeAdapter({
+    baseUrl,
+    workdir: root,
+    expectedVersion,
+    model: liveModel,
+    allowedProviders: [providerId],
+    requestTimeoutMs: 180_000,
+  });
+  assert.equal((await adapter.initialize()).status, "ready");
+  observedAdapter = observeAdapter(adapter);
   service = new AgentWorkspaceService(
-    store, adapter, () => NOW, undefined, runtime,
+    store, observedAdapter, () => NOW, undefined, runtime,
     (capability) => `${endpoint.origin}/a2/mcp?cap=${encodeURIComponent(capability)}`,
   );
   const restoredBinding = await service.workspaceBinding("stage6_live_workspace");

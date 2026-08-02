@@ -22,7 +22,8 @@ const createUnboundWorkspaceHref = () =>
   `/workbench/new/${crypto.randomUUID()}`;
 
 const readWorkbenchRoute = (): WorkbenchRoute => {
-  if (window.location.pathname === "/workbench"
+  if (window.location.pathname === "/"
+    || window.location.pathname === "/workbench"
     || window.location.pathname === "/workbench/"
     || window.location.pathname === "/workbench/new") {
     const href = createUnboundWorkspaceHref();
@@ -92,6 +93,8 @@ export function RiffologyWorkbenchApp({
   const [error, setError] = useState<string>();
   const [filesOpen, setFilesOpen] = useState(() => !compactWorkbench());
   const [browser, setBrowser] = useState<BrowserSessionDto>();
+  const [browserConversationId, setBrowserConversationId] = useState<string>();
+  const [browserLoadRevision, setBrowserLoadRevision] = useState(0);
   const [browserScreenshot, setBrowserScreenshot] = useState<string>();
   const [browserError, setBrowserError] = useState<string>();
   const [browserBusy, setBrowserBusy] = useState(false);
@@ -101,23 +104,46 @@ export function RiffologyWorkbenchApp({
   const browserRequestRef = useRef(0);
   const browserStateRef = useRef<BrowserSessionDto | undefined>(undefined);
   const browserBusyRef = useRef(false);
+  const loadEpochRef = useRef(0);
   const fileToggleRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
+    const epoch = ++loadEpochRef.current;
+    const current = () => epoch === loadEpochRef.current;
     setError(undefined);
     try {
       const nextRecovery = await client.recoveryStatus();
+      if (!current()) return;
       setRecovery(nextRecovery);
-      if (nextRecovery.state !== "ready") return;
+      if (nextRecovery.state !== "ready") {
+        // Recovery is an authority boundary, not a visual overlay. Never leave
+        // a prior ready owner's rail, browser image, or binding projected.
+        setHome(undefined);
+        setProviders(undefined);
+        setWorkspace(undefined);
+        setWorkspaceBinding(undefined);
+        setBrowser(undefined);
+        setBrowserConversationId(undefined);
+        browserStateRef.current = undefined;
+        browserRequestRef.current += 1;
+        setBrowserBusy(false);
+        setBrowserScreenshot(undefined);
+        setBrowserError(undefined);
+        return;
+      }
       const [nextHome, nextProviders] = await Promise.all([
         client.home(), client.providers(),
       ]);
+      if (!current()) return;
       setHome(nextHome);
       setProviders(nextProviders);
       if (route.page === "project" || route.page === "model") {
         const ownerId = route.page === "project" ? route.projectId : route.modelId;
-        setWorkspace(await client.workspace(route.page, ownerId));
+        const nextWorkspace = await client.workspace(route.page, ownerId);
+        if (!current()) return;
+        setWorkspace(nextWorkspace);
         setWorkspaceBinding(undefined);
+        setBrowserLoadRevision(epoch);
       } else if (route.page === "new") {
         let binding: WorkspaceBinding;
         try {
@@ -129,6 +155,7 @@ export function RiffologyWorkbenchApp({
             workspaceKey: route.workspaceKey,
           })).binding;
         }
+        if (!current()) return;
         setWorkspaceBinding(binding);
         if (binding.state === "bound" && binding.owner) {
           navigateWorkbench(workbenchOwnerHref(
@@ -141,7 +168,9 @@ export function RiffologyWorkbenchApp({
         setWorkspaceBinding(undefined);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The workbench could not be loaded.");
+      if (current()) {
+        setError(cause instanceof Error ? cause.message : "The workbench could not be loaded.");
+      }
     }
   }, [client, route]);
 
@@ -163,6 +192,31 @@ export function RiffologyWorkbenchApp({
   }, [load]);
 
   useEffect(() => {
+    if (route.page !== "project" || !workspace || !("runs" in workspace)
+      || !workspace.runs.some((run) => ["queued", "running", "cancelling"].includes(run.status))) {
+      return;
+    }
+    let cancelled = false;
+    let polling = false;
+    const authorityEpoch = loadEpochRef.current;
+    const poll = () => {
+      if (polling) return;
+      polling = true;
+      void client.workspace("project", route.projectId).then((next) => {
+        if (!cancelled && authorityEpoch === loadEpochRef.current) setWorkspace(next);
+      }).catch(() => {
+        // The next authoritative recovery/load transition owns the visible
+        // error. Never synthesize a terminal Run or output from a poll failure.
+      }).finally(() => { polling = false; });
+    };
+    const timer = window.setInterval(poll, 750);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client, route, workspace]);
+
+  useEffect(() => {
     const query = globalThis.matchMedia?.("(max-width: 760px)");
     if (!query) return;
     const closeForCompactLayout = () => { if (query.matches) setFilesOpen(false); };
@@ -178,11 +232,18 @@ export function RiffologyWorkbenchApp({
       ? home?.models.find((model) => model.id === route.modelId)
       : undefined;
   const ownerWorkspace = ownerRoute && workspace?.owner.kind === ownerRoute.page
+    && workspace.owner.id === (ownerRoute.page === "project"
+      ? ownerRoute.projectId : ownerRoute.modelId)
     ? workspace : undefined;
   const currentConversation = ownerRoute && ownerWorkspace
     ? ownerWorkspace.conversations.find((item) => item.id === ownerRoute.conversationId)
       ?? ownerWorkspace.conversations[0]
     : undefined;
+  const browserMatchesConversation = Boolean(currentConversation
+    && browserConversationId === currentConversation.id);
+  const projectedBrowser = browserMatchesConversation ? browser : undefined;
+  const projectedBrowserScreenshot = browserMatchesConversation
+    ? browserScreenshot : undefined;
 
   const browserScreenshotData = useCallback(async (
     conversationId: string,
@@ -197,8 +258,10 @@ export function RiffologyWorkbenchApp({
 
   useEffect(() => {
     let active = true;
+    const authorityEpoch = loadEpochRef.current;
     const requestId = ++browserRequestRef.current;
     setBrowser(undefined);
+    setBrowserConversationId(undefined);
     setBrowserScreenshot(undefined);
     setBrowserError(undefined);
     if (!currentConversation || !client.browserOpen) return () => { active = false; };
@@ -210,20 +273,24 @@ export function RiffologyWorkbenchApp({
         ? await client.browserOpen!(currentConversation.id, "riff-app")
         : existing;
       const screenshot = await browserScreenshotData(currentConversation.id, state);
-      if (!active || requestId !== browserRequestRef.current) return;
+      if (!active || authorityEpoch !== loadEpochRef.current
+        || requestId !== browserRequestRef.current) return;
       setBrowser(state);
+      setBrowserConversationId(currentConversation.id);
       setBrowserScreenshot(screenshot);
     })()
       .catch((cause) => {
-        if (active && requestId === browserRequestRef.current) {
+        if (active && authorityEpoch === loadEpochRef.current
+          && requestId === browserRequestRef.current) {
           setBrowserError(cause instanceof Error ? cause.message : "浏览器观察不可用。");
         }
       })
       .finally(() => {
-        if (active && requestId === browserRequestRef.current) setBrowserBusy(false);
+        if (active && authorityEpoch === loadEpochRef.current
+          && requestId === browserRequestRef.current) setBrowserBusy(false);
       });
     return () => { active = false; };
-  }, [client, currentConversation?.id, browserScreenshotData]);
+  }, [client, currentConversation?.id, browserLoadRevision, browserScreenshotData]);
 
   useEffect(() => { browserStateRef.current = browser; }, [browser]);
   useEffect(() => { browserBusyRef.current = browserBusy; }, [browserBusy]);
@@ -231,6 +298,7 @@ export function RiffologyWorkbenchApp({
   useEffect(() => {
     let active = true;
     let polling = false;
+    const authorityEpoch = loadEpochRef.current;
     if (!currentConversation || !client.browserState) return () => { active = false; };
     const poll = async () => {
       if (polling || browserBusyRef.current) return;
@@ -239,16 +307,19 @@ export function RiffologyWorkbenchApp({
       try {
         const next = await client.browserState!(currentConversation.id);
         const previous = browserStateRef.current;
-        if (!active || requestEpoch !== browserRequestRef.current
+        if (!active || authorityEpoch !== loadEpochRef.current
+          || requestEpoch !== browserRequestRef.current
           || browserFingerprint(previous) === browserFingerprint(next)) return;
         browserStateRef.current = next;
         setBrowser(next);
+        setBrowserConversationId(currentConversation.id);
         if (next.recoveryState === "ready"
           && (!previous || next.pageGeneration !== previous.pageGeneration
             || next.recoveryState !== previous.recoveryState
             || next.projectedUrl !== previous.projectedUrl)) {
           const screenshot = await browserScreenshotData(currentConversation.id, next);
-          if (active && requestEpoch === browserRequestRef.current) {
+          if (active && authorityEpoch === loadEpochRef.current
+            && requestEpoch === browserRequestRef.current) {
             setBrowserScreenshot(screenshot);
           }
         }
@@ -263,7 +334,7 @@ export function RiffologyWorkbenchApp({
       active = false;
       window.clearInterval(timer);
     };
-  }, [client, currentConversation?.id, browserScreenshotData]);
+  }, [client, currentConversation?.id, browserLoadRevision, browserScreenshotData]);
 
   useEffect(() => {
     setPausableRequestKey(undefined);
@@ -277,20 +348,25 @@ export function RiffologyWorkbenchApp({
       : action === "reload" ? client.browserReload : client.browserReconnect;
     if (!operation) return;
     const requestId = ++browserRequestRef.current;
+    const authorityEpoch = loadEpochRef.current;
     setBrowserBusy(true);
     setBrowserError(undefined);
     try {
       const next = await operation.call(client, currentConversation.id, browser);
       const screenshot = await browserScreenshotData(currentConversation.id, next);
-      if (requestId !== browserRequestRef.current) return;
+      if (authorityEpoch !== loadEpochRef.current
+        || requestId !== browserRequestRef.current) return;
       setBrowser(next);
+      setBrowserConversationId(currentConversation.id);
       setBrowserScreenshot(screenshot);
     } catch (cause) {
-      if (requestId === browserRequestRef.current) {
+      if (authorityEpoch === loadEpochRef.current
+        && requestId === browserRequestRef.current) {
         setBrowserError(cause instanceof Error ? cause.message : "浏览器观察不可用。");
       }
     } finally {
-      if (requestId === browserRequestRef.current) setBrowserBusy(false);
+      if (authorityEpoch === loadEpochRef.current
+        && requestId === browserRequestRef.current) setBrowserBusy(false);
     }
   };
 
@@ -299,21 +375,26 @@ export function RiffologyWorkbenchApp({
     const operation = action === "takeover" ? client.browserTakeover : client.browserReturn;
     if (!operation) return;
     const requestId = ++browserRequestRef.current;
+    const authorityEpoch = loadEpochRef.current;
     setAgentActionBusy(true);
     setBrowserBusy(true);
     setBrowserError(undefined);
     try {
       const next = await operation.call(client, currentConversation.id, browser);
       const screenshot = await browserScreenshotData(currentConversation.id, next);
-      if (requestId !== browserRequestRef.current) return;
+      if (authorityEpoch !== loadEpochRef.current
+        || requestId !== browserRequestRef.current) return;
       setBrowser(next);
+      setBrowserConversationId(currentConversation.id);
       setBrowserScreenshot(screenshot);
     } catch (cause) {
-      if (requestId === browserRequestRef.current) {
+      if (authorityEpoch === loadEpochRef.current
+        && requestId === browserRequestRef.current) {
         setBrowserError(cause instanceof Error ? cause.message : "浏览器控制不可用。");
       }
     } finally {
-      if (requestId === browserRequestRef.current) setBrowserBusy(false);
+      if (authorityEpoch === loadEpochRef.current
+        && requestId === browserRequestRef.current) setBrowserBusy(false);
       setAgentActionBusy(false);
     }
   };
@@ -363,11 +444,14 @@ export function RiffologyWorkbenchApp({
         </a>
         <WorkbenchChrome
           route={route}
-          workspace={workspace}
+          authorityReady={recovery !== "checking" && recovery.state === "ready"}
+          workspace={recovery !== "checking" && recovery.state === "ready"
+            ? ownerWorkspace : undefined}
           filesOpen={filesOpen}
           onFilesOpenChange={setFilesOpen}
           fileToggleRef={fileToggleRef}
-          browser={browser}
+          browser={recovery !== "checking" && recovery.state === "ready"
+            ? projectedBrowser : undefined}
           browserBusy={browserBusy}
           onBrowserBack={() => void browserAction("back")}
           onBrowserReload={() => void browserAction("reload")}
@@ -381,14 +465,14 @@ export function RiffologyWorkbenchApp({
         />
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
-        <ProjectRail
+        {recovery !== "checking" && recovery.state === "ready" && <ProjectRail
           models={home?.models ?? []}
           projects={home?.projects ?? []}
           currentOwner={route.page === "project"
             ? { kind: "project", id: route.projectId }
             : route.page === "model" ? { kind: "model", id: route.modelId } : undefined}
           unbound={route.page === "new"}
-        />
+        />}
         {recovery === "checking" && <WorkbenchState title="正在恢复工作台…" />}
         {recovery !== "checking" && recovery.state === "recovery_required" && (
           <WorkbenchState title="工作台需要恢复" detail="Riffology 当前不会接受工作区写入。" />
@@ -443,8 +527,8 @@ export function RiffologyWorkbenchApp({
             <RiffologyWorkbenchViewer client={client} workspace={ownerWorkspace}
               filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
               fileToggleRef={fileToggleRef}
-              browser={browser}
-              browserScreenshot={browserScreenshot}
+              browser={projectedBrowser}
+              browserScreenshot={projectedBrowserScreenshot}
               browserError={browserError}
               browserBusy={browserBusy}
               onBrowserReconnect={() => void browserAction("reconnect")} />
@@ -457,6 +541,7 @@ export function RiffologyWorkbenchApp({
 
 function WorkbenchChrome({
   route,
+  authorityReady,
   workspace,
   filesOpen,
   onFilesOpenChange,
@@ -474,6 +559,7 @@ function WorkbenchChrome({
   onBrowserReturn,
 }: Readonly<{
   route: WorkbenchRoute;
+  authorityReady: boolean;
   workspace?: WorkspaceDto;
   filesOpen: boolean;
   onFilesOpenChange: (open: boolean) => void;
@@ -507,7 +593,8 @@ function WorkbenchChrome({
       document.removeEventListener("keydown", escape);
     };
   }, [agentMenuOpen]);
-  const projectedPath = route.page === "project"
+  const projectedPath = !authorityReady ? "riff://unavailable"
+    : route.page === "project"
     ? `riff://project/${encodeURIComponent(route.projectId)}`
     : route.page === "model" ? `riff://model/${encodeURIComponent(route.modelId)}`
       : "riff://unbound-workspace";
@@ -528,7 +615,8 @@ function WorkbenchChrome({
   return <div className="riffology-workbench-chrome">
     <span className="riffology-context-projection">
       <i aria-hidden="true" />
-      {workspace && (workspace.owner.kind === "project" || workspace.owner.kind === "model")
+      {!authorityReady ? "工作台恢复中"
+        : workspace && (workspace.owner.kind === "project" || workspace.owner.kind === "model")
         ? `${workspace.owner.name} / ${workspace.owner.kind === "project" ? "Project" : "Model"} Conversation`
         : "新项目 / Agent 引导"}
     </span>
@@ -543,7 +631,8 @@ function WorkbenchChrome({
       {browser?.projectedUrl ?? projectedPath}
     </output>
     <span className="riffology-trust-state" aria-label="受信状态">
-      {!browser || browser.trustState === "trusted_riff" ? "受信 Riff" : "未连接"}
+      {authorityReady && (!browser || browser.trustState === "trusted_riff")
+        ? "受信 Riff" : "未连接"}
     </span>
     <div className="riffology-agent-menu" ref={agentMenuRef}>
       <button type="button" className="riffology-agent-state"
@@ -575,8 +664,9 @@ function WorkbenchChrome({
     </div>
     <span className="riffology-opencode-version" aria-label="OpenCode 基线版本">OpenCode 1.18.11</span>
     <button ref={fileToggleRef} type="button" className="riffology-file-toggle"
-      disabled={route.page !== "project" && route.page !== "model"}
-      aria-expanded={route.page === "project" || route.page === "model" ? filesOpen : undefined}
+      disabled={!authorityReady || route.page !== "project" && route.page !== "model"}
+      aria-expanded={authorityReady && (route.page === "project" || route.page === "model")
+        ? filesOpen : undefined}
       aria-controls="riffology-owner-files" onClick={() => onFilesOpenChange(!filesOpen)}>文件 ↗</button>
   </div>;
 }
@@ -654,16 +744,31 @@ function UnboundProjectWorkspace({
   providers?: ProviderDiscovery;
   onBindingChange(binding: WorkspaceBinding): void;
 }>) {
-  const [draft, setDraft] = useState(binding.draft);
+  const draftStorageKey = `riffology.workspace-draft.${binding.workspaceKey}`;
+  const readLocalDraft = () => {
+    try { return window.localStorage.getItem(draftStorageKey) ?? ""; }
+    catch { return ""; }
+  };
+  const [draft, setDraft] = useState(() => binding.draft || readLocalDraft());
+  const [savedLocalDraft, setSavedLocalDraft] = useState(() => readLocalDraft());
   const [provider, setProvider] = useState(() => binding.provider
     ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    setDraft(binding.draft);
+    const localDraft = readLocalDraft();
+    setDraft(binding.draft || localDraft);
+    setSavedLocalDraft(localDraft);
     setProvider(binding.provider
       ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
   }, [binding.bindingDigest, binding.draft, binding.provider]);
+  const saveLocalDraft = () => {
+    const value = draft.trim();
+    if (!value) return;
+    try { window.localStorage.setItem(draftStorageKey, value); }
+    catch { /* the visible non-authoritative draft remains usable this visit */ }
+    setSavedLocalDraft(value);
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const [providerId, modelId] = provider ? JSON.parse(provider) as string[] : [];
@@ -687,6 +792,9 @@ function UnboundProjectWorkspace({
         text: draft.trim(),
       });
       onBindingChange(turn.binding);
+      try { window.localStorage.removeItem(draftStorageKey); }
+      catch { /* authoritative binding already succeeded */ }
+      setSavedLocalDraft("");
       setDraft("");
       if (turn.binding.state === "bound" && turn.binding.owner) {
         navigateWorkbench(workbenchOwnerHref(
@@ -715,6 +823,11 @@ function UnboundProjectWorkspace({
             <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
             <p>{message.text}</p>
           </article>)}
+          {savedLocalDraft && !binding.bootstrapMessages.some((message) =>
+            message.role === "user" && message.text === savedLocalDraft) && <article
+              className="riffology-local-draft">
+            <strong>You</strong><p>{savedLocalDraft}</p>
+          </article>}
         </div>
         <form className="riffology-unbound-composer" onSubmit={submit}>
           <label htmlFor="unbound-project-provider">Provider</label>
@@ -734,9 +847,16 @@ function UnboundProjectWorkspace({
             || binding.providerMode !== "live" || binding.state !== "unbound"}>
             {busy ? "Agent 正在处理…" : "发送给 Agent"}
           </button>
+          {binding.providerMode === "read_only" && <button type="button"
+            disabled={!draft.trim() || busy} onClick={saveLocalDraft}>
+            保存引导草稿
+          </button>}
           {error && <small role="alert">{error}</small>}
           {binding.providerMode === "read_only" && <small>
             OpenCode Provider 不可用；现有引导与绑定只读，未启用隐藏 fallback。
+          </small>}
+          {binding.providerMode === "read_only" && <small>
+            本地引导草稿不是 Riff Model / Project 权威数据。
           </small>}
           <small>只有 Riff receipt 能证明 Model / Project 已持久写入；对话文本不是权威数据。</small>
         </form>

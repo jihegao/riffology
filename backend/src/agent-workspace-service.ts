@@ -1653,7 +1653,7 @@ export class AgentWorkspaceService {
       if (!output || output.contractVersion !== 4) {
         throw new ApiError(404, "output_not_found", "The requested output was not found.");
       }
-      return rendererDto({
+      return workbenchRendererDto({
         title: output.logicalName,
         mediaType: output.file.mediaType,
         sizeBytes: output.file.sizeBytes,

@@ -272,7 +272,14 @@ The restart script refuses to stop a listener unless its process command matches
 the expected local Riff or OpenCode service. It preserves Product data and logs
 to `/tmp/riff-demo-backend.log` and `/tmp/riff-demo-opencode.log`.
 
-Open [http://localhost:8787](http://localhost:8787). The backend exact-binds
+Open [http://localhost:8787](http://localhost:8787). The default entry is the
+Riffology workbench, which creates an unbound Agent-guided workspace at
+`/workbench/new/<workspace-key>`; the historical Product UI has no visible
+entry. For local recovery only, set `VITE_RIFFOLOGY_LEGACY_PRODUCT_UI=true` in
+`.env` **together with** `RIFF_LEGACY_PRODUCT_UI=true`, then rebuild with the launch script. This is a build-time local rollback,
+not a browser preference or a production fallback.
+
+The backend exact-binds
 `[::1]:8787`, serves the built Product shell and APIs from that authority, and
 uses a second server-owned `[::1]:8788` visual-broker port. The default Product
 root is `.riff-product`; set `RIFF_PRODUCT_ROOT` to an absolute

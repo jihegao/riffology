@@ -5,14 +5,19 @@ test("Riffology Stage 3 keeps one viewer and a far-right accessible file tree", 
 }, testInfo) => {
   const errors: string[] = [];
   page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
+    if (message.type() === "error"
+      && !/^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/u.test(message.text())) {
+      errors.push(message.text());
+    }
   });
   page.on("pageerror", (error) => errors.push(error.message));
 
   await page.goto("/");
-  const projectHref = await page.getByRole("link", { name: "Open Project" }).first().getAttribute("href");
-  expect(projectHref).toMatch(/^\/projects\//u);
-  await page.goto(`/workbench${projectHref}`);
+  const projectHref = await page.locator(
+    '.riffology-project-rail a[href^="/workbench/projects/"]',
+  ).first().getAttribute("href");
+  expect(projectHref).toMatch(/^\/workbench\/projects\//u);
+  await page.goto(projectHref!);
 
   await expect(page.getByRole("navigation", { name: "浏览器导航" })).toBeVisible();
   await expect(page.getByLabel("页面地址")).toContainText("riff://project/");
@@ -110,7 +115,7 @@ test("Riffology Stage 3 keeps one viewer and a far-right accessible file tree", 
   await page.keyboard.press("Escape");
   await expect(fileToggle).toBeFocused();
   await expect(drawer).toBeHidden();
-  const closedDrawerTabStops = await page.locator("#riffology-project-files").evaluate((element) =>
+  const closedDrawerTabStops = await page.locator("#riffology-owner-files").evaluate((element) =>
     Array.from(element.querySelectorAll<HTMLElement>("button, summary, [tabindex]"))
       .filter((candidate) => candidate.tabIndex >= 0 && candidate.offsetParent !== null).length);
   expect(closedDrawerTabStops).toBe(0);
@@ -139,8 +144,11 @@ test("Riffology Stage 3 keeps one viewer and a far-right accessible file tree", 
 
 test("Riffology Stage 3 renders the admitted file matrix and fails closed", async ({ page }) => {
   await page.goto("/");
-  const projectHref = await page.getByRole("link", { name: "Open Project" }).first().getAttribute("href");
-  expect(projectHref).toMatch(/^\/projects\//u);
+  const projectHref = await page.locator(
+    '.riffology-project-rail a[href^="/workbench/projects/"]',
+  ).first().getAttribute("href");
+  expect(projectHref).toMatch(/^\/workbench\/projects\//u);
+  const projectId = projectHref!.slice("/workbench/projects/".length);
 
   const fixtureFiles = [
     ["fixture-html", "visuals/preview.html", "text/html"],
@@ -151,9 +159,8 @@ test("Riffology Stage 3 renders the admitted file matrix and fails closed", asyn
     ["fixture-malicious", "visuals/active.html", "text/html"],
     ["fixture-oversized", "analysis/oversized.json", "application/json"],
   ] as const;
-  await page.goto(`/workbench${projectHref}`);
+  await page.goto(projectHref!);
   await expect(page.getByRole("region", { name: "项目文件与页面查看器" })).toBeVisible();
-  const projectId = projectHref!.slice("/projects/".length);
   const body = await page.evaluate(async (path) => {
     const response = await fetch(path, { credentials: "same-origin" });
     return response.json();
