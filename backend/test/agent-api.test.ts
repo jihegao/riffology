@@ -8,6 +8,7 @@ import { BackendApp } from "../src/server.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { UnavailableMesaAdapter } from "../src/mesa-adapter.ts";
 import type { OpenCodeAdapter, OpenCodeAssistantResponse, OpenCodeConversationPort, OpenCodePrompt, OpenCodeProviderModel, OpenCodeReadiness, OpenCodeWorkspaceBinding } from "../src/opencode-adapter.ts";
+import { agentToolOperationCommitment } from "../src/agent-tools.ts";
 import { captureWorkspaceDigest, executionDescriptionDigest, validateExecutionDescription } from "../src/model-workspace.ts";
 import type { ModelTechnicalCheckerPort } from "../src/model-technical-check-service.ts";
 
@@ -28,6 +29,11 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   afterScopedMutation?: Promise<void>;
   scopedMutationObserved?: () => void;
   scopedProbe?: (mcpUrl: string) => Promise<void>;
+  pendingMutationPermission: Readonly<{
+    id: string;
+    authority: Readonly<{ toolName: "riff_apply_model_changes"; operationCommitment: string }>;
+    continue: (decision: "once" | "reject") => void;
+  }> | null = null;
 
   async initialize(): Promise<OpenCodeReadiness> { return { status: "ready", modelId: "provider-a/model-a", version: "test" }; }
   async discoverProviderModels(workspace?: OpenCodeWorkspaceBinding) {
@@ -65,11 +71,26 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
       const workspace = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "riff_list_model_workspace", arguments: {} } });
       const files = JSON.parse(workspace.result.content[0].text);
       const code = files.find((file: any) => file.kind === "model_code");
-      const changed = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "riff_apply_model_changes", arguments: {
+      const mutationInput = {
         requestKey: "fake-opencode-scoped-change",
         changes: [{ objectFileId: code.id, kind: code.kind, relativePath: code.relativePath, mediaType: code.mediaType,
           text: "print('scoped MCP')\n", expectedPriorSha256: code.sha256 }],
-      } } });
+      };
+      const decision = await new Promise<"once" | "reject">((resolve) => {
+        this.pendingMutationPermission = Object.freeze({
+          id: "permission_scoped_mutation",
+          authority: Object.freeze({
+            toolName: "riff_apply_model_changes" as const,
+            operationCommitment: agentToolOperationCommitment(
+              "riff_apply_model_changes", mutationInput,
+            ).digest,
+          }),
+          continue: resolve,
+        });
+      });
+      this.pendingMutationPermission = null;
+      if (decision !== "once") throw new Error("Scoped mutation permission rejected.");
+      const changed = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "riff_apply_model_changes", arguments: mutationInput } });
       assert.equal(changed.result.isError, undefined, JSON.stringify(changed));
       this.scopedMutationObserved?.();
       if (this.afterScopedMutation) await this.afterScopedMutation;
@@ -87,6 +108,40 @@ class ApiOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   }
   async prompt() {}
   async abort() {}
+  async runtimeSnapshot() {
+    return {
+      status: "busy" as const,
+      assistant: null,
+      tools: [],
+      interactions: this.pendingMutationPermission ? [{
+        id: this.pendingMutationPermission.id,
+        kind: "permission" as const,
+        title: "Permission required",
+        permission: "Apply 1 Model file operation: code/model.py. File contents are hidden.",
+      }] : [],
+      failureCode: null,
+      scopedMcp: { label: "Riff tools" as const, status: "connected" as const },
+    };
+  }
+  async resolvePermissionAuthority(
+    _sessionId: string,
+    interactionId: string,
+  ) {
+    return this.pendingMutationPermission?.id === interactionId
+      ? this.pendingMutationPermission.authority : null;
+  }
+  async respondPermission(
+    _sessionId: string,
+    interactionId: string,
+    decision: "once" | "reject",
+    _workspace?: OpenCodeWorkspaceBinding,
+    expectedAuthority?: Readonly<{ toolName: string; operationCommitment: string }>,
+  ) {
+    const pending = this.pendingMutationPermission;
+    assert.ok(pending && pending.id === interactionId);
+    assert.deepEqual(expectedAuthority, pending.authority);
+    pending.continue(decision);
+  }
   async bindScopedMcp(scopeId: string, mcpUrl: string) { this.scopedBindings.set(scopeId, mcpUrl); this.scopedUrls.push(mcpUrl); }
   async unbindScopedMcp(scopeId: string) { this.scopedBindings.delete(scopeId); this.unboundScopes.push(scopeId); }
 }
@@ -358,6 +413,27 @@ test("A2 turn binds one capability-scoped MCP endpoint through tools/list and at
   const responsePromise = post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
     requestKey: "scoped-mcp-turn", text: "Update the model file now", attachmentIds: [],
   });
+  let permission: any = null;
+  for (let attempt = 0; attempt < 100 && !permission; attempt += 1) {
+    const runtimeResponse = await apiFetch(
+      `${baseUrl}/api/conversations/${created.conversation.id}/runtime`,
+    );
+    if (runtimeResponse.ok) {
+      const runtime = await runtimeResponse.json() as any;
+      permission = runtime.pendingInteractions?.find(
+        (interaction: any) => interaction.kind === "permission",
+      ) ?? null;
+    }
+    if (!permission) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(permission, "exact scoped mutation permission did not appear within 2 seconds");
+  assert.match(permission.prompt, /Apply 1 Model file operation/u);
+  assert.doesNotMatch(permission.prompt, /scoped MCP|[0-9a-f]{32,}|capability/u);
+  const resumed = await post(
+    `${baseUrl}/api/conversations/${created.conversation.id}/turns/scoped-mcp-turn/resume`,
+    { interactionId: permission.id, kind: "permission", decision: "once" },
+  );
+  assert.equal(resumed.status, 200, await resumed.clone().text());
   await observed;
   assert.equal(openCode.scopedBindings.size, 1, "the capability must remain bound while the OpenCode turn is non-terminal");
   assert.equal(openCode.unboundScopes.length, 0);
@@ -579,9 +655,29 @@ test("a missing OpenCode session rebuilds before the next scoped capability is m
   openCode.sessions.delete(openCode.created[0]!.sessionId);
 
   openCode.executeScopedMutation = true;
-  const second = await post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
+  const secondPromise = post(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
     requestKey: "generation-scoped-change", text: "Update the model file now", attachmentIds: [],
   });
+  let permission: any = null;
+  for (let attempt = 0; attempt < 100 && !permission; attempt += 1) {
+    const runtimeResponse = await apiFetch(
+      `${baseUrl}/api/conversations/${created.conversation.id}/runtime`,
+    );
+    if (runtimeResponse.ok) {
+      const runtime = await runtimeResponse.json() as any;
+      permission = runtime.pendingInteractions?.find(
+        (interaction: any) => interaction.kind === "permission",
+      ) ?? null;
+    }
+    if (!permission) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(permission, "rebuilt generation did not publish exact permission");
+  const resume = await post(
+    `${baseUrl}/api/conversations/${created.conversation.id}/turns/generation-scoped-change/resume`,
+    { interactionId: permission.id, kind: "permission", decision: "once" },
+  );
+  assert.equal(resume.status, 200, await resume.clone().text());
+  const second = await secondPromise;
   assert.equal(second.status, 200, await second.clone().text());
   const payload = await second.json() as any;
   assert.equal(payload.mode, "live");
@@ -1382,13 +1478,19 @@ target.write_text(
   assert.equal(acceptedVisualRun.status, 201);
   const visualStart = await acceptedVisualRun.json() as any;
   assert.deepEqual(Object.keys(visualStart).sort(), [
-    "commandId", "completionConversationId", "createdAt", "experimentConfigId", "projectId",
-    "runId", "runKind", "sampleCount", "schemaVersion", "status",
+    "commandId", "completionConversationId", "createdAt", "executionDescriptionDigest",
+    "experimentConfigId", "frozenConfigurationDigest", "intentDigest", "limitsDigest",
+    "projectId", "projectSnapshotDigest", "runId", "runKind", "sampleCount",
+    "samplePlanDigest", "schemaVersion", "status",
   ]);
   assert.equal(visualStart.status, "queued");
   assert.equal(visualStart.runKind, "visual");
   assert.equal(visualStart.sampleCount, 1);
   assert.equal(visualStart.completionConversationId, null);
+  for (const field of [
+    "intentDigest", "frozenConfigurationDigest", "samplePlanDigest",
+    "projectSnapshotDigest", "executionDescriptionDigest", "limitsDigest",
+  ]) assert.match(visualStart[field], /^[0-9a-f]{64}$/u, field);
   const acceptedVisualRetry = await post(visualRunUrl, visualRunRequest);
   assert.equal(acceptedVisualRetry.status, 201);
   assert.deepEqual(await acceptedVisualRetry.json(), visualStart);
@@ -1457,11 +1559,17 @@ target.write_text(
   assert.equal(publicStartResponse.status, 201, await publicStartResponse.clone().text());
   const publicStart = await publicStartResponse.json() as any;
   assert.deepEqual(Object.keys(publicStart).sort(), [
-    "commandId", "completionConversationId", "createdAt", "experimentConfigId", "projectId",
-    "runId", "runKind", "sampleCount", "schemaVersion", "status",
+    "commandId", "completionConversationId", "createdAt", "executionDescriptionDigest",
+    "experimentConfigId", "frozenConfigurationDigest", "intentDigest", "limitsDigest",
+    "projectId", "projectSnapshotDigest", "runId", "runKind", "sampleCount",
+    "samplePlanDigest", "schemaVersion", "status",
   ]);
   assert.equal(publicStart.status, "queued");
   assert.equal(publicStart.sampleCount, 1);
+  for (const field of [
+    "intentDigest", "frozenConfigurationDigest", "samplePlanDigest",
+    "projectSnapshotDigest", "executionDescriptionDigest", "limitsDigest",
+  ]) assert.match(publicStart[field], /^[0-9a-f]{64}$/u, field);
   const publicStartRetry = await post(`${baseUrl}/api/projects/${outputProject.id}/runs`, {
     commandId: "command_public_api_start",
     experimentConfigId: "experiment_public_run_projection",

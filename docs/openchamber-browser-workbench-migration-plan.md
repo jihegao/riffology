@@ -159,6 +159,9 @@ budget, denial, concurrent control, manual takeover, and Chromium crash.
 
 ### Stage 6 — Agent-oriented Riff flows and durable evidence
 
+Implementation contract and current local evidence:
+[`riffology-openchamber-stage-6.md`](riffology-openchamber-stage-6.md).
+
 - Add bootstrap tools to list objects, create Model/Project, and select/bind an
   owner.
 - Persist `WorkspaceBinding` across Riffology workspace, Conversation, owner,

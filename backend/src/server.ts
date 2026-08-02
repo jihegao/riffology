@@ -902,7 +902,7 @@ export class BackendApp {
                   if (alias !== "riff-app" || !this.productStore) return null;
                   const conversation = this.productStore.getConversation(scope.conversationId);
                   const runtime = await this.productStore.getConversationRuntime(scope.conversationId);
-                  if (!runtime.session || runtime.session.generation !== scope.conversationGeneration
+                  if (!runtime?.session || runtime.session.generation !== scope.conversationGeneration
                     || !this.#workbenchOwnerExists(conversation.owner)) return null;
                   const token = this.#workbenchObservationTargets.register(
                     scope,
@@ -1642,7 +1642,7 @@ export class BackendApp {
       const runControl = request.method === "POST"
         && /^\/api\/projects\/[^/]+\/runs\/[^/]+\/(?:cancel|trash|restore)$/u
           .test(requestUrl.pathname);
-      const productApi = /^\/api\/(?:health|recovery-status|home|providers|agents|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
+      const productApi = /^\/api\/(?:health|recovery-status|home|providers|agents|workspace-bindings(?:\/|$)|models(?:\/|$)|projects(?:\/|$)|objects\/|conversations\/|resources\/)/u
         .test(requestUrl.pathname);
       const write = gate3
         ? canonicalJson

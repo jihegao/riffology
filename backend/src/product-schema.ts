@@ -3776,6 +3776,167 @@ export const PRODUCT_SCHEMA_V17_SQL = SQL`
   BEGIN SELECT RAISE(ABORT, 'Agent tool result receipt is immutable'); END;
 `;
 
+export const PRODUCT_SCHEMA_V18_SQL = SQL`
+  CREATE TABLE workspace_bootstrap_conversations (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    workspace_key TEXT NOT NULL UNIQUE CHECK (
+      length(workspace_key) BETWEEN 3 AND 80
+      AND workspace_key NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    provider_id TEXT CHECK (
+      provider_id IS NULL OR length(trim(provider_id)) BETWEEN 1 AND 200
+    ),
+    provider_model_id TEXT CHECK (
+      provider_model_id IS NULL OR length(trim(provider_model_id)) BETWEEN 1 AND 300
+    ),
+    session_generation INTEGER NOT NULL DEFAULT 0 CHECK (session_generation >= 0),
+    session_state TEXT NOT NULL DEFAULT 'closed' CHECK (
+      session_state IN ('closed', 'creating', 'available', 'lost')
+    ),
+    external_session_ref TEXT,
+    directory_ref TEXT NOT NULL UNIQUE CHECK (
+      length(directory_ref) BETWEEN 16 AND 96
+      AND directory_ref NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((provider_id IS NULL) = (provider_model_id IS NULL)),
+    CHECK ((session_state = 'available' AND external_session_ref IS NOT NULL)
+      OR (session_state != 'available'))
+  ) STRICT;
+
+  CREATE TABLE workspace_bootstrap_messages (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL REFERENCES workspace_bootstrap_conversations(id)
+      ON UPDATE RESTRICT ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    status TEXT NOT NULL CHECK (status IN ('complete', 'failed')),
+    text TEXT NOT NULL CHECK (length(text) <= 1000000),
+    created_at TEXT NOT NULL,
+    UNIQUE (conversation_id, ordinal)
+  ) STRICT;
+
+  CREATE TABLE workspace_bindings (
+    workspace_key TEXT PRIMARY KEY CHECK (
+      length(workspace_key) BETWEEN 3 AND 80
+      AND workspace_key NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    bootstrap_conversation_id TEXT NOT NULL UNIQUE
+      REFERENCES workspace_bootstrap_conversations(id)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    conversation_id TEXT UNIQUE REFERENCES conversations(id)
+      ON UPDATE RESTRICT ON DELETE SET NULL,
+    owner_model_id TEXT REFERENCES models(id)
+      ON UPDATE RESTRICT ON DELETE SET NULL,
+    owner_project_id TEXT REFERENCES projects(id)
+      ON UPDATE RESTRICT ON DELETE SET NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    state TEXT NOT NULL CHECK (state IN ('unbound', 'bound', 'recovery_required')),
+    draft_text TEXT NOT NULL DEFAULT '' CHECK (length(draft_text) <= 100000),
+    provider_id TEXT CHECK (
+      provider_id IS NULL OR length(trim(provider_id)) BETWEEN 1 AND 200
+    ),
+    provider_model_id TEXT CHECK (
+      provider_model_id IS NULL OR length(trim(provider_model_id)) BETWEEN 1 AND 300
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((provider_id IS NULL) = (provider_model_id IS NULL)),
+    CHECK ((owner_model_id IS NOT NULL) + (owner_project_id IS NOT NULL) <= 1),
+    CHECK (
+      (state = 'unbound' AND conversation_id IS NULL
+        AND owner_model_id IS NULL AND owner_project_id IS NULL)
+      OR (state = 'bound' AND conversation_id IS NOT NULL
+        AND ((owner_model_id IS NOT NULL) != (owner_project_id IS NOT NULL)))
+      OR (state = 'recovery_required' AND conversation_id IS NULL
+        AND owner_model_id IS NULL AND owner_project_id IS NULL)
+    )
+  ) STRICT;
+
+  CREATE TABLE workspace_binding_receipts (
+    command_id TEXT PRIMARY KEY CHECK (length(command_id) BETWEEN 3 AND 128),
+    workspace_key TEXT NOT NULL REFERENCES workspace_bindings(workspace_key)
+      ON UPDATE RESTRICT ON DELETE RESTRICT,
+    operation TEXT NOT NULL CHECK (operation IN (
+      'create', 'update_draft', 'bind', 'recover_owner_deleted'
+    )),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    state TEXT NOT NULL CHECK (state IN ('unbound', 'bound', 'recovery_required')),
+    conversation_id TEXT,
+    owner_model_id TEXT,
+    owner_project_id TEXT,
+    binding_sha256 TEXT NOT NULL CHECK (
+      length(binding_sha256) = 64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    intent_sha256 TEXT NOT NULL CHECK (
+      length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK (
+      json_valid(receipt_json) AND json_type(receipt_json) = 'object'
+      AND json_extract(receipt_json, '$.schemaVersion') = 1
+      AND json_extract(receipt_json, '$.commandId') = command_id
+      AND json_extract(receipt_json, '$.operation') = operation
+      AND json_extract(receipt_json, '$.workspaceKey') = workspace_key
+      AND json_extract(receipt_json, '$.generation') = generation
+      AND json_extract(receipt_json, '$.state') = state
+      AND json_extract(receipt_json, '$.conversationId') IS conversation_id
+      AND json_extract(receipt_json, '$.bindingDigest') = binding_sha256
+      AND json_extract(receipt_json, '$.committedAt') = committed_at
+      AND ((owner_model_id IS NULL AND owner_project_id IS NULL
+          AND json_type(receipt_json, '$.owner') = 'null')
+        OR (owner_model_id IS NOT NULL AND owner_project_id IS NULL
+          AND json_extract(receipt_json, '$.owner.kind') = 'model'
+          AND json_extract(receipt_json, '$.owner.id') = owner_model_id)
+        OR (owner_model_id IS NULL AND owner_project_id IS NOT NULL
+          AND json_extract(receipt_json, '$.owner.kind') = 'project'
+          AND json_extract(receipt_json, '$.owner.id') = owner_project_id))
+    ),
+    receipt_sha256 TEXT NOT NULL CHECK (
+      length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+      AND json_extract(receipt_json, '$.receiptDigest') = receipt_sha256
+    ),
+    committed_at TEXT NOT NULL
+    ,CHECK ((owner_model_id IS NOT NULL) + (owner_project_id IS NOT NULL) <= 1)
+  ) STRICT;
+
+  CREATE TRIGGER workspace_binding_scope_insert_v18
+  BEFORE INSERT ON workspace_bindings WHEN NEW.state = 'bound'
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM conversations c
+      WHERE c.id = NEW.conversation_id
+        AND ((NEW.owner_model_id IS NOT NULL AND c.model_id = NEW.owner_model_id)
+          OR (NEW.owner_project_id IS NOT NULL AND c.project_id = NEW.owner_project_id))
+    ) THEN RAISE(ABORT, 'workspace binding conversation owner mismatch') END;
+  END;
+
+  CREATE TRIGGER workspace_binding_scope_update_v18
+  BEFORE UPDATE ON workspace_bindings WHEN NEW.state = 'bound'
+  BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM conversations c
+      WHERE c.id = NEW.conversation_id
+        AND ((NEW.owner_model_id IS NOT NULL AND c.model_id = NEW.owner_model_id)
+          OR (NEW.owner_project_id IS NOT NULL AND c.project_id = NEW.owner_project_id))
+    ) THEN RAISE(ABORT, 'workspace binding conversation owner mismatch') END;
+  END;
+
+  CREATE TRIGGER workspace_bootstrap_receipts_immutable_update_v18
+  BEFORE UPDATE OF workspace_key, directory_ref, created_at
+    ON workspace_bootstrap_conversations
+  BEGIN SELECT RAISE(ABORT, 'Bootstrap conversation identity is immutable'); END;
+
+  CREATE TRIGGER workspace_binding_receipts_immutable_update_v18
+  BEFORE UPDATE ON workspace_binding_receipts
+  BEGIN SELECT RAISE(ABORT, 'Workspace binding receipt is immutable'); END;
+
+  CREATE TRIGGER workspace_binding_receipts_immutable_delete_v18
+  BEFORE DELETE ON workspace_binding_receipts
+  BEGIN SELECT RAISE(ABORT, 'Workspace binding receipt is immutable'); END;
+`;
+
 export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Object.freeze([
   Object.freeze({ version: 1, sql: PRODUCT_SCHEMA_SQL }),
   Object.freeze({ version: 2, sql: PRODUCT_SCHEMA_V2_SQL }),
@@ -3794,4 +3955,5 @@ export const PRODUCT_SCHEMA_MIGRATIONS: readonly ProductSchemaMigration[] = Obje
   Object.freeze({ version: 15, sql: PRODUCT_SCHEMA_V15_SQL }),
   Object.freeze({ version: 16, sql: PRODUCT_SCHEMA_V16_SQL }),
   Object.freeze({ version: 17, sql: PRODUCT_SCHEMA_V17_SQL }),
+  Object.freeze({ version: 18, sql: PRODUCT_SCHEMA_V18_SQL }),
 ]);

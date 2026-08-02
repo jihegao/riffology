@@ -1,4 +1,4 @@
-export const PRODUCT_SCHEMA_VERSION = 17 as const;
+export const PRODUCT_SCHEMA_VERSION = 18 as const;
 
 export type ProductId = string;
 export type IsoTimestamp = string;
@@ -39,6 +39,52 @@ export type ResourceOwner =
   | { kind: "project"; id: ProductId }
   | { kind: "conversation"; id: ProductId }
   | { kind: "run"; id: ProductId };
+
+export type WorkspaceBindingState = "unbound" | "bound" | "recovery_required";
+
+/**
+ * Browser-safe durable Riffology workspace identity. OpenCode session identity
+ * and filesystem locations deliberately do not belong to this contract.
+ */
+export type WorkspaceBinding = Readonly<{
+  workspaceKey: string;
+  conversation: Readonly<{
+    kind: "bootstrap" | "owner";
+    id: ProductId;
+    name: string;
+    provider: Readonly<{ providerId: string; modelId: string }> | null;
+  }>;
+  owner: Extract<ResourceOwner, { kind: "model" | "project" }> | null;
+  generation: number;
+  bindingDigest: Sha256Digest;
+  state: WorkspaceBindingState;
+  draft: string;
+  provider: Readonly<{ providerId: string; modelId: string }> | null;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}>;
+
+export type WorkspaceBindingReceipt = Readonly<{
+  schemaVersion: 1;
+  commandId: ProductId;
+  operation: "create" | "update_draft" | "bind" | "recover_owner_deleted";
+  workspaceKey: string;
+  previousGeneration: number | null;
+  previousBindingDigest: Sha256Digest | null;
+  generation: number;
+  bindingDigest: Sha256Digest;
+  state: WorkspaceBindingState;
+  conversationId: ProductId | null;
+  owner: Extract<ResourceOwner, { kind: "model" | "project" }> | null;
+  ownerRecordDigest: Sha256Digest | null;
+  recoveryCause: Readonly<{
+    action: "permanently_delete";
+    commandId: ProductId;
+    owner: Extract<ResourceOwner, { kind: "model" | "project" }>;
+  }> | null;
+  committedAt: IsoTimestamp;
+  receiptDigest: Sha256Digest;
+}>;
 
 export type StoredObjectMetadata = {
   id: ProductId;
@@ -396,6 +442,11 @@ export type PermanentDeleteReceipt = Readonly<{
   previewToken: Sha256Digest;
   stateToken: Sha256Digest;
   canonicalIntentDigest: Sha256Digest;
+  workspaceRecoveryReceipts: readonly Readonly<{
+    workspaceKey: string;
+    commandId: ProductId;
+    receiptDigest: Sha256Digest;
+  }>[];
   committedAt: IsoTimestamp;
   receiptDigest: Sha256Digest;
 }>;

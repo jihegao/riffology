@@ -25,7 +25,7 @@ test("schema v15 adds immutable Conversation provider-binding receipts", () => {
   try {
     installVersion14(database);
     initializeProductSchema(database);
-    assert.equal(PRODUCT_SCHEMA_VERSION, 17);
+    assert.equal(PRODUCT_SCHEMA_VERSION, 18);
     assert.equal(
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;

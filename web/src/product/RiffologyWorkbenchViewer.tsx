@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
-import type { BrowserSessionDto, ProjectWorkspaceDto } from "./types";
+import type { BrowserSessionDto, WorkspaceDto } from "./types";
 
 type WorkbenchFile = Readonly<{
   key: string;
@@ -43,7 +43,7 @@ export function RiffologyWorkbenchViewer({
   onBrowserReconnect,
 }: Readonly<{
   client: ProductClient;
-  workspace: ProjectWorkspaceDto;
+  workspace: WorkspaceDto;
   filesOpen: boolean;
   onFilesOpenChange: (open: boolean) => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
@@ -54,9 +54,9 @@ export function RiffologyWorkbenchViewer({
   onBrowserReconnect: () => void;
 }>) {
   const files = workspace.files.flatMap((file): WorkbenchFile[] => {
-    const relativePath = safeRelativePath(file.relativePath);
+    const relativePath = safeRelativePath(file.relativePath ?? "");
     return relativePath ? [{
-      key: file.fileRef,
+      key: "fileRef" in file ? file.fileRef : file.id,
       relativePath,
       mediaType: file.mediaType,
       sizeBytes: file.sizeBytes,
@@ -75,7 +75,8 @@ export function RiffologyWorkbenchViewer({
     setSelectedKey("");
     setResource(undefined);
     setError(undefined);
-  }, [workspace.owner.id, workspace.modelSnapshotDigest]);
+  }, [workspace.owner.id, "modelSnapshotDigest" in workspace
+    ? workspace.modelSnapshotDigest : workspace.digest]);
 
   const selected = files.find((file) => file.key === selectedKey);
   const selectFile = async (file: WorkbenchFile) => {
@@ -90,10 +91,14 @@ export function RiffologyWorkbenchViewer({
       queueMicrotask(() => viewerRef.current?.focus());
     }
     try {
-      if (!client.projectFileWorkbenchRenderable) {
-        throw new Error("文件投影当前不可用；没有安全读取接口。");
-      }
-      const next = await client.projectFileWorkbenchRenderable(workspace.owner.id, file.key);
+      const next = workspace.owner.kind === "project"
+        ? await (() => {
+          if (!client.projectFileWorkbenchRenderable) {
+            throw new Error("文件投影当前不可用；没有安全读取接口。");
+          }
+          return client.projectFileWorkbenchRenderable(workspace.owner.id, file.key);
+        })()
+        : await client.modelRenderable(workspace.owner.id, file.key);
       if (operation === request.current) setResource(next);
     } catch (cause) {
       if (operation === request.current) {
@@ -116,14 +121,16 @@ export function RiffologyWorkbenchViewer({
   return <>
     <section ref={viewerRef}
       className={`riffology-stage3-viewer ${selected ? "has-selection" : ""}`}
-      aria-label="项目文件与页面查看器" tabIndex={-1}>
+      aria-label={workspace.owner.kind === "project" ? "项目文件与页面查看器" : "模型文件与页面查看器"}
+      tabIndex={-1}>
       {selected && <header className="riffology-viewer-header">
         <button type="button" className="riffology-viewer-back" onClick={returnToConversation}>← 返回对话</button>
         <strong>{selected.relativePath}</strong>
         <span>{fileKind(selected.mediaType)}</span>
       </header>}
       {!selected && <BrowserViewer
-        projectName={workspace.owner.name}
+        ownerName={workspace.owner.name}
+        ownerKind={workspace.owner.kind}
         fileCount={files.length}
         browser={browser}
         screenshot={browserScreenshot}
@@ -138,6 +145,7 @@ export function RiffologyWorkbenchViewer({
       </div>}
     </section>
     <ProjectFileRail
+      ownerKind={workspace.owner.kind}
       files={files}
       selectedKey={selectedKey}
       open={filesOpen}
@@ -150,7 +158,8 @@ export function RiffologyWorkbenchViewer({
 }
 
 function BrowserViewer({
-  projectName,
+  ownerName,
+  ownerKind,
   fileCount,
   browser,
   screenshot,
@@ -158,7 +167,8 @@ function BrowserViewer({
   busy,
   onReconnect,
 }: Readonly<{
-  projectName: string;
+  ownerName: string;
+  ownerKind: "model" | "project";
   fileCount: number;
   browser?: BrowserSessionDto;
   screenshot?: string;
@@ -168,7 +178,7 @@ function BrowserViewer({
 }>) {
   if (screenshot && browser?.recoveryState === "ready") {
     return <div className="riffology-browser-observation" role="status">
-      <img src={screenshot} alt={`${projectName} 的受信浏览器页面观察`} />
+      <img src={screenshot} alt={`${ownerName} 的受信浏览器页面观察`} />
       <small>只读 Chromium 观察 · 页面 generation {browser.pageGeneration}</small>
     </div>;
   }
@@ -183,18 +193,19 @@ function BrowserViewer({
   if (browser?.recoveryState === "expired") {
     return <ViewerState title="浏览器会话已过期" detail="刷新工作台以创建新的只读观察会话。" />;
   }
-  return <ViewerEmpty projectName={projectName} fileCount={fileCount} detail={error} />;
+  return <ViewerEmpty ownerName={ownerName} ownerKind={ownerKind} fileCount={fileCount} detail={error} />;
 }
 
-function ViewerEmpty({ projectName, fileCount, detail }: Readonly<{
-  projectName: string;
+function ViewerEmpty({ ownerName, ownerKind, fileCount, detail }: Readonly<{
+  ownerName: string;
+  ownerKind: "model" | "project";
   fileCount: number;
   detail?: string;
 }>) {
   return <div className="riffology-viewer-empty" role="status">
-    <p className="product-eyebrow">RIFF PROJECT · READ ONLY</p>
-    <h1>{projectName}</h1>
-    <p>{detail ?? "从最右侧文件栏选择一个已声明的 Project 快照文件。"}</p>
+    <p className="product-eyebrow">RIFF {ownerKind.toUpperCase()} · READ ONLY</p>
+    <h1>{ownerName}</h1>
+    <p>{detail ?? `从最右侧文件栏选择一个已声明的 ${ownerKind === "project" ? "Project 快照" : "Model"} 文件。`}</p>
     <small>{fileCount} 个可用文件 · 内容由 Riff 的只读 renderable 投影提供。</small>
   </div>;
 }
@@ -204,6 +215,7 @@ function ViewerState({ title, detail }: Readonly<{ title: string; detail?: strin
 }
 
 function ProjectFileRail({
+  ownerKind,
   files,
   selectedKey,
   open,
@@ -212,6 +224,7 @@ function ProjectFileRail({
   onSelect,
   fileToggleRef,
 }: Readonly<{
+  ownerKind: "model" | "project";
   files: readonly WorkbenchFile[];
   selectedKey: string;
   open: boolean;
@@ -278,12 +291,12 @@ function ProjectFileRail({
 
   return <>
     {compact && open && <button type="button" className="riffology-file-backdrop"
-      aria-label="关闭项目文件" onClick={close} />}
+      aria-label={`关闭${ownerKind === "project" ? "项目" : "模型"}文件`} onClick={close} />}
     <aside
-      id="riffology-project-files"
+      id="riffology-owner-files"
       ref={railRef}
       className={`riffology-file-rail ${open ? "is-open" : "is-closed"}`}
-      aria-label="项目文件"
+      aria-label={ownerKind === "project" ? "项目文件" : "模型文件"}
       aria-hidden={!open}
       inert={!open ? true : undefined}
       role={compact ? "dialog" : undefined}
@@ -295,14 +308,14 @@ function ProjectFileRail({
         aria-label="调整文件栏宽度" aria-valuemin={RAIL_MIN} aria-valuemax={RAIL_MAX}
         aria-valuenow={width} tabIndex={open && !compact ? 0 : -1} onKeyDown={onResizeKeyDown}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} />
-      <header><div><strong>文件</strong><span>{files.length} 个 Project 快照</span></div>
+      <header><div><strong>文件</strong><span>{files.length} 个 {ownerKind === "project" ? "Project 快照" : "Model"}文件</span></div>
         <button ref={closeRef} type="button" onClick={close} aria-label="收起文件栏">收起</button>
       </header>
       {tree.length > 0 && <ul className="riffology-file-tree" aria-label="只读项目文件">
         <FileTree entries={tree} selectedKey={selectedKey} onSelect={onSelect} />
       </ul>}
-      {tree.length === 0 && <p className="riffology-file-empty">没有可展示的 Project 快照文件。</p>}
-      <footer><i aria-hidden="true" />项目结构 · 只读投影</footer>
+      {tree.length === 0 && <p className="riffology-file-empty">没有可展示的 {ownerKind === "project" ? "Project 快照" : "Model"}文件。</p>}
+      <footer><i aria-hidden="true" />{ownerKind === "project" ? "项目" : "模型"}结构 · 只读投影</footer>
     </aside>
   </>;
 }

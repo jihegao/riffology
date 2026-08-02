@@ -1,12 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentMcpServer } from "../src/agent-mcp.ts";
-import { toolsForOwner, type AgentToolGrant } from "../src/agent-tools.ts";
+import {
+  agentToolOperationCommitment,
+  toolsForOwner,
+  type AgentToolGrant,
+  type AgentToolName,
+} from "../src/agent-tools.ts";
 import { McpToolServer as LegacyMcpToolServer } from "../src/mcp.ts";
 import { ProjectStore } from "../src/project-store.ts";
 import { SimulationActions } from "../src/simulation-actions.ts";
 
 const call = (name: string, args: Record<string, unknown> = {}) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+const authorize = (
+  server: AgentMcpServer,
+  capability: string,
+  tool: AgentToolName,
+  args: Record<string, unknown>,
+) => server.authorizeConsequentialOperation(capability, {
+  toolName: tool,
+  operationCommitment: agentToolOperationCommitment(tool, args).digest,
+});
 
 test("Agent capabilities bind conversation, owner, turn, generation and exact tools", async () => {
   let now = 10;
@@ -25,7 +39,9 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   assert.ok(!names.includes("riff_drive_workbench_ui"));
   const denied = await server.handle(projectCapability, call("riff_apply_model_changes", { requestKey: "r", changes: [{}] }));
   assert.equal((denied?.result as any).isError, true);
-  const allowed = await server.handle(projectCapability, call("riff_create_analysis_document", { name: "Analysis", mediaType: "text/markdown", content: "x" }));
+  const analysisInput = { name: "Analysis", mediaType: "text/markdown", content: "x" };
+  authorize(server, projectCapability, "riff_create_analysis_document", analysisInput);
+  const allowed = await server.handle(projectCapability, call("riff_create_analysis_document", analysisInput));
   assert.equal((allowed?.result as any).isError, undefined);
   assert.deepEqual(seen[0]?.owner, { kind: "project", id: "project_a" });
   assert.equal(seen[0]?.externalSessionGeneration, 2);
@@ -35,6 +51,202 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   const expiring = server.grant({ conversationId: "conversation_model", owner: { kind: "model", id: "model_a" }, turnId: "turn_b", externalSessionGeneration: 1, allowedTools: toolsForOwner({ kind: "model", id: "model_a" }) });
   now = 15;
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
+});
+
+test("Experiment MCP definitions publish the closed ExperimentConfigurationV1 envelope", async () => {
+  const server = new AgentMcpServer({ async execute() { return {}; } });
+  const capability = server.grant({
+    conversationId: "conversation_experiment_schema",
+    owner: { kind: "project", id: "project_experiment_schema" },
+    turnId: "turn_experiment_schema",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "project", id: "project_experiment_schema" }),
+  });
+  const listed = await server.handle(capability, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  const tools = (listed?.result as any).tools as any[];
+  for (const name of [
+    "riff_create_experiment_configuration",
+    "riff_update_experiment_configuration",
+  ]) {
+    const configuration = tools.find((tool) => tool.name === name)
+      ?.inputSchema?.properties?.configuration;
+    assert.equal(configuration?.type, "object");
+    assert.deepEqual(configuration?.required, [
+      "schemaVersion",
+      "runKind",
+      "parameters",
+      "sampling",
+    ]);
+    assert.equal(configuration?.additionalProperties, false);
+    assert.deepEqual(configuration?.properties?.schemaVersion?.enum, [1]);
+    assert.deepEqual(configuration?.properties?.runKind?.enum, ["batch", "visual"]);
+    assert.equal(configuration?.properties?.parameters?.type, "object");
+    assert.deepEqual(configuration?.properties?.parameters?.additionalProperties, {});
+    const sampling = configuration?.properties?.sampling?.oneOf;
+    assert.equal(sampling?.length, 3);
+    assert.deepEqual(sampling?.map((variant: any) => variant.properties.kind.enum[0]), [
+      "single",
+      "multiple-seeds",
+      "cartesian-sweep",
+    ]);
+    assert.ok(sampling.every((variant: any) => variant.additionalProperties === false));
+    assert.deepEqual(sampling[1].required, ["kind", "seeds"]);
+    assert.equal(sampling[1].properties.seeds.uniqueItems, true);
+    assert.deepEqual(sampling[2].required, ["kind", "axes"]);
+    assert.equal(sampling[2].properties.axes.minItems, 1);
+    assert.equal(sampling[2].properties.axes.items.additionalProperties, false);
+    assert.deepEqual(sampling[2].properties.axes.items.required, ["pointer", "values"]);
+  }
+});
+
+test("one consequential Agent capability is consumed synchronously across concurrent calls", async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() {
+      calls += 1;
+      entered();
+      await gate;
+      return { ok: true };
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_budget",
+    owner: { kind: "project", id: "project_budget" },
+    turnId: "turn_budget",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_start_run"]),
+  });
+  const firstInput = {
+    requestKey: "run_first",
+    configurationId: "configuration_a",
+  };
+  authorize(server, capability, "riff_start_run", firstInput);
+  const first = server.handle(capability, call("riff_start_run", firstInput));
+  await started;
+  const concurrent = await server.handle(capability, call("riff_start_run", {
+    requestKey: "run_concurrent",
+    configurationId: "configuration_b",
+  }));
+  assert.equal((concurrent?.result as any).isError, true);
+  assert.match((concurrent?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 1);
+
+  release();
+  assert.equal(((await first)?.result as any).isError, undefined);
+  const sequential = await server.handle(capability, call("riff_start_run", {
+    requestKey: "run_after_success",
+    configurationId: "configuration_c",
+  }));
+  assert.equal((sequential?.result as any).isError, true);
+  assert.match((sequential?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 1);
+});
+
+test("allow-once permission binds the exact normalized consequential parameters", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() { calls += 1; return { ok: true }; },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_exact_permission",
+    owner: { kind: "project", id: "project_exact_permission" },
+    turnId: "turn_exact_permission",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_transition_owner_lifecycle"]),
+  });
+  const approved = {
+    requestKey: "rename_exact",
+    action: "rename",
+    expectedRecordDigest: "a".repeat(64),
+    name: "Approved name",
+  };
+  authorize(server, capability, "riff_transition_owner_lifecycle", approved);
+  for (const substituted of [
+    { ...approved, name: "Substituted name" },
+    { ...approved, expectedRecordDigest: "b".repeat(64) },
+    { ...approved, action: "archive", name: undefined },
+  ]) {
+    const result = await server.handle(
+      capability,
+      call("riff_transition_owner_lifecycle", substituted),
+    );
+    assert.equal((result?.result as any).isError, true);
+    assert.match((result?.result as any).content[0].text, /allow-once permission/u);
+  }
+  assert.equal(calls, 0);
+  const accepted = await server.handle(
+    capability,
+    call("riff_transition_owner_lifecycle", approved),
+  );
+  assert.equal((accepted?.result as any).isError, undefined);
+  assert.equal(calls, 1);
+});
+
+test("a second pending consequential approval revokes instead of overwriting the first", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() { calls += 1; return { ok: true }; },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_competing_permissions",
+    owner: { kind: "project", id: "project_competing_permissions" },
+    turnId: "turn_competing_permissions",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_start_run"]),
+  });
+  const first = { requestKey: "first", configurationId: "configuration_a" };
+  const second = { requestKey: "second", configurationId: "configuration_b" };
+  authorize(server, capability, "riff_start_run", first);
+  assert.throws(
+    () => authorize(server, capability, "riff_start_run", second),
+    /competing consequential permission/u,
+  );
+  for (const input of [first, second]) {
+    const response = await server.handle(
+      capability,
+      call("riff_start_run", input),
+    );
+    assert.equal(response?.error?.code, -32001);
+  }
+  assert.equal(calls, 0);
+});
+
+test("a failed consequential Agent operation still consumes the turn budget", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() {
+      calls += 1;
+      throw new Error("bounded failure");
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_failed_budget",
+    owner: { kind: "model", id: "model_failed_budget" },
+    turnId: "turn_failed_budget",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_start_model_technical_check"]),
+  });
+  const firstInput = {
+    requestKey: "check_first",
+  };
+  authorize(server, capability, "riff_start_model_technical_check", firstInput);
+  const failed = await server.handle(capability, call("riff_start_model_technical_check", firstInput));
+  assert.equal((failed?.result as any).isError, true);
+  assert.match((failed?.result as any).content[0].text, /tool_failed/u);
+  const retry = await server.handle(capability, call("riff_start_model_technical_check", {
+    requestKey: "check_retry",
+  }));
+  assert.equal((retry?.result as any).isError, true);
+  assert.match((retry?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 1);
 });
 
 test("generated-view publication accepts an OpenCode JSON-stringified views array", async () => {

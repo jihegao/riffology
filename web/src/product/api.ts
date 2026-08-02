@@ -27,6 +27,9 @@ import type {
   WorkspaceDto,
   BrowserSessionDto,
   BrowserScreenshotDto,
+  WorkspaceBinding,
+  WorkspaceBindingMutation,
+  WorkspaceBootstrapTurn,
 } from "./types";
 import type { RendererResource } from "./RendererRegistry";
 
@@ -56,6 +59,23 @@ export interface ProductClient {
   recoveryStatus(): Promise<ProductRecoveryStatus>;
   home(): Promise<HomeDto>;
   providers(): Promise<ProviderDiscovery>;
+  createWorkspaceBinding(input: Readonly<{ commandId: string; workspaceKey: string }>): Promise<WorkspaceBindingMutation>;
+  workspaceBinding(workspaceKey: string): Promise<WorkspaceBinding>;
+  updateWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    draft: string;
+    provider?: Readonly<{ providerId: string; modelId: string }> | null;
+  }>): Promise<WorkspaceBindingMutation>;
+  sendWorkspaceBootstrapTurn(input: Readonly<{
+    workspaceKey: string;
+    requestKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    text: string;
+  }>): Promise<WorkspaceBootstrapTurn>;
   agents?(ownerKind: OwnerKind, ownerId: string): Promise<AgentDiscovery>;
   createModel(input: Readonly<{
     commandId: string;
@@ -271,6 +291,51 @@ export class HttpProductClient implements ProductClient {
 
   providers(): Promise<ProviderDiscovery> {
     return this.#request<ProviderDiscovery>("/api/providers");
+  }
+
+  createWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+  }>): Promise<WorkspaceBindingMutation> {
+    return this.#request("/api/workspace-bindings", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  workspaceBinding(workspaceKey: string): Promise<WorkspaceBinding> {
+    return this.#request(
+      `/api/workspace-bindings/${encodeURIComponent(workspaceKey)}`,
+    );
+  }
+
+  updateWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    draft: string;
+    provider?: Readonly<{ providerId: string; modelId: string }> | null;
+  }>): Promise<WorkspaceBindingMutation> {
+    const { workspaceKey, ...body } = input;
+    return this.#request(
+      `/api/workspace-bindings/${encodeURIComponent(workspaceKey)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    );
+  }
+
+  sendWorkspaceBootstrapTurn(input: Readonly<{
+    workspaceKey: string;
+    requestKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    text: string;
+  }>): Promise<WorkspaceBootstrapTurn> {
+    const { workspaceKey, ...body } = input;
+    return this.#request(
+      `/api/workspace-bindings/${encodeURIComponent(workspaceKey)}/turn`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
   }
 
   async agents(ownerKind: OwnerKind, ownerId: string): Promise<AgentDiscovery> {

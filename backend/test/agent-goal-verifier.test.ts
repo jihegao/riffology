@@ -114,6 +114,51 @@ test("generic completion requires a nonempty, goal-matched committed effect", ()
   assert.equal(matched.reasonCode, "committed_owner_state_verified");
 });
 
+test("receipt-backed Stage 6 operations finalize only against their exact explicit goal", () => {
+  const cases = [
+    ["model", "Run a technical check on this Model.", "model_technical_check_start"],
+    ["project", "Create a new Experiment configuration for this Project.", "experiment_configuration_create"],
+    ["project", "Start the simulation Run for this Project.", "run_start"],
+    ["project", "Cancel the current Run for this Project.", "run_cancel"],
+    ["project", "Move this Run to trash in the Project.", "run_trash"],
+    ["project", "Restore this Run in the Project.", "run_restore"],
+    ["model", "Rename this Model.", "owner_rename"],
+    ["model", "Archive this Model.", "owner_archive"],
+    ["project", "Move this Project to trash.", "owner_trash"],
+    ["project", "Restore this Project.", "owner_restore"],
+  ] as const;
+
+  for (const [ownerKind, goalText, actionKind] of cases) {
+    const receipt = verifyAgentGoal(input({
+      ownerKind,
+      goalText,
+      actions: [{
+        ...action("committed", actionKind, [{
+          kind: `${actionKind}_receipt`,
+          id: `${actionKind}_resource`,
+          sha256: "f".repeat(64),
+        }]),
+        actionKind,
+      }],
+    }));
+    assert.equal(receipt.disposition, "completed", actionKind);
+    assert.equal(receipt.reasonCode, "committed_owner_state_verified", actionKind);
+  }
+
+  const mismatched = verifyAgentGoal(input({
+    ownerKind: "project",
+    goalText: "Start the current Run for this Project.",
+    actions: [{
+      ...action("committed", "run_cancel", [{
+        kind: "run_cancel_receipt", id: "run_cancelled", sha256: "e".repeat(64),
+      }]),
+      actionKind: "run_cancel",
+    }],
+  }));
+  assert.equal(mismatched.disposition, "needs_user_input");
+  assert.equal(mismatched.reasonCode, "explicit_goal_unverified");
+});
+
 test("generated-view publication can satisfy a view goal but never a visual Model mutation goal", () => {
   const generated = {
     ...action("committed", "generated_views", [{

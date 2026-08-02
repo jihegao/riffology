@@ -8,6 +8,7 @@ import type { AgentContextInput } from "../src/agent-context.ts";
 import { ApiError } from "../src/errors.ts";
 import {
   HttpOpenCodeAdapter,
+  consequentialPermissionSummary,
   redactPublicRuntimeText,
   type OpenCodeConfig,
   type OpenCodeConversationPort,
@@ -15,6 +16,49 @@ import {
   type OpenCodeProviderModel,
   type OpenCodeWorkspaceBinding,
 } from "../src/opencode-adapter.ts";
+
+test("consequential permission summaries identify exact public targets without format controls", () => {
+  const updateA = consequentialPermissionSummary(
+    "riff_update_experiment_configuration",
+    { configurationId: "experiment_alpha", name: "Alpha", configuration: {
+      schemaVersion: 1, runKind: "batch",
+      parameters: { horizon: 2, enabled: true, label: "private value", nested: { x: 1 } },
+      sampling: { kind: "single" },
+    } },
+  );
+  const updateB = consequentialPermissionSummary(
+    "riff_update_experiment_configuration",
+    { configurationId: "experiment_beta", name: "Alpha", configuration: {
+      schemaVersion: 1, runKind: "batch",
+      parameters: { horizon: 2 }, sampling: { kind: "single" },
+    } },
+  );
+  assert.match(updateA, /experiment_alpha/u);
+  assert.match(updateB, /experiment_beta/u);
+  assert.notEqual(updateA, updateB, "two Experiment targets must not share a generic prompt");
+  assert.match(updateA, /enabled=true/u);
+  assert.match(updateA, /horizon=2/u);
+  assert.match(updateA, /label=string\(13\)/u);
+  assert.match(updateA, /nested=object/u);
+  assert.doesNotMatch(updateA, /private value/u);
+  assert.match(consequentialPermissionSummary(
+    "riff_create_experiment_configuration",
+    { name: "Incomplete" },
+  ), /Cannot approve: Experiment configuration details are incomplete/u);
+  assert.match(consequentialPermissionSummary(
+    "riff_transition_temporary_document",
+    { documentId: "document_public_a", transition: "reject" },
+  ), /document_public_a/u);
+  assert.match(consequentialPermissionSummary(
+    "riff_adopt_attachment",
+    { attachmentId: "attachment_public_b", logicalName: "inputs/data.csv" },
+  ), /attachment_public_b.*inputs\/data\.csv/u);
+  const deceptive = consequentialPermissionSummary(
+    "riff_transition_owner_lifecycle",
+    { action: "rename", name: "safe\u202eevil\u200b" },
+  );
+  assert.doesNotMatch(deceptive, /[\u202e\u200b]/u);
+});
 
 const context = (conversationId = "conversation-a"): AgentContextInput => ({
   conversationId,
@@ -135,6 +179,12 @@ const readyAdapter = async (
         const providerId = model.slice(0, slash);
         const modelId = model.slice(slash + 1);
         return Response.json({ providers: [{ id: providerId, models: { [modelId]: {} } }] });
+      }
+      if (path === "/session/opaque-session" && init?.method === "PATCH") {
+        (config as any).onSessionPermissionUpdate?.(
+          JSON.parse(String(init.body)),
+        );
+        return Response.json({ id: "opaque-session", directory: workdir });
       }
       if (path === "/session/opaque-session") {
         return Response.json({ id: "opaque-session", directory: workdir });
@@ -276,9 +326,11 @@ test("provider discovery is stable, deduplicated, allowlisted, and has no first-
 
 test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async (t) => {
   const bodies: any[] = [];
+  const sessionPermissionBodies: any[] = [];
   let prompted = false;
   const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
+    onSessionPermissionUpdate: (body: any) => sessionPermissionBodies.push(body),
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       if (path.endsWith("/prompt_async")) {
@@ -296,11 +348,15 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "hello", system: "bounded", attachments: [] });
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });
   assert.equal("messageID" in bodies[0], false);
-  assert.equal(bodies[0].tools["*"], false);
-  assert.equal(bodies[0].tools.question, true);
-  assert.equal(Object.entries(bodies[0].tools)
-    .filter(([name]) => name !== "question")
-    .every(([, value]) => value === false), true);
+  assert.equal("tools" in bodies[0], false,
+    "legacy prompt tools must not override the session permission ruleset");
+  assert.deepEqual(sessionPermissionBodies, [
+    { permission: [
+      { permission: "*", pattern: "*", action: "deny" },
+      { permission: "question", pattern: "*", action: "allow" },
+    ] },
+    { permission: [] },
+  ]);
 });
 
 test("runtime snapshot stays on the current turn boundary and exposes only redacted typed controls", async (t) => {
@@ -347,6 +403,14 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
           state: {
             status: terminal ? "completed" : "running",
             title: "raw input={path:/var/private.txt} output=relative/result.json",
+            input: {
+              requestKey: "apply-current-model-change",
+              changes: [{
+                operation: "replace",
+                relativePath: "code/\u202emodel\u200b.py",
+                content: "token=api-secret-value",
+              }],
+            },
           },
         },
         {
@@ -477,21 +541,35 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
     /api-secret-value|\/Users\/|\/home\/|\/tmp\/|\/var\/|file:\/\/|relative\//u,
   );
   const permission = active.interactions.find((interaction) => interaction.kind === "permission")!;
-  assert.deepEqual(permission, {
-    id: permission.id,
-    kind: "permission",
-    title: "Permission required",
-    permission: "Allow Riff apply model changes once for the current turn?",
-  });
+  assert.match(
+    permission.permission,
+    /^Allow Riff apply model changes once for the current turn\? Apply 1 Model file operation/u,
+  );
+  assert.doesNotMatch(permission.permission, /api-secret-value|[0-9a-f]{32,}/u);
+  assert.doesNotMatch(permission.permission, /[\u202e\u200b]/u);
+  const permissionAuthority = await adapter.resolvePermissionAuthority(
+    "opaque-session", permission.id,
+  );
+  assert.equal(permissionAuthority?.toolName, "riff_apply_model_changes");
+  assert.match(permissionAuthority?.operationCommitment ?? "", /^[0-9a-f]{64}$/u);
   mutatePermissionDuringResponse = true;
   await assert.rejects(
-    () => adapter.respondPermission("opaque-session", permission.id, "once"),
+    () => adapter.respondPermission(
+      "opaque-session", permission.id, "once", undefined,
+      permissionAuthority!,
+    ),
     (error: any) => error.code === "interaction_not_pending",
   );
   assert.deepEqual(replies, [], "a mutated permission grant must fail before the control POST");
   mutatePermissionDuringResponse = false;
   permissionReadsAfterMutationTrigger = 0;
-  await adapter.respondPermission("opaque-session", permission.id, "once");
+  const refreshedAuthority = await adapter.resolvePermissionAuthority(
+    "opaque-session", permission.id,
+  );
+  await adapter.respondPermission(
+    "opaque-session", permission.id, "once", undefined,
+    refreshedAuthority!,
+  );
   const question = active.interactions.find((interaction) => interaction.kind === "question")!;
   await assert.rejects(
     () => adapter.respondQuestion("opaque-session", question.id, { answers: [["Other"]] }),
@@ -631,6 +709,7 @@ const assertBrowserPermissionEvidenceRejected = async (
   let prompted = false;
   let terminal = false;
   let mcpName = "";
+  const permissionUpdates: any[] = [];
   const ref = `element_${"c".repeat(32)}`;
   const toolPart = () => ({
     type: "tool",
@@ -644,6 +723,7 @@ const assertBrowserPermissionEvidenceRejected = async (
   });
   const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
+    onSessionPermissionUpdate: (body: any) => permissionUpdates.push(body),
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       if (path.endsWith("/prompt_async")) {
@@ -702,6 +782,11 @@ const assertBrowserPermissionEvidenceRejected = async (
     },
   );
   await waitUntil(() => prompted, "browser evidence prompt dispatch");
+  assert.deepEqual(permissionUpdates[0].permission.at(-1), {
+    permission: `${mcpName}_browser_click`,
+    pattern: "*",
+    action: "allow",
+  }, "Browser tools must enter the Riff-owned Browser permission gate");
   const snapshot = await adapter.runtimeSnapshot("opaque-session", scopeId);
   assert.deepEqual(snapshot.interactions.filter((item) => item.kind === "permission"), []);
   assert.equal(await adapter.resolvePermissionAuthority(
@@ -753,6 +838,9 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
   let prompted = false;
   const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
+    onSessionPermissionUpdate: (body: any) => calls.push({
+      path: "/session/opaque-session", body,
+    }),
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : null;
@@ -767,6 +855,7 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
   });
   const scopeId = "turn_scoped_binding";
   const exactTools = [
+    "riff_apply_model_changes",
     "riff_list_model_workspace",
     "riff_read_owner_summary",
   ] as const;
@@ -787,10 +876,19 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
   assert.match(registration.body.name, /^riffa2[0-9a-f]{24}$/u);
   assert.equal(registration.body.config.url, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
   const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
-  assert.equal(prompt.tools["*"], false);
-  assert.equal(prompt.tools[`${registration.body.name}_*`], undefined);
-  assert.equal(prompt.tools[`${registration.body.name}_riff_list_model_workspace`], true);
-  assert.equal(prompt.tools[`${registration.body.name}_riff_read_owner_summary`], true);
+  assert.equal("tools" in prompt, false,
+    "prompt-level true rules must not override exact session ask rules");
+  const permissionUpdates = calls.filter((call) =>
+    call.path === "/session/opaque-session" && call.body?.permission);
+  assert.ok(permissionUpdates.length > 0, JSON.stringify(calls));
+  assert.deepEqual(permissionUpdates[0].body.permission, [
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "question", pattern: "*", action: "allow" },
+    { permission: `${registration.body.name}_riff_apply_model_changes`, pattern: "*", action: "ask" },
+    { permission: `${registration.body.name}_riff_list_model_workspace`, pattern: "*", action: "allow" },
+    { permission: `${registration.body.name}_riff_read_owner_summary`, pattern: "*", action: "allow" },
+  ]);
+  assert.deepEqual(permissionUpdates.at(-1)?.body, { permission: [] });
   const mcpPostsBeforeDrift = calls.filter((call) => call.path === "/mcp").length;
   await assert.rejects(
     () => adapter.bindScopedMcp(

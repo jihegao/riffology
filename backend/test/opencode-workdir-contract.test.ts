@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { HttpOpenCodeAdapter, normalizeOpenCodeWorkdir, opencodeFromEnvironment } from "../src/opencode-adapter.ts";
+import { ProductStoreV2 } from "../src/product-store-v2.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const launcher = join(repositoryRoot, "scripts", "start-local-demo.sh");
@@ -269,6 +270,63 @@ test("OpenCode readiness requires healthy versioned server and matching canonica
 
   assert.deepEqual(await adapter.initialize(), { status: "ready", modelId: "provider-z/model-2", version: "1.18.4" });
   assert.deepEqual(calls, ["/global/health", "/path", "/config/providers"]);
+});
+
+test("real HTTP adapter accepts only a canonical Store-derived bootstrap workspace for readiness and session creation", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "riff-opencode-bootstrap-workspace-"));
+  const store = ProductStoreV2.open(join(parent, "store"));
+  t.after(() => {
+    store.close();
+    return rm(parent, { recursive: true, force: true });
+  });
+  const created = store.createWorkspaceBinding({
+    commandId: "command_http_bootstrap_workspace",
+    workspaceKey: "workspace_http_bootstrap",
+    createdAt: "2026-08-02T06:30:00.000Z",
+  });
+  const runtime = store.getWorkspaceBootstrapRuntime(created.binding.workspaceKey);
+  assert.equal(runtime.directory, await realpath(runtime.directory));
+  const workspace = {
+    owner: { kind: "workspace" as const, id: created.binding.workspaceKey },
+    directory: runtime.directory,
+  };
+  const requests: Array<{ path: string; directory: string | null }> = [];
+  const adapter = new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model: "provider-z/model-2",
+    workdir: parent,
+    expectedVersion: "1.18.4",
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      requests.push({ path: url.pathname, directory: url.searchParams.get("directory") });
+      if (url.pathname === "/global/health") {
+        return Response.json({ healthy: true, version: "1.18.4" });
+      }
+      if (url.pathname === "/path") {
+        return Response.json({ directory: runtime.directory });
+      }
+      if (url.pathname === "/session") {
+        return Response.json({ id: "session-bootstrap-http", directory: runtime.directory });
+      }
+      throw new Error(`unexpected OpenCode endpoint ${url.pathname}`);
+    },
+  });
+
+  assert.equal(
+    await adapter.createSession(created.binding.conversation.id, workspace),
+    "session-bootstrap-http",
+  );
+  assert.equal(requests.some((request) =>
+    request.path === "/path" && request.directory === runtime.directory), true);
+  assert.equal(requests.some((request) =>
+    request.path === "/session" && request.directory === runtime.directory), true);
+  await assert.rejects(
+    () => adapter.createSession(created.binding.conversation.id, {
+      owner: { kind: "workspace", id: "../escape" },
+      directory: runtime.directory,
+    }),
+    (error: any) => error.code === "opencode_invalid_workdir",
+  );
 });
 
 test("loopback and server-auth contract remains available with the mandatory live profile", async (t) => {

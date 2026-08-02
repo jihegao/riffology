@@ -28,7 +28,7 @@ test("schema v17 adds bounded generated views, change sets, and immutable receip
       (database.prepare("PRAGMA user_version").get() as {
         user_version: number;
       }).user_version,
-      17,
+      18,
     );
     for (const table of [
       "model_generated_view_sets",

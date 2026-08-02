@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   AgentToolPermissionError,
+  agentToolOperationCommitment,
   assertToolInputCannotOverrideScope,
+  CONSEQUENTIAL_AGENT_TOOLS,
   isAgentToolName,
   type AgentOwner,
   type AgentToolExecutor,
@@ -18,9 +20,51 @@ type RpcRequest = { jsonrpc?: string; id?: string | number | null; method?: stri
 type RpcResponse = { jsonrpc: "2.0"; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
 
 const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSchema: Record<string, unknown> }>> = {
+  riff_bootstrap_list_objects: definition(
+    "List generation-bound opaque Riff objects and provider choices for this unbound workspace.",
+    {},
+  ),
+  riff_bootstrap_create_model: definition(
+    "Create a new Model, its owner Conversation, and bind this workspace atomically.",
+    {
+      requestKey: { type: "string" },
+      name: { type: "string" },
+      providerRef: { type: "string" },
+      expectedGeneration: { type: "integer", minimum: 1 },
+      expectedBindingDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    },
+    ["requestKey", "name", "providerRef", "expectedGeneration", "expectedBindingDigest"],
+  ),
+  riff_bootstrap_create_project: definition(
+    "Create a Project fixed copy from an opaque Model reference, create its owner Conversation, and bind atomically.",
+    {
+      requestKey: { type: "string" },
+      name: { type: "string" },
+      sourceModelRef: { type: "string" },
+      providerRef: { type: "string" },
+      expectedGeneration: { type: "integer", minimum: 1 },
+      expectedBindingDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    },
+    ["requestKey", "name", "sourceModelRef", "providerRef", "expectedGeneration", "expectedBindingDigest"],
+  ),
+  riff_bootstrap_bind_owner: definition(
+    "Bind this workspace to an existing opaque Riff object and create its owner Conversation.",
+    {
+      requestKey: { type: "string" },
+      objectRef: { type: "string" },
+      providerRef: { type: "string" },
+      expectedGeneration: { type: "integer", minimum: 1 },
+      expectedBindingDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    },
+    ["requestKey", "objectRef", "providerRef", "expectedGeneration", "expectedBindingDigest"],
+  ),
   riff_read_owner_summary: definition("Read the bounded summary for the conversation's current object.", {}),
   riff_list_model_workspace: definition("List logical files in the bound Model workspace.", {}),
   riff_read_model_file: definition("Read one bounded Model file by its logical file ID.", { fileId: { type: "string" } }, ["fileId"]),
+  riff_start_model_technical_check: definition(
+    "Start one receipt-backed technical check for the current Model.",
+    { requestKey: { type: "string" } }, ["requestKey"],
+  ),
   riff_apply_model_changes: definition("Apply one explicit, validated, atomic Model change set.", {
     requestKey: { type: "string" },
     changes: {
@@ -144,6 +188,21 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     "List active, digest-bound Experiment configurations for the current Project.",
     {},
   ),
+  riff_list_project_workspace: definition(
+    "List immutable logical files in the current Project fixed Model copy.", {},
+  ),
+  riff_read_project_file: definition(
+    "Read one bounded Project fixed-copy file by opaque file reference.",
+    { fileRef: { type: "string" } }, ["fileRef"],
+  ),
+  riff_create_experiment_configuration: definition(
+    "Create one receipt-backed Experiment configuration for the current Project.",
+    {
+      requestKey: { type: "string" },
+      name: { type: "string" },
+      configuration: experimentConfigurationSchema(),
+    }, ["requestKey", "name", "configuration"],
+  ),
   riff_update_experiment_configuration: definition(
     "Apply one explicit, validated, compare-and-set Experiment configuration update.",
     {
@@ -152,7 +211,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
       expectedConfigurationDigest: { type: "string" },
       expectedRecordDigest: { type: "string" },
       name: { type: "string" },
-      configuration: { type: "object" },
+      configuration: experimentConfigurationSchema(),
     },
     [
       "requestKey",
@@ -161,6 +220,56 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
       "expectedRecordDigest",
       "configuration",
     ],
+  ),
+  riff_list_runs: definition(
+    "List bounded Run summaries for the current Project using opaque run references.", {},
+  ),
+  riff_start_run: definition(
+    "Start one receipt-backed Run from an active Experiment configuration.",
+    { requestKey: { type: "string" }, configurationId: { type: "string" } },
+    ["requestKey", "configurationId"],
+  ),
+  riff_cancel_run: definition(
+    "Request cancellation of one current-Project Run by opaque reference.",
+    { requestKey: { type: "string" }, runRef: { type: "string" } },
+    ["requestKey", "runRef"],
+  ),
+  riff_trash_run: definition(
+    "Move one terminal Run to trash with exact lifecycle and terminal closure evidence.",
+    {
+      requestKey: { type: "string" }, runRef: { type: "string" },
+      expectedLifecycleDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      terminalStatus: { type: "string", enum: ["succeeded", "failed", "cancelled", "timed_out"] },
+      terminalClosureDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    }, ["requestKey", "runRef", "expectedLifecycleDigest", "terminalStatus", "terminalClosureDigest"],
+  ),
+  riff_restore_run: definition(
+    "Restore one trashed Run with an exact lifecycle digest.",
+    { requestKey: { type: "string" }, runRef: { type: "string" }, expectedLifecycleDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } },
+    ["requestKey", "runRef", "expectedLifecycleDigest"],
+  ),
+  riff_list_run_outputs: definition(
+    "List receipt-indexed outputs for one successful Run.",
+    { runRef: { type: "string" } }, ["runRef"],
+  ),
+  riff_read_run_output: definition(
+    "Read one bounded textual Run output by opaque references.",
+    { runRef: { type: "string" }, outputRef: { type: "string" } },
+    ["runRef", "outputRef"],
+  ),
+  riff_read_run_events: definition(
+    "Read a bounded page of diagnostic events for one Run.",
+    { runRef: { type: "string" }, afterSequence: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 200 } },
+    ["runRef"],
+  ),
+  riff_transition_owner_lifecycle: definition(
+    "Apply a receipt-backed lifecycle action to the current bound Model or Project.",
+    {
+      requestKey: { type: "string" },
+      action: { type: "string", enum: ["rename", "archive", "trash", "restore"] },
+      expectedRecordDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      name: { type: "string" },
+    }, ["requestKey", "action", "expectedRecordDigest"],
   ),
   riff_create_analysis_document: definition(
     "Create a persistent draft analysis document only after an explicit user request.",
@@ -199,6 +308,8 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
 
 export class AgentMcpServer {
   readonly #grants = new Map<string, AgentToolGrant>();
+  readonly #inFlightConsequential = new Set<string>();
+  readonly #consumedConsequential = new Set<string>();
   readonly #executor: AgentToolExecutor;
   readonly #now: () => number;
   readonly #ttlMs: number;
@@ -215,6 +326,7 @@ export class AgentMcpServer {
     turnId: string;
     externalSessionGeneration: number;
     allowedTools: ReadonlySet<AgentToolName>;
+    operationCommitment?: AgentToolGrant["operationCommitment"];
     intentAuthority?: "explicit" | "proposal_only";
     attachmentIds?: ReadonlySet<string>;
     confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation;
@@ -226,6 +338,7 @@ export class AgentMcpServer {
     this.#grants.set(capability, {
       ...input,
       allowedTools: new Set(input.allowedTools),
+      operationCommitment: input.operationCommitment ?? null,
       intentAuthority: input.intentAuthority ?? "proposal_only",
       attachmentIds: new Set(input.attachmentIds ?? []),
       expiresAt: this.#now() + this.#ttlMs,
@@ -233,19 +346,52 @@ export class AgentMcpServer {
     return capability;
   }
 
-  revoke(capability: string): void { this.#grants.delete(capability); }
+  revoke(capability: string): void {
+    this.#grants.delete(capability);
+    this.#inFlightConsequential.delete(capability);
+    this.#consumedConsequential.delete(capability);
+  }
 
   revokeConversation(conversationId: string): void {
-    for (const [capability, grant] of this.#grants) if (grant.conversationId === conversationId) this.#grants.delete(capability);
+    for (const [capability, grant] of this.#grants) if (grant.conversationId === conversationId) this.revoke(capability);
   }
 
   revokeSessionGeneration(conversationId: string, generation: number): void {
     for (const [capability, grant] of this.#grants) {
-      if (grant.conversationId === conversationId && grant.externalSessionGeneration === generation) this.#grants.delete(capability);
+      if (grant.conversationId === conversationId && grant.externalSessionGeneration === generation) this.revoke(capability);
     }
   }
 
-  revokeAll(): void { this.#grants.clear(); }
+  revokeAll(): void {
+    this.#grants.clear();
+    this.#inFlightConsequential.clear();
+    this.#consumedConsequential.clear();
+  }
+
+  authorizeConsequentialOperation(
+    capability: string,
+    authority: Readonly<{ toolName: AgentToolName; operationCommitment: string }>,
+  ): void {
+    const grant = this.#activeGrant(capability);
+    if (!grant || !grant.allowedTools.has(authority.toolName)
+      || !CONSEQUENTIAL_AGENT_TOOLS.has(authority.toolName)
+      || !/^[0-9a-f]{64}$/u.test(authority.operationCommitment)
+      || this.#consumedConsequential.has(capability)) {
+      throw new AgentToolPermissionError(
+        "The exact consequential operation cannot be authorized in this scope.",
+      );
+    }
+    if (grant.operationCommitment) {
+      this.revoke(capability);
+      throw new AgentToolPermissionError(
+        "A competing consequential permission revoked this capability.",
+      );
+    }
+    grant.operationCommitment = Object.freeze({
+      tool: authority.toolName,
+      digest: authority.operationCommitment,
+    });
+  }
 
   hasActiveConversation(conversationIds: ReadonlySet<string>): boolean {
     const now = this.#now();
@@ -274,10 +420,41 @@ export class AgentMcpServer {
       const params = record(request.params);
       const name = typeof params.name === "string" ? params.name : "";
       if (!isAgentToolName(name) || !grant.allowedTools.has(name)) throw new AgentToolPermissionError("That Agent tool is not available in this scope.");
-      const input = normalizeToolInput(name, record(params.arguments ?? {}));
+      const rawInput = record(params.arguments ?? {});
+      const consequential = CONSEQUENTIAL_AGENT_TOOLS.has(name);
+      if (consequential && this.#consumedConsequential.has(capability!)) {
+        throw new AgentToolPermissionError(
+          "This turn's single consequential operation has already been consumed.",
+        );
+      }
+      if (consequential) {
+        let commitment: Readonly<{ tool: AgentToolName; digest: string }> | null = null;
+        try { commitment = agentToolOperationCommitment(name, rawInput); }
+        catch { /* stable permission failure below */ }
+        if (!commitment || grant.operationCommitment?.tool !== name
+          || grant.operationCommitment.digest !== commitment.digest) {
+          throw new AgentToolPermissionError(
+            "This exact consequential operation requires allow-once permission.",
+          );
+        }
+      }
+      const input = normalizeToolInput(name, rawInput);
       assertToolInputCannotOverrideScope(input);
       validateInput(name, input);
-      const result = await this.#executor.execute(grant, name, input);
+      if (consequential) {
+        this.#inFlightConsequential.add(capability!);
+        this.#consumedConsequential.add(capability!);
+      }
+      let result: unknown;
+      try {
+        result = await this.#executor.execute(grant, name, input);
+      } catch (error) {
+        if (consequential) this.#inFlightConsequential.delete(capability!);
+        throw error;
+      }
+      if (consequential) {
+        this.#inFlightConsequential.delete(capability!);
+      }
       if (name === "riff_observe_current_visual"
         && result
         && typeof result === "object"
@@ -350,16 +527,105 @@ export class AgentMcpServer {
       }
       return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) ?? "null" }] } };
     } catch (error) {
-      const message = error instanceof AgentToolPermissionError ? error.message : "The scoped Agent action failed.";
-      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: error instanceof AgentToolPermissionError ? "tool_not_allowed" : "tool_failed", message } }) }] } };
+      const denied = error instanceof AgentToolPermissionError;
+      const budgetExhausted = denied
+        && /single consequential operation has already been consumed/u.test(error.message);
+      const runtimeCode = !denied && error && typeof error === "object"
+        && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code : null;
+      const staleCapability = runtimeCode === "stale_capability"
+        || runtimeCode === "scope_changed";
+      const message = denied ? error.message
+        : staleCapability ? "The Agent capability no longer matches its active durable scope."
+          : "The scoped Agent action failed.";
+      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: budgetExhausted ? "operation_budget_exhausted" : denied ? "tool_not_allowed" : staleCapability ? "stale_capability" : "tool_failed", message } }) }] } };
     }
   }
 
   #activeGrant(capability: string): AgentToolGrant | undefined {
     const grant = this.#grants.get(capability);
-    if (grant && grant.expiresAt <= this.#now()) this.#grants.delete(capability);
+    if (grant && grant.expiresAt <= this.#now()) this.revoke(capability);
     return grant && grant.expiresAt > this.#now() ? grant : undefined;
   }
+}
+
+function experimentConfigurationSchema(): Record<string, unknown> {
+  const safeInteger = {
+    type: "integer",
+    minimum: Number.MIN_SAFE_INTEGER,
+    maximum: Number.MAX_SAFE_INTEGER,
+  };
+  const seeds = {
+    type: "array",
+    minItems: 1,
+    maxItems: 10_000,
+    uniqueItems: true,
+    items: safeInteger,
+  };
+  return {
+    type: "object",
+    properties: {
+      schemaVersion: { type: "integer", enum: [1] },
+      runKind: { type: "string", enum: ["batch", "visual"] },
+      parameters: {
+        type: "object",
+        maxProperties: 1_024,
+        additionalProperties: {},
+      },
+      sampling: {
+        oneOf: [
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["single"] },
+              seed: safeInteger,
+            },
+            required: ["kind"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["multiple-seeds"] },
+              seeds,
+            },
+            required: ["kind", "seeds"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["cartesian-sweep"] },
+              axes: {
+                type: "array",
+                minItems: 1,
+                maxItems: 128,
+                items: {
+                  type: "object",
+                  properties: {
+                    pointer: { type: "string", minLength: 1, maxLength: 1_024 },
+                    values: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 10_000,
+                      items: {},
+                    },
+                  },
+                  required: ["pointer", "values"],
+                  additionalProperties: false,
+                },
+              },
+              seeds,
+            },
+            required: ["kind", "axes"],
+            additionalProperties: false,
+          },
+        ],
+      },
+    },
+    required: ["schemaVersion", "runKind", "parameters", "sampling"],
+    additionalProperties: false,
+  };
 }
 
 function definition(description: string, properties: Record<string, unknown>, required: string[] = []) {
@@ -402,13 +668,21 @@ function normalizeToolInput(
 function validateInput(name: AgentToolName, input: Record<string, unknown>): void {
   if (isBrowserAgentToolName(name)) return;
   const allowed: Partial<Record<AgentToolName, readonly string[]>> = {
+    riff_bootstrap_list_objects: [],
+    riff_bootstrap_create_model: ["requestKey", "name", "providerRef", "expectedGeneration", "expectedBindingDigest"],
+    riff_bootstrap_create_project: ["requestKey", "name", "sourceModelRef", "providerRef", "expectedGeneration", "expectedBindingDigest"],
+    riff_bootstrap_bind_owner: ["requestKey", "objectRef", "providerRef", "expectedGeneration", "expectedBindingDigest"],
     riff_read_owner_summary: [],
     riff_list_model_workspace: [],
     riff_read_model_file: ["fileId"],
+    riff_start_model_technical_check: ["requestKey"],
     riff_apply_model_changes: ["requestKey", "changes", "executionDescription"],
     riff_propose_model_changes: ["requestKey", "changes", "executionDescription"],
     riff_publish_model_generated_views: ["requestKey", "views"],
     riff_list_experiment_configurations: [],
+    riff_list_project_workspace: [],
+    riff_read_project_file: ["fileRef"],
+    riff_create_experiment_configuration: ["requestKey", "name", "configuration"],
     riff_update_experiment_configuration: [
       "requestKey",
       "configurationId",
@@ -417,6 +691,15 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
       "name",
       "configuration",
     ],
+    riff_list_runs: [],
+    riff_start_run: ["requestKey", "configurationId"],
+    riff_cancel_run: ["requestKey", "runRef"],
+    riff_trash_run: ["requestKey", "runRef", "expectedLifecycleDigest", "terminalStatus", "terminalClosureDigest"],
+    riff_restore_run: ["requestKey", "runRef", "expectedLifecycleDigest"],
+    riff_list_run_outputs: ["runRef"],
+    riff_read_run_output: ["runRef", "outputRef"],
+    riff_read_run_events: ["runRef", "afterSequence", "limit"],
+    riff_transition_owner_lifecycle: ["requestKey", "action", "expectedRecordDigest", "name"],
     riff_create_analysis_document: ["name", "mediaType", "content"],
     riff_create_temporary_document: ["name", "mediaType", "content"],
     riff_transition_temporary_document: ["documentId", "transition"],
@@ -429,7 +712,74 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     const value = input[key];
     if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > maximum) throw new AgentToolPermissionError(`Agent tool ${key} is invalid.`);
   };
+  if (name.startsWith("riff_bootstrap_")) {
+    if (name !== "riff_bootstrap_list_objects") {
+      text("requestKey", 256);
+      text("providerRef", 512);
+      text("expectedBindingDigest", 64);
+      if (!Number.isSafeInteger(input.expectedGeneration)
+        || Number(input.expectedGeneration) < 1
+        || !/^[0-9a-f]{64}$/u.test(String(input.expectedBindingDigest))) {
+        throw new AgentToolPermissionError("Workspace bootstrap CAS is invalid.");
+      }
+    }
+    if (name === "riff_bootstrap_create_model"
+      || name === "riff_bootstrap_create_project") text("name", 200);
+    if (name === "riff_bootstrap_create_project") text("sourceModelRef", 512);
+    if (name === "riff_bootstrap_bind_owner") text("objectRef", 512);
+    return;
+  }
   if (name === "riff_read_model_file") text("fileId", 256);
+  if (name === "riff_start_model_technical_check") text("requestKey", 256);
+  if (name === "riff_read_project_file") text("fileRef", 256);
+  if (name === "riff_create_experiment_configuration") {
+    text("requestKey", 256); text("name", 200);
+    if (!input.configuration || typeof input.configuration !== "object"
+      || Array.isArray(input.configuration)) {
+      throw new AgentToolPermissionError("Agent Experiment configuration is invalid.");
+    }
+  }
+  if (name === "riff_start_run") {
+    text("requestKey", 256); text("configurationId", 256);
+  }
+  if (name === "riff_cancel_run") {
+    text("requestKey", 256); text("runRef", 256);
+  }
+  if (name === "riff_trash_run" || name === "riff_restore_run") {
+    text("requestKey", 256); text("runRef", 256);
+    text("expectedLifecycleDigest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(String(input.expectedLifecycleDigest))) {
+      throw new AgentToolPermissionError("Agent Run lifecycle digest is invalid.");
+    }
+    if (name === "riff_trash_run") {
+      text("terminalStatus", 32); text("terminalClosureDigest", 64);
+      if (!/^[0-9a-f]{64}$/u.test(String(input.terminalClosureDigest))) {
+        throw new AgentToolPermissionError("Agent Run terminal closure is invalid.");
+      }
+    }
+  }
+  if (name === "riff_list_run_outputs") text("runRef", 256);
+  if (name === "riff_read_run_output") {
+    text("runRef", 256); text("outputRef", 256);
+  }
+  if (name === "riff_read_run_events") {
+    text("runRef", 256);
+    if (input.afterSequence !== undefined && (!Number.isSafeInteger(input.afterSequence)
+      || Number(input.afterSequence) < 0)) throw new AgentToolPermissionError("Agent event cursor is invalid.");
+    if (input.limit !== undefined && (!Number.isSafeInteger(input.limit)
+      || Number(input.limit) < 1 || Number(input.limit) > 200)) {
+      throw new AgentToolPermissionError("Agent event limit is invalid.");
+    }
+  }
+  if (name === "riff_transition_owner_lifecycle") {
+    text("requestKey", 256); text("action", 32); text("expectedRecordDigest", 64);
+    if (!/^(?:rename|archive|trash|restore)$/u.test(String(input.action))
+      || !/^[0-9a-f]{64}$/u.test(String(input.expectedRecordDigest))) {
+      throw new AgentToolPermissionError("Agent owner lifecycle input is invalid.");
+    }
+    if (input.action === "rename") text("name", 200);
+    else if (input.name !== undefined) throw new AgentToolPermissionError("Only rename accepts a name.");
+  }
   if (name === "riff_apply_model_changes"
     || name === "riff_propose_model_changes") {
     text("requestKey", 256);

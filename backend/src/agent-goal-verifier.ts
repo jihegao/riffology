@@ -233,6 +233,45 @@ const genericExplicitGoalMatchesCommittedActions = (
       return ownerKind === "project"
         && /\b(?:experiment|configuration)\b|(?:实验|配置)/iu.test(text);
     }
+    if (action.actionKind === "model_technical_check_start") {
+      return ownerKind === "model"
+        && /\b(?:technical\s+check|validation|validate|verify|check)\b|(?:技术检查|校验|验证|检查)/iu.test(text);
+    }
+    if (action.actionKind === "experiment_configuration_create") {
+      return ownerKind === "project"
+        && /\b(?:create|add|new)\b[\s\S]{0,120}\b(?:experiment|configuration)\b|\b(?:experiment|configuration)\b[\s\S]{0,120}\b(?:create|add|new)\b|(?:创建|新增|建立)[^。！？\n]{0,120}(?:实验|配置)|(?:实验|配置)[^。！？\n]{0,120}(?:创建|新增|建立)/iu.test(text);
+    }
+    if (action.actionKind === "run_start") {
+      return ownerKind === "project"
+        && /\b(?:start|launch|run|execute)\b[\s\S]{0,120}\b(?:run|simulation|experiment)\b|\b(?:run|simulation|experiment)\b[\s\S]{0,120}\b(?:start|launch|execute)\b|(?:启动|运行|执行)[^。！？\n]{0,120}(?:运行|仿真|实验)|(?:运行|仿真|实验)[^。！？\n]{0,120}(?:启动|运行|执行)/iu.test(text);
+    }
+    if (action.actionKind === "run_cancel") {
+      return ownerKind === "project"
+        && /\b(?:cancel|stop|abort)\b[\s\S]{0,120}\b(?:run|simulation)\b|\b(?:run|simulation)\b[\s\S]{0,120}\b(?:cancel|stop|abort)\b|(?:取消|停止|中止)[^。！？\n]{0,120}(?:运行|仿真)|(?:运行|仿真)[^。！？\n]{0,120}(?:取消|停止|中止)/iu.test(text);
+    }
+    if (action.actionKind === "run_trash") {
+      return ownerKind === "project"
+        && /\b(?:trash|remove)\b[\s\S]{0,120}\b(?:run|simulation)\b|\b(?:run|simulation)\b[\s\S]{0,120}\b(?:trash|remove)\b|(?:移入回收站|丢弃)[^。！？\n]{0,120}(?:运行|仿真)|(?:运行|仿真)[^。！？\n]{0,120}(?:移入回收站|丢弃)/iu.test(text);
+    }
+    if (action.actionKind === "run_restore") {
+      return ownerKind === "project"
+        && /\brestore\b[\s\S]{0,120}\b(?:run|simulation)\b|\b(?:run|simulation)\b[\s\S]{0,120}\brestore\b|(?:恢复|还原)[^。！？\n]{0,120}(?:运行|仿真)|(?:运行|仿真)[^。！？\n]{0,120}(?:恢复|还原)/iu.test(text);
+    }
+    const ownerLifecycle = /^owner_(rename|archive|trash|restore)$/u.exec(action.actionKind);
+    if (ownerLifecycle) {
+      const ownerNoun = ownerKind === "model"
+        ? /\bmodel\b|模型/iu
+        : /\bproject\b|项目/iu;
+      if (!ownerNoun.test(text)) return false;
+      const actionPattern = ownerLifecycle[1] === "rename"
+        ? /\brename\b|重命名|改名/iu
+        : ownerLifecycle[1] === "archive"
+          ? /\barchive\b|归档/iu
+          : ownerLifecycle[1] === "trash"
+            ? /\btrash\b|移入回收站|丢弃/iu
+            : /\brestore\b|恢复|还原/iu;
+      return actionPattern.test(text);
+    }
     if (action.actionKind === "analysis_document_create") {
       return /\b(?:analysis|report|document)\b|(?:分析|报告|文档)/iu.test(text);
     }

@@ -6,7 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentMcpServer } from "../src/agent-mcp.ts";
-import { type AgentToolGrant, type AgentToolName } from "../src/agent-tools.ts";
+import {
+  legacyPromptToolsCompatible,
+  MODEL_AGENT_TOOLS,
+  PROJECT_AGENT_TOOLS,
+  READ_ONLY_AGENT_TOOLS,
+  WORKSPACE_BOOTSTRAP_TOOLS,
+  type AgentToolGrant,
+  type AgentToolName,
+} from "../src/agent-tools.ts";
+import { BROWSER_AGENT_TOOLS } from "../src/browser-agent-tools.ts";
 import { HttpOpenCodeAdapter } from "../src/opencode-adapter.ts";
 import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 import {
@@ -52,7 +61,7 @@ test("prompt-injection-shaped Skill text cannot expand the native OpenCode or MC
   const workdir = mkdtempSync(join(tmpdir(), "riff-pr4-opencode-"));
   t.after(() => rmSync(workdir, { recursive: true, force: true }));
   const requests: Array<{ path: string; method: string; body: unknown }> = [];
-  let prompted = false;
+  let promptCount = 0;
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "provider-z/model-2",
@@ -76,30 +85,30 @@ test("prompt-injection-shaped Skill text cannot expand the native OpenCode or MC
         return Response.json({ id: "opaque-session", directory: workdir });
       }
       if (path === "/session/opaque-session/message") {
-        return Response.json(prompted ? [
+        return Response.json(Array.from({ length: promptCount }, (_, index) => [
           {
-            info: { id: "user-current", sessionID: "opaque-session", role: "user" },
-            parts: [{ type: "text", text: "Build safely" }],
+            info: { id: `user-${index}`, sessionID: "opaque-session", role: "user" },
+            parts: [{ type: "text", text: `Prompt ${index}` }],
           },
           {
             info: {
-              id: "assistant-current",
+              id: `assistant-${index}`,
               sessionID: "opaque-session",
               role: "assistant",
-              parentID: "user-current",
-              time: { completed: 1 },
+              parentID: `user-${index}`,
+              time: { completed: index + 1 },
             },
             parts: [{ type: "text", text: "Done" }],
           },
-        ] : []);
+        ]).flat());
       }
       if (path === "/session/status") {
-        return Response.json(prompted
+        return Response.json(promptCount > 0
           ? { "opaque-session": { type: "idle" } }
           : {});
       }
       if (path === "/session/opaque-session/prompt_async") {
-        prompted = true;
+        promptCount += 1;
         return new Response(null, { status: 204 });
       }
       throw new Error(`Unexpected OpenCode request: ${method} ${path}`);
@@ -144,6 +153,95 @@ test("prompt-injection-shaped Skill text cannot expand the native OpenCode or MC
   );
   assert.equal(JSON.stringify(prompt).includes(capabilityCanary), false);
   assert.equal(JSON.stringify(prompt).includes(registration.config.url), false);
+
+  await adapter.bindScopedMcp(
+    "scope-owner-a-turn-write",
+    "http://127.0.0.1:8787/a2/mcp?cap=second-secret",
+    ["riff_publish_model_generated_views", "riff_read_owner_summary"],
+  );
+  await adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    {
+      text: "Publish a view",
+      system: "bounded",
+      attachments: [],
+      scopedMcpScopeId: "scope-owner-a-turn-write",
+      scopedMcpTools: [
+        "riff_publish_model_generated_views",
+        "riff_read_owner_summary",
+      ],
+    },
+  );
+  const mixedPrompt = requests.filter((entry) =>
+    entry.path.endsWith("/prompt_async")).at(-1)?.body as any;
+  assert.equal("tools" in mixedPrompt, false,
+    "mixing one projection write into a read scope must remove legacy prompt tools");
+});
+
+test("legacy prompt compatibility classifies the complete Agent tool vocabulary fail-closed", () => {
+  const expected = {
+    riff_read_owner_summary: true,
+    riff_list_model_workspace: true,
+    riff_read_model_file: true,
+    riff_start_model_technical_check: false,
+    riff_transition_owner_lifecycle: false,
+    riff_apply_model_changes: false,
+    riff_propose_model_changes: false,
+    riff_publish_model_generated_views: false,
+    riff_create_temporary_document: false,
+    riff_transition_temporary_document: false,
+    riff_adopt_attachment: false,
+    riff_list_project_workspace: true,
+    riff_read_project_file: true,
+    riff_list_experiment_configurations: true,
+    riff_create_experiment_configuration: false,
+    riff_update_experiment_configuration: false,
+    riff_list_runs: true,
+    riff_start_run: false,
+    riff_cancel_run: false,
+    riff_trash_run: false,
+    riff_restore_run: false,
+    riff_list_run_outputs: true,
+    riff_read_run_output: true,
+    riff_read_run_events: true,
+    riff_create_analysis_document: false,
+    riff_observe_current_visual: false,
+    riff_bootstrap_list_objects: true,
+    riff_bootstrap_create_model: false,
+    riff_bootstrap_create_project: false,
+    riff_bootstrap_bind_owner: false,
+    riff_interact_current_visual: false,
+    browser_open: false,
+    browser_snapshot: false,
+    browser_screenshot: false,
+    browser_click: false,
+    browser_type: false,
+    browser_scroll: false,
+    browser_wait: false,
+    browser_back: false,
+    browser_reload: false,
+    browser_close: false,
+  } satisfies Record<AgentToolName, boolean>;
+  const vocabulary = new Set<AgentToolName>([
+    ...MODEL_AGENT_TOOLS,
+    ...PROJECT_AGENT_TOOLS,
+    ...WORKSPACE_BOOTSTRAP_TOOLS,
+    ...BROWSER_AGENT_TOOLS,
+    "riff_interact_current_visual",
+  ]);
+  assert.deepEqual([...vocabulary].sort(), Object.keys(expected).sort(),
+    "every AgentToolName must receive an explicit reviewed classification");
+  for (const tool of vocabulary) {
+    assert.equal(READ_ONLY_AGENT_TOOLS.has(tool), expected[tool], tool);
+    assert.equal(legacyPromptToolsCompatible([tool]), expected[tool], tool);
+    if (!expected[tool]) {
+      assert.equal(legacyPromptToolsCompatible([
+        "riff_read_owner_summary", tool,
+      ]), false, `mixed:${tool}`);
+    }
+  }
+  assert.equal(legacyPromptToolsCompatible([]), false);
 });
 
 test("MCP rejects injected tool names and scope or secret-shaped arguments without echoing them", async () => {

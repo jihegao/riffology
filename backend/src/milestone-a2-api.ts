@@ -118,6 +118,112 @@ export class MilestoneA2Api {
       privateJson(response, 200, await this.service.discoverProviders());
       return true;
     }
+    if (request.method === "POST" && parts.length === 2
+      && parts[1] === "workspace-bindings") {
+      const body = await strictJsonBody(request, ["commandId", "workspaceKey"]);
+      privateJson(response, 201, await this.service.createWorkspaceBinding({
+        commandId: requiredString(body.commandId, "commandId"),
+        workspaceKey: requiredString(body.workspaceKey, "workspaceKey"),
+      }));
+      return true;
+    }
+    if (parts[1] === "workspace-bindings" && parts[2]) {
+      const workspaceKey = parts[2];
+      if (request.method === "GET" && parts.length === 3) {
+        exactQuery(url, []);
+        privateJson(response, 200, await this.service.workspaceBinding(workspaceKey));
+        return true;
+      }
+      if (request.method === "PATCH" && parts.length === 3) {
+        const body = await strictJsonBody(request, [
+          "commandId", "expectedGeneration", "expectedBindingDigest", "draft", "provider",
+        ], ["provider"]);
+        const provider = body.provider === undefined
+          ? undefined : body.provider === null ? null : workspaceProvider(body.provider);
+        privateJson(response, 200, await this.service.updateWorkspaceBinding({
+          commandId: requiredString(body.commandId, "commandId"),
+          workspaceKey,
+          expectedGeneration: requiredInteger(body.expectedGeneration, "expectedGeneration"),
+          expectedBindingDigest: requiredString(body.expectedBindingDigest, "expectedBindingDigest"),
+          draft: requiredString(body.draft, "draft", true),
+          ...(provider === undefined ? {} : { provider }),
+        }));
+        return true;
+      }
+      if (request.method === "GET" && parts.length === 4
+        && parts[3] === "bootstrap") {
+        exactQuery(url, []);
+        privateJson(response, 200,
+          await this.service.workspaceBootstrapInventory(workspaceKey));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 4
+        && parts[3] === "turn") {
+        const body = await strictJsonBody(request, [
+          "requestKey", "expectedGeneration", "expectedBindingDigest", "text",
+        ]);
+        privateJson(response, 200, await this.service.runWorkspaceBootstrapTurn({
+          workspaceKey,
+          requestKey: requiredString(body.requestKey, "requestKey"),
+          expectedGeneration: requiredInteger(body.expectedGeneration, "expectedGeneration"),
+          expectedBindingDigest: requiredString(body.expectedBindingDigest, "expectedBindingDigest"),
+          text: requiredString(body.text, "text"),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && parts[3] === "bootstrap" && parts[4] === "create-model") {
+        const body = await strictJsonBody(request, [
+          "commandId", "expectedGeneration", "expectedBindingDigest", "name",
+          "providerId", "modelId",
+        ]);
+        privateJson(response, 201, await this.service.bootstrapCreateModel({
+          commandId: requiredString(body.commandId, "commandId"),
+          workspaceKey,
+          expectedGeneration: requiredInteger(body.expectedGeneration, "expectedGeneration"),
+          expectedBindingDigest: requiredString(body.expectedBindingDigest, "expectedBindingDigest"),
+          name: requiredString(body.name, "name"),
+          providerId: requiredString(body.providerId, "providerId"),
+          modelId: requiredString(body.modelId, "modelId"),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && parts[3] === "bootstrap" && parts[4] === "create-project") {
+        const body = await strictJsonBody(request, [
+          "commandId", "expectedGeneration", "expectedBindingDigest", "name",
+          "sourceModelRef", "providerId", "modelId",
+        ]);
+        privateJson(response, 201, await this.service.bootstrapCreateProject({
+          commandId: requiredString(body.commandId, "commandId"),
+          workspaceKey,
+          expectedGeneration: requiredInteger(body.expectedGeneration, "expectedGeneration"),
+          expectedBindingDigest: requiredString(body.expectedBindingDigest, "expectedBindingDigest"),
+          name: requiredString(body.name, "name"),
+          sourceModelRef: requiredString(body.sourceModelRef, "sourceModelRef"),
+          providerId: requiredString(body.providerId, "providerId"),
+          modelId: requiredString(body.modelId, "modelId"),
+        }));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 5
+        && parts[3] === "bootstrap" && parts[4] === "bind-owner") {
+        const body = await strictJsonBody(request, [
+          "commandId", "expectedGeneration", "expectedBindingDigest", "objectRef",
+          "providerId", "modelId",
+        ]);
+        privateJson(response, 200, await this.service.bootstrapBindOwner({
+          commandId: requiredString(body.commandId, "commandId"),
+          workspaceKey,
+          expectedGeneration: requiredInteger(body.expectedGeneration, "expectedGeneration"),
+          expectedBindingDigest: requiredString(body.expectedBindingDigest, "expectedBindingDigest"),
+          objectRef: requiredString(body.objectRef, "objectRef"),
+          providerId: requiredString(body.providerId, "providerId"),
+          modelId: requiredString(body.modelId, "modelId"),
+        }));
+        return true;
+      }
+    }
     if (request.method === "GET" && parts.length === 2 && parts[1] === "agents") {
       exactQuery(url, ["ownerKind", "ownerId"]);
       const ownerKind = url.searchParams.get("ownerKind");
@@ -1409,9 +1515,11 @@ const productRoute = (method: string, parts: string[]): boolean => {
     return true;
   }
   if (method === "POST" && parts.length === 2
-    && ["models", "projects"].includes(parts[1]!)) {
+    && ["models", "projects", "workspace-bindings"].includes(parts[1]!)) {
     return true;
   }
+  if (parts[1] === "workspace-bindings" && parts.length >= 3
+    && ["GET", "POST", "PATCH"].includes(method)) return true;
   if (parts[1] === "resources" && parts.length >= 4
     && ["PATCH", "POST"].includes(method)) {
     return true;
@@ -1506,9 +1614,31 @@ const strictJsonBody = async (
   return object;
 };
 
-const requiredString = (value: unknown, name: string): string => {
+const requiredString = (value: unknown, name: string, allowEmpty = false): string => {
   if (typeof value !== "string") throw new ApiError(422, "invalid_request", `${name} must be text.`);
+  if (!allowEmpty && !value) throw new ApiError(422, "invalid_request", `${name} must not be empty.`);
   return value;
+};
+
+const requiredInteger = (value: unknown, name: string): number => {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new ApiError(422, "invalid_request", `${name} must be a positive integer.`);
+  }
+  return Number(value);
+};
+
+const workspaceProvider = (value: unknown): { providerId: string; modelId: string } => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(422, "invalid_request", "provider must be an object.");
+  }
+  const provider = value as Record<string, unknown>;
+  if (Object.keys(provider).sort().join("\n") !== "modelId\nproviderId") {
+    throw new ApiError(422, "invalid_request", "provider contains unsupported fields.");
+  }
+  return {
+    providerId: requiredString(provider.providerId, "provider.providerId"),
+    modelId: requiredString(provider.modelId, "provider.modelId"),
+  };
 };
 
 const permanentDeleteConfirmation = (value: unknown): {
