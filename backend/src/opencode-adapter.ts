@@ -3,7 +3,13 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { ApiError } from "./errors.ts";
 import { canonicalJsonV2 } from "./canonical-json-v2.ts";
-import { isAgentToolName, type AgentToolName } from "./agent-tools.ts";
+import {
+  agentToolOperationCommitment,
+  CONSEQUENTIAL_AGENT_TOOLS,
+  isAgentToolName,
+  legacyPromptToolsCompatible,
+  type AgentToolName,
+} from "./agent-tools.ts";
 import {
   BROWSER_AGENT_ACTION_BUDGET,
   BROWSER_AGENT_GRANT_TTL_MS,
@@ -109,7 +115,7 @@ export type OpenCodeRuntimeEvent = { id?: string; type?: string; properties?: Re
  * Riff from the durable Conversation owner; browser input must never populate it.
  */
 export type OpenCodeWorkspaceBinding = Readonly<{
-  owner: { kind: "model" | "project"; id: string };
+  owner: { kind: "model" | "project" | "workspace"; id: string };
   directory: string;
 }>;
 
@@ -410,6 +416,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     const deadlineSignal = signal ?? AbortSignal.timeout(this.#requestTimeoutMs);
     const directory = this.#workspaceDirectory(workspace);
     let lifecycle: OpenCodeTurnEventSupervisor | undefined;
+    let permissionRulesInstalled = false;
     try {
       await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
       const before = await this.#sessionMessages(sessionId, deadlineSignal, directory);
@@ -434,6 +441,27 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         prompt.scopedMcpTools,
         directory,
       );
+      // OpenCode 1.18.11 still accepts the legacy prompt-level `tools` map as
+      // an availability allowlist. Preserve that compatibility shape only for
+      // purely read-only Riff scopes. Consequential and Browser tools rely
+      // exclusively on the ordered session permission rules below: setting a
+      // prompt-level `true` for those names would be appended after `ask` and
+      // could silently widen a single-turn approval into `allow`.
+      const legacyPromptTools = prompt.scopedMcpTools ?? [];
+      const legacyPromptToolsSafe = Boolean(prompt.scopedMcpScopeId)
+        && legacyPromptToolsCompatible(legacyPromptTools);
+      await this.#json(`/session/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        signal: deadlineSignal,
+        body: JSON.stringify({
+          permission: this.#promptPermissionRules(
+            prompt.scopedMcpScopeId,
+            prompt.scopedMcpTools,
+            directory,
+          ),
+        }),
+      }, directory);
+      permissionRulesInstalled = true;
       await this.#json(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
         method: "POST",
         signal: deadlineSignal,
@@ -442,7 +470,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
           ...(prompt.agentName ? { agent: validatedAgentName(prompt.agentName) } : {}),
           system: prompt.system,
           parts,
-          tools: promptTools,
+          ...(legacyPromptToolsSafe ? { tools: promptTools } : {}),
         }),
       }, directory);
       lifecycle.arm();
@@ -466,6 +494,18 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         : new ApiError(504, "opencode_prompt_timeout", "OpenCode did not complete the target session turn in time.");
     } finally {
       lifecycle?.close();
+      if (permissionRulesInstalled) {
+        try {
+          await this.#assertSessionWorkspace(sessionId, directory);
+          await this.#json(`/session/${encodeURIComponent(sessionId)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ permission: [] }),
+          }, directory);
+        } catch {
+          // A restrictive stale ruleset is safer than widening on cleanup
+          // failure; the session generation will be retired on turn failure.
+        }
+      }
     }
   }
 
@@ -676,13 +716,19 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         ? exactScopedToolName(evidence.tool, scopedBinding.name, scopedBinding.allowedTools)
         : null;
       let currentCommitment: string | null = null;
-      if (exactTool && isBrowserAgentToolName(exactTool)
-        && evidence?.inputSource === "state") {
+      if (exactTool && evidence?.inputSource === "state") {
         try {
-          currentCommitment = browserAgentOperationCommitment(
-            exactTool,
-            runtimeToolInput(evidence?.input),
-          ).digest;
+          currentCommitment = isBrowserAgentToolName(exactTool)
+            ? browserAgentOperationCommitment(
+              exactTool,
+              runtimeToolInput(evidence?.input),
+            ).digest
+            : CONSEQUENTIAL_AGENT_TOOLS.has(exactTool)
+              ? agentToolOperationCommitment(
+                exactTool,
+                runtimeToolInput(evidence?.input),
+              ).digest
+              : null;
         } catch { currentCommitment = null; }
       }
       if (!evidence || evidence.tool !== privateRecord.scopedToolName
@@ -881,6 +927,44 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       ...Object.entries(tools),
       ...exact.map((tool) => [`${binding.name}_${tool}`, true] as const),
     ]);
+  }
+
+  #promptPermissionRules(
+    scopeId: string | undefined,
+    allowedTools: readonly AgentToolName[] | undefined,
+    directory: string,
+  ): readonly Readonly<{
+    permission: string;
+    pattern: string;
+    action: "ask" | "allow" | "deny";
+  }>[] {
+    const rules: Array<{
+      permission: string;
+      pattern: string;
+      action: "ask" | "allow" | "deny";
+    }> = [
+      { permission: "*", pattern: "*", action: "deny" },
+      { permission: "question", pattern: "*", action: "allow" },
+    ];
+    if (!scopeId) return Object.freeze(rules.map(Object.freeze));
+    const binding = this.#scopedMcp.get(scopeId);
+    if (!binding || binding.directory !== directory) {
+      throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");
+    }
+    const exact = validatedScopedMcpTools(allowedTools);
+    if (!sameAgentTools(binding.allowedTools, exact)) {
+      throw new ApiError(503, "opencode_mcp_tools_invalid", "The scoped Riff MCP tool grant is invalid.");
+    }
+    for (const tool of exact) {
+      rules.push({
+        permission: `${binding.name}_${tool}`,
+        pattern: "*",
+        // Browser tools enter BrowserAgentAuthority's Riff-owned permission
+        // queue; an upstream OpenCode ask would create competing controllers.
+        action: CONSEQUENTIAL_AGENT_TOOLS.has(tool) ? "ask" : "allow",
+      });
+    }
+    return Object.freeze(rules.map(Object.freeze));
   }
 
   async subscribeEvents(
@@ -1206,7 +1290,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       );
     }
     if (workspace) {
-      if (!["model", "project"].includes(workspace.owner.kind)
+      if (!["model", "project", "workspace"].includes(workspace.owner.kind)
         || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(workspace.owner.id)) {
         throw new ApiError(
           503,
@@ -1792,25 +1876,41 @@ const runtimePermissions = (
     if (!exactTool) continue;
     let operationCommitment: string | undefined;
     let browserAliasSummary = "fixed active grant alias (riff-app, riff-visual, or riff-artifact)";
-    if (isBrowserAgentToolName(exactTool)) {
+    if (isBrowserAgentToolName(exactTool)
+      || CONSEQUENTIAL_AGENT_TOOLS.has(exactTool)) {
       if (call?.inputSource !== "state") continue;
       try {
-        const committed = browserAgentOperationCommitment(
-          exactTool,
-          runtimeToolInput(call?.input),
-        );
-        operationCommitment = committed.digest;
-        if (exactTool === "browser_open") {
-          browserAliasSummary = `alias ${String(committed.normalized.alias)}`;
+        if (isBrowserAgentToolName(exactTool)) {
+          const committed = browserAgentOperationCommitment(
+            exactTool,
+            runtimeToolInput(call?.input),
+          );
+          operationCommitment = committed.digest;
+          if (exactTool === "browser_open") {
+            browserAliasSummary = `alias ${String(committed.normalized.alias)}`;
+          }
+        } else {
+          operationCommitment = agentToolOperationCommitment(
+            exactTool,
+            runtimeToolInput(call?.input),
+          ).digest;
         }
       } catch { continue; }
     }
     const label = publicToolLabel(tool, scopedMcpName) ?? "Riff tool";
+    const consequentialSummary = operationCommitment
+      && !isBrowserAgentToolName(exactTool)
+      ? consequentialPermissionSummary(
+        exactTool,
+        runtimeToolInput(call?.input),
+      ) : null;
     const browserSummary = isBrowserAgentToolName(exactTool)
       ? `Allow Browser control for this turn? Target ${browserAliasSummary}; operation ${exactTool}; `
         + `budget ${BROWSER_AGENT_ACTION_BUDGET}; expires within `
         + `${Math.floor(BROWSER_AGENT_GRANT_TTL_MS / 1_000)} seconds.`
-      : `Allow ${label} once for the current turn?`;
+      : consequentialSummary
+        ? `Allow ${label} once for the current turn? ${consequentialSummary}`
+        : `Allow ${label} once for the current turn?`;
     const publicRequestId = runtimeRequestId(
       "permission",
       sessionId,
@@ -1818,7 +1918,7 @@ const runtimePermissions = (
       item,
       operationCommitment,
     );
-    if (isBrowserAgentToolName(exactTool)) {
+    if (operationCommitment) {
       recordAuthority(publicRequestId, Object.freeze({
         upstreamId,
         messageId: ownerMessageId,
@@ -1843,6 +1943,116 @@ const runtimePermissions = (
     if (result.length >= 32) break;
   }
   return result;
+};
+
+export const consequentialPermissionSummary = (
+  tool: AgentToolName,
+  input: Readonly<Record<string, unknown>>,
+): string => {
+  const publicValue = (value: unknown, maximum = 200): string | null =>
+    typeof value === "string" && value.trim().length > 0
+      && value.trim().length <= maximum
+      && !/[\u0000-\u001f\u007f\p{Cf}]/u.test(value)
+      ? value.trim() : null;
+  const experimentShape = (): string => {
+    const configuration = input.configuration;
+    if (!configuration || typeof configuration !== "object"
+      || Array.isArray(configuration)) {
+      return "Cannot approve: Experiment configuration details are incomplete.";
+    }
+    const record = configuration as Record<string, unknown>;
+    const runKind = publicValue(record.runKind, 32);
+    if (record.schemaVersion !== 1
+      || (runKind !== "batch" && runKind !== "visual")
+      || !record.parameters || typeof record.parameters !== "object"
+      || Array.isArray(record.parameters)) {
+      return "Cannot approve: Experiment configuration details are incomplete.";
+    }
+    const parameters = Object.entries(record.parameters as Record<string, unknown>)
+      .filter(([key]) => /^[A-Za-z0-9_.-]{1,80}$/u.test(key))
+      .sort(([left], [right]) => left.localeCompare(right, "en"))
+      .slice(0, 12)
+      .map(([key, value]) => {
+        if (value === null) return `${key}=null`;
+        if (typeof value === "boolean") return `${key}=${String(value)}`;
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return `${key}=${Object.is(value, -0) ? 0 : String(value)}`;
+        }
+        if (typeof value === "string") return `${key}=string(${value.length})`;
+        if (Array.isArray(value)) return `${key}=array(${value.length})`;
+        if (value && typeof value === "object") return `${key}=object`;
+        return `${key}=unsupported`;
+      });
+    const sampling = record.sampling && typeof record.sampling === "object"
+      && !Array.isArray(record.sampling)
+      ? record.sampling as Record<string, unknown> : {};
+    const sampleCount = sampling.kind === "single" ? 1
+      : sampling.kind === "multiple-seeds" && Array.isArray(sampling.seeds)
+        && sampling.seeds.length > 0 ? sampling.seeds.length
+        : sampling.kind === "cartesian-sweep" && Array.isArray(sampling.axes)
+          && sampling.axes.length > 0
+          ? sampling.axes.reduce((count, axis) => {
+            if (!axis || typeof axis !== "object" || Array.isArray(axis)
+              || !Array.isArray((axis as Record<string, unknown>).values)
+              || !(axis as Record<string, unknown>).values) return Number.NaN;
+            return count * ((axis as Record<string, unknown>).values as unknown[]).length;
+          }, Array.isArray(sampling.seeds) ? sampling.seeds.length : 1)
+          : null;
+    if (!Number.isSafeInteger(sampleCount) || Number(sampleCount) < 1) {
+      return "Cannot approve: Experiment sampling details are incomplete.";
+    }
+    return `Run kind ${runKind}; samples ${sampleCount}; parameters `
+      + `${parameters.length ? parameters.join(", ") : "none"}.`;
+  };
+  switch (tool) {
+    case "riff_start_model_technical_check":
+      return "Start a technical check for the current Model.";
+    case "riff_apply_model_changes": {
+      let changes: unknown = input.changes;
+      if (typeof changes === "string" && changes.length <= 256_000) {
+        try { changes = JSON.parse(changes); } catch { changes = null; }
+      }
+      const list = Array.isArray(changes) ? changes.slice(0, 64) : [];
+      const paths = list.flatMap((change) => {
+        if (!change || typeof change !== "object" || Array.isArray(change)) return [];
+        const path = publicValue((change as Record<string, unknown>).relativePath, 240)
+          ?? publicValue((change as Record<string, unknown>).path, 240);
+        return path && !path.startsWith("/") && !path.includes("..") ? [path] : [];
+      }).slice(0, 8);
+      return `Apply ${list.length} Model file operation(s)`
+        + `${paths.length ? `: ${paths.join(", ")}` : ""}. File contents are hidden.`;
+    }
+    case "riff_create_experiment_configuration":
+      return `Create Experiment "${publicValue(input.name) ?? "unnamed"}". ${experimentShape()}`;
+    case "riff_update_experiment_configuration":
+      return `Update Experiment ${publicValue(input.configurationId, 256) ?? "selection"}`
+        + `${publicValue(input.name) ? ` and name it "${publicValue(input.name)}"` : ""}. `
+        + experimentShape();
+    case "riff_start_run":
+      return `Start a Run from Experiment ${publicValue(input.configurationId, 256) ?? "selection"}.`;
+    case "riff_cancel_run":
+      return `Cancel Run ${publicValue(input.runRef, 256) ?? "selection"}.`;
+    case "riff_trash_run":
+      return `Move Run ${publicValue(input.runRef, 256) ?? "selection"} to trash.`;
+    case "riff_restore_run":
+      return `Restore Run ${publicValue(input.runRef, 256) ?? "selection"}.`;
+    case "riff_transition_owner_lifecycle": {
+      const action = publicValue(input.action, 32) ?? "change";
+      return action === "rename"
+        ? `Rename the current object to "${publicValue(input.name) ?? "unnamed"}".`
+        : `${action[0]?.toUpperCase() ?? "C"}${action.slice(1)} the current object.`;
+    }
+    case "riff_create_analysis_document":
+      return `Create analysis document "${publicValue(input.name) ?? "unnamed"}"; content hidden.`;
+    case "riff_transition_temporary_document":
+      return `Apply ${publicValue(input.transition, 32) ?? "a lifecycle change"} to document `
+        + `${publicValue(input.documentId, 256) ?? "selection"}.`;
+    case "riff_adopt_attachment":
+      return `Adopt attachment ${publicValue(input.attachmentId, 256) ?? "selection"} as `
+        + `"${publicValue(input.logicalName, 240) ?? "an owned file"}".`;
+    default:
+      return "Apply the exact server-held parameters shown for this request.";
+  }
 };
 
 const runtimeQuestions = (

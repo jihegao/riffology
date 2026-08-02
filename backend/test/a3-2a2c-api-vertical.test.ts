@@ -378,15 +378,25 @@ test("A3-2a2c public Project run route executes one real visual run without leak
   assert.deepEqual(startReceipt, {
     schemaVersion: 1,
     commandId: startRequest.commandId,
+    intentDigest: startReceipt.intentDigest,
     runId: startReceipt.runId,
     projectId: project.id,
     experimentConfigId: experiment.id,
     completionConversationId: null,
     status: "queued",
     runKind: "visual",
+    frozenConfigurationDigest: startReceipt.frozenConfigurationDigest,
+    samplePlanDigest: startReceipt.samplePlanDigest,
     sampleCount: 1,
+    projectSnapshotDigest: startReceipt.projectSnapshotDigest,
+    executionDescriptionDigest: startReceipt.executionDescriptionDigest,
+    limitsDigest: startReceipt.limitsDigest,
     createdAt: startReceipt.createdAt,
   });
+  for (const field of [
+    "intentDigest", "frozenConfigurationDigest", "samplePlanDigest",
+    "projectSnapshotDigest", "executionDescriptionDigest", "limitsDigest",
+  ]) assert.match(startReceipt[field], /^[0-9a-f]{64}$/u, field);
 
   const replayResponse = await post(
     `${baseUrl}/api/projects/${project.id}/runs`,

@@ -75,6 +75,54 @@ export type ProviderDiscovery =
     providerModels: readonly [];
   }>;
 
+export type WorkspaceBinding = Readonly<{
+  schemaVersion: 1;
+  workspaceKey: string;
+  conversation: Readonly<{
+    kind: "bootstrap" | "owner";
+    id: string;
+    name: string;
+    provider: Readonly<{ providerId: string; modelId: string }> | null;
+  }>;
+  owner: Readonly<{ kind: "model" | "project"; id: string }> | null;
+  generation: number;
+  bindingDigest: string;
+  state: "unbound" | "bound" | "recovery_required";
+  draft: string;
+  provider: Readonly<{ providerId: string; modelId: string }> | null;
+  providerMode: "live" | "read_only";
+  providerReason: "opencode_unavailable" | "opencode_auth_failed" | null;
+  ownerProjection: Readonly<{
+    kind: "model" | "project";
+    id: string;
+    name: string;
+    recordDigest: string;
+  }> | null;
+  bootstrapMessages: readonly Readonly<{
+    id: string;
+    ordinal: number;
+    role: "user" | "assistant" | "system";
+    status: "complete" | "failed";
+    text: string;
+    createdAt: string;
+  }>[];
+  createdAt: string;
+  updatedAt: string;
+}>;
+
+export type WorkspaceBindingMutation = Readonly<{
+  binding: WorkspaceBinding;
+  receipt: Readonly<{ receiptDigest: string; generation: number }>;
+}>;
+
+export type WorkspaceBootstrapTurn = Readonly<{
+  schemaVersion: 1;
+  mode: "live" | "read_only";
+  reason: string | null;
+  binding: WorkspaceBinding;
+  assistantText: string | null;
+}>;
+
 export type AgentDiscovery =
   | Readonly<{
     mode: "live";

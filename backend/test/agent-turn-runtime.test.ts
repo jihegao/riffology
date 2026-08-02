@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
+import { agentToolOperationCommitment, type AgentToolName } from "../src/agent-tools.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
 import { ProductStoreV2 } from "../src/product-store-v2.ts";
@@ -13,6 +14,15 @@ import { SimulationSkillCatalog } from "../src/simulation-skill-catalog.ts";
 
 const NOW = "2026-07-22T01:00:00.000Z";
 const call = (name: string, args: Record<string, unknown> = {}) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+const authorize = (
+  runtime: AgentTurnRuntime,
+  capability: string,
+  tool: AgentToolName,
+  args: Record<string, unknown>,
+) => runtime.authorizeConsequentialOperation(capability, {
+  toolName: tool,
+  operationCommitment: agentToolOperationCommitment(tool, args).digest,
+});
 
 test("explicit Model turn loads and records a skill, scopes its attachment, and atomically mutates only its Model", async (t) => {
   const fixture = setup(t);
@@ -52,6 +62,7 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
   const applyArguments = { requestKey: "change-a", changes: [{
     objectFileId: modelFile.id, kind: "model_code", relativePath: "model.py", mediaType: "text/x-python", text: "value = 2\n", expectedPriorSha256: modelFile.sha256,
   }] };
+  authorize(runtime, prepared.capability, "riff_apply_model_changes", applyArguments);
   const response = await runtime.handle(
     prepared.capability,
     call("riff_apply_model_changes", applyArguments),
@@ -61,10 +72,8 @@ test("explicit Model turn loads and records a skill, scopes its attachment, and 
     prepared.capability,
     call("riff_apply_model_changes", applyArguments),
   );
-  assert.equal(
-    (exactApplyReplay?.result as any).content[0].text,
-    (response?.result as any).content[0].text,
-  );
+  assert.equal((exactApplyReplay?.result as any).isError, true,
+    "the one-operation turn budget is consumed even by an idempotent replay");
   assert.equal((response?.result as any).content[0].text.includes("intent"), false);
   assert.equal(store.readObjectFile(modelFile.id).toString("utf8"), "value = 2\n");
   const directAction = store.getActionRecord(
@@ -163,19 +172,21 @@ test("public direct-apply receipt projection fails closed on receipt corruption 
     kind: "model",
     id: "model_alpha",
   }).find((file) => file.id === "file_model_alpha")!;
+  const applyArguments = {
+    requestKey: "public-receipt-change",
+    changes: [{
+      objectFileId: modelFile.id,
+      kind: "model_code",
+      relativePath: "model.py",
+      mediaType: "text/x-python",
+      text: "value = 3\n",
+      expectedPriorSha256: modelFile.sha256,
+    }],
+  };
+  authorize(runtime, prepared.capability, "riff_apply_model_changes", applyArguments);
   const response = await runtime.handle(
     prepared.capability,
-    call("riff_apply_model_changes", {
-      requestKey: "public-receipt-change",
-      changes: [{
-        objectFileId: modelFile.id,
-        kind: "model_code",
-        relativePath: "model.py",
-        mediaType: "text/x-python",
-        text: "value = 3\n",
-        expectedPriorSha256: modelFile.sha256,
-      }],
-    }),
+    call("riff_apply_model_changes", applyArguments),
   );
   const actionId = (JSON.parse(
     (response?.result as any).content[0].text,
@@ -502,16 +513,19 @@ test("Project capability never exposes Model workspace mutation and attachment a
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(!names.includes("riff_apply_model_changes")); assert.ok(!names.includes("riff_read_model_file"));
   assert.ok(!names.includes("riff_observe_current_visual"));
+  const adoptInput = { attachmentId: "attachment_project", purpose: "project input", logicalName: "source.csv" };
+  authorize(runtime, prepared.capability, "riff_adopt_attachment", adoptInput);
+  const adopted = await runtime.handle(prepared.capability, call("riff_adopt_attachment", adoptInput));
+  assert.equal((adopted?.result as any).isError, undefined, JSON.stringify(adopted));
   const forged = await runtime.handle(prepared.capability, call("riff_adopt_attachment", { attachmentId: "attachment_other", purpose: "forged", logicalName: "other.csv" }));
   assert.equal((forged?.result as any).isError, true);
-  const adopted = await runtime.handle(prepared.capability, call("riff_adopt_attachment", { attachmentId: "attachment_project", purpose: "project input", logicalName: "source.csv" }));
-  assert.equal((adopted?.result as any).isError, undefined, JSON.stringify(adopted));
+  assert.match((forged?.result as any).content[0].text, /operation_budget_exhausted/u);
   const projectFiles = store.listObjectFiles({ kind: "project", id: "project_alpha" });
   assert.ok(projectFiles.some((file) => file.kind === "adopted_attachment" && file.sourceAttachmentId === "attachment_project"));
   assert.equal(store.readObjectFile("file_model_alpha").toString("utf8"), "value = 1\n");
 });
 
-test("explicit Project turn compare-and-set updates an Experiment and creates requested analysis only", async (t) => {
+test("one turn naming two consequential Project operations receives neither write authority", async (t) => {
   const { store, runtime } = setup(t, true);
   store.startAgentTurn({
     turnId: "turn_project_experiment",
@@ -544,62 +558,18 @@ test("explicit Project turn compare-and-set updates an Experiment and creates re
   });
   const names = ((listed?.result as any).tools as any[]).map((item) => item.name);
   assert.ok(names.includes("riff_list_experiment_configurations"));
-  assert.ok(names.includes("riff_update_experiment_configuration"));
-  assert.ok(names.includes("riff_create_analysis_document"));
-  assert.ok(!names.includes("riff_create_temporary_document"));
-
-  const configurations = await runtime.handle(
+  assert.ok(!names.includes("riff_update_experiment_configuration"));
+  assert.ok(!names.includes("riff_create_analysis_document"));
+  const deniedUpdate = await runtime.handle(
     prepared.capability,
-    call("riff_list_experiment_configurations"),
+    call("riff_update_experiment_configuration", {}),
   );
-  const current = JSON.parse((configurations?.result as any).content[0].text)[0];
-  const nextConfiguration = structuredClone(current.configuration);
-  nextConfiguration.parameters.horizon = 2;
-  delete nextConfiguration.parameters.crewCount;
-  const updateArguments = {
-    requestKey: "agent-experiment-update",
-    configurationId: current.id,
-    expectedConfigurationDigest: current.configurationDigest,
-    expectedRecordDigest: current.recordDigest,
-    configuration: nextConfiguration,
-  };
-  const updated = await runtime.handle(
+  const deniedDocument = await runtime.handle(
     prepared.capability,
-    call("riff_update_experiment_configuration", updateArguments),
+    call("riff_create_analysis_document", {}),
   );
-  assert.equal((updated?.result as any).isError, undefined, JSON.stringify(updated));
-  const replayed = await runtime.handle(
-    prepared.capability,
-    call("riff_update_experiment_configuration", updateArguments),
-  );
-  assert.equal(
-    (replayed?.result as any).content[0].text,
-    (updated?.result as any).content[0].text,
-    "an exact retry after response loss must replay the durable result",
-  );
-  assert.equal(
-    store.listExperimentConfigurations("project_alpha")[0]?.configuration.parameters.horizon,
-    2,
-  );
-  assert.equal(
-    store.listExperimentConfigurations("project_alpha")[0]?.configuration.parameters.crewCount,
-    1,
-    "schema defaults must normalize once and still replay exactly",
-  );
-
-  const analysis = await runtime.handle(
-    prepared.capability,
-    call("riff_create_analysis_document", {
-      name: "Requested analysis",
-      mediaType: "text/markdown",
-      content: "# Analysis\n\nUser requested this document.",
-    }),
-  );
-  assert.equal((analysis?.result as any).isError, undefined, JSON.stringify(analysis));
-  assert.equal(
-    store.listTemporaryDocuments("conversation_project")[0]?.name,
-    "Requested analysis",
-  );
+  assert.equal((deniedUpdate?.result as any).isError, true);
+  assert.equal((deniedDocument?.result as any).isError, true);
   const actions = store.startAgentTurn({
     turnId: "turn_project_experiment",
     userMessageId: "message_project_experiment",
@@ -612,10 +582,7 @@ test("explicit Project turn compare-and-set updates an Experiment and creates re
     actions
       .map((action) => [action.actionKind, action.state])
       .sort(([left], [right]) => String(left).localeCompare(String(right))),
-    [
-      ["analysis_document_create", "committed"],
-      ["experiment_configuration_update", "committed"],
-    ],
+    [],
   );
 });
 

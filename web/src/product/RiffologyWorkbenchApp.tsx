@@ -1,21 +1,22 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
-import { defaultProductClient, type ProductClient, type ProductRecoveryStatus } from "./api";
+import { defaultProductClient, ProductApiError, type ProductClient, type ProductRecoveryStatus } from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { RiffologyWorkbenchViewer } from "./RiffologyWorkbenchViewer";
 import type {
   BrowserSessionDto,
   HomeDto,
+  ModelSummary,
   ProjectSummary,
-  ProjectWorkspaceDto,
+  ProviderDiscovery,
+  WorkspaceBinding,
   WorkspaceDto,
 } from "./types";
 
 type WorkbenchRoute =
   | Readonly<{ page: "new"; workspaceKey: string }>
+  | Readonly<{ page: "model"; modelId: string; conversationId?: string }>
   | Readonly<{ page: "project"; projectId: string; conversationId?: string }>
   | Readonly<{ page: "not_found" }>;
-
-const UNBOUND_DRAFT_PREFIX = "riffology:stage2:unbound-project";
 
 const createUnboundWorkspaceHref = () =>
   `/workbench/new/${crypto.randomUUID()}`;
@@ -31,7 +32,9 @@ const readWorkbenchRoute = (): WorkbenchRoute => {
   const newMatch = /^\/workbench\/new\/([a-zA-Z0-9_-]{1,80})\/?$/u
     .exec(window.location.pathname);
   if (newMatch) return { page: "new", workspaceKey: newMatch[1]! };
-  const match = /^\/workbench\/projects\/([^/]+)\/?$/u.exec(window.location.pathname);
+  const modelMatch = /^\/workbench\/models\/([^/]+)\/?$/u.exec(window.location.pathname);
+  const projectMatch = /^\/workbench\/projects\/([^/]+)\/?$/u.exec(window.location.pathname);
+  const match = modelMatch ?? projectMatch;
   if (!match) return { page: "not_found" };
   try {
     const projectId = decodeURIComponent(match[1]!);
@@ -46,7 +49,9 @@ const readWorkbenchRoute = (): WorkbenchRoute => {
       || conversationId.includes("/") || conversationId.includes("\\"))) {
       return { page: "not_found" };
     }
-    return { page: "project", projectId, ...(conversationId ? { conversationId } : {}) };
+    return modelMatch
+      ? { page: "model", modelId: projectId, ...(conversationId ? { conversationId } : {}) }
+      : { page: "project", projectId, ...(conversationId ? { conversationId } : {}) };
   } catch {
     return { page: "not_found" };
   }
@@ -56,6 +61,19 @@ const workbenchProjectHref = (projectId: string, conversationId?: string) => {
   const path = `/workbench/projects/${encodeURIComponent(projectId)}`;
   return conversationId ? `${path}?conversation=${encodeURIComponent(conversationId)}` : path;
 };
+
+const workbenchModelHref = (modelId: string, conversationId?: string) => {
+  const path = `/workbench/models/${encodeURIComponent(modelId)}`;
+  return conversationId ? `${path}?conversation=${encodeURIComponent(conversationId)}` : path;
+};
+
+const workbenchOwnerHref = (
+  kind: "model" | "project",
+  id: string,
+  conversationId?: string,
+) => kind === "model"
+  ? workbenchModelHref(id, conversationId)
+  : workbenchProjectHref(id, conversationId);
 
 const navigateWorkbench = (href: string) => {
   history.pushState({}, "", href);
@@ -69,6 +87,8 @@ export function RiffologyWorkbenchApp({
   const [recovery, setRecovery] = useState<ProductRecoveryStatus | "checking">("checking");
   const [home, setHome] = useState<HomeDto>();
   const [workspace, setWorkspace] = useState<WorkspaceDto>();
+  const [workspaceBinding, setWorkspaceBinding] = useState<WorkspaceBinding>();
+  const [providers, setProviders] = useState<ProviderDiscovery>();
   const [error, setError] = useState<string>();
   const [filesOpen, setFilesOpen] = useState(() => !compactWorkbench());
   const [browser, setBrowser] = useState<BrowserSessionDto>();
@@ -89,12 +109,36 @@ export function RiffologyWorkbenchApp({
       const nextRecovery = await client.recoveryStatus();
       setRecovery(nextRecovery);
       if (nextRecovery.state !== "ready") return;
-      const nextHome = await client.home();
+      const [nextHome, nextProviders] = await Promise.all([
+        client.home(), client.providers(),
+      ]);
       setHome(nextHome);
-      if (route.page === "project") {
-        setWorkspace(await client.workspace("project", route.projectId));
+      setProviders(nextProviders);
+      if (route.page === "project" || route.page === "model") {
+        const ownerId = route.page === "project" ? route.projectId : route.modelId;
+        setWorkspace(await client.workspace(route.page, ownerId));
+        setWorkspaceBinding(undefined);
+      } else if (route.page === "new") {
+        let binding: WorkspaceBinding;
+        try {
+          binding = await client.workspaceBinding(route.workspaceKey);
+        } catch (cause) {
+          if (!(cause instanceof ProductApiError) || cause.status !== 404) throw cause;
+          binding = (await client.createWorkspaceBinding({
+            commandId: `workspace_create_${route.workspaceKey}`,
+            workspaceKey: route.workspaceKey,
+          })).binding;
+        }
+        setWorkspaceBinding(binding);
+        if (binding.state === "bound" && binding.owner) {
+          navigateWorkbench(workbenchOwnerHref(
+            binding.owner.kind, binding.owner.id, binding.conversation.kind === "owner"
+              ? binding.conversation.id : undefined,
+          ));
+        }
       } else {
         setWorkspace(undefined);
+        setWorkspaceBinding(undefined);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The workbench could not be loaded.");
@@ -114,6 +158,7 @@ export function RiffologyWorkbenchApp({
   useEffect(() => {
     setRecovery("checking");
     setWorkspace(undefined);
+    setWorkspaceBinding(undefined);
     void load();
   }, [load]);
 
@@ -126,13 +171,17 @@ export function RiffologyWorkbenchApp({
     return () => query.removeEventListener("change", closeForCompactLayout);
   }, []);
 
-  const currentProject = route.page === "project"
+  const ownerRoute = route.page === "project" || route.page === "model" ? route : undefined;
+  const currentOwner = route.page === "project"
     ? home?.projects.find((project) => project.id === route.projectId)
-    : undefined;
-  const projectWorkspace = isProjectWorkspace(workspace) ? workspace : undefined;
-  const currentConversation = route.page === "project" && projectWorkspace
-    ? projectWorkspace.conversations.find((item) => item.id === route.conversationId)
-      ?? projectWorkspace.conversations[0]
+    : route.page === "model"
+      ? home?.models.find((model) => model.id === route.modelId)
+      : undefined;
+  const ownerWorkspace = ownerRoute && workspace?.owner.kind === ownerRoute.page
+    ? workspace : undefined;
+  const currentConversation = ownerRoute && ownerWorkspace
+    ? ownerWorkspace.conversations.find((item) => item.id === ownerRoute.conversationId)
+      ?? ownerWorkspace.conversations[0]
     : undefined;
 
   const browserScreenshotData = useCallback(async (
@@ -333,8 +382,11 @@ export function RiffologyWorkbenchApp({
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
         <ProjectRail
+          models={home?.models ?? []}
           projects={home?.projects ?? []}
-          currentProjectId={route.page === "project" ? route.projectId : undefined}
+          currentOwner={route.page === "project"
+            ? { kind: "project", id: route.projectId }
+            : route.page === "model" ? { kind: "model", id: route.modelId } : undefined}
           unbound={route.page === "new"}
         />
         {recovery === "checking" && <WorkbenchState title="正在恢复工作台…" />}
@@ -347,29 +399,48 @@ export function RiffologyWorkbenchApp({
         {recovery !== "checking" && recovery.state === "ready" && !error
           && route.page === "not_found" && <WorkbenchState title="没有这个工作台" />}
         {recovery !== "checking" && recovery.state === "ready" && !error
-          && route.page === "new" && (
-          <UnboundProjectWorkspace workspaceKey={route.workspaceKey} />
+          && route.page === "new" && !workspaceBinding && (
+          <WorkbenchState title="正在载入项目引导…" />
         )}
         {recovery !== "checking" && recovery.state === "ready" && !error
-          && route.page === "project" && projectWorkspace && currentProject && (
+          && route.page === "new" && workspaceBinding && (
+          <UnboundProjectWorkspace
+            client={client}
+            binding={workspaceBinding}
+            providers={providers}
+            onBindingChange={setWorkspaceBinding}
+          />
+        )}
+        {recovery !== "checking" && recovery.state === "ready" && !error
+          && (route.page === "project" || route.page === "model")
+          && ownerWorkspace && currentOwner && (
           <>
-            <aside className="riffology-chat-pane" aria-label="项目对话">
+            <aside className="riffology-chat-pane"
+              aria-label={route.page === "project" ? "项目对话" : "模型对话"}>
               <ConversationPane
                 client={client}
-                ownerKind="project"
-                ownerId={route.projectId}
+                ownerKind={route.page}
+                ownerId={route.page === "project" ? route.projectId : route.modelId}
                 selectedConversationId={route.conversationId}
                 onOwnerChanged={load}
                 presentation="riffology"
-                ownerName={projectWorkspace.owner.name}
+                ownerName={ownerWorkspace.owner.name}
                 navigateConversation={(conversationId) => {
-                  navigateWorkbench(workbenchProjectHref(route.projectId, conversationId));
+                  navigateWorkbench(workbenchOwnerHref(
+                    route.page,
+                    route.page === "project" ? route.projectId : route.modelId,
+                    conversationId,
+                  ));
                 }}
                 conversationHref={(conversationId) =>
-                  workbenchProjectHref(route.projectId, conversationId)}
+                  workbenchOwnerHref(
+                    route.page,
+                    route.page === "project" ? route.projectId : route.modelId,
+                    conversationId,
+                  )}
               />
             </aside>
-            <RiffologyWorkbenchViewer client={client} workspace={projectWorkspace}
+            <RiffologyWorkbenchViewer client={client} workspace={ownerWorkspace}
               filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
               fileToggleRef={fileToggleRef}
               browser={browser}
@@ -436,9 +507,12 @@ function WorkbenchChrome({
       document.removeEventListener("keydown", escape);
     };
   }, [agentMenuOpen]);
-  const projectPath = route.page === "project"
-    ? `riff://project/${encodeURIComponent(route.projectId)}` : "riff://unbound-workspace";
-  const conversation = route.page === "project" && workspace?.owner.kind === "project"
+  const projectedPath = route.page === "project"
+    ? `riff://project/${encodeURIComponent(route.projectId)}`
+    : route.page === "model" ? `riff://model/${encodeURIComponent(route.modelId)}`
+      : "riff://unbound-workspace";
+  const conversation = (route.page === "project" || route.page === "model")
+    && workspace?.owner.kind === route.page
     ? workspace.conversations.find((item) => item.id === route.conversationId) ?? workspace.conversations[0]
     : undefined;
   const agentState = conversation?.sessionState === "available" ? "可用"
@@ -454,8 +528,8 @@ function WorkbenchChrome({
   return <div className="riffology-workbench-chrome">
     <span className="riffology-context-projection">
       <i aria-hidden="true" />
-      {workspace?.owner.kind === "project"
-        ? `${workspace.owner.name} / Project Conversation`
+      {workspace && (workspace.owner.kind === "project" || workspace.owner.kind === "model")
+        ? `${workspace.owner.name} / ${workspace.owner.kind === "project" ? "Project" : "Model"} Conversation`
         : "新项目 / Agent 引导"}
     </span>
     <nav aria-label="浏览器导航" className="riffology-browser-navigation">
@@ -466,7 +540,7 @@ function WorkbenchChrome({
         onClick={onBrowserReload} aria-label="刷新">↻</button>
     </nav>
     <output className="riffology-url-projection" aria-label="页面地址">
-      {browser?.projectedUrl ?? projectPath}
+      {browser?.projectedUrl ?? projectedPath}
     </output>
     <span className="riffology-trust-state" aria-label="受信状态">
       {!browser || browser.trustState === "trusted_riff" ? "受信 Riff" : "未连接"}
@@ -500,9 +574,10 @@ function WorkbenchChrome({
       </div>}
     </div>
     <span className="riffology-opencode-version" aria-label="OpenCode 基线版本">OpenCode 1.18.11</span>
-    <button ref={fileToggleRef} type="button" className="riffology-file-toggle" disabled={route.page !== "project"}
-      aria-expanded={route.page === "project" ? filesOpen : undefined}
-      aria-controls="riffology-project-files" onClick={() => onFilesOpenChange(!filesOpen)}>文件 ↗</button>
+    <button ref={fileToggleRef} type="button" className="riffology-file-toggle"
+      disabled={route.page !== "project" && route.page !== "model"}
+      aria-expanded={route.page === "project" || route.page === "model" ? filesOpen : undefined}
+      aria-controls="riffology-owner-files" onClick={() => onFilesOpenChange(!filesOpen)}>文件 ↗</button>
   </div>;
 }
 
@@ -524,12 +599,10 @@ const browserFingerprint = (state?: BrowserSessionDto): string => state
   ].join("\u0000")
   : "";
 
-const isProjectWorkspace = (workspace?: WorkspaceDto): workspace is ProjectWorkspaceDto =>
-  workspace?.owner.kind === "project";
-
-function ProjectRail({ projects, currentProjectId, unbound }: Readonly<{
+function ProjectRail({ models, projects, currentOwner, unbound }: Readonly<{
+  models: readonly ModelSummary[];
   projects: readonly ProjectSummary[];
-  currentProjectId?: string;
+  currentOwner?: Readonly<{ kind: "model" | "project"; id: string }>;
   unbound: boolean;
 }>) {
   return (
@@ -540,11 +613,23 @@ function ProjectRail({ projects, currentProjectId, unbound }: Readonly<{
         <span aria-hidden="true">＋</span><small>新项目</small>
       </button>
       <ul>
+        {models.map((model) => (
+          <li key={`model:${model.id}`}>
+            <a href={workbenchModelHref(model.id)}
+              aria-current={currentOwner?.kind === "model" && model.id === currentOwner.id ? "page" : undefined}
+              aria-label={`模型：${model.name}`} title={`Model · ${model.name}`}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                event.preventDefault();
+                navigateWorkbench(workbenchModelHref(model.id));
+              }}>{projectInitials(model.name)}</a>
+          </li>
+        ))}
         {projects.map((project) => (
-          <li key={project.id}>
+          <li key={`project:${project.id}`}>
             <a href={workbenchProjectHref(project.id)}
-              aria-current={project.id === currentProjectId ? "page" : undefined}
-              aria-label={project.name} title={project.name}
+              aria-current={currentOwner?.kind === "project" && project.id === currentOwner.id ? "page" : undefined}
+              aria-label={`项目：${project.name}`} title={`Project · ${project.name}`}
               onClick={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
                 event.preventDefault();
@@ -558,46 +643,108 @@ function ProjectRail({ projects, currentProjectId, unbound }: Readonly<{
   );
 }
 
-function UnboundProjectWorkspace({ workspaceKey }: Readonly<{ workspaceKey: string }>) {
-  const draftKey = `${UNBOUND_DRAFT_PREFIX}:${workspaceKey}:draft`;
-  const [draft, setDraft] = useState(() => sessionStorage.getItem(draftKey) ?? "");
-  const [saved, setSaved] = useState(Boolean(draft));
-  const submit = (event: FormEvent) => {
+function UnboundProjectWorkspace({
+  client,
+  binding,
+  providers,
+  onBindingChange,
+}: Readonly<{
+  client: ProductClient;
+  binding: WorkspaceBinding;
+  providers?: ProviderDiscovery;
+  onBindingChange(binding: WorkspaceBinding): void;
+}>) {
+  const [draft, setDraft] = useState(binding.draft);
+  const [provider, setProvider] = useState(() => binding.provider
+    ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    setDraft(binding.draft);
+    setProvider(binding.provider
+      ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
+  }, [binding.bindingDigest, binding.draft, binding.provider]);
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
-    sessionStorage.setItem(draftKey, draft.trim());
-    setSaved(true);
+    const [providerId, modelId] = provider ? JSON.parse(provider) as string[] : [];
+    if (!providerId || !modelId || !draft.trim() || busy) return;
+    setBusy(true); setError(undefined);
+    try {
+      const saved = await client.updateWorkspaceBinding({
+        commandId: `workspace_draft_${crypto.randomUUID()}`,
+        workspaceKey: binding.workspaceKey,
+        expectedGeneration: binding.generation,
+        expectedBindingDigest: binding.bindingDigest,
+        draft: draft.trim(),
+        provider: { providerId, modelId },
+      });
+      onBindingChange(saved.binding);
+      const turn = await client.sendWorkspaceBootstrapTurn({
+        workspaceKey: binding.workspaceKey,
+        requestKey: `bootstrap_turn_${crypto.randomUUID()}`,
+        expectedGeneration: saved.binding.generation,
+        expectedBindingDigest: saved.binding.bindingDigest,
+        text: draft.trim(),
+      });
+      onBindingChange(turn.binding);
+      setDraft("");
+      if (turn.binding.state === "bound" && turn.binding.owner) {
+        navigateWorkbench(workbenchOwnerHref(
+          turn.binding.owner.kind, turn.binding.owner.id,
+          turn.binding.conversation.kind === "owner"
+            ? turn.binding.conversation.id : undefined,
+        ));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "项目引导暂时不可用。");
+    } finally { setBusy(false); }
   };
+  const providerModels = providers?.mode === "live" ? providers.providerModels : [];
   return (
     <>
       <aside className="riffology-chat-pane riffology-unbound-chat" aria-label="新项目引导">
         <header className="riffology-conversation-heading"><div>
-          <strong>新项目</strong><span>未绑定 · 本地引导草稿</span>
+          <strong>新项目</strong><span>{binding.state === "unbound" ? "未绑定 · Agent 项目引导" : "已绑定"}</span>
         </div></header>
         <div className="riffology-unbound-timeline" role="log" aria-label="Agent 项目引导">
           <article><strong>Assistant</strong>
-            <p>先描述要研究的问题。我会整理项目目标；绑定 Riff Project 后才能执行持久写入。</p>
+            <p>先描述要研究的问题。我会通过受限工具建立或选择 Riff 对象，并在收到持久回执后绑定工作区。</p>
           </article>
-          {saved && draft.trim() && <article className="riffology-local-draft">
-            <strong>本地草稿</strong><p>{draft.trim()}</p>
-          </article>}
+          {binding.bootstrapMessages.map((message) => <article key={message.id}
+            className={message.role === "user" ? "riffology-local-draft" : undefined}>
+            <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
+            <p>{message.text}</p>
+          </article>)}
         </div>
         <form className="riffology-unbound-composer" onSubmit={submit}>
+          <label htmlFor="unbound-project-provider">Provider</label>
+          <select id="unbound-project-provider" value={provider}
+            disabled={busy || binding.providerMode !== "live"}
+            onChange={(event) => setProvider(event.target.value)}>
+            <option value="">选择 Provider / Model…</option>
+            {providerModels.map((item) => <option key={item.qualifiedId}
+              value={JSON.stringify([item.providerId, item.modelId])}>{item.qualifiedId}</option>)}
+          </select>
           <label htmlFor="unbound-project-draft">项目目标</label>
           <textarea id="unbound-project-draft" rows={4} value={draft}
             placeholder="描述要建立的仿真项目…"
-            onChange={(event) => {
-              setDraft(event.target.value);
-              sessionStorage.setItem(draftKey, event.target.value);
-              setSaved(false);
-            }} />
-          <button type="submit" disabled={!draft.trim()}>保存引导草稿</button>
-          <small>此状态只保存在当前浏览器，不是 Riff Model / Project 权威数据。</small>
+            disabled={busy || binding.state !== "unbound"}
+            onChange={(event) => setDraft(event.target.value)} />
+          <button type="submit" disabled={!draft.trim() || !provider || busy
+            || binding.providerMode !== "live" || binding.state !== "unbound"}>
+            {busy ? "Agent 正在处理…" : "发送给 Agent"}
+          </button>
+          {error && <small role="alert">{error}</small>}
+          {binding.providerMode === "read_only" && <small>
+            OpenCode Provider 不可用；现有引导与绑定只读，未启用隐藏 fallback。
+          </small>}
+          <small>只有 Riff receipt 能证明 Model / Project 已持久写入；对话文本不是权威数据。</small>
         </form>
       </aside>
       <section className="riffology-stage2-viewer riffology-unbound-viewer" aria-label="未绑定项目状态">
         <p className="product-eyebrow">UNBOUND WORKSPACE</p>
-        <h1>等待 Agent 建立并绑定 Riff Project</h1>
-        <p>服务端 WorkspaceBinding 与 Agent 化创建流程将在阶段 6 接入。</p>
+        <h1>{binding.ownerProjection?.name ?? "等待 Agent 建立并绑定 Riff Project"}</h1>
+        <p>WorkspaceBinding generation {binding.generation} · {binding.state}</p>
       </section>
     </>
   );

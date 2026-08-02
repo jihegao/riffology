@@ -58,6 +58,8 @@ import type {
   PermanentDeleteReceipt,
   RunRecord,
   StoredObjectMetadata,
+  WorkspaceBinding,
+  WorkspaceBindingReceipt,
 } from "./product-domain.ts";
 import {
   executableModelOptions,
@@ -98,6 +100,16 @@ import {
   publicExecutionDescription,
   type PublicExecutionDescriptionV2,
 } from "./public-execution-description.ts";
+import {
+  WorkspaceBootstrapMcpServer,
+  workspaceBootstrapOperationCommitment,
+  type WorkspaceBootstrapGrant,
+} from "./workspace-bootstrap-mcp.ts";
+import {
+  CONSEQUENTIAL_AGENT_TOOLS,
+  WORKSPACE_BOOTSTRAP_TOOLS,
+  type WorkspaceBootstrapToolName,
+} from "./agent-tools.ts";
 
 export type ProviderDiscoveryDto =
   | { mode: "live"; providerModels: OpenCodeProviderModel[] }
@@ -152,6 +164,7 @@ type ActiveConversationTurn = {
   externalSessionRef: string | null;
   workspace: OpenCodeWorkspaceBinding | null;
   externalSessionGeneration: number | null;
+  capability: string | null;
   mcpBound: boolean;
   controlState: "open" | "stopping" | "terminal";
   controlTail: Promise<void>;
@@ -296,18 +309,60 @@ export type ProjectRunDto = {
   outputs: ProjectOutputDto[];
 };
 
-export type RunStartDto = {
+export type RunStartDto = FrozenRunStartReceipt;
+
+export type WorkspaceBindingDto = WorkspaceBinding & Readonly<{
   schemaVersion: 1;
-  commandId: string;
-  runId: string;
-  projectId: string;
-  experimentConfigId: string;
-  completionConversationId: string | null;
-  status: "queued";
-  runKind: "batch" | "visual";
-  sampleCount: number;
-  createdAt: string;
-};
+  providerMode: "live" | "read_only";
+  providerReason: "opencode_unavailable" | "opencode_auth_failed" | null;
+  ownerProjection: Readonly<{
+    kind: "model" | "project";
+    id: string;
+    name: string;
+    recordDigest: string;
+  }> | null;
+  bootstrapMessages: readonly Readonly<{
+    id: string;
+    ordinal: number;
+    role: "user" | "assistant" | "system";
+    status: "complete" | "failed";
+    text: string;
+    createdAt: string;
+  }>[];
+}>;
+
+export type WorkspaceBootstrapInventoryDto = Readonly<{
+  schemaVersion: 1;
+  workspaceKey: string;
+  generation: number;
+  bindingDigest: string;
+  providerMode: "live" | "read_only";
+  providers: readonly Readonly<{
+    providerRef: string;
+    qualifiedId: string;
+  }>[];
+  objects: readonly Readonly<{
+    objectRef: string;
+    kind: "model" | "project";
+    name: string;
+    lifecycleState: string;
+    technicalStatus?: string;
+    canCreateProject?: boolean;
+  }>[];
+}>;
+
+export type WorkspaceBootstrapMutationDto = Readonly<{
+  binding: WorkspaceBindingDto;
+  receipt: WorkspaceBindingReceipt;
+}>;
+
+export type WorkspaceBootstrapTurnDto = Readonly<{
+  schemaVersion: 1;
+  mode: "live" | "read_only";
+  reason: "opencode_unavailable" | "opencode_auth_failed" | "provider_unavailable" | "agent_failed" | null;
+  binding: WorkspaceBindingDto;
+  assistantText: string | null;
+}>;
 
 export type RunCancelDto = FrozenRunCancelReceipt;
 
@@ -327,6 +382,7 @@ export class AgentWorkspaceService {
   readonly #onRunQueued?: (runId: string, cancellationRequested: boolean) => void;
   readonly #visualDispatchAvailable: boolean;
   readonly #permanentDeleteAdmission = new PermanentDeleteAdmission();
+  readonly #bootstrapMcp: WorkspaceBootstrapMcpServer;
   readonly store: ProductStoreV2;
   readonly openCode: OpenCodeConversationPort;
   readonly technicalChecks: ModelTechnicalCheckService;
@@ -356,9 +412,28 @@ export class AgentWorkspaceService {
     this.#scopedMcpUrl = scopedMcpUrl;
     this.#onRunQueued = onRunQueued;
     this.#visualDispatchAvailable = visualDispatchAvailable;
+    this.#bootstrapMcp = new WorkspaceBootstrapMcpServer({
+      executeWorkspaceBootstrapTool: (grant, tool, input) =>
+        this.#executeWorkspaceBootstrapTool(grant, tool, input),
+    });
+    if (this.turnRuntime?.configureProjectOperations) {
+      this.turnRuntime.configureProjectOperations({
+        startTechnicalCheck: ({ modelId, commandId }) =>
+          this.startTechnicalCheck(modelId, commandId),
+        createExperiment: (input) => this.createExperimentConfiguration(input),
+        startRun: (input) => this.startRun(input),
+        cancelRun: (input) => this.cancelRun(input),
+        trashRun: (input) => this.trashRun(input),
+        restoreRun: (input) => this.restoreRun(input),
+        transitionOwner: (input) => this.lifecycleCommand(input),
+      });
+    }
   }
 
   handleAgentMcp(capability: string | undefined, request: unknown) {
+    if (capability?.startsWith("bootstrap_")) {
+      return this.#bootstrapMcp.handle(capability, request);
+    }
     if (!this.turnRuntime) throw new ApiError(503, "agent_tools_unavailable", "Scoped Agent tools are not configured.");
     return this.turnRuntime.handle(capability, request);
   }
@@ -579,6 +654,601 @@ export class AgentWorkspaceService {
     );
   }
 
+  async createWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+  }>): Promise<WorkspaceBootstrapMutationDto> {
+    try {
+      const result = this.store.createWorkspaceBinding({
+        commandId: boundedKey(input.commandId, "commandId"),
+        workspaceKey: boundedWorkspaceKey(input.workspaceKey),
+        createdAt: this.#now(),
+      });
+      return Object.freeze({
+        binding: await this.workspaceBinding(input.workspaceKey),
+        receipt: result.receipt,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async workspaceBinding(workspaceKeyInput: string): Promise<WorkspaceBindingDto> {
+    const workspaceKey = boundedWorkspaceKey(workspaceKeyInput);
+    try {
+      const binding = this.store.getWorkspaceBinding(workspaceKey);
+      const discovery = await this.discoverProviders();
+      const ownerProjection = binding.owner ? (() => {
+        const record = binding.owner!.kind === "model"
+          ? this.store.listModels({ includeArchived: true, includeTrashed: true })
+            .find((item) => item.id === binding.owner!.id)
+          : this.store.listProjects({ includeArchived: true, includeTrashed: true })
+            .find((item) => item.id === binding.owner!.id);
+        if (!record) return null;
+        return Object.freeze({
+          kind: binding.owner!.kind,
+          id: record.id,
+          name: record.name,
+          recordDigest: this.store.resourceRecordDigest(binding.owner!.kind, record.id),
+        });
+      })() : null;
+      return Object.freeze({
+        schemaVersion: 1,
+        ...binding,
+        providerMode: discovery.mode,
+        providerReason: discovery.mode === "read_only" ? discovery.reason : null,
+        ownerProjection,
+        bootstrapMessages: this.store.getWorkspaceBootstrapRuntime(
+          binding.workspaceKey,
+        ).messages,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async updateWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    draft: string;
+    provider?: Readonly<{ providerId: string; modelId: string }> | null;
+  }>): Promise<WorkspaceBootstrapMutationDto> {
+    try {
+      if (input.provider) {
+        await this.#requireProviderModel(input.provider.providerId, input.provider.modelId);
+      }
+      const result = this.store.updateWorkspaceBindingDraft({
+        commandId: boundedKey(input.commandId, "commandId"),
+        workspaceKey: boundedWorkspaceKey(input.workspaceKey),
+        expectedGeneration: boundedGeneration(input.expectedGeneration),
+        expectedBindingDigest: boundedDigest(input.expectedBindingDigest),
+        draft: boundedBootstrapText(input.draft),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
+        updatedAt: this.#now(),
+      });
+      return Object.freeze({
+        binding: await this.workspaceBinding(input.workspaceKey),
+        receipt: result.receipt,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async workspaceBootstrapInventory(
+    workspaceKeyInput: string,
+  ): Promise<WorkspaceBootstrapInventoryDto> {
+    const binding = this.store.getWorkspaceBinding(
+      boundedWorkspaceKey(workspaceKeyInput),
+    );
+    if (binding.state !== "unbound") {
+      throw new ApiError(409, "workspace_already_bound", "The workspace is already bound.");
+    }
+    const discovery = await this.discoverProviders();
+    const selectedProvider = binding.provider && discovery.mode === "live"
+      ? discovery.providerModels.find((provider) =>
+        provider.providerId === binding.provider!.providerId
+        && provider.modelId === binding.provider!.modelId)
+      : null;
+    const models = this.store.listModels().map((record) => ({
+      objectRef: bootstrapObjectRef(binding, "model", record.id,
+        this.store.resourceRecordDigest("model", record.id)),
+      kind: "model" as const,
+      name: record.name,
+      lifecycleState: record.lifecycleState,
+      technicalStatus: record.technicalStatus,
+      canCreateProject: record.lifecycleState === "active"
+        && record.technicalStatus === "executable",
+    }));
+    const projects = this.store.listProjects().map((record) => ({
+      objectRef: bootstrapObjectRef(binding, "project", record.id,
+        this.store.resourceRecordDigest("project", record.id)),
+      kind: "project" as const,
+      name: record.name,
+      lifecycleState: record.lifecycleState,
+    }));
+    return Object.freeze({
+      schemaVersion: 1,
+      workspaceKey: binding.workspaceKey,
+      generation: binding.generation,
+      bindingDigest: binding.bindingDigest,
+      providerMode: discovery.mode,
+      providers: selectedProvider ? Object.freeze(
+        [selectedProvider].map((provider) => Object.freeze({
+          providerRef: bootstrapProviderRef(
+            binding, provider.providerId, provider.modelId,
+          ),
+          qualifiedId: provider.qualifiedId,
+        })),
+      ) : Object.freeze([]),
+      objects: Object.freeze([...models, ...projects]),
+    });
+  }
+
+  async bootstrapCreateModel(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    name: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<WorkspaceBootstrapMutationDto> {
+    const commandId = boundedKey(input.commandId, "commandId");
+    const workspaceKey = boundedWorkspaceKey(input.workspaceKey);
+    const expectedGeneration = boundedGeneration(input.expectedGeneration);
+    const expectedBindingDigest = boundedDigest(input.expectedBindingDigest);
+    const name = boundedName(input.name, "Model name");
+    const providerId = boundedProviderPart(input.providerId, "providerId");
+    const providerModelId = boundedProviderPart(input.modelId, "modelId");
+    await this.#requireProviderModel(providerId, providerModelId);
+    const modelId = stableId("model", commandId);
+    const conversationId = stableId("conversation", `model:${commandId}`);
+    const scaffold = createGenericModelScaffold(modelId);
+    const at = this.#now();
+    try {
+      const created = this.store.createModelWithFirstConversation({
+        model: {
+          id: modelId,
+          name,
+          technicalStatus: "draft",
+          runMode: scaffold.runMode,
+          executionDescription: scaffold.executionDescription,
+          createdAt: at,
+          files: [...scaffold.files],
+        },
+        conversation: {
+          id: conversationId,
+          name: "Main",
+          providerId,
+          providerModelId,
+          createdAt: at,
+        },
+        workspaceBinding: {
+          commandId,
+          workspaceKey,
+          expectedGeneration,
+          expectedBindingDigest,
+        },
+      });
+      if (!created.workspaceBinding) throw new Error("Workspace binding receipt missing.");
+      return Object.freeze({
+        binding: await this.workspaceBinding(workspaceKey),
+        receipt: created.workspaceBinding.receipt,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async bootstrapCreateProject(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    name: string;
+    sourceModelRef: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<WorkspaceBootstrapMutationDto> {
+    const commandId = boundedKey(input.commandId, "commandId");
+    const workspaceKey = boundedWorkspaceKey(input.workspaceKey);
+    const expectedGeneration = boundedGeneration(input.expectedGeneration);
+    const expectedBindingDigest = boundedDigest(input.expectedBindingDigest);
+    const binding = this.store.getWorkspaceBinding(workspaceKey);
+    assertWorkspaceCas(binding, expectedGeneration, expectedBindingDigest);
+    const sourceModelId = this.#resolveBootstrapObjectRef(
+      binding, "model", input.sourceModelRef,
+    );
+    const providerId = boundedProviderPart(input.providerId, "providerId");
+    const providerModelId = boundedProviderPart(input.modelId, "modelId");
+    await this.#requireProviderModel(providerId, providerModelId);
+    const projectId = stableId("project", commandId);
+    const conversationId = stableId("conversation", `project:${commandId}`);
+    const at = this.#now();
+    try {
+      this.store.createProjectFromModel({
+        projectId,
+        projectName: boundedName(input.name, "Project name"),
+        sourceModelId,
+        createdAt: at,
+        conversation: {
+          id: conversationId,
+          name: "Main",
+          providerId,
+          providerModelId,
+          createdAt: at,
+        },
+        workspaceBinding: {
+          commandId,
+          workspaceKey,
+          expectedGeneration,
+          expectedBindingDigest,
+        },
+      });
+      const receipt = this.store.getWorkspaceBindingReceipt(commandId);
+      if (!receipt) throw new Error("Workspace binding receipt missing.");
+      return Object.freeze({
+        binding: await this.workspaceBinding(workspaceKey),
+        receipt,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async bootstrapBindOwner(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    objectRef: string;
+    providerId: string;
+    modelId: string;
+  }>): Promise<WorkspaceBootstrapMutationDto> {
+    const workspaceKey = boundedWorkspaceKey(input.workspaceKey);
+    const binding = this.store.getWorkspaceBinding(workspaceKey);
+    assertWorkspaceCas(binding, input.expectedGeneration, input.expectedBindingDigest);
+    const inventory = [
+      ...this.store.listModels().map((record) => ({ kind: "model" as const, id: record.id })),
+      ...this.store.listProjects().map((record) => ({ kind: "project" as const, id: record.id })),
+    ];
+    const selected = inventory.find((candidate) =>
+      bootstrapObjectRef(binding, candidate.kind, candidate.id,
+        this.store.resourceRecordDigest(candidate.kind, candidate.id)) === input.objectRef);
+    if (!selected) throw new ApiError(409, "stale_object_ref", "The bootstrap object reference is stale.");
+    await this.#requireProviderModel(input.providerId, input.modelId);
+    const commandId = boundedKey(input.commandId, "commandId");
+    const at = this.#now();
+    try {
+      const result = this.store.bindWorkspaceToNewOwnerConversation({
+        commandId,
+        workspaceKey,
+        expectedGeneration: boundedGeneration(input.expectedGeneration),
+        expectedBindingDigest: boundedDigest(input.expectedBindingDigest),
+        owner: selected,
+        conversation: {
+          id: stableId("conversation", `bind:${commandId}`),
+          name: "Main",
+          providerId: boundedProviderPart(input.providerId, "providerId"),
+          providerModelId: boundedProviderPart(input.modelId, "modelId"),
+          createdAt: at,
+        },
+        committedAt: at,
+      });
+      return Object.freeze({
+        binding: await this.workspaceBinding(workspaceKey),
+        receipt: result.receipt,
+      });
+    } catch (error) { throw storeApiError(error); }
+  }
+
+  async runWorkspaceBootstrapTurn(input: Readonly<{
+    workspaceKey: string;
+    requestKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    text: string;
+  }>): Promise<WorkspaceBootstrapTurnDto> {
+    const workspaceKey = boundedWorkspaceKey(input.workspaceKey);
+    const requestKey = boundedKey(input.requestKey, "requestKey");
+    const expectedGeneration = boundedGeneration(input.expectedGeneration);
+    const expectedBindingDigest = boundedDigest(input.expectedBindingDigest);
+    const text = boundedText(input.text);
+    const binding = this.store.getWorkspaceBinding(workspaceKey);
+    assertWorkspaceCas(binding, expectedGeneration, expectedBindingDigest);
+    if (!binding.provider) {
+      throw new ApiError(409, "provider_required", "Select an available provider before starting the project guide.");
+    }
+    const userMessageId = stableId(
+      "bootstrap_message", `${workspaceKey}:${requestKey}:user`,
+    );
+    const turnId = stableId("bootstrap_turn", `${workspaceKey}:${requestKey}`);
+    const userAt = this.#now();
+    try {
+      this.store.appendWorkspaceBootstrapMessage({
+        workspaceKey, id: userMessageId, role: "user", status: "complete",
+        text, createdAt: userAt,
+      });
+      let runtime = this.store.getWorkspaceBootstrapRuntime(workspaceKey);
+      const workspace: OpenCodeWorkspaceBinding = Object.freeze({
+        owner: Object.freeze({ kind: "workspace" as const, id: workspaceKey }),
+        directory: runtime.directory,
+      });
+      await this.#requireProviderModel(
+        binding.provider.providerId, binding.provider.modelId, workspace,
+      );
+      let externalSessionRef = runtime.session.externalSessionRef;
+      if (runtime.session.state === "available" && externalSessionRef) {
+        let alive = false;
+        try { alive = await this.openCode.getSession(externalSessionRef, workspace); }
+        catch { /* rebuild below */ }
+        if (!alive) {
+          this.store.loseWorkspaceBootstrapSession({
+            workspaceKey,
+            generation: runtime.session.generation,
+            expectedExternalSessionRef: externalSessionRef,
+            updatedAt: this.#now(),
+          });
+          externalSessionRef = null;
+          runtime = this.store.getWorkspaceBootstrapRuntime(workspaceKey);
+        }
+      }
+      if (runtime.session.state !== "available" || !externalSessionRef) {
+        const next = this.store.beginWorkspaceBootstrapSession({
+          workspaceKey, expectedGeneration, expectedBindingDigest,
+          updatedAt: this.#now(),
+        });
+        try {
+          externalSessionRef = await this.openCode.createSession(
+            runtime.conversationId, workspace,
+          );
+          await this.openCode.injectContext(
+            externalSessionRef,
+            workspaceBootstrapContext(runtime.messages),
+            undefined,
+            workspace,
+          );
+          this.store.activateWorkspaceBootstrapSession({
+            workspaceKey,
+            generation: next.generation,
+            externalSessionRef,
+            updatedAt: this.#now(),
+          });
+        } catch (error) {
+          try {
+            this.store.loseWorkspaceBootstrapSession({
+              workspaceKey, generation: next.generation,
+              updatedAt: this.#now(),
+            });
+          } catch { /* the exact failed generation may already be terminal */ }
+          throw error;
+        }
+      }
+      if (!externalSessionRef || !this.#scopedMcpUrl
+        || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
+        throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind the project-guide tools.");
+      }
+      const bootstrapMutation = this.#bootstrapMutationCommitment(
+        binding, text,
+      );
+      const scopedTools = Object.freeze([
+        "riff_bootstrap_list_objects" as const,
+        ...(bootstrapMutation ? [bootstrapMutation.tool] : []),
+      ].sort((left, right) => left.localeCompare(right, "en")));
+      const capability = this.#bootstrapMcp.grant({
+        workspaceKey,
+        conversationId: runtime.conversationId,
+        generation: expectedGeneration,
+        bindingDigest: expectedBindingDigest,
+        turnId,
+        allowedTools: new Set(scopedTools),
+        providerRef: bootstrapProviderRef(
+          binding, binding.provider.providerId, binding.provider.modelId,
+        ),
+        operationCommitmentDigest: bootstrapMutation?.digest
+          ?? canonicalDigest({
+            schemaVersion: 1,
+            workspaceKey,
+            turnId,
+            operation: "read_only_bootstrap",
+            generation: expectedGeneration,
+            bindingDigest: expectedBindingDigest,
+          }),
+      });
+      const scopeId = stableId("bootstrap_scope", workspaceKey);
+      const release = await this.#acquireScopedMcpTurn();
+      let mcpBound = false;
+      try {
+        await this.openCode.bindScopedMcp(
+          scopeId,
+          this.#scopedMcpUrl(capability),
+          scopedTools,
+          workspace,
+        );
+        mcpBound = true;
+        const response = await this.openCode.promptWithModel(
+          externalSessionRef,
+          binding.provider,
+          {
+            text,
+            system: workspaceBootstrapSystemPrompt(binding),
+            attachments: [],
+            scopedMcpScopeId: scopeId,
+            scopedMcpTools: scopedTools,
+          },
+          undefined,
+          workspace,
+        );
+        this.store.appendWorkspaceBootstrapMessage({
+          workspaceKey,
+          id: stableId("bootstrap_message", `${workspaceKey}:${requestKey}:assistant`),
+          role: "assistant",
+          status: "complete",
+          text: response.text,
+          createdAt: this.#now(),
+        });
+        const current = this.store.getWorkspaceBinding(workspaceKey);
+        if (current.state === "bound") {
+          this.#bootstrapMcp.revokeWorkspace(workspaceKey);
+          await this.openCode.abort(externalSessionRef, workspace).catch(() => undefined);
+        }
+        return Object.freeze({
+          schemaVersion: 1,
+          mode: "live",
+          reason: null,
+          binding: await this.workspaceBinding(workspaceKey),
+          assistantText: response.text,
+        });
+      } finally {
+        this.#bootstrapMcp.revoke(capability);
+        if (mcpBound) {
+          await this.openCode.unbindScopedMcp(scopeId, workspace)
+            .catch(() => undefined);
+        }
+        this.openCode.releaseRuntimeBoundary?.(externalSessionRef, workspace);
+        release();
+      }
+    } catch (error) {
+      const api = error instanceof ApiError ? error : storeApiError(error);
+      const reason = api.code === "opencode_auth_failed" ? "opencode_auth_failed"
+        : api.code === "provider_unavailable" || api.code === "model_unavailable"
+          ? "provider_unavailable"
+          : api.code.startsWith("opencode_") ? "opencode_unavailable"
+            : "agent_failed";
+      try {
+        this.store.appendWorkspaceBootstrapMessage({
+          workspaceKey,
+          id: stableId("bootstrap_message", `${workspaceKey}:${requestKey}:assistant`),
+          role: "assistant",
+          status: "failed",
+          text: "本轮项目引导未能完成，未写入或恢复任何 Riff 权威数据。",
+          createdAt: this.#now(),
+        });
+      } catch { /* preserve the original stable failure */ }
+      return Object.freeze({
+        schemaVersion: 1,
+        mode: "read_only",
+        reason,
+        binding: await this.workspaceBinding(workspaceKey),
+        assistantText: null,
+      });
+    }
+  }
+
+  #bootstrapMutationCommitment(
+    binding: WorkspaceBinding,
+    text: string,
+  ): Readonly<{
+    tool: Exclude<WorkspaceBootstrapToolName, "riff_bootstrap_list_objects">;
+    digest: string;
+  }> | null {
+    if (!binding.provider) return null;
+    const [tool] = bootstrapConsequentialTools(text);
+    if (!tool) return null;
+    const common = {
+      providerRef: bootstrapProviderRef(
+        binding, binding.provider.providerId, binding.provider.modelId,
+      ),
+      expectedGeneration: binding.generation,
+      expectedBindingDigest: binding.bindingDigest,
+    };
+    let parameters: Record<string, unknown>;
+    if (tool === "riff_bootstrap_create_model") {
+      const name = bootstrapRequestedName(text);
+      if (!name) return null;
+      parameters = { ...common, name };
+    } else if (tool === "riff_bootstrap_create_project") {
+      const name = bootstrapRequestedName(text);
+      const candidates = this.store.listModels().filter((model) =>
+        model.lifecycleState === "active" && model.technicalStatus === "executable");
+      if (!name || candidates.length !== 1) return null;
+      const source = candidates[0]!;
+      parameters = {
+        ...common,
+        name,
+        sourceModelRef: bootstrapObjectRef(
+          binding,
+          "model",
+          source.id,
+          this.store.resourceRecordDigest("model", source.id),
+        ),
+      };
+    } else {
+      const objectRef = /\bobject_[0-9a-f]{48}\b/u.exec(text)?.[0];
+      if (!objectRef) return null;
+      parameters = { ...common, objectRef };
+    }
+    return Object.freeze({
+      tool,
+      digest: workspaceBootstrapOperationCommitment(tool, parameters),
+    });
+  }
+
+  async #executeWorkspaceBootstrapTool(
+    grant: WorkspaceBootstrapGrant,
+    tool: WorkspaceBootstrapToolName,
+    input: Readonly<Record<string, unknown>>,
+  ): Promise<unknown> {
+    const binding = this.store.getWorkspaceBinding(grant.workspaceKey);
+    assertWorkspaceCas(binding, grant.generation, grant.bindingDigest);
+    if (tool === "riff_bootstrap_list_objects") {
+      return this.workspaceBootstrapInventory(grant.workspaceKey);
+    }
+    const provider = await this.#resolveBootstrapProviderRef(
+      binding, String(input.providerRef),
+    );
+    const common = {
+      // Durable idempotency is server-owned; requestKey is only a bounded
+      // model-supplied diagnostic label and cannot redirect a command receipt.
+      commandId: stableId("command", `workspace-bootstrap:${grant.turnId}`),
+      workspaceKey: grant.workspaceKey,
+      expectedGeneration: grant.generation,
+      expectedBindingDigest: grant.bindingDigest,
+      providerId: provider.providerId,
+      modelId: provider.modelId,
+    };
+    if (tool === "riff_bootstrap_create_model") {
+      return this.bootstrapCreateModel({ ...common, name: String(input.name) });
+    }
+    if (tool === "riff_bootstrap_create_project") {
+      return this.bootstrapCreateProject({
+        ...common,
+        name: String(input.name),
+        sourceModelRef: String(input.sourceModelRef),
+      });
+    }
+    return this.bootstrapBindOwner({
+      ...common,
+      objectRef: String(input.objectRef),
+    });
+  }
+
+  async #resolveBootstrapProviderRef(
+    binding: WorkspaceBinding,
+    providerRefInput: string,
+  ): Promise<Readonly<{ providerId: string; modelId: string }>> {
+    const providerRef = boundedProviderRef(providerRefInput);
+    const discovery = await this.discoverProviders();
+    if (discovery.mode !== "live") {
+      throw new ApiError(503, discovery.reason, "OpenCode provider discovery is unavailable.");
+    }
+    const provider = discovery.providerModels.find((candidate) =>
+      bootstrapProviderRef(binding, candidate.providerId, candidate.modelId)
+        === providerRef);
+    if (!provider) throw new ApiError(409, "stale_provider_ref", "The bootstrap provider reference is stale.");
+    return Object.freeze({ providerId: provider.providerId, modelId: provider.modelId });
+  }
+
+  #resolveBootstrapObjectRef(
+    binding: WorkspaceBinding,
+    kind: "model" | "project",
+    objectRefInput: string,
+  ): string {
+    const objectRef = boundedObjectRef(objectRefInput);
+    const records = kind === "model" ? this.store.listModels() : this.store.listProjects();
+    const record = records.find((candidate) => bootstrapObjectRef(
+      binding,
+      kind,
+      candidate.id,
+      this.store.resourceRecordDigest(kind, candidate.id),
+    ) === objectRef);
+    if (!record) throw new ApiError(409, "stale_object_ref", "The bootstrap object reference is stale.");
+    return record.id;
+  }
+
   listModelsByLifecycle(
     lifecycle: "active" | "archived" | "trashed",
   ): ModelSummaryDto[] {
@@ -612,6 +1282,19 @@ export class AgentWorkspaceService {
     name?: string;
   }): ProductLifecycleReceipt {
     try {
+      if ((input.action === "archive" || input.action === "trash")
+        && (input.kind === "model" || input.kind === "project")) {
+        const conversations = this.store.listConversations(
+          { kind: input.kind, id: boundedId(input.id) },
+          { includeArchived: true, includeTrashed: true },
+        );
+        for (const conversation of conversations) {
+          // The revocation methods synchronously retire MCP/visual/browser
+          // grants before their asynchronous Browser cleanup is joined.
+          void this.turnRuntime?.revokeConversation(conversation.id)
+            .catch(() => undefined);
+        }
+      }
       return this.store.executeLifecycleCommand({
         commandId: boundedKey(input.commandId, "commandId"),
         action: input.action,
@@ -1749,6 +2432,43 @@ export class AgentWorkspaceService {
               "Browser control can only be approved through the Riffology permission gate.",
             );
           }
+        } else if (authority && CONSEQUENTIAL_AGENT_TOOLS.has(authority.toolName)) {
+          if (!active.capability || !this.turnRuntime) {
+            throw new ApiError(
+              409,
+              "interaction_not_pending",
+              "The exact operation permission is no longer bound to this turn.",
+            );
+          }
+          if (input.response.decision === "once") {
+            try {
+              this.turnRuntime.authorizeConsequentialOperation(
+                active.capability,
+                authority,
+              );
+            } catch {
+              throw new ApiError(
+                409,
+                "interaction_not_pending",
+                "The exact operation permission is no longer bound to this turn.",
+              );
+            }
+          }
+          try {
+            await this.openCode.respondPermission(
+              active.externalSessionRef,
+              interactionId,
+              input.response.decision,
+              active.workspace,
+              authority,
+            );
+          } catch (error) {
+            if (input.response.decision === "once" && active.capability) {
+              this.turnRuntime.revokeCapability(active.capability);
+              active.capability = null;
+            }
+            throw error;
+          }
         } else {
           await this.openCode.respondPermission(
             active.externalSessionRef,
@@ -1908,6 +2628,7 @@ export class AgentWorkspaceService {
       externalSessionRef: null as string | null,
       workspace: null as OpenCodeWorkspaceBinding | null,
       externalSessionGeneration: null as number | null,
+      capability: null as string | null,
       mcpBound: false,
       controlState: "open" as ActiveConversationTurn["controlState"],
       controlTail: Promise.resolve(),
@@ -1964,6 +2685,7 @@ export class AgentWorkspaceService {
         workspace: session.workspace,
         ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}),
       });
+      active.capability = prepared?.capability ?? null;
       this.#assertTurnControlOpen(conversationId, active);
       if (prepared && prepared.externalSessionGeneration !== session.generation) {
         throw new ApiError(
@@ -2546,18 +3268,8 @@ const publicConfigurationScalar = (
       : null;
 };
 
-const publicRunStart = (receipt: FrozenRunStartReceipt): RunStartDto => ({
-  schemaVersion: 1,
-  commandId: receipt.commandId,
-  runId: receipt.runId,
-  projectId: receipt.projectId,
-  experimentConfigId: receipt.experimentConfigId,
-  completionConversationId: receipt.completionConversationId,
-  status: receipt.status,
-  runKind: receipt.runKind,
-  sampleCount: receipt.sampleCount,
-  createdAt: receipt.createdAt,
-});
+const publicRunStart = (receipt: FrozenRunStartReceipt): RunStartDto =>
+  Object.freeze({ ...receipt });
 
 const stableId = (prefix: string, value: string): string => `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 const MAX_EXPERIMENT_SAMPLES = 10_000;
@@ -2581,6 +3293,117 @@ const boundedKey = (value: string, name: string): string => {
 const boundedId = (value: string): string => {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value)) throw new ApiError(422, "invalid_id", "A resource ID is invalid.");
   return value;
+};
+const boundedWorkspaceKey = (value: string): string => {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{3,80}$/u.test(value)) {
+    throw new ApiError(422, "invalid_workspace_key", "The workspace key is invalid.");
+  }
+  return value;
+};
+const boundedGeneration = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ApiError(422, "invalid_workspace_generation", "The workspace generation is invalid.");
+  }
+  return value;
+};
+const boundedBootstrapText = (value: string): string => {
+  if (typeof value !== "string" || value.length > 100_000 || value.includes("\0")) {
+    throw new ApiError(422, "invalid_workspace_draft", "The workspace draft is invalid.");
+  }
+  return value;
+};
+const boundedObjectRef = (value: string): string => {
+  if (typeof value !== "string" || !/^object_[0-9a-f]{48}$/u.test(value)) {
+    throw new ApiError(422, "invalid_object_ref", "The bootstrap object reference is invalid.");
+  }
+  return value;
+};
+const boundedProviderRef = (value: string): string => {
+  if (typeof value !== "string" || !/^provider_[0-9a-f]{48}$/u.test(value)) {
+    throw new ApiError(422, "invalid_provider_ref", "The bootstrap provider reference is invalid.");
+  }
+  return value;
+};
+const bootstrapObjectRef = (
+  binding: WorkspaceBinding,
+  kind: "model" | "project",
+  id: string,
+  recordDigest: string,
+): string => `object_${canonicalDigest({
+  workspaceKey: binding.workspaceKey,
+  generation: binding.generation,
+  bindingDigest: binding.bindingDigest,
+  kind,
+  id,
+  recordDigest,
+}).slice(0, 48)}`;
+const bootstrapProviderRef = (
+  binding: WorkspaceBinding,
+  providerId: string,
+  modelId: string,
+): string => `provider_${canonicalDigest({
+  workspaceKey: binding.workspaceKey,
+  generation: binding.generation,
+  bindingDigest: binding.bindingDigest,
+  providerId,
+  modelId,
+}).slice(0, 48)}`;
+const workspaceBootstrapContext = (
+  messages: readonly Readonly<{
+    role: "user" | "assistant" | "system";
+    status: "complete" | "failed";
+    text: string;
+  }>[],
+): string => [
+  "Riffology project-guide durable conversation history follows.",
+  ...messages.slice(-24).map((message) =>
+    `${message.role}[${message.status}]: ${message.text.slice(0, 8_000)}`),
+].join("\n").slice(0, 48_000);
+const workspaceBootstrapSystemPrompt = (binding: WorkspaceBinding): string =>
+  `You are the Riffology project guide for one unbound workspace. `
+  + `Use only the four riff_bootstrap tools to inspect or persist Riff data. `
+  + `Never claim a Model or Project exists unless a tool returns a durable receipt. `
+  + `Object and provider references are opaque, generation-bound capabilities. `
+  + `The current WorkspaceBinding generation is ${binding.generation} and digest is ${binding.bindingDigest}.`;
+const bootstrapConsequentialTools = (
+  text: string,
+): readonly WorkspaceBootstrapToolName[] => {
+  const normalized = text.trim();
+  if (!normalized
+    || /[?？]|\b(?:if|maybe|might|could|would|should we|discuss|explain|suggest|consider|how|what|why)\b|(?:如果|也许|可能|是否|能否|可以吗|讨论|解释|建议|如何|为什么)/iu.test(normalized)) {
+    return Object.freeze([]);
+  }
+  const candidates: WorkspaceBootstrapToolName[] = [];
+  if (/^(?:please\s+)?(?:create|add|build|make)\b[^.!?。！？]{0,80}\bmodel\b|^(?:请)?(?:创建|新增|建立)[^。！？]{0,40}模型/iu.test(normalized)) {
+    candidates.push("riff_bootstrap_create_model");
+  }
+  if (/^(?:please\s+)?(?:create|add|build|make)\b[^.!?。！？]{0,80}\bproject\b|^(?:请)?(?:创建|新增|建立)[^。！？]{0,40}项目/iu.test(normalized)) {
+    candidates.push("riff_bootstrap_create_project");
+  }
+  if (/^(?:please\s+)?(?:bind|select|use|open)\b[^.!?。！？]{0,100}\b(?:existing\s+)?(?:model|project|object)\b|^(?:请)?(?:绑定|选择|使用|打开)[^。！？]{0,50}(?:已有|现有)?(?:模型|项目|对象)/iu.test(normalized)) {
+    candidates.push("riff_bootstrap_bind_owner");
+  }
+  return candidates.length === 1 ? Object.freeze(candidates) : Object.freeze([]);
+};
+const bootstrapRequestedName = (text: string): string | null => {
+  const matched = /\bnamed\s+["']?(.{1,200}?)["']?(?=\s+from\b|\s+with\b|[.!?。！？]|$)/iu.exec(text)?.[1]
+    ?? /名为[“"']?([^。！？]{1,200}?)[”"']?(?=\s*(?:来自|基于|并|，|。|！|？|$))/u.exec(text)?.[1];
+  if (!matched) return null;
+  try { return boundedName(matched.replace(/["'”’]+$/u, "").trim(), "name"); }
+  catch { return null; }
+};
+const assertWorkspaceCas = (
+  binding: WorkspaceBinding,
+  expectedGeneration: number,
+  expectedBindingDigest: string,
+): void => {
+  boundedGeneration(expectedGeneration);
+  boundedDigest(expectedBindingDigest, "expectedBindingDigest");
+  if (binding.state !== "unbound"
+    || binding.generation !== expectedGeneration
+    || binding.bindingDigest !== expectedBindingDigest) {
+    throw new ApiError(409, "stale_workspace_binding", "The WorkspaceBinding changed after it was observed.");
+  }
 };
 const boundedName = (value: string, label: string): string => {
   if (typeof value !== "string" || !value.trim() || value.trim().length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ApiError(422, "invalid_request", `${label} is invalid.`);
@@ -2729,6 +3552,7 @@ const storeApiError = (error: unknown): ApiError => {
     );
   }
   if (!(error instanceof ProductStoreV2Error)) return new ApiError(500, "internal_error", "The Agent workspace could not complete the request.");
+  if (/^stale_workspace_generation:/u.test(error.message)) return new ApiError(409, "stale_workspace_binding", "The WorkspaceBinding changed after it was observed.");
   if (/does not exist/u.test(error.message)) return new ApiError(404, "resource_not_found", "The requested resource does not exist.");
   if (/^legacy_contract_read_only:/u.test(error.message)) return new ApiError(409, "legacy_contract_read_only", "The legacy execution contract is read-only.");
   if (/^execution_protocol_upgrade_required:/u.test(error.message)) return new ApiError(409, "execution_protocol_upgrade_required", "The copied Project does not have an accepted execution-description v2 contract.");

@@ -493,6 +493,7 @@ MVP 在本地 macOS 运行：
 | **3 — Project 与执行** | 公开 Project 创建、实验计划、冻结 Runs、batch/visual、直接操作、outputs/events、scoped visual/Playwright、普通风机导入。 | 已实现并验收。固定副本 Project、planning、batch lifecycle、cancel/recovery/cards、visual Store/supervision/dispatch、browser broker/frame/WebSocket、scoped Playwright、通用 output/download/events/direct controls、跨 authority 撤销、普通风机 Model/Project/Experiment 导入，以及创建 Project、编辑 Experiment、真实运行、下载与重启恢复的窄 Product Chromium 场景均完成。 |
 | **4 — 共享产品 shell** | Models/Projects 首页、最终双栏 UX、动态右栏、Conversation 管理/cards、offline/recovery UX、旧产品清理、完整风机 browser 验收。 | 已通过 A4-6 branch gate、最终独立复审和连续 Chromium 12 步场景；PR #55 已合并为 `d333580`，merged-main 复跑通过，Issue #15 于 2026-07-25 关闭。修订范围证据经 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md) 稳定入口归档。 |
 | **5 — 动态工作台细化** | 全高 Conversation、弱约定 generated views、文件树与拟议/已提交 change-set review、状态驱动 Project 组织。 | 已批准、尚未实现；目标合同由 [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md) 定义，必须经分阶段代码、测试、独立评审和 merged-main browser gate 才能更新状态。 |
+| **Riffology 工作台 Stage 6** | 持久 `WorkspaceBinding`、Agent 项目引导、owner-scoped Model/Project/Experiment/Run MCP 与 receipt 证据。 | 本地实现与受控 OpenCode port、Store、MCP、Web 测试已通过；真实认证 Provider 的连续 Model/Project 多轮验收尚未执行，因此当前不是 Stage 6 exit accepted。详见 [`riffology-openchamber-stage-6.md`](riffology-openchamber-stage-6.md)。 |
 
 详细切片状态记录在
 [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)、
@@ -552,6 +553,9 @@ MVP 在本地 macOS 运行：
   A4-5 tracked-code 退役的身份、版本、摘要、替代证据和明确排除范围；
 - [`dynamic-workbench-ui-design.md`](dynamic-workbench-ui-design.md)：
   共享 shell 的后续全高布局、动态生成视图和文件/变更审阅设计；
+- [`riffology-openchamber-stage-6.md`](riffology-openchamber-stage-6.md)：
+  Riffology `WorkspaceBinding`、bootstrap turn/MCP、owner-scoped 工具、receipt
+  边界与当前本地证据；
 - [`architecture.md`](architecture.md)：更深入的当前与历史架构说明；
 - [`backend-api.md`](backend-api.md)、[`opencode-bridge.md`](opencode-bridge.md)
   和 [`ui-workflow.md`](ui-workflow.md)：子系统合同；

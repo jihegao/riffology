@@ -242,6 +242,51 @@ test("default riff-app observation never bootstraps the SPA or rotates the outer
     "riff-app://models/model_browser_api?conversation=conversation_model_browser_api",
   );
   assert.equal(modelOpened.trustState, "trusted_riff");
+
+  app.productStore!.archiveResource(
+    "project", "project_browser_api", "2026-08-02T00:02:00.000Z",
+  );
+  assert.equal(
+    await app.productStore!.getConversationRuntime("conversation_browser_api"),
+    null,
+  );
+  for (const response of [
+    await fetch(
+      `${network.app.origin}/api/conversations/conversation_browser_api/browser`,
+      { headers: reads(outerSession) },
+    ),
+    await mutation(
+      network.app.origin,
+      outerSession,
+      "/api/conversations/conversation_browser_api/browser/open",
+      { alias: "riff-app" },
+    ),
+  ]) {
+    assert.equal(response.status, 409);
+    assert.equal(
+      (await response.json() as any).error.code,
+      "browser_conversation_unavailable",
+    );
+  }
+
+  app.productStore!.trashResource(
+    "model", "model_browser_api", "2026-08-02T00:03:00.000Z",
+  );
+  assert.equal(
+    await app.productStore!.getConversationRuntime("conversation_model_browser_api"),
+    null,
+  );
+  const modelReconnect = await mutation(
+    network.app.origin,
+    outerSession,
+    "/api/conversations/conversation_model_browser_api/browser/open",
+    { alias: "riff-app" },
+  );
+  assert.equal(modelReconnect.status, 409);
+  assert.equal(
+    (await modelReconnect.json() as any).error.code,
+    "browser_conversation_unavailable",
+  );
 });
 
 const seed = (app: BackendApp): void => {

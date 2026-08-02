@@ -9,6 +9,7 @@ import {
   mkdirSync,
   openSync,
   realpathSync,
+  readdirSync,
   renameSync,
   rmSync,
 } from "node:fs";
@@ -85,6 +86,8 @@ import type {
   RunStatus,
   StoredObjectMetadata,
   TemporaryDocumentState,
+  WorkspaceBinding,
+  WorkspaceBindingReceipt,
 } from "./product-domain.ts";
 import { MutationCoordinator, type DatabaseMutationStatement, type MutationCoordinatorOptions } from "./mutation-coordinator.ts";
 import {
@@ -119,6 +122,7 @@ import {
 } from "./agent-goal-verifier.ts";
 
 const DATABASE_NAME = "product.sqlite3";
+const WORKSPACE_BOOTSTRAP_DIRECTORY = "workspace-bootstrap";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
 const FILE_KINDS = new Set<ObjectFileKind>(["model_code", "model_environment", "model_visual_asset"]);
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
@@ -365,6 +369,17 @@ export type ExperimentUpdateIntentV4 = Pick<
   UpdateExperimentV4Input,
   "commandId" | "transactionId" | "id" | "projectId" | "expectedConfigurationDigest" | "expectedRecordDigest" | "name" | "configuration"
 >;
+
+export type ExperimentCommandReceiptEvidence = Readonly<{
+  commandId: string;
+  commandKind: "create" | "update";
+  projectId: string;
+  experimentId: string;
+  intentDigest: string;
+  receiptDigest: string;
+  response: ExperimentConfigurationRecordV4;
+  affectedResources: readonly Readonly<Record<string, unknown>>[];
+}>;
 
 export type RunLimitsV1 = Readonly<{
   schemaVersion: 1;
@@ -841,6 +856,8 @@ export class ProductStoreV2 {
     this.#objects = objects;
     this.#coordinator = coordinator;
     try {
+      this.#reconcileWorkspaceBootstrapDirectories();
+      this.#auditWorkspaceBindingReceipts();
       this.#reconcileInterruptedAgentState();
       this.#reconcileVisualAgentAuditGaps();
       this.reconcileRunCompletionCards();
@@ -1046,15 +1063,50 @@ export class ProductStoreV2 {
     return this.#verifyFrozenProject(project);
   }
 
-  createProjectFromModel(input: CreateProjectFromModelInput): ProjectRecord {
+  createProjectFromModel(input: CreateProjectFromModelInput & Readonly<{
+    conversation?: Omit<CreateConversationInput, "owner">;
+    workspaceBinding?: Readonly<{
+      commandId: string;
+      workspaceKey: string;
+      expectedGeneration: number;
+      expectedBindingDigest: string;
+    }>;
+  }>): ProjectRecord {
     this.#assertOpen();
     assertId(input.projectId);
+    if (Boolean(input.conversation) !== Boolean(input.workspaceBinding)) {
+      throw new ProductStoreV2Error(
+        "Composite Project creation requires both Conversation and WorkspaceBinding intent.",
+      );
+    }
     const existing = this.#database.prepare("SELECT * FROM projects WHERE id = ?").get(input.projectId) as any;
     if (existing) {
       if (existing.name !== input.projectName || existing.source_model_id !== input.sourceModelId || existing.created_at !== input.createdAt) {
         throw new ProductStoreV2Error("Project ID already exists with a different creation intent.");
       }
       this.#verifyFrozenProject(existing);
+      if (input.conversation && input.workspaceBinding) {
+        const conversation = this.#database.prepare(
+          "SELECT 1 FROM conversations WHERE id = ? AND project_id = ?",
+        ).get(input.conversation.id, input.projectId);
+        const ownerRecordDigest = this.resourceRecordDigest("project", input.projectId);
+        const intentDigest = this.#workspaceBindIntentDigest({
+          ...input.workspaceBinding,
+          owner: { kind: "project", id: input.projectId },
+          conversationId: input.conversation.id,
+          ownerRecordDigest,
+          provider: {
+            providerId: input.conversation.providerId,
+            modelId: input.conversation.providerModelId,
+          },
+        });
+        if (!conversation || !this.#workspaceBindingReceipt(
+          input.workspaceBinding.commandId,
+          intentDigest,
+        )) {
+          throw new ProductStoreV2Error("Composite workspace Project creation is incomplete.");
+        }
+      }
       return projectRecord(existing);
     }
     const source = this.#database.prepare(`SELECT id, lifecycle_state, technical_status, execution_description_json
@@ -1084,6 +1136,31 @@ export class ProductStoreV2 {
     const snapshotDigest = canonicalDigest(copies.map(({ relativePath, mediaType, bytes, digest }) => ({
       relativePath, mediaType, sizeBytes: bytes.byteLength, sha256: digest,
     })).sort((left, right) => compareStrings(left.relativePath, right.relativePath)));
+    const ownerRecordDigest = canonicalDigest({
+      kind: "project",
+      id: input.projectId,
+      name: input.projectName,
+      lifecycleState: "active",
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+      details: {
+        sourceModelId: input.sourceModelId,
+        modelSnapshotDigest: snapshotDigest,
+      },
+    });
+    const workspacePlan = input.conversation && input.workspaceBinding
+      ? this.#workspaceBindPlan({
+        ...input.workspaceBinding,
+        owner,
+        conversationId: input.conversation.id,
+        conversationName: input.conversation.name,
+        provider: {
+          providerId: input.conversation.providerId,
+          modelId: input.conversation.providerModelId,
+        },
+        ownerRecordDigest,
+        committedAt: input.createdAt,
+      }) : null;
     const statements: DatabaseMutationStatement[] = [{
       sql: `UPDATE models SET updated_at = updated_at WHERE id = ? AND lifecycle_state = 'active'
         AND technical_status = 'executable' AND execution_description_json = ? AND updated_at = ?`,
@@ -1105,7 +1182,22 @@ export class ProductStoreV2 {
     }, ...copies.map((copy) => objectInsert({
       id: copy.id, owner, kind: "project_model_snapshot", relativePath: copy.relativePath,
       mediaType: copy.mediaType, sizeBytes: copy.bytes.byteLength, digest: copy.digest, createdAt: input.createdAt,
-    }))];
+    })), ...(input.conversation ? [{
+      sql: `INSERT INTO conversations
+        (id, project_id, name, provider_id, provider_model_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [
+        input.conversation.id,
+        input.projectId,
+        input.conversation.name,
+        input.conversation.providerId,
+        input.conversation.providerModelId,
+        input.conversation.createdAt,
+        input.conversation.createdAt,
+      ],
+      expectedChanges: 1,
+    } satisfies DatabaseMutationStatement] : []),
+    ...(workspacePlan?.statements.map(coordinatorStatement) ?? [])];
     this.#coordinator.execute({
       transactionId: stableTransactionId("create_project", input.projectId),
       files: copies.map(({ target, bytes }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: null })),
@@ -1124,6 +1216,830 @@ export class ProductStoreV2 {
         input.name, input.providerId, input.providerModelId, input.createdAt, input.createdAt], expectedChanges: 1,
     }]);
     return this.getConversation(input.id);
+  }
+
+  createWorkspaceBinding(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    createdAt: IsoTimestamp;
+  }>): Readonly<{ binding: WorkspaceBinding; receipt: WorkspaceBindingReceipt }> {
+    this.#assertOpen();
+    assertId(input.commandId);
+    assertWorkspaceKey(input.workspaceKey);
+    assertIsoTimestamp(input.createdAt, "Workspace binding timestamp");
+    const intentDigest = canonicalDigest({
+      operation: "create",
+      workspaceKey: input.workspaceKey,
+    });
+    const replay = this.#workspaceBindingReceipt(input.commandId, intentDigest);
+    if (replay) return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt: replay,
+    });
+    if (this.#database.prepare(
+      "SELECT 1 FROM workspace_bindings WHERE workspace_key = ?",
+    ).get(input.workspaceKey)) {
+      throw new ProductStoreV2Error(
+        "Workspace binding already exists with a different creation command.",
+      );
+    }
+    const bootstrapConversationId = `bootstrap_${canonicalDigest({
+      workspaceKey: input.workspaceKey,
+    }).slice(0, 40)}`;
+    const directoryRef = `workspace_${canonicalDigest({
+      workspaceKey: input.workspaceKey,
+      purpose: "riffology-bootstrap-v1",
+    }).slice(0, 48)}`;
+    const directory = this.#ensureWorkspaceBootstrapDirectory(directoryRef);
+    const unsignedBinding = {
+      workspaceKey: input.workspaceKey,
+      conversation: {
+        kind: "bootstrap" as const,
+        id: bootstrapConversationId,
+        name: "项目引导",
+        provider: null,
+      },
+      owner: null,
+      generation: 1,
+      state: "unbound" as const,
+      draft: "",
+      provider: null,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    };
+    const bindingDigest = workspaceBindingDigest(unsignedBinding);
+    const receipt = workspaceBindingReceipt({
+      commandId: input.commandId,
+      operation: "create",
+      workspaceKey: input.workspaceKey,
+      previousGeneration: null,
+      previousBindingDigest: null,
+      generation: 1,
+      bindingDigest,
+      state: "unbound",
+      conversationId: bootstrapConversationId,
+      owner: null,
+      ownerRecordDigest: null,
+      recoveryCause: null,
+      committedAt: input.createdAt,
+    });
+    try {
+      this.#databaseMutation([{
+        sql: `INSERT INTO workspace_bootstrap_conversations
+          (id, workspace_key, name, directory_ref, created_at, updated_at)
+          VALUES (?, ?, '项目引导', ?, ?, ?)`,
+        params: [
+          bootstrapConversationId,
+          input.workspaceKey,
+          directoryRef,
+          input.createdAt,
+          input.createdAt,
+        ],
+        expectedChanges: 1,
+      }, {
+        sql: `INSERT INTO workspace_bindings
+          (workspace_key, bootstrap_conversation_id, generation, state,
+            created_at, updated_at)
+          VALUES (?, ?, 1, 'unbound', ?, ?)`,
+        params: [
+          input.workspaceKey,
+          bootstrapConversationId,
+          input.createdAt,
+          input.createdAt,
+        ],
+        expectedChanges: 1,
+      }, workspaceBindingReceiptInsert(receipt, intentDigest)]);
+    } catch (error) {
+      try { removeExactWorkspaceBootstrapDirectory(directory); } catch { /* recovery owns an ambiguous owned directory */ }
+      throw error;
+    }
+    return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt,
+    });
+  }
+
+  getWorkspaceBinding(workspaceKey: string): WorkspaceBinding {
+    this.#assertOpen();
+    assertWorkspaceKey(workspaceKey);
+    const row = this.#database.prepare(
+      `SELECT wb.*, bc.name AS bootstrap_name,
+        bc.provider_id AS bootstrap_provider_id,
+        bc.provider_model_id AS bootstrap_provider_model_id,
+        c.name AS owner_conversation_name,
+        c.provider_id AS owner_provider_id,
+        c.provider_model_id AS owner_provider_model_id
+       FROM workspace_bindings wb
+       JOIN workspace_bootstrap_conversations bc
+         ON bc.id = wb.bootstrap_conversation_id
+       LEFT JOIN conversations c ON c.id = wb.conversation_id
+       WHERE wb.workspace_key = ?`,
+    ).get(workspaceKey) as any;
+    if (!row) throw new ProductStoreV2Error("Workspace binding does not exist.");
+    return workspaceBinding(row);
+  }
+
+  /** Backend-only runtime projection for an unbound Riffology workspace. */
+  getWorkspaceBootstrapRuntime(workspaceKey: string): Readonly<{
+    conversationId: string;
+    provider: Readonly<{ providerId: string; modelId: string }> | null;
+    session: Readonly<{
+      generation: number;
+      state: "closed" | "creating" | "available" | "lost";
+      externalSessionRef: string | null;
+    }>;
+    directory: string;
+    messages: readonly Readonly<{
+      id: string;
+      ordinal: number;
+      role: "user" | "assistant" | "system";
+      status: "complete" | "failed";
+      text: string;
+      createdAt: string;
+    }>[];
+  }> {
+    this.#assertOpen();
+    this.getWorkspaceBinding(workspaceKey);
+    const row = this.#database.prepare(
+      `SELECT id, provider_id, provider_model_id, session_generation,
+        session_state, external_session_ref, directory_ref
+       FROM workspace_bootstrap_conversations WHERE workspace_key = ?`,
+    ).get(workspaceKey) as any;
+    if (!row) throw new ProductStoreV2Error("Workspace bootstrap conversation does not exist.");
+    const directory = this.#ensureWorkspaceBootstrapDirectory(row.directory_ref);
+    const messages = this.#database.prepare(
+      `SELECT id, ordinal, role, status, text, created_at
+       FROM workspace_bootstrap_messages WHERE conversation_id = ?
+       ORDER BY ordinal, id`,
+    ).all(row.id) as any[];
+    return Object.freeze({
+      conversationId: row.id,
+      provider: row.provider_id === null ? null : Object.freeze({
+        providerId: row.provider_id,
+        modelId: row.provider_model_id,
+      }),
+      session: Object.freeze({
+        generation: row.session_generation,
+        state: row.session_state,
+        externalSessionRef: row.external_session_ref,
+      }),
+      directory,
+      messages: Object.freeze(messages.map((message) => Object.freeze({
+        id: message.id,
+        ordinal: message.ordinal,
+        role: message.role,
+        status: message.status,
+        text: message.text,
+        createdAt: message.created_at,
+      }))),
+    });
+  }
+
+  appendWorkspaceBootstrapMessage(input: Readonly<{
+    workspaceKey: string;
+    id: string;
+    role: "user" | "assistant" | "system";
+    status: "complete" | "failed";
+    text: string;
+    createdAt: IsoTimestamp;
+  }>): void {
+    this.#assertOpen();
+    assertWorkspaceKey(input.workspaceKey); assertId(input.id);
+    assertIsoTimestamp(input.createdAt, "Workspace bootstrap message timestamp");
+    if (!input.text || input.text.length > 1_000_000) {
+      throw new ProductStoreV2Error("Workspace bootstrap message is invalid.");
+    }
+    const existing = this.#database.prepare(
+      `SELECT m.role, m.status, m.text, m.created_at, c.workspace_key
+       FROM workspace_bootstrap_messages m
+       JOIN workspace_bootstrap_conversations c ON c.id = m.conversation_id
+       WHERE m.id = ?`,
+    ).get(input.id) as any;
+    if (existing) {
+      if (existing.workspace_key !== input.workspaceKey || existing.role !== input.role
+        || existing.status !== input.status || existing.text !== input.text) {
+        throw new ProductStoreV2Error("Workspace bootstrap message ID was reused with different intent.");
+      }
+      return;
+    }
+    this.#databaseMutation([{
+      sql: `INSERT INTO workspace_bootstrap_messages
+        (id, conversation_id, ordinal, role, status, text, created_at)
+        SELECT ?, id,
+          (SELECT coalesce(max(ordinal), -1) + 1 FROM workspace_bootstrap_messages
+            WHERE conversation_id = workspace_bootstrap_conversations.id),
+          ?, ?, ?, ?
+        FROM workspace_bootstrap_conversations
+        WHERE workspace_key = ?`,
+      params: [input.id, input.role, input.status, input.text, input.createdAt,
+        input.workspaceKey],
+      expectedChanges: 1,
+      mismatchMessage: "Workspace bootstrap conversation is no longer unbound.",
+    }]);
+  }
+
+  beginWorkspaceBootstrapSession(input: Readonly<{
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    updatedAt: IsoTimestamp;
+  }>): Readonly<{ generation: number }> {
+    const binding = this.getWorkspaceBinding(input.workspaceKey);
+    if (binding.state !== "unbound" || binding.generation !== input.expectedGeneration
+      || binding.bindingDigest !== input.expectedBindingDigest || !binding.provider) {
+      throw new ProductStoreV2Error(
+        "stale_workspace_generation: the WorkspaceBinding changed before session creation.",
+      );
+    }
+    const runtime = this.getWorkspaceBootstrapRuntime(input.workspaceKey);
+    const generation = runtime.session.generation + 1;
+    this.#databaseMutation([{
+      sql: `UPDATE workspace_bootstrap_conversations
+        SET session_generation = ?, session_state = 'creating',
+          external_session_ref = NULL, updated_at = ?
+        WHERE workspace_key = ? AND session_generation = ?`,
+      params: [generation, input.updatedAt, input.workspaceKey,
+        runtime.session.generation],
+      expectedChanges: 1,
+      mismatchMessage: "stale_workspace_generation: bootstrap session generation changed.",
+    }]);
+    return Object.freeze({ generation });
+  }
+
+  activateWorkspaceBootstrapSession(input: Readonly<{
+    workspaceKey: string;
+    generation: number;
+    externalSessionRef: string;
+    updatedAt: IsoTimestamp;
+  }>): void {
+    if (!input.externalSessionRef || input.externalSessionRef.length > 1000) {
+      throw new ProductStoreV2Error("Workspace bootstrap session reference is invalid.");
+    }
+    this.#databaseMutation([{
+      sql: `UPDATE workspace_bootstrap_conversations
+        SET session_state = 'available', external_session_ref = ?, updated_at = ?
+        WHERE workspace_key = ? AND session_generation = ?
+          AND session_state = 'creating'`,
+      params: [input.externalSessionRef, input.updatedAt, input.workspaceKey,
+        input.generation],
+      expectedChanges: 1,
+    }]);
+  }
+
+  loseWorkspaceBootstrapSession(input: Readonly<{
+    workspaceKey: string;
+    generation: number;
+    expectedExternalSessionRef?: string | null;
+    updatedAt: IsoTimestamp;
+  }>): void {
+    this.#databaseMutation([{
+      sql: `UPDATE workspace_bootstrap_conversations
+        SET session_state = 'lost', external_session_ref = NULL, updated_at = ?
+        WHERE workspace_key = ? AND session_generation = ?
+          AND session_state IN ('creating', 'available')
+          AND (? IS NULL OR external_session_ref = ?)`,
+      params: [input.updatedAt, input.workspaceKey, input.generation,
+        input.expectedExternalSessionRef ?? null,
+        input.expectedExternalSessionRef ?? null],
+      expectedChanges: 1,
+    }]);
+  }
+
+  getWorkspaceBindingReceipt(commandId: string): WorkspaceBindingReceipt | null {
+    this.#assertOpen();
+    assertId(commandId);
+    const row = this.#database.prepare(
+      "SELECT intent_sha256 FROM workspace_binding_receipts WHERE command_id = ?",
+    ).get(commandId) as { intent_sha256: string } | undefined;
+    return row ? this.#workspaceBindingReceipt(commandId, row.intent_sha256) : null;
+  }
+
+  updateWorkspaceBindingDraft(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    draft: string;
+    provider?: Readonly<{ providerId: string; modelId: string }> | null;
+    updatedAt: IsoTimestamp;
+  }>): Readonly<{ binding: WorkspaceBinding; receipt: WorkspaceBindingReceipt }> {
+    this.#assertOpen();
+    assertId(input.commandId);
+    assertWorkspaceKey(input.workspaceKey);
+    assertWorkspaceGeneration(input.expectedGeneration);
+    assertDigest(input.expectedBindingDigest, "Workspace binding digest");
+    assertIsoTimestamp(input.updatedAt, "Workspace binding timestamp");
+    if (typeof input.draft !== "string" || input.draft.length > 100_000) {
+      throw new ProductStoreV2Error("Workspace draft is invalid.");
+    }
+    const provider = input.provider === undefined ? undefined
+      : input.provider === null ? null : {
+        providerId: boundedWorkspaceProvider(input.provider.providerId, 200),
+        modelId: boundedWorkspaceProvider(input.provider.modelId, 300),
+      };
+    const intentDigest = canonicalDigest({
+      operation: "update_draft",
+      workspaceKey: input.workspaceKey,
+      expectedGeneration: input.expectedGeneration,
+      expectedBindingDigest: input.expectedBindingDigest,
+      draft: input.draft,
+      provider: provider ?? null,
+    });
+    const replay = this.#workspaceBindingReceipt(input.commandId, intentDigest);
+    if (replay) return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt: replay,
+    });
+    const current = this.getWorkspaceBinding(input.workspaceKey);
+    if (current.state !== "unbound" || current.generation !== input.expectedGeneration
+      || current.bindingDigest !== input.expectedBindingDigest) {
+      throw new ProductStoreV2Error(
+        "stale_workspace_generation: the WorkspaceBinding changed after it was observed.",
+      );
+    }
+    const generation = current.generation + 1;
+    const resultingBindingDigest = workspaceBindingDigest({
+      ...current,
+      generation,
+      draft: input.draft,
+      provider: provider === undefined ? current.provider : provider,
+      conversation: {
+        ...current.conversation,
+        provider: provider === undefined ? current.conversation.provider : provider,
+      },
+      updatedAt: input.updatedAt,
+    });
+    const receipt = workspaceBindingReceipt({
+      commandId: input.commandId,
+      operation: "update_draft",
+      workspaceKey: input.workspaceKey,
+      previousGeneration: current.generation,
+      previousBindingDigest: current.bindingDigest,
+      generation,
+      bindingDigest: resultingBindingDigest,
+      state: "unbound",
+      conversationId: current.conversation.id,
+      owner: null,
+      ownerRecordDigest: null,
+      recoveryCause: null,
+      committedAt: input.updatedAt,
+    });
+    this.#databaseMutation([{
+      sql: `UPDATE workspace_bindings
+        SET draft_text = ?, provider_id = ?, provider_model_id = ?,
+          generation = ?, updated_at = ?
+        WHERE workspace_key = ? AND generation = ? AND state = 'unbound'`,
+      params: [
+        input.draft,
+        provider === undefined ? current.provider?.providerId ?? null : provider?.providerId ?? null,
+        provider === undefined ? current.provider?.modelId ?? null : provider?.modelId ?? null,
+        generation,
+        input.updatedAt,
+        input.workspaceKey,
+        input.expectedGeneration,
+      ],
+      expectedChanges: 1,
+      mismatchMessage: "stale_workspace_generation: the WorkspaceBinding changed before the draft committed.",
+    }, {
+      sql: `UPDATE workspace_bootstrap_conversations
+        SET provider_id = ?, provider_model_id = ?, updated_at = ?
+        WHERE id = ?`,
+      params: [
+        provider === undefined ? current.provider?.providerId ?? null : provider?.providerId ?? null,
+        provider === undefined ? current.provider?.modelId ?? null : provider?.modelId ?? null,
+        input.updatedAt,
+        current.conversation.id,
+      ],
+      expectedChanges: 1,
+    }, workspaceBindingReceiptInsert(receipt, intentDigest)]);
+    return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt,
+    });
+  }
+
+  bindWorkspaceOwner(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    owner: Extract<ResourceOwner, { kind: "model" | "project" }>;
+    conversationId: string;
+    provider?: Readonly<{ providerId: string; modelId: string }> | null;
+    committedAt: IsoTimestamp;
+  }>): Readonly<{ binding: WorkspaceBinding; receipt: WorkspaceBindingReceipt }> {
+    this.#assertOpen();
+    assertId(input.commandId);
+    assertWorkspaceKey(input.workspaceKey);
+    assertWorkspaceGeneration(input.expectedGeneration);
+    assertDigest(input.expectedBindingDigest, "Workspace binding digest");
+    assertId(input.owner.id);
+    assertId(input.conversationId);
+    assertIsoTimestamp(input.committedAt, "Workspace binding timestamp");
+    const provider = input.provider == null ? null : {
+      providerId: boundedWorkspaceProvider(input.provider.providerId, 200),
+      modelId: boundedWorkspaceProvider(input.provider.modelId, 300),
+    };
+    const ownerRecordDigest = this.resourceRecordDigest(input.owner.kind, input.owner.id);
+    const conversation = this.getConversation(input.conversationId);
+    if (conversation.owner.kind !== input.owner.kind
+      || conversation.owner.id !== input.owner.id) {
+      throw new ProductStoreV2Error(
+        "Workspace binding conversation does not belong to the selected owner.",
+      );
+    }
+    const intentDigest = canonicalDigest({
+      operation: "bind",
+      workspaceKey: input.workspaceKey,
+      expectedGeneration: input.expectedGeneration,
+      expectedBindingDigest: input.expectedBindingDigest,
+      owner: input.owner,
+      conversationId: input.conversationId,
+      ownerRecordDigest,
+      provider,
+    });
+    const replay = this.#workspaceBindingReceipt(input.commandId, intentDigest);
+    if (replay) return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt: replay,
+    });
+    const current = this.getWorkspaceBinding(input.workspaceKey);
+    if (current.state !== "unbound" || current.generation !== input.expectedGeneration
+      || current.bindingDigest !== input.expectedBindingDigest) {
+      throw new ProductStoreV2Error(
+        "stale_workspace_generation: the WorkspaceBinding changed after it was observed.",
+      );
+    }
+    const generation = current.generation + 1;
+    const resultingProvider = provider ?? {
+      providerId: conversation.provider.providerId,
+      modelId: conversation.provider.modelId,
+    };
+    const resultingBindingDigest = workspaceBindingDigest({
+      ...current,
+      conversation: {
+        kind: "owner" as const,
+        id: input.conversationId,
+        name: conversation.name,
+        provider: resultingProvider,
+      },
+      owner: input.owner,
+      generation,
+      state: "bound" as const,
+      provider: resultingProvider,
+      updatedAt: input.committedAt,
+    });
+    const receipt = workspaceBindingReceipt({
+      commandId: input.commandId,
+      operation: "bind",
+      workspaceKey: input.workspaceKey,
+      previousGeneration: current.generation,
+      previousBindingDigest: current.bindingDigest,
+      generation,
+      bindingDigest: resultingBindingDigest,
+      state: "bound",
+      conversationId: input.conversationId,
+      owner: input.owner,
+      ownerRecordDigest,
+      recoveryCause: null,
+      committedAt: input.committedAt,
+    });
+    this.#databaseMutation([{
+      sql: `UPDATE workspace_bindings SET conversation_id = ?,
+          owner_model_id = ?, owner_project_id = ?, generation = ?, state = 'bound',
+          provider_id = ?, provider_model_id = ?, updated_at = ?
+        WHERE workspace_key = ? AND generation = ? AND state = 'unbound'`,
+      params: [
+        input.conversationId,
+        input.owner.kind === "model" ? input.owner.id : null,
+        input.owner.kind === "project" ? input.owner.id : null,
+        generation,
+        provider?.providerId ?? conversation.provider.providerId,
+        provider?.modelId ?? conversation.provider.modelId,
+        input.committedAt,
+        input.workspaceKey,
+        input.expectedGeneration,
+      ],
+      expectedChanges: 1,
+      mismatchMessage: "stale_workspace_generation: the WorkspaceBinding changed before owner binding committed.",
+    }, workspaceBindingReceiptInsert(receipt, intentDigest)]);
+    return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      receipt,
+    });
+  }
+
+  bindWorkspaceToNewOwnerConversation(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    owner: Extract<ResourceOwner, { kind: "model" | "project" }>;
+    conversation: Omit<CreateConversationInput, "owner">;
+    committedAt: IsoTimestamp;
+  }>): Readonly<{
+    binding: WorkspaceBinding;
+    conversation: ConversationDto;
+    receipt: WorkspaceBindingReceipt;
+  }> {
+    this.#assertOpen();
+    const ownerRecordDigest = this.resourceRecordDigest(
+      input.owner.kind,
+      input.owner.id,
+    );
+    const provider = {
+      providerId: boundedWorkspaceProvider(input.conversation.providerId, 200),
+      modelId: boundedWorkspaceProvider(input.conversation.providerModelId, 300),
+    };
+    const intentDigest = this.#workspaceBindIntentDigest({
+      ...input,
+      conversationId: input.conversation.id,
+      ownerRecordDigest,
+      provider,
+    });
+    const replay = this.#workspaceBindingReceipt(input.commandId, intentDigest);
+    if (replay) return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      conversation: this.getConversation(input.conversation.id),
+      receipt: replay,
+    });
+    const plan = this.#workspaceBindPlan({
+      ...input,
+      conversationId: input.conversation.id,
+      conversationName: input.conversation.name,
+      provider,
+      ownerRecordDigest,
+    });
+    this.#databaseMutation([activeOwnerGuard(input.owner), {
+      sql: `INSERT INTO conversations
+        (id, model_id, project_id, name, provider_id, provider_model_id,
+          created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      params: [
+        input.conversation.id,
+        input.owner.kind === "model" ? input.owner.id : null,
+        input.owner.kind === "project" ? input.owner.id : null,
+        input.conversation.name,
+        provider.providerId,
+        provider.modelId,
+        input.conversation.createdAt,
+        input.conversation.createdAt,
+      ],
+      expectedChanges: 1,
+    }, ...plan.statements]);
+    return Object.freeze({
+      binding: this.getWorkspaceBinding(input.workspaceKey),
+      conversation: this.getConversation(input.conversation.id),
+      receipt: plan.receipt,
+    });
+  }
+
+  #workspaceBindIntentDigest(input: Readonly<{
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    owner: Extract<ResourceOwner, { kind: "model" | "project" }>;
+    conversationId: string;
+    ownerRecordDigest: string;
+    provider: Readonly<{ providerId: string; modelId: string }>;
+  }>): string {
+    return canonicalDigest({
+      operation: "bind",
+      workspaceKey: input.workspaceKey,
+      expectedGeneration: input.expectedGeneration,
+      expectedBindingDigest: input.expectedBindingDigest,
+      owner: input.owner,
+      conversationId: input.conversationId,
+      ownerRecordDigest: input.ownerRecordDigest,
+      provider: input.provider,
+    });
+  }
+
+  #workspaceBindPlan(input: Readonly<{
+    commandId: string;
+    workspaceKey: string;
+    expectedGeneration: number;
+    expectedBindingDigest: string;
+    owner: Extract<ResourceOwner, { kind: "model" | "project" }>;
+    conversationId: string;
+    conversationName: string;
+    provider: Readonly<{ providerId: string; modelId: string }>;
+    ownerRecordDigest: string;
+    committedAt: IsoTimestamp;
+  }>): Readonly<{
+    receipt: WorkspaceBindingReceipt;
+    statements: readonly DatabaseMutationStatement[];
+  }> {
+    assertId(input.commandId);
+    assertWorkspaceKey(input.workspaceKey);
+    assertWorkspaceGeneration(input.expectedGeneration);
+    assertDigest(input.expectedBindingDigest, "Workspace binding digest");
+    assertDigest(input.ownerRecordDigest, "Workspace owner record digest");
+    const current = this.getWorkspaceBinding(input.workspaceKey);
+    if (current.state !== "unbound"
+      || current.generation !== input.expectedGeneration
+      || current.bindingDigest !== input.expectedBindingDigest) {
+      throw new ProductStoreV2Error(
+        "stale_workspace_generation: the WorkspaceBinding changed after it was observed.",
+      );
+    }
+    const generation = current.generation + 1;
+    const bindingDigest = workspaceBindingDigest({
+      ...current,
+      conversation: {
+        kind: "owner" as const,
+        id: input.conversationId,
+        name: input.conversationName,
+        provider: input.provider,
+      },
+      owner: input.owner,
+      generation,
+      state: "bound" as const,
+      provider: input.provider,
+      updatedAt: input.committedAt,
+    });
+    const receipt = workspaceBindingReceipt({
+      commandId: input.commandId,
+      operation: "bind",
+      workspaceKey: input.workspaceKey,
+      previousGeneration: current.generation,
+      previousBindingDigest: current.bindingDigest,
+      generation,
+      bindingDigest,
+      state: "bound",
+      conversationId: input.conversationId,
+      owner: input.owner,
+      ownerRecordDigest: input.ownerRecordDigest,
+      recoveryCause: null,
+      committedAt: input.committedAt,
+    });
+    const intentDigest = this.#workspaceBindIntentDigest(input);
+    const replay = this.#workspaceBindingReceipt(input.commandId, intentDigest);
+    if (replay) {
+      throw new ProductStoreV2Error(
+        "Workspace binding command already completed before composite creation.",
+      );
+    }
+    return Object.freeze({
+      receipt,
+      statements: Object.freeze([{
+        sql: `UPDATE workspace_bootstrap_conversations
+          SET session_state = 'closed', external_session_ref = NULL,
+            updated_at = ? WHERE workspace_key = ?`,
+        params: [input.committedAt, input.workspaceKey],
+        expectedChanges: 1,
+      }, {
+        sql: `UPDATE workspace_bindings SET conversation_id = ?,
+            owner_model_id = ?, owner_project_id = ?, generation = ?,
+            state = 'bound', provider_id = ?, provider_model_id = ?, updated_at = ?
+          WHERE workspace_key = ? AND generation = ? AND state = 'unbound'`,
+        params: [
+          input.conversationId,
+          input.owner.kind === "model" ? input.owner.id : null,
+          input.owner.kind === "project" ? input.owner.id : null,
+          generation,
+          input.provider.providerId,
+          input.provider.modelId,
+          input.committedAt,
+          input.workspaceKey,
+          input.expectedGeneration,
+        ],
+        expectedChanges: 1,
+        mismatchMessage: "stale_workspace_generation: the WorkspaceBinding changed before owner binding committed.",
+      }, workspaceBindingReceiptInsert(receipt, intentDigest)]),
+    });
+  }
+
+  #workspaceBindingReceipt(
+    commandId: string,
+    expectedIntentDigest: string,
+  ): WorkspaceBindingReceipt | null {
+    const row = this.#database.prepare(
+      `SELECT intent_sha256, receipt_json, receipt_sha256
+       FROM workspace_binding_receipts WHERE command_id = ?`,
+    ).get(commandId) as {
+      intent_sha256: string;
+      receipt_json: string;
+      receipt_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.intent_sha256 !== expectedIntentDigest) {
+      throw new ProductStoreV2Error(
+        "Workspace binding command already exists with a different intent.",
+      );
+    }
+    let receipt: WorkspaceBindingReceipt;
+    try { receipt = JSON.parse(row.receipt_json) as WorkspaceBindingReceipt; }
+    catch (error) {
+      throw new ProductStoreV2Error(
+        "Workspace binding receipt contains invalid JSON.", { cause: error },
+      );
+    }
+    if (receipt.receiptDigest !== row.receipt_sha256
+      || canonicalDigest(workspaceBindingReceiptPreimage(receipt)) !== row.receipt_sha256) {
+      throw new ProductStoreV2Error("Workspace binding receipt failed integrity verification.");
+    }
+    return Object.freeze(receipt);
+  }
+
+  #ensureWorkspaceBootstrapDirectory(directoryRef: string): string {
+    const base = join(this.root, WORKSPACE_BOOTSTRAP_DIRECTORY);
+    if (!existsSync(base)) mkdirSync(base, { mode: 0o700 });
+    assertSecureWorkspaceDirectory(base, this.root);
+    const target = join(base, directoryRef);
+    if (!existsSync(target)) mkdirSync(target, { mode: 0o700 });
+    assertSecureWorkspaceDirectory(target, base);
+    return realpathSync(target);
+  }
+
+  #reconcileWorkspaceBootstrapDirectories(): void {
+    const base = join(this.root, WORKSPACE_BOOTSTRAP_DIRECTORY);
+    if (!existsSync(base)) mkdirSync(base, { mode: 0o700 });
+    assertSecureWorkspaceDirectory(base, this.root);
+    const rows = this.#database.prepare(
+      "SELECT directory_ref FROM workspace_bootstrap_conversations",
+    ).all() as Array<{ directory_ref: string }>;
+    const expected = new Set(rows.map((row) => row.directory_ref));
+    for (const ref of expected) {
+      if (!/^[A-Za-z0-9_-]{16,96}$/u.test(ref)) {
+        throw new ProductStoreV2Error("Workspace bootstrap directory reference is corrupt.");
+      }
+      this.#ensureWorkspaceBootstrapDirectory(ref);
+    }
+    for (const entry of readdirSync(base)) {
+      if (!expected.has(entry)) {
+        removeExactWorkspaceBootstrapDirectory(join(base, entry));
+      }
+    }
+  }
+
+  #auditWorkspaceBindingReceipts(): void {
+    const rows = this.#database.prepare(
+      `SELECT command_id, workspace_key, operation, generation, state,
+        conversation_id, owner_model_id, owner_project_id, binding_sha256,
+        receipt_json, receipt_sha256, committed_at
+       FROM workspace_binding_receipts
+       ORDER BY workspace_key, generation, command_id`,
+    ).all() as any[];
+    const latest = new Map<string, WorkspaceBindingReceipt>();
+    for (const row of rows) {
+      let receipt: WorkspaceBindingReceipt;
+      try { receipt = JSON.parse(row.receipt_json) as WorkspaceBindingReceipt; }
+      catch (error) {
+        throw new ProductStoreV2Error(
+          "Workspace binding receipt contains invalid JSON.", { cause: error },
+        );
+      }
+      const ownerId = receipt.owner?.id ?? null;
+      const storedOwnerId = row.owner_model_id ?? row.owner_project_id ?? null;
+      if (receipt.commandId !== row.command_id
+        || receipt.workspaceKey !== row.workspace_key
+        || receipt.operation !== row.operation
+        || receipt.generation !== row.generation
+        || receipt.state !== row.state
+        || receipt.conversationId !== row.conversation_id
+        || receipt.bindingDigest !== row.binding_sha256
+        || receipt.committedAt !== row.committed_at
+        || ownerId !== storedOwnerId
+        || (receipt.owner?.kind === "model") !== (row.owner_model_id !== null)
+        || (receipt.owner?.kind === "project") !== (row.owner_project_id !== null)
+        || receipt.receiptDigest !== row.receipt_sha256
+        || canonicalDigest(workspaceBindingReceiptPreimage(receipt))
+          !== row.receipt_sha256) {
+        throw new ProductStoreV2Error(
+          "Workspace binding receipt failed startup integrity audit.",
+        );
+      }
+      const prior = latest.get(receipt.workspaceKey);
+      if (!prior || receipt.generation > prior.generation) {
+        latest.set(receipt.workspaceKey, receipt);
+      } else if (receipt.generation === prior.generation
+        && receipt.receiptDigest !== prior.receiptDigest) {
+        throw new ProductStoreV2Error(
+          "Workspace binding receipt generations are ambiguous.",
+        );
+      }
+    }
+    const bindings = this.#database.prepare(
+      "SELECT workspace_key FROM workspace_bindings ORDER BY workspace_key",
+    ).all() as Array<{ workspace_key: string }>;
+    for (const { workspace_key: workspaceKey } of bindings) {
+      const binding = this.getWorkspaceBinding(workspaceKey);
+      const receipt = latest.get(workspaceKey);
+      if (!receipt || receipt.generation !== binding.generation
+        || receipt.bindingDigest !== binding.bindingDigest
+        || receipt.state !== binding.state
+        || receipt.conversationId !== (
+          binding.conversation.kind === "owner" ? binding.conversation.id
+            : binding.state === "recovery_required" ? null : binding.conversation.id
+        )
+        || canonicalJsonV2(receipt.owner)
+          .compare(canonicalJsonV2(binding.owner)) !== 0) {
+        throw new ProductStoreV2Error(
+          "Workspace binding current state lacks matching receipt evidence.",
+        );
+      }
+    }
   }
 
   listConversations(owner: Extract<ResourceOwner, { kind: "model" | "project" }>, options: ConversationListOptions = {}): ConversationDto[] {
@@ -1504,6 +2420,73 @@ export class ProductStoreV2 {
                 && configuration.contractVersion === 4
                 && configuration.configurationDigest === resource.sha256);
           }
+          if (resource.kind === "model_technical_check"
+            && owner.kind === "model") {
+            try {
+              const check = this.getTechnicalCheck(owner.id, resource.id);
+              return check.state !== "running"
+                && typeof resource.sha256 === "string"
+                && canonicalDigest(check) === resource.sha256;
+            } catch { return false; }
+          }
+          if (["run_start_receipt", "run_cancel_receipt",
+            "run_lifecycle_receipt"].includes(resource.kind)
+            && owner.kind === "project") {
+            if (typeof resource.commandId !== "string"
+              || typeof resource.sha256 !== "string") return false;
+            const receipt = this.#database.prepare(
+              `SELECT q.receipt_kind, q.payload_sha256, q.payload_json,
+                c.run_id, r.project_id
+               FROM run_command_receipts q
+               JOIN run_commands c ON c.id = q.command_id
+                 AND c.run_id = q.run_id AND c.state = 'committed'
+               JOIN runs r ON r.id = c.run_id
+               WHERE q.command_id = ? AND q.run_id = ?`,
+            ).get(resource.commandId, resource.id) as {
+              receipt_kind: string;
+              payload_sha256: string;
+              payload_json: string;
+              run_id: string;
+              project_id: string;
+            } | undefined;
+            if (!receipt || receipt.project_id !== owner.id
+              || receipt.payload_sha256 !== resource.sha256) return false;
+            const expectedKind = resource.kind === "run_start_receipt"
+              ? "run.start.v1" : resource.kind === "run_cancel_receipt"
+                ? "run.cancel.v1"
+                : resource.action === "trash_run" ? "run.trash.v1"
+                  : resource.action === "restore_run" ? "run.restore.v1" : null;
+            if (receipt.receipt_kind !== expectedKind) return false;
+            try {
+              return canonicalDigest(JSON.parse(receipt.payload_json))
+                === receipt.payload_sha256;
+            } catch { return false; }
+          }
+          if ((resource.kind === "model_lifecycle_receipt"
+              || resource.kind === "project_lifecycle_receipt")
+            && resource.kind === `${owner.kind}_lifecycle_receipt`
+            && resource.id === owner.id
+            && typeof resource.commandId === "string"
+            && typeof resource.sha256 === "string"
+            && typeof resource.currentRecordDigest === "string") {
+            const lifecycle = this.#database.prepare(
+              `SELECT receipt_sha256, receipt_json
+               FROM resource_lifecycle_receipts
+               WHERE command_id = ? AND resource_kind = ? AND resource_id = ?`,
+            ).get(resource.commandId, owner.kind, owner.id) as {
+              receipt_sha256: string;
+              receipt_json: string;
+            } | undefined;
+            if (!lifecycle || lifecycle.receipt_sha256 !== resource.sha256
+              || this.resourceRecordDigest(owner.kind, owner.id)
+                !== resource.currentRecordDigest) return false;
+            try {
+              const parsed = JSON.parse(lifecycle.receipt_json) as any;
+              const { receiptDigest: _ignored, ...preimage } = parsed;
+              return canonicalDigest(preimage) === lifecycle.receipt_sha256
+                && parsed.currentRecordDigest === resource.currentRecordDigest;
+            } catch { return false; }
+          }
           if (resource.kind === "temporary_document") {
             return documents.some((document) =>
               document.id === resource.id
@@ -1652,7 +2635,13 @@ export class ProductStoreV2 {
   /** Backend-only runtime read. Never pass its session reference into an HTTP DTO. */
   async getConversationRuntime(conversationId: string): Promise<DurableConversationRuntime | null> {
     this.#assertOpen();
-    const row = this.#database.prepare("SELECT * FROM conversations WHERE id = ? AND lifecycle_state = 'active' AND provider_locked_at IS NOT NULL").get(conversationId) as any;
+    const row = this.#database.prepare(`SELECT c.* FROM conversations c
+      LEFT JOIN models m ON m.id = c.model_id
+      LEFT JOIN projects p ON p.id = c.project_id
+      WHERE c.id = ? AND c.lifecycle_state = 'active'
+        AND c.provider_locked_at IS NOT NULL
+        AND coalesce(m.lifecycle_state, p.lifecycle_state) = 'active'`
+    ).get(conversationId) as any;
     if (!row) return null;
     const session = this.#database.prepare("SELECT generation, state, external_session_ref FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
       .get(conversationId) as any;
@@ -1667,9 +2656,24 @@ export class ProductStoreV2 {
 
   assertActiveAgentToolGrant(input: { conversationId: string; turnId: string; externalSessionGeneration: number }): void {
     this.#assertOpen();
-    const turn = this.#database.prepare("SELECT state FROM agent_turns WHERE id = ? AND conversation_id = ?")
-      .get(input.turnId, input.conversationId) as { state: string } | undefined;
-    if (turn?.state !== "running") throw new ProductStoreV2Error("Agent tool grant turn is no longer active.");
+    const scope = this.#database.prepare(`SELECT t.state AS turn_state,
+        c.lifecycle_state AS conversation_lifecycle_state,
+        coalesce(m.lifecycle_state, p.lifecycle_state) AS owner_lifecycle_state
+      FROM agent_turns t
+      JOIN conversations c ON c.id = t.conversation_id
+      LEFT JOIN models m ON m.id = c.model_id
+      LEFT JOIN projects p ON p.id = c.project_id
+      WHERE t.id = ? AND t.conversation_id = ?`)
+      .get(input.turnId, input.conversationId) as {
+        turn_state: string;
+        conversation_lifecycle_state: LifecycleState;
+        owner_lifecycle_state: LifecycleState | null;
+      } | undefined;
+    if (scope?.turn_state !== "running"
+      || scope.conversation_lifecycle_state !== "active"
+      || scope.owner_lifecycle_state !== "active") {
+      throw new ProductStoreV2Error("Agent tool grant durable scope is no longer active.");
+    }
     const session = this.#database.prepare("SELECT generation, state FROM agent_sessions WHERE conversation_id = ? ORDER BY generation DESC LIMIT 1")
       .get(input.conversationId) as { generation: number; state: DurableAgentSessionState } | undefined;
     if (session?.state !== "available" || session.generation !== input.externalSessionGeneration) {
@@ -2083,6 +3087,38 @@ export class ProductStoreV2 {
     return this.#actions(row.turn_id).find((action) => action.id === input.id)!;
   }
 
+  commitReceiptBackedAgentAction(input: Readonly<{
+    actionId: string;
+    mutationTransactionId: string;
+    receiptDigest: string;
+    affectedResources: readonly unknown[];
+    committedAt: IsoTimestamp;
+  }>): ActionRecordDto {
+    this.#assertOpen(); assertId(input.actionId); assertId(input.mutationTransactionId);
+    assertDigest(input.receiptDigest, "Agent operation receipt digest");
+    assertIsoTimestamp(input.committedAt, "Agent action commit timestamp");
+    this.#databaseMutation([{
+      sql: `INSERT INTO committed_mutations
+        (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, ?)`,
+      params: [input.mutationTransactionId, input.receiptDigest, input.committedAt],
+      expectedChanges: 1,
+    }, {
+      sql: `UPDATE action_records SET state = 'committed',
+        mutation_transaction_id = ?, affected_resources_json = ?,
+        error_code = NULL, updated_at = ?
+        WHERE id = ? AND state = 'staging'
+          AND mutation_transaction_id = ?`,
+      params: [input.mutationTransactionId, json(input.affectedResources),
+        input.committedAt, input.actionId, input.mutationTransactionId],
+      expectedChanges: 1,
+    }]);
+    const row = this.#database.prepare(
+      "SELECT turn_id FROM action_records WHERE id = ?",
+    ).get(input.actionId) as { turn_id: string } | undefined;
+    if (!row) throw new ProductStoreV2Error("Agent action does not exist.");
+    return this.#actions(row.turn_id).find((action) => action.id === input.actionId)!;
+  }
+
   createAttachment(input: CreateAttachmentInput): StoredObjectMetadata {
     const owner = { kind: "conversation" as const, id: input.conversationId };
     const relativePath = `attachments/${input.relativePath}`;
@@ -2368,6 +3404,230 @@ export class ProductStoreV2 {
       input.id,
       experimentUpdateIntentDigest(input),
     );
+  }
+
+  getExperimentCommandReceiptEvidence(input: Readonly<{
+    commandId: string;
+    commandKind: "create" | "update";
+    projectId: string;
+  }>): ExperimentCommandReceiptEvidence | null {
+    assertCommandId(input.commandId);
+    assertId(input.projectId);
+    const row = this.#database.prepare(
+      `SELECT command_kind, project_id, experiment_id, intent_sha256,
+        response_json, response_sha256
+       FROM experiment_command_receipts WHERE command_id = ?`,
+    ).get(input.commandId) as {
+      command_kind: string;
+      project_id: string;
+      experiment_id: string;
+      intent_sha256: string;
+      response_json: string;
+      response_sha256: string;
+    } | undefined;
+    if (!row) return null;
+    if (row.command_kind !== input.commandKind || row.project_id !== input.projectId) {
+      throw new ProductStoreV2Error(
+        "Experiment command receipt is bound to a different operation or Project.",
+      );
+    }
+    let response: unknown;
+    try { response = JSON.parse(row.response_json); }
+    catch (error) {
+      throw new ProductStoreV2Error(
+        "Experiment command receipt contains invalid JSON.", { cause: error },
+      );
+    }
+    assertExperimentV4Response(response);
+    if (canonicalDigest(response) !== row.response_sha256
+      || response.id !== row.experiment_id
+      || response.projectId !== row.project_id) {
+      throw new ProductStoreV2Error(
+        "Experiment command receipt digest or resource binding is corrupt.",
+      );
+    }
+    return Object.freeze({
+      commandId: input.commandId,
+      commandKind: input.commandKind,
+      projectId: row.project_id,
+      experimentId: row.experiment_id,
+      intentDigest: row.intent_sha256,
+      receiptDigest: row.response_sha256,
+      response,
+      affectedResources: Object.freeze([Object.freeze({
+        kind: "experiment_configuration",
+        id: response.id,
+        sha256: response.configurationDigest,
+        recordDigest: experimentConfigurationRecordDigest(response),
+        commandId: input.commandId,
+        intentDigest: row.intent_sha256,
+      })]),
+    });
+  }
+
+  getTechnicalCheckReceiptEvidence(input: Readonly<{
+    modelId: string;
+    checkId: string;
+  }>) {
+    const record = this.getTechnicalCheck(input.modelId, input.checkId);
+    if (record.state === "running") return null;
+    const receiptDigest = canonicalDigest(record);
+    return Object.freeze({
+      modelId: input.modelId,
+      checkId: input.checkId,
+      receiptDigest,
+      record,
+      affectedResources: Object.freeze([Object.freeze({
+        kind: "model_technical_check",
+        id: record.id,
+        sha256: receiptDigest,
+      })]),
+    });
+  }
+
+  getRunCommandReceiptEvidence(input: Readonly<{
+    commandId: string;
+    commandKind: "start" | "cancel" | "trash" | "restore";
+    projectId: string;
+  }>) {
+    assertCommandId(input.commandId);
+    assertId(input.projectId);
+    const row = this.#database.prepare(`SELECT
+        c.run_id, c.command_kind, c.intent_sha256, c.state,
+        q.receipt_kind, q.payload_sha256, q.payload_json,
+        r.project_id, r.contract_version
+      FROM run_commands c
+      LEFT JOIN run_command_receipts q
+        ON q.command_id = c.id AND q.run_id = c.run_id
+      LEFT JOIN runs r ON r.id = c.run_id
+      WHERE c.id = ?`
+    ).get(input.commandId) as {
+      run_id: string;
+      command_kind: string;
+      intent_sha256: string;
+      state: string;
+      receipt_kind: string | null;
+      payload_sha256: string | null;
+      payload_json: string | null;
+      project_id: string | null;
+      contract_version: number | null;
+    } | undefined;
+    if (!row) return null;
+    if (row.command_kind !== input.commandKind || row.state !== "committed"
+      || row.project_id !== input.projectId || row.contract_version !== 4
+      || row.receipt_kind !== `run.${input.commandKind}.v1`
+      || typeof row.payload_sha256 !== "string"
+      || typeof row.payload_json !== "string") {
+      throw new ProductStoreV2Error(
+        "Run command receipt is bound to a different operation or Project.",
+      );
+    }
+    let response: FrozenRunStartReceipt | FrozenRunCancelReceipt
+      | RunLifecycleCommandReceipt;
+    try {
+      const parsed = JSON.parse(row.payload_json) as unknown;
+      if (input.commandKind === "start") {
+        assertFrozenRunStartReceipt(parsed);
+        response = this.#frozenRunStartReceipt({
+          commandId: input.commandId,
+          projectId: input.projectId,
+          experimentConfigId: parsed.experimentConfigId,
+          completionConversationId: parsed.completionConversationId,
+        }, row.intent_sha256)!;
+      } else if (input.commandKind === "cancel") {
+        assertFrozenRunCancelReceipt(parsed);
+        response = this.#frozenRunCancelReceipt({
+          commandId: input.commandId,
+          projectId: input.projectId,
+          runId: parsed.runId,
+        }, row.intent_sha256)!;
+      } else {
+        assertRunLifecycleCommandReceipt(parsed);
+        response = this.#runLifecycleCommandReceipt(
+          input.commandId,
+          input.projectId,
+          parsed.runId,
+          input.commandKind,
+          row.intent_sha256,
+        )!;
+      }
+    } catch (error) {
+      if (error instanceof ProductStoreV2Error) throw error;
+      throw new ProductStoreV2Error(
+        "Run command receipt contains invalid authoritative evidence.",
+        { cause: error },
+      );
+    }
+    if (!response || canonicalDigest(response) !== row.payload_sha256
+      || response.commandId !== input.commandId
+      || response.projectId !== input.projectId
+      || response.runId !== row.run_id) {
+      throw new ProductStoreV2Error(
+        "Run command receipt digest or resource binding is corrupt.",
+      );
+    }
+    const action = input.commandKind === "trash" ? "trash_run"
+      : input.commandKind === "restore" ? "restore_run" : null;
+    return Object.freeze({
+      commandId: input.commandId,
+      commandKind: input.commandKind,
+      projectId: input.projectId,
+      runId: row.run_id,
+      intentDigest: row.intent_sha256,
+      receiptDigest: row.payload_sha256,
+      response,
+      affectedResources: Object.freeze([Object.freeze({
+        kind: input.commandKind === "start" ? "run_start_receipt"
+          : input.commandKind === "cancel" ? "run_cancel_receipt"
+            : "run_lifecycle_receipt",
+        id: row.run_id,
+        sha256: row.payload_sha256,
+        commandId: input.commandId,
+        ...(action ? { action } : {}),
+      })]),
+    });
+  }
+
+  getLifecycleCommandReceiptEvidence(input: Readonly<{
+    commandId: string;
+    action: ProductLifecycleAction;
+    kind: ProductLifecycleKind;
+    id: string;
+  }>) {
+    assertCommandId(input.commandId);
+    assertId(input.id);
+    const row = this.#database.prepare(
+      `SELECT intent_sha256 FROM resource_lifecycle_receipts
+       WHERE command_id = ?`,
+    ).get(input.commandId) as { intent_sha256: string } | undefined;
+    if (!row) return null;
+    const response = this.#lifecycleReceipt(
+      input.commandId,
+      input.action,
+      input.kind,
+      input.id,
+      row.intent_sha256,
+    );
+    if (!response) throw new ProductStoreV2Error(
+      "Lifecycle command receipt disappeared during verification.",
+    );
+    return Object.freeze({
+      commandId: input.commandId,
+      action: input.action,
+      kind: input.kind,
+      id: input.id,
+      intentDigest: row.intent_sha256,
+      receiptDigest: response.receiptDigest,
+      response,
+      affectedResources: Object.freeze([Object.freeze({
+        kind: `${input.kind}_lifecycle_receipt`,
+        id: input.id,
+        sha256: response.receiptDigest,
+        currentRecordDigest: response.currentRecordDigest,
+        commandId: input.commandId,
+        action: input.action,
+      })]),
+    });
   }
 
   updateExperiment(input: UpdateExperimentInput): ExperimentConfigurationRecord {
@@ -7609,6 +8869,122 @@ export class ProductStoreV2 {
     return Object.freeze(receipt);
   }
 
+  #workspaceBindingRecoveryPlansForPermanentDelete(input: Readonly<{
+    commandId: string;
+    kind: ProductLifecycleKind;
+    id: string;
+    committedAt: IsoTimestamp;
+  }>): readonly Readonly<{
+    receipt: WorkspaceBindingReceipt;
+    intentDigest: string;
+    statements: readonly ProductDatabaseMutationStatement[];
+  }>[] {
+    if (input.kind !== "model" && input.kind !== "project"
+      && input.kind !== "conversation") return [];
+    const targetPredicate = input.kind === "conversation"
+      ? "wb.conversation_id = ?"
+      : `wb.${input.kind === "model" ? "owner_model_id" : "owner_project_id"} = ?`;
+    const rows = this.#database.prepare(
+      `SELECT wb.*, bc.name AS bootstrap_name,
+        bc.provider_id AS bootstrap_provider_id,
+        bc.provider_model_id AS bootstrap_provider_model_id,
+        c.name AS owner_conversation_name,
+        c.provider_id AS owner_provider_id,
+        c.provider_model_id AS owner_provider_model_id
+       FROM workspace_bindings wb
+       JOIN workspace_bootstrap_conversations bc
+         ON bc.id = wb.bootstrap_conversation_id
+       LEFT JOIN conversations c ON c.id = wb.conversation_id
+       WHERE wb.state = 'bound' AND ${targetPredicate}
+       ORDER BY wb.workspace_key`,
+    ).all(input.id) as any[];
+    return Object.freeze(rows.map((row) => {
+      const current = workspaceBinding(row);
+      const targetMatches = input.kind === "conversation"
+        ? current.conversation.kind === "owner"
+          && current.conversation.id === input.id
+        : current.owner?.kind === input.kind && current.owner.id === input.id;
+      if (!current.owner || current.conversation.kind !== "owner" || !targetMatches) {
+        throw new ProductStoreV2Error(
+          "Workspace binding deletion recovery scope is inconsistent.",
+        );
+      }
+      const generation = current.generation + 1;
+      const bootstrapProvider = row.bootstrap_provider_id
+        && row.bootstrap_provider_model_id
+        ? Object.freeze({
+          providerId: row.bootstrap_provider_id as string,
+          modelId: row.bootstrap_provider_model_id as string,
+        }) : current.provider;
+      const finalBindingDigest = workspaceBindingDigest({
+        ...current,
+        conversation: Object.freeze({
+          kind: "bootstrap" as const,
+          id: row.bootstrap_conversation_id as string,
+          name: row.bootstrap_name as string,
+          provider: bootstrapProvider,
+        }),
+        owner: null,
+        generation,
+        state: "recovery_required" as const,
+        updatedAt: input.committedAt,
+      });
+      const recoveryCommandId = `binding_recovery_${canonicalDigest({
+        permanentDeleteCommandId: input.commandId,
+        workspaceKey: current.workspaceKey,
+      }).slice(0, 40)}`;
+      const recoveryCause = Object.freeze({
+        action: "permanently_delete" as const,
+        commandId: input.commandId,
+        owner: current.owner,
+      });
+      const receipt = workspaceBindingReceipt({
+        commandId: recoveryCommandId,
+        operation: "recover_owner_deleted",
+        workspaceKey: current.workspaceKey,
+        previousGeneration: current.generation,
+        previousBindingDigest: current.bindingDigest,
+        generation,
+        bindingDigest: finalBindingDigest,
+        state: "recovery_required",
+        conversationId: null,
+        owner: null,
+        ownerRecordDigest: null,
+        recoveryCause,
+        committedAt: input.committedAt,
+      });
+      const intentDigest = canonicalDigest({
+        operation: receipt.operation,
+        workspaceKey: current.workspaceKey,
+        previousGeneration: current.generation,
+        previousBindingDigest: current.bindingDigest,
+        recoveryCause,
+      });
+      return Object.freeze({
+        receipt,
+        intentDigest,
+        statements: Object.freeze([{
+          sql: `UPDATE workspace_bindings
+            SET conversation_id = NULL, owner_model_id = NULL,
+              owner_project_id = NULL, generation = ?,
+              state = 'recovery_required', updated_at = ?
+            WHERE workspace_key = ? AND generation = ? AND state = 'bound'
+              AND conversation_id = ? AND owner_${current.owner.kind}_id = ?`,
+          params: [
+            generation,
+            input.committedAt,
+            current.workspaceKey,
+            current.generation,
+            current.conversation.id,
+            current.owner.id,
+          ],
+          expectedChanges: 1,
+          mismatchMessage: "Workspace binding changed before owner deletion recovery committed.",
+        }, workspaceBindingReceiptInsert(receipt, intentDigest)]),
+      });
+    }));
+  }
+
   commitPermanentDelete(input: {
     commandId: string;
     kind: ProductLifecycleKind;
@@ -7640,6 +9016,8 @@ export class ProductStoreV2 {
     if (activity.length > 0) {
       throw new ProductStoreV2Error("Permanent-delete target has active work.");
     }
+    const workspaceRecoveryPlans =
+      this.#workspaceBindingRecoveryPlansForPermanentDelete(input);
     const unsigned = {
       schemaVersion: 1 as const,
       commandId: input.commandId,
@@ -7652,13 +9030,21 @@ export class ProductStoreV2 {
       previewToken: preview.previewToken,
       stateToken: preview.stateToken,
       canonicalIntentDigest: input.canonicalIntentDigest,
+      workspaceRecoveryReceipts: workspaceRecoveryPlans.map(({ receipt }) => ({
+        workspaceKey: receipt.workspaceKey,
+        commandId: receipt.commandId,
+        receiptDigest: receipt.receiptDigest,
+      })),
       committedAt: input.committedAt,
     };
     const receipt: PermanentDeleteReceipt = Object.freeze({
       ...unsigned,
       receiptDigest: canonicalDigest(unsigned),
     });
-    const deleteStatements = permanentDeleteStatements(preview.records);
+    const deleteStatements = [
+      ...workspaceRecoveryPlans.flatMap(({ statements }) => statements),
+      ...permanentDeleteStatements(preview.records),
+    ];
     deleteStatements.push({
       sql: `INSERT INTO permanent_delete_receipts
         (command_id, resource_kind, resource_id, canonical_intent_sha256,
@@ -7693,7 +9079,7 @@ export class ProductStoreV2 {
       this.#coordinator.executePermanentDelete({
         transactionId: stableTransactionId("permanent_delete", input.commandId),
         files,
-        statements: deleteStatements,
+        statements: deleteStatements.map(coordinatorStatement),
       });
     }
     return receipt;
@@ -8604,7 +9990,16 @@ export class ProductStoreV2 {
     };
   }
 
-  createModelWithFirstConversation(input: { model: CreateModelInput; conversation: Omit<CreateConversationInput, "owner"> }): { model: ModelRecord; conversation: ConversationDto } {
+  createModelWithFirstConversation(input: {
+    model: CreateModelInput;
+    conversation: Omit<CreateConversationInput, "owner">;
+    workspaceBinding?: Readonly<{
+      commandId: string;
+      workspaceKey: string;
+      expectedGeneration: number;
+      expectedBindingDigest: string;
+    }>;
+  }): { model: ModelRecord; conversation: ConversationDto; workspaceBinding?: Readonly<{ binding: WorkspaceBinding; receipt: WorkspaceBindingReceipt }> } {
     this.#assertOpen();
     const { model, conversation } = input;
     assertId(model.id); assertId(conversation.id);
@@ -8629,18 +10024,64 @@ export class ProductStoreV2 {
         && files.every(({ file, relativePath, bytes, digest }) => rows.some((row) => row.id === file.id && row.kind === file.kind
           && row.relative_path === relativePath && row.media_type === file.mediaType && row.size_bytes === bytes.byteLength && row.sha256 === digest));
       if (!matches) throw new ProductStoreV2Error("Composite Model creation ID was reused with different intent.");
-      return { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+      const result = { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+      if (!input.workspaceBinding) return result;
+      const replay = this.#workspaceBindingReceipt(
+        input.workspaceBinding.commandId,
+        this.#workspaceBindIntentDigest({
+          ...input.workspaceBinding,
+          owner: { kind: "model", id: model.id },
+          conversationId: conversation.id,
+          ownerRecordDigest: this.resourceRecordDigest("model", model.id),
+          provider: {
+            providerId: conversation.providerId,
+            modelId: conversation.providerModelId,
+          },
+        }),
+      );
+      if (!replay) throw new ProductStoreV2Error("Composite workspace Model creation is incomplete.");
+      return { ...result, workspaceBinding: {
+        binding: this.getWorkspaceBinding(input.workspaceBinding.workspaceKey),
+        receipt: replay,
+      } };
     }
+    const ownerRecordDigest = canonicalDigest({
+      kind: "model",
+      id: model.id,
+      name: model.name,
+      lifecycleState: "active",
+      createdAt: model.createdAt,
+      updatedAt: model.createdAt,
+      details: { technicalStatus: model.technicalStatus, runMode: model.runMode },
+    });
+    const workspacePlan = input.workspaceBinding
+      ? this.#workspaceBindPlan({
+        ...input.workspaceBinding,
+        owner,
+        conversationId: conversation.id,
+        conversationName: conversation.name,
+        provider: {
+          providerId: conversation.providerId,
+          modelId: conversation.providerModelId,
+        },
+        ownerRecordDigest,
+        committedAt: model.createdAt,
+      }) : null;
     const statements: DatabaseMutationStatement[] = [{ sql: `INSERT INTO models
       (id, name, technical_status, run_mode, execution_description_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       params: [model.id, model.name, model.technicalStatus, model.runMode, json(model.executionDescription), model.createdAt, model.createdAt], expectedChanges: 1 },
       ...files.map(({ file, bytes, relativePath, digest }) => objectInsert({ id: file.id, owner, kind: file.kind, relativePath, mediaType: file.mediaType,
         sizeBytes: bytes.byteLength, digest, createdAt: model.createdAt })),
       { sql: `INSERT INTO conversations (id, model_id, name, provider_id, provider_model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        params: [conversation.id, model.id, conversation.name, conversation.providerId, conversation.providerModelId, conversation.createdAt, conversation.createdAt], expectedChanges: 1 }];
+        params: [conversation.id, model.id, conversation.name, conversation.providerId, conversation.providerModelId, conversation.createdAt, conversation.createdAt], expectedChanges: 1 },
+      ...(workspacePlan?.statements.map(coordinatorStatement) ?? [])];
     this.#coordinator.execute({ transactionId: stableTransactionId("create_model_conversation", model.id),
       files: files.map(({ target, bytes }) => ({ operation: "write" as const, target, bytes, expectedPriorSha256: null })), statements });
-    return { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+    const result = { model: this.#model(model.id), conversation: this.getConversation(conversation.id) };
+    return workspacePlan ? { ...result, workspaceBinding: {
+      binding: this.getWorkspaceBinding(input.workspaceBinding!.workspaceKey),
+      receipt: workspacePlan.receipt,
+    } } : result;
   }
 
   startTechnicalCheck(input: { id: string; modelId: string; limits: Record<string, unknown>; startedAt: IsoTimestamp }): {
@@ -9392,6 +10833,7 @@ export class ProductStoreV2 {
   }
 
   #reconcileInterruptedAgentState(): void {
+    this.#recoverReceiptBackedAgentActionGaps();
     const committedActions = (this.#database.prepare(`SELECT count(*) AS count FROM action_records a WHERE a.state = 'staging'
       AND a.mutation_transaction_id IS NOT NULL AND EXISTS (SELECT 1 FROM committed_mutations m WHERE m.transaction_id = a.mutation_transaction_id)`).get() as { count: number }).count;
     const rolledBackActions = (this.#database.prepare(`SELECT count(*) AS count FROM action_records a WHERE a.state = 'staging'
@@ -9463,6 +10905,235 @@ export class ProductStoreV2 {
         AND EXISTS (SELECT 1 FROM model_technical_checks t WHERE t.model_id = models.id AND t.state = 'running')`, params: [now], expectedChanges: checkingModels },
       { sql: `UPDATE model_technical_checks SET state = 'failed', results_json = '{"failureCode":"interrupted"}', finished_at = ? WHERE state = 'running'`, params: [now], expectedChanges: runningChecks },
     ]);
+  }
+
+  #recoverReceiptBackedAgentActionGaps(): void {
+    const rows = this.#database.prepare(
+      `SELECT a.id, a.turn_id, a.conversation_id, a.action_kind,
+        a.intent_json, a.mutation_transaction_id, a.updated_at,
+        c.model_id, c.project_id
+       FROM action_records a
+       JOIN conversations c ON c.id = a.conversation_id
+       WHERE a.state = 'staging' AND a.mutation_transaction_id IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM committed_mutations m
+           WHERE m.transaction_id = a.mutation_transaction_id
+         )
+       ORDER BY a.id`,
+    ).all() as Array<{
+      id: string;
+      turn_id: string;
+      conversation_id: string;
+      action_kind: string;
+      intent_json: string;
+      mutation_transaction_id: string;
+      updated_at: string;
+      model_id: string | null;
+      project_id: string | null;
+    }>;
+    for (const row of rows) {
+      let intent: Record<string, unknown>;
+      try { intent = JSON.parse(row.intent_json) as Record<string, unknown>; }
+      catch { continue; }
+      const requestKey = typeof intent.requestKey === "string"
+        ? intent.requestKey : null;
+      if (!requestKey || requestKey.length > 256
+        || /[\u0000-\u001f\u007f]/u.test(requestKey)) continue;
+      const label = row.action_kind === "model_technical_check_start"
+        ? "technical-check"
+        : row.action_kind === "experiment_configuration_create"
+          ? "create-experiment"
+          : row.action_kind === "experiment_configuration_update"
+            ? "update-experiment"
+          : row.action_kind === "run_start" ? "start-run"
+            : row.action_kind === "run_cancel" ? "cancel-run"
+              : row.action_kind === "run_trash" ? "trash-run"
+                : row.action_kind === "run_restore" ? "restore-run"
+                  : /^owner_(rename|archive|trash|restore)$/u.test(row.action_kind)
+                    ? `owner-${row.action_kind.slice("owner_".length)}`
+                    : null;
+      if (!label) continue;
+      const commandId = stableAgentId(
+        "command", `${row.turn_id}:${label}:${requestKey}`,
+      );
+      let receiptDigest: string | null = null;
+      let affectedResources: readonly unknown[] = [];
+      let receiptCorrupt = false;
+      if (row.action_kind === "model_technical_check_start" && row.model_id) {
+        const checkId = `technical_check_${sha256(Buffer.from(
+          `${row.model_id}\u0000${commandId}`, "utf8",
+        )).slice(0, 32)}`;
+        const rawCheck = this.#database.prepare(
+          "SELECT state FROM model_technical_checks WHERE id = ? AND model_id = ?",
+        ).get(checkId, row.model_id) as { state: string } | undefined;
+        try {
+          const check = this.getTechnicalCheck(row.model_id, checkId);
+          if (check.state !== "running") {
+            receiptDigest = canonicalDigest(check);
+            affectedResources = [{
+              kind: "model_technical_check", id: check.id,
+              sha256: receiptDigest,
+            }];
+          }
+        } catch {
+          receiptCorrupt = Boolean(rawCheck && rawCheck.state !== "running");
+        }
+      } else if ((row.action_kind === "experiment_configuration_create"
+        || row.action_kind === "experiment_configuration_update")
+        && row.project_id) {
+        const rawReceiptExists = Boolean(this.#database.prepare(
+          "SELECT 1 FROM experiment_command_receipts WHERE command_id = ?",
+        ).get(commandId));
+        try {
+          const evidence = this.getExperimentCommandReceiptEvidence({
+            commandId,
+            commandKind: row.action_kind === "experiment_configuration_create"
+              ? "create" : "update",
+            projectId: row.project_id,
+          });
+          if (evidence) {
+            receiptDigest = evidence.receiptDigest;
+            affectedResources = evidence.affectedResources;
+          }
+        } catch { receiptCorrupt = rawReceiptExists; }
+      } else if (["run_start", "run_cancel", "run_trash", "run_restore"]
+        .includes(row.action_kind) && row.project_id) {
+        const receipt = this.#database.prepare(
+          `SELECT q.receipt_kind, q.payload_sha256, q.payload_json,
+            c.run_id, c.intent_sha256, c.state, r.project_id
+           FROM run_command_receipts q
+           JOIN run_commands c ON c.id = q.command_id AND c.run_id = q.run_id
+           JOIN runs r ON r.id = c.run_id
+           WHERE q.command_id = ?`,
+        ).get(commandId) as {
+          receipt_kind: string;
+          payload_sha256: string;
+          payload_json: string;
+          run_id: string;
+          intent_sha256: string;
+          state: string;
+          project_id: string;
+        } | undefined;
+        const expectedReceiptKind = row.action_kind === "run_start"
+          ? "run.start.v1" : row.action_kind === "run_cancel"
+            ? "run.cancel.v1" : row.action_kind === "run_trash"
+              ? "run.trash.v1" : "run.restore.v1";
+        if (receipt?.state === "committed"
+          && receipt.project_id === row.project_id
+          && receipt.receipt_kind === expectedReceiptKind) {
+          try {
+            const payload = JSON.parse(receipt.payload_json) as any;
+            if (canonicalDigest(payload) === receipt.payload_sha256
+              && payload.commandId === commandId
+              && payload.projectId === row.project_id
+              && payload.runId === receipt.run_id
+              && (row.action_kind !== "run_start"
+                || (payload.intentDigest === receipt.intent_sha256
+                  && typeof payload.frozenConfigurationDigest === "string"
+                  && typeof payload.samplePlanDigest === "string"
+                  && typeof payload.projectSnapshotDigest === "string"
+                  && typeof payload.executionDescriptionDigest === "string"
+                  && typeof payload.limitsDigest === "string"))) {
+              receiptDigest = receipt.payload_sha256;
+              affectedResources = [{
+                kind: row.action_kind === "run_start" ? "run_start_receipt"
+                  : row.action_kind === "run_cancel" ? "run_cancel_receipt"
+                    : "run_lifecycle_receipt",
+                id: receipt.run_id,
+                sha256: receipt.payload_sha256,
+                commandId,
+                ...(row.action_kind === "run_trash" ? { action: "trash_run" }
+                  : row.action_kind === "run_restore" ? { action: "restore_run" }
+                    : {}),
+              }];
+            }
+          } catch { receiptCorrupt = true; }
+        }
+        if (receipt && (!receiptDigest || affectedResources.length === 0)) {
+          receiptCorrupt = true;
+        }
+      } else if (/^owner_(rename|archive|trash|restore)$/u.test(row.action_kind)) {
+        const kind = row.model_id ? "model" as const
+          : row.project_id ? "project" as const : null;
+        const id = row.model_id ?? row.project_id;
+        const lifecycle = kind && id ? this.#database.prepare(
+          `SELECT action, resource_kind, resource_id, receipt_json,
+            receipt_sha256, intent_sha256
+           FROM resource_lifecycle_receipts WHERE command_id = ?`,
+        ).get(commandId) as {
+          action: string;
+          resource_kind: string;
+          resource_id: string;
+          receipt_json: string;
+          receipt_sha256: string;
+          intent_sha256: string;
+        } | undefined : undefined;
+        if (kind && id && lifecycle?.action === row.action_kind.slice("owner_".length)
+          && lifecycle.resource_kind === kind && lifecycle.resource_id === id) {
+          try {
+            const parsed = JSON.parse(lifecycle.receipt_json) as any;
+            const { receiptDigest: _ignored, ...preimage } = parsed;
+            const expectedIntentDigest = typeof intent.expectedRecordDigest === "string"
+              && /^[0-9a-f]{64}$/u.test(intent.expectedRecordDigest)
+              && intent.action === lifecycle.action
+              ? canonicalDigest({
+                  action: lifecycle.action,
+                  kind,
+                  id,
+                  expectedRecordDigest: intent.expectedRecordDigest,
+                  ...(typeof intent.name === "string" ? { name: intent.name } : {}),
+                })
+              : null;
+            if (canonicalDigest(preimage) === lifecycle.receipt_sha256
+              && parsed.receiptDigest === lifecycle.receipt_sha256
+              && parsed.commandId === commandId
+              && parsed.schemaVersion === 1
+              && parsed.kind === kind
+              && parsed.id === id
+              && parsed.action === lifecycle.action
+              && lifecycle.intent_sha256 === expectedIntentDigest
+              && typeof parsed.currentRecordDigest === "string") {
+              receiptDigest = lifecycle.receipt_sha256;
+              affectedResources = [{
+                kind: `${kind}_lifecycle_receipt`, id,
+                sha256: lifecycle.receipt_sha256,
+                currentRecordDigest: parsed.currentRecordDigest,
+                commandId,
+                action: lifecycle.action,
+              }];
+            }
+          } catch { receiptCorrupt = true; }
+        }
+        if (lifecycle && (!receiptDigest || affectedResources.length === 0)) {
+          receiptCorrupt = true;
+        }
+      }
+      if ((!receiptDigest || affectedResources.length === 0) && receiptCorrupt) {
+        this.#databaseMutation([{
+          sql: `UPDATE action_records SET state = 'failed',
+            error_code = 'authoritative_receipt_corrupt', updated_at = ?
+            WHERE id = ? AND state = 'staging'
+              AND mutation_transaction_id = ?`,
+          params: [row.updated_at, row.id, row.mutation_transaction_id],
+          expectedChanges: 1,
+        }]);
+        continue;
+      }
+      if (!receiptDigest || affectedResources.length === 0) continue;
+      this.#databaseMutation([{
+        sql: `INSERT INTO committed_mutations
+          (transaction_id, manifest_sha256, committed_at) VALUES (?, ?, ?)`,
+        params: [row.mutation_transaction_id, receiptDigest, row.updated_at],
+        expectedChanges: 1,
+      }, {
+        sql: `UPDATE action_records SET state = 'committed',
+          affected_resources_json = ?, error_code = NULL
+          WHERE id = ? AND state = 'staging'
+            AND mutation_transaction_id = ?`,
+        params: [json(affectedResources), row.id, row.mutation_transaction_id],
+        expectedChanges: 1,
+      }]);
+    }
   }
 
   #reconcileVisualAgentAuditGaps(): void {
@@ -11411,6 +13082,152 @@ const terminalRunStatus = (value: unknown): TerminalRunStatus | null =>
     : null;
 
 const stableTransactionId = (operation: string, id: string): string => `mutation_${operation}_${canonicalDigest(id).slice(0, 32)}`;
+const assertWorkspaceKey = (value: string): void => {
+  if (!/^[A-Za-z0-9_-]{3,80}$/u.test(value)) {
+    throw new ProductStoreV2Error("Workspace key is invalid.");
+  }
+};
+const assertWorkspaceGeneration = (value: number): void => {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ProductStoreV2Error("Workspace generation is invalid.");
+  }
+};
+const boundedWorkspaceProvider = (value: string, maximum: number): string => {
+  if (typeof value !== "string" || !value.trim()
+    || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new ProductStoreV2Error("Workspace provider binding is invalid.");
+  }
+  return value;
+};
+const workspaceBinding = (row: any): WorkspaceBinding => {
+  const owner = row.owner_model_id
+    ? Object.freeze({ kind: "model" as const, id: row.owner_model_id })
+    : row.owner_project_id
+      ? Object.freeze({ kind: "project" as const, id: row.owner_project_id })
+      : null;
+  const provider = row.provider_id && row.provider_model_id
+    ? Object.freeze({ providerId: row.provider_id, modelId: row.provider_model_id })
+    : null;
+  const conversation = row.conversation_id
+    ? Object.freeze({
+      kind: "owner" as const,
+      id: row.conversation_id,
+      name: row.owner_conversation_name,
+      provider: row.owner_provider_id && row.owner_provider_model_id
+        ? Object.freeze({
+          providerId: row.owner_provider_id,
+          modelId: row.owner_provider_model_id,
+        }) : provider,
+    })
+    : Object.freeze({
+      kind: "bootstrap" as const,
+      id: row.bootstrap_conversation_id,
+      name: row.bootstrap_name,
+      provider: row.bootstrap_provider_id && row.bootstrap_provider_model_id
+        ? Object.freeze({
+          providerId: row.bootstrap_provider_id,
+          modelId: row.bootstrap_provider_model_id,
+        }) : provider,
+    });
+  const preimage = {
+    workspaceKey: row.workspace_key,
+    conversation,
+    owner,
+    generation: row.generation,
+    state: row.state,
+    draft: row.draft_text,
+    provider,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+  return Object.freeze({
+    ...preimage,
+    bindingDigest: workspaceBindingDigest(preimage),
+  });
+};
+const workspaceBindingDigest = (
+  input: Omit<WorkspaceBinding, "bindingDigest"> | WorkspaceBinding,
+): string => {
+  const binding = input as WorkspaceBinding;
+  return canonicalDigest({
+    schemaVersion: 1,
+    workspaceKey: binding.workspaceKey,
+    conversation: {
+      kind: binding.conversation.kind,
+      id: binding.conversation.id,
+    },
+    owner: binding.owner,
+    generation: binding.generation,
+    state: binding.state,
+    draft: binding.draft,
+    provider: binding.provider,
+    createdAt: binding.createdAt,
+    updatedAt: binding.updatedAt,
+  });
+};
+const workspaceBindingReceiptPreimage = (
+  receipt: Omit<WorkspaceBindingReceipt, "receiptDigest"> | WorkspaceBindingReceipt,
+) => {
+  const { receiptDigest: _receiptDigest, ...preimage } = receipt as WorkspaceBindingReceipt;
+  return preimage;
+};
+const workspaceBindingReceipt = (
+  input: Omit<WorkspaceBindingReceipt, "schemaVersion" | "receiptDigest">,
+): WorkspaceBindingReceipt => {
+  const preimage = Object.freeze({ schemaVersion: 1 as const, ...input });
+  return Object.freeze({
+    ...preimage,
+    receiptDigest: canonicalDigest(preimage),
+  });
+};
+const workspaceBindingReceiptInsert = (
+  receipt: WorkspaceBindingReceipt,
+  intentDigest: string,
+): DatabaseMutationStatement => ({
+  sql: `INSERT INTO workspace_binding_receipts
+    (command_id, workspace_key, operation, generation, state,
+      conversation_id, owner_model_id, owner_project_id, binding_sha256,
+      intent_sha256, receipt_json, receipt_sha256, committed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  params: [
+    receipt.commandId,
+    receipt.workspaceKey,
+    receipt.operation,
+    receipt.generation,
+    receipt.state,
+    receipt.conversationId,
+    receipt.owner?.kind === "model" ? receipt.owner.id : null,
+    receipt.owner?.kind === "project" ? receipt.owner.id : null,
+    receipt.bindingDigest,
+    intentDigest,
+    json(receipt),
+    receipt.receiptDigest,
+    receipt.committedAt,
+  ],
+  expectedChanges: 1,
+});
+const coordinatorStatement = (
+  statement: ProductDatabaseMutationStatement,
+): DatabaseMutationStatement => ({
+  sql: statement.sql,
+  ...(statement.params === undefined ? {} : { params: statement.params }),
+  expectedChanges: statement.expectedChanges,
+});
+const assertSecureWorkspaceDirectory = (target: string, expectedParent: string): void => {
+  const info = lstatSync(target);
+  const uid = process.getuid?.();
+  if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(target) !== target
+    || dirname(target) !== expectedParent || uid === undefined || info.uid !== uid
+    || (info.mode & 0o077) !== 0) {
+    throw new ProductStoreV2Error("Workspace bootstrap directory is unsafe.");
+  }
+};
+const removeExactWorkspaceBootstrapDirectory = (target: string): void => {
+  const base = dirname(target);
+  assertSecureWorkspaceDirectory(base, dirname(base));
+  assertSecureWorkspaceDirectory(target, base);
+  rmSync(target, { recursive: true, force: false });
+};
 const activeLifecycleGuard = (table: "models" | "projects" | "conversations", id: string): DatabaseMutationStatement => ({
   sql: `UPDATE ${table} SET updated_at = updated_at WHERE id = ? AND lifecycle_state = 'active'`, params: [id], expectedChanges: 1,
 });

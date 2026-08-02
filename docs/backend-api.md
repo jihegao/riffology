@@ -209,6 +209,48 @@ visual Model mutation; the verified receipt survives refresh and backend
 restart. See [`issue-56-pr5-exit-evidence.md`](issue-56-pr5-exit-evidence.md)
 for the evidence and claim limits.
 
+## Riffology Stage 6 WorkspaceBinding and bootstrap API
+
+Schema v18 adds a durable, generation-fenced `WorkspaceBinding`. Its public
+projection includes a non-null bootstrap or owner Conversation, optional
+Model/Project owner, generation, `bindingDigest`, state, selected Provider,
+durable bootstrap messages, and a redacted owner projection. It never includes
+the Store-owned bootstrap directory or OpenCode session reference.
+
+| Method and route | Contract |
+| --- | --- |
+| `POST /api/workspace-bindings` | Idempotently create an unbound binding, durable bootstrap Conversation, verified `0700` Store directory, and immutable creation receipt. |
+| `GET /api/workspace-bindings/{workspaceKey}` | Return current public binding, durable bootstrap messages, Provider read-only state, and optional owner projection. |
+| `PATCH /api/workspace-bindings/{workspaceKey}` | Compare expected generation plus binding digest, then persist draft and explicit Provider selection with a receipt. |
+| `GET /api/workspace-bindings/{workspaceKey}/bootstrap` | Return generation-bound opaque object and Provider references. Raw owner IDs and paths are omitted. |
+| `POST /api/workspace-bindings/{workspaceKey}/turn` | Run one durable OpenCode project-guide turn with the exact four-tool bootstrap MCP. |
+
+The `bootstrap/create-model`, `bootstrap/create-project`, and
+`bootstrap/bind-owner` HTTP routes are retained as authenticated operational
+contracts. The Riffology UI does not call them and exposes no corresponding
+domain buttons; its only mutation path is the Agent bootstrap turn.
+
+The bootstrap capability binds workspace key, binding generation, binding
+digest, bootstrap Conversation, and turn. Its exact tools are
+`riff_bootstrap_list_objects`, `riff_bootstrap_create_model`,
+`riff_bootstrap_create_project`, and `riff_bootstrap_bind_owner`. Create tools
+atomically create the owner, first owner Conversation, WorkspaceBinding update,
+and immutable receipt. A successful bind closes the private bootstrap session
+and revokes all workspace bootstrap capabilities.
+
+Owner MCP adds Model technical-check and Model/Project lifecycle operations,
+plus Project fixed-copy file reads, Experiment create/update, Run
+list/start/cancel/trash/restore, output list/read, and diagnostic-event read.
+Project files, Runs, and outputs use opaque `fileRef`, `runRef`, and
+`outputRef`; scope IDs, paths, and raw Run IDs are rejected. Consequential
+actions require explicit-turn authority and commit only with durable mutation
+evidence derived from the returned Riff receipt.
+
+Implementation details and current evidence limits are recorded in
+[`riffology-openchamber-stage-6.md`](riffology-openchamber-stage-6.md). The
+controlled-port tests and local Web suite pass; real authenticated OpenCode
+acceptance is still pending and is not implied by this API snapshot.
+
 ## Milestone A2 authority and current A3 execution
 
 The current product authority is the

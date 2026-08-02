@@ -142,6 +142,10 @@ const client = (): ProductClient => ({
   })),
   home: vi.fn(async () => home),
   providers: vi.fn(async () => providers),
+  createWorkspaceBinding: vi.fn(async () => { throw new Error("unused"); }),
+  workspaceBinding: vi.fn(async () => { throw new Error("unused"); }),
+  updateWorkspaceBinding: vi.fn(async () => { throw new Error("unused"); }),
+  sendWorkspaceBootstrapTurn: vi.fn(async () => { throw new Error("unused"); }),
   createModel: vi.fn(async () => ({
     model: { id: "created-model", name: "Created", lifecycleState: "active" as const },
     conversation: workspace.conversations[0],
@@ -1007,6 +1011,77 @@ describe("Stage 4 Product entry", () => {
     expect(screen.queryByText("Share")).not.toBeInTheDocument();
   });
 
+  it("opens a Model in the Riffology workbench with its Conversation and bounded file projection", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.workspace = vi.fn(async (kind, id) => {
+      expect(kind).toBe("model");
+      expect(id).toBe("model-one");
+      return {
+        ...workspace,
+        files: [{
+          id: "model-file-readme",
+          kind: "model_code",
+          relativePath: "docs/model.md",
+          mediaType: "text/markdown",
+          sizeBytes: 18,
+          sha256: "9".repeat(64),
+          createdAt: "2026-07-25T00:00:00.000Z",
+        }],
+      };
+    });
+    productClient.modelRenderable = vi.fn(async () => ({
+      kind: "markdown" as const,
+      title: "docs/model.md",
+      text: "# Model projection",
+    }));
+    const browser = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 3,
+      pageGeneration: 5,
+      projectedUrl: "riff-app://models/model-one?conversation=conversation-main",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    productClient.browserState = vi.fn(async () => browser);
+    productClient.browserOpen = vi.fn(async () => browser);
+    productClient.browserScreenshot = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      pageGeneration: browser.pageGeneration,
+      contentType: "image/png" as const,
+      pngBase64: "iVBORw0KGgo=",
+    }));
+    const { unmount } = render(<App client={productClient} />);
+
+    expect(await screen.findByRole("complementary", { name: "模型对话" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "模型文件与页面查看器" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("页面地址")).toHaveTextContent(
+      "riff-app://models/model-one?conversation=conversation-main",
+    ));
+    expect(screen.getByRole("link", { name: "模型：General maintenance" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(await screen.findByRole("img", {
+      name: "General maintenance 的受信浏览器页面观察",
+    })).toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
+    await user.click(screen.getByRole("button", { name: /^model\.md/u }));
+    expect(await screen.findByRole("heading", { name: "Model projection" })).toBeInTheDocument();
+    expect(productClient.modelRenderable).toHaveBeenCalledWith(
+      "model-one", "model-file-readme",
+    );
+
+    unmount();
+    render(<App client={productClient} />);
+    expect(await screen.findByRole("complementary", { name: "模型对话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^model\.md/u })).toBeInTheDocument();
+    expect(productClient.workspace).toHaveBeenCalledTimes(2);
+  });
+
   it("shows the Stage 3 file rail and renders only a bounded Project file projection", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
@@ -1216,20 +1291,57 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff-app://projects/project-one");
   });
 
-  it("restores an explicit non-authoritative new-project draft after refresh", async () => {
+  it("restores the durable WorkspaceBinding project guide after refresh", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/new");
-    const { unmount } = render(<App client={client()} />);
+    const productClient = client();
+    let binding: any = {
+      schemaVersion: 1, workspaceKey: "placeholder",
+      conversation: { kind: "bootstrap", id: "bootstrap-conversation", name: "项目引导", provider: null },
+      owner: null, generation: 1, bindingDigest: "a".repeat(64), state: "unbound",
+      draft: "", provider: null, providerMode: "live", providerReason: null,
+      ownerProjection: null, bootstrapMessages: [],
+      createdAt: "2026-08-02T00:00:00.000Z", updatedAt: "2026-08-02T00:00:00.000Z",
+    };
+    productClient.workspaceBinding = vi.fn(async (workspaceKey) => {
+      binding = { ...binding, workspaceKey };
+      return binding;
+    });
+    productClient.updateWorkspaceBinding = vi.fn(async (input) => {
+      binding = {
+        ...binding, generation: binding.generation + 1,
+        bindingDigest: "b".repeat(64), draft: input.draft,
+        provider: input.provider ?? null,
+        conversation: { ...binding.conversation, provider: input.provider ?? null },
+      };
+      return { binding, receipt: { receiptDigest: "c".repeat(64), generation: binding.generation } };
+    });
+    productClient.sendWorkspaceBootstrapTurn = vi.fn(async (input) => {
+      binding = { ...binding, bootstrapMessages: [
+        { id: "bootstrap-user", ordinal: 0, role: "user", status: "complete", text: input.text, createdAt: "2026-08-02T00:00:01.000Z" },
+        { id: "bootstrap-assistant", ordinal: 1, role: "assistant", status: "complete", text: "我会继续完善项目边界。", createdAt: "2026-08-02T00:00:02.000Z" },
+      ] };
+      return { schemaVersion: 1 as const, mode: "live" as const, reason: null, binding, assistantText: "我会继续完善项目边界。" };
+    });
+    const { unmount } = render(<App client={productClient} />);
 
     const draft = await screen.findByRole("textbox", { name: "项目目标" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }),
+      JSON.stringify(["provider", "model"]));
     await user.type(draft, "比较两种维修队列配置");
-    await user.click(screen.getByRole("button", { name: "保存引导草稿" }));
-    expect(screen.getAllByText("比较两种维修队列配置")).toHaveLength(2);
-    expect(screen.getByText(/不是 Riff Model \/ Project 权威数据/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "发送给 Agent" }));
+    expect(await screen.findByText("我会继续完善项目边界。")).toBeInTheDocument();
+    expect(productClient.sendWorkspaceBootstrapTurn).toHaveBeenCalledWith(expect.objectContaining({
+      expectedGeneration: 2,
+      expectedBindingDigest: "b".repeat(64),
+      text: "比较两种维修队列配置",
+    }));
+    expect(screen.getByText(/只有 Riff receipt 能证明/u)).toBeInTheDocument();
 
     unmount();
-    render(<App client={client()} />);
+    render(<App client={productClient} />);
     expect(await screen.findByDisplayValue("比较两种维修队列配置")).toBeInTheDocument();
+    expect(screen.getByText("我会继续完善项目边界。")).toBeInTheDocument();
   });
 
   it("fails the workbench composer and new-session action closed when Provider is read-only", async () => {
