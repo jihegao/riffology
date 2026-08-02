@@ -836,6 +836,7 @@ test("adapter reuses one OpenCode session across turns with server-generated use
 test("adapter binds one uniquely named scoped MCP and enables only that server for the prompt", async (t) => {
   const calls: Array<{ path: string; body: any }> = [];
   let prompted = false;
+  let scopedName = "";
   const adapter = await readyAdapter(t, {
     allowedProviders: ["provider-z"],
     onSessionPermissionUpdate: (body: any) => calls.push({
@@ -845,7 +846,14 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
       const path = new URL(String(input)).pathname;
       const body = init?.body ? JSON.parse(String(init.body)) : null;
       calls.push({ path, body });
-      if (path === "/mcp" || path.endsWith("/disconnect")) return Response.json({});
+      if (path === "/mcp" && init?.method === "POST") {
+        scopedName = body.name;
+        return Response.json({});
+      }
+      if (path === "/mcp") {
+        return Response.json(scopedName ? { [scopedName]: { status: "connected" } } : {});
+      }
+      if (path.includes("/mcp/")) return Response.json({});
       if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
       return Response.json(prompted ? [
         { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "change" }] },
@@ -872,7 +880,7 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
     scopedMcpTools: exactTools,
   });
 
-  const registration = calls.find((call) => call.path === "/mcp")!;
+  const registration = calls.find((call) => call.path === "/mcp" && call.body?.name)!;
   assert.match(registration.body.name, /^riffa2[0-9a-f]{24}$/u);
   assert.equal(registration.body.config.url, "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability");
   const prompt = calls.find((call) => call.path.endsWith("/prompt_async"))!.body;
@@ -889,7 +897,7 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
     { permission: `${registration.body.name}_riff_read_owner_summary`, pattern: "*", action: "allow" },
   ]);
   assert.deepEqual(permissionUpdates.at(-1)?.body, { permission: [] });
-  const mcpPostsBeforeDrift = calls.filter((call) => call.path === "/mcp").length;
+  const mcpPostsBeforeDrift = calls.filter((call) => call.path === "/mcp" && call.body?.name).length;
   await assert.rejects(
     () => adapter.bindScopedMcp(
       scopeId,
@@ -898,7 +906,7 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
     ),
     (error: any) => error.code === "opencode_mcp_binding_changed",
   );
-  assert.equal(calls.filter((call) => call.path === "/mcp").length, mcpPostsBeforeDrift);
+  assert.equal(calls.filter((call) => call.path === "/mcp" && call.body?.name).length, mcpPostsBeforeDrift);
   const promptsBeforeDrift = calls.filter((call) => call.path.endsWith("/prompt_async")).length;
   for (const invalidTools of [
     ["riff_read_owner_summary"],
@@ -933,6 +941,117 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
   await assert.rejects(() => adapter.bindScopedMcp("turn_external", "http://example.com/a2/mcp?cap=x"), /capability-scoped local/u);
 });
 
+test("scoped MCP binding waits for connected and reconciles a retained upstream name", async (t) => {
+  const calls: Array<{ method: string; path: string; url?: string }> = [];
+  let name = "";
+  let url = "";
+  let status: "missing" | "disabled" | "connected" = "missing";
+  let statusReadsAfterConnect = 0;
+  const behavior = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    const method = init?.method ?? "GET";
+    if (path === "/mcp" && method === "POST") {
+      const body = JSON.parse(String(init?.body));
+      name = body.name;
+      url = body.config.url;
+      status = "disabled";
+      calls.push({ method, path, url });
+      return Response.json({});
+    }
+    if (path === "/mcp") {
+      if (statusReadsAfterConnect > 0) {
+        statusReadsAfterConnect += 1;
+        if (status === "disabled" && statusReadsAfterConnect >= 3) status = "connected";
+      }
+      calls.push({ method, path });
+      return Response.json(name && status !== "missing" ? { [name]: { status } } : {});
+    }
+    if (path.endsWith("/connect")) {
+      statusReadsAfterConnect = 1;
+      calls.push({ method, path });
+      return Response.json({});
+    }
+    if (path.endsWith("/disconnect")) {
+      status = "disabled";
+      calls.push({ method, path });
+      return Response.json({});
+    }
+    return Response.json({});
+  };
+  const first = await readyAdapter(t, { fetch: behavior });
+  const scope = "conversation_reconnect";
+  const tools = ["riff_read_owner_summary"] as const;
+  await first.bindScopedMcp(
+    scope,
+    "http://127.0.0.1:8787/a2/mcp?cap=first-capability",
+    tools,
+  );
+  assert.equal(status, "connected");
+  assert.ok(statusReadsAfterConnect >= 2);
+
+  const second = await readyAdapter(t, { fetch: behavior });
+  const boundary = calls.length;
+  await second.bindScopedMcp(
+    scope,
+    "http://127.0.0.1:8787/a2/mcp?cap=second-capability",
+    tools,
+  );
+  assert.equal(url, "http://127.0.0.1:8787/a2/mcp?cap=second-capability");
+  assert.deepEqual(
+    calls.slice(boundary).filter((call) => call.path.startsWith("/mcp")).map((call) =>
+      call.path === "/mcp" && call.method === "POST" ? "register"
+        : call.path.endsWith("/disconnect") ? "disconnect"
+          : call.path.endsWith("/connect") ? "connect" : "status"),
+    ["status", "disconnect", "register", "connect", "status", "status"],
+  );
+});
+
+test("scoped MCP binding fails closed and cleans a rejected connection", async (t) => {
+  let name = "";
+  let disconnected = false;
+  const adapter = await readyAdapter(t, {
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/mcp" && init?.method === "POST") {
+        name = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (path === "/mcp") {
+        return Response.json(name ? { [name]: { status: "failed" } } : {});
+      }
+      if (path.endsWith("/disconnect")) {
+        disconnected = true;
+        return Response.json({});
+      }
+      if (path.endsWith("/connect")) return Response.json({});
+      return Response.json({});
+    },
+  });
+  await assert.rejects(
+    () => adapter.bindScopedMcp(
+      "conversation_failed_connect",
+      "http://127.0.0.1:8787/a2/mcp?cap=failed-capability",
+      ["riff_read_owner_summary"],
+    ),
+    (error: any) => error.code === "opencode_mcp_unavailable",
+  );
+  assert.equal(disconnected, true);
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      {
+        text: "must not dispatch",
+        system: "bounded",
+        attachments: [],
+        scopedMcpScopeId: "conversation_failed_connect",
+        scopedMcpTools: ["riff_read_owner_summary"],
+      },
+    ),
+    (error: any) => error.code === "opencode_mcp_unbound",
+  );
+});
+
 test("a scoped turn rejects a completed tool outside its exact grant", async (t) => {
   let prompted = false;
   let terminal = false;
@@ -945,6 +1064,9 @@ test("a scoped turn rejects a completed tool outside its exact grant", async (t)
       if (path === "/mcp" && init?.method === "POST") {
         scopedName = JSON.parse(String(init.body)).name;
         return Response.json({});
+      }
+      if (path === "/mcp") {
+        return Response.json(scopedName ? { [scopedName]: { status: "connected" } } : {});
       }
       if (path.includes("/mcp/")) return Response.json({});
       if (path.endsWith("/prompt_async")) {
@@ -1947,6 +2069,7 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
   const calls: Array<{ path: string; directory: string | null; method: string }> = [];
   let misdirectCreatedSession = false;
   let projectPrompted = false;
+  let scopedMcpName = "";
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "provider-z/model-2",
@@ -2005,7 +2128,15 @@ test("adapter scopes Product sessions and controls to the server-derived owner d
       if (url.pathname.startsWith("/session/")) {
         return Response.json({});
       }
-      if (url.pathname === "/mcp" || url.pathname.includes("/mcp/")) {
+      if (url.pathname === "/mcp" && init?.method === "POST") {
+        scopedMcpName = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (url.pathname === "/mcp") {
+        return Response.json(scopedMcpName
+          ? { [scopedMcpName]: { status: "connected" } } : {});
+      }
+      if (url.pathname.includes("/mcp/")) {
         return Response.json({});
       }
       if (url.pathname === "/event") {

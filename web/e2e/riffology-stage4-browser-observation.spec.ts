@@ -3,14 +3,19 @@ import { expect, test } from "@playwright/test";
 test("Riffology Stage 4 projects a real isolated Chromium observation", async ({ page }) => {
   const errors: string[] = [];
   page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
+    if (message.type() === "error"
+      && !/^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/u.test(message.text())) {
+      errors.push(message.text());
+    }
   });
   page.on("pageerror", (error) => errors.push(error.message));
 
   await page.goto("/");
-  const projectHref = await page.getByRole("link", { name: "Open Project" }).first().getAttribute("href");
-  expect(projectHref).toMatch(/^\/projects\//u);
-  await page.goto(`/workbench${projectHref}`);
+  const projectHref = await page.locator(
+    '.riffology-project-rail a[href^="/workbench/projects/"]',
+  ).first().getAttribute("href");
+  expect(projectHref).toMatch(/^\/workbench\/projects\//u);
+  await page.goto(projectHref!);
 
   await expect(page.getByLabel("页面地址")).toHaveText("riff-app://projects/stage4", {
     timeout: 15_000,

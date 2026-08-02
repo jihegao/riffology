@@ -15,7 +15,7 @@ test("recovery-only Product startup serves a CSP shell and denies every authorit
   await mkdir(join(staticWebRoot, "assets"), { recursive: true });
   await writeFile(
     join(staticWebRoot, "index.html"),
-    "<!doctype html><html><body><div id=\"root\"></div><script type=\"module\" src=\"/assets/app.js\"></script></body></html>",
+    "<!doctype html><html><head><meta name=\"riffology-server-legacy-product-ui\" content=\"false\" /></head><body><div id=\"root\"></div><script type=\"module\" src=\"/assets/app.js\"></script></body></html>",
   );
   await writeFile(join(staticWebRoot, "assets", "app.js"), "globalThis.riffProduct = true;\n");
   const app = new BackendApp({
@@ -39,6 +39,7 @@ test("recovery-only Product startup serves a CSP shell and denies every authorit
   const shell = await raw(network.app, "GET", "/?mode=legacy");
   assert.equal(shell.status, 200);
   assert.match(shell.text, /id="root"/u);
+  assert.match(shell.text, /riffology-server-legacy-product-ui" content="false"/u);
   assert.equal(shell.headers["cache-control"], "no-store");
   assert.match(
     String(shell.headers["content-security-policy"]),
@@ -50,6 +51,16 @@ test("recovery-only Product startup serves a CSP shell and denies every authorit
   );
   assert.equal(shell.headers["referrer-policy"], "no-referrer");
   assert.equal(shell.headers["permissions-policy"], "camera=(), microphone=(), geolocation=()");
+
+  const defaultWorkbench = await raw(network.app, "GET", "/workbench/new/workspace_7");
+  assert.equal(defaultWorkbench.status, 200);
+  assert.match(defaultWorkbench.text, /id="root"/u);
+
+  const ownerWorkbench = await raw(network.app, "GET", "/workbench/projects/project_7");
+  assert.equal(ownerWorkbench.status, 200);
+
+  const historicalOwnerLink = await raw(network.app, "GET", "/projects/project_7");
+  assert.equal(historicalOwnerLink.status, 404);
 
   const asset = await raw(network.app, "GET", "/assets/app.js");
   assert.equal(asset.status, 200);
@@ -124,6 +135,50 @@ test("recovery-only Product startup serves a CSP shell and denies every authorit
   });
   assert.equal(upgrade.status, 503);
   assert.match(upgrade.text, /recovery_required/u);
+});
+
+test("explicit local rollback admits legacy Product owner refresh routes only on the server flag", async (t) => {
+  const repositoryRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "riff-legacy-rollback-")),
+  );
+  const staticWebRoot = join(repositoryRoot, "web", "dist");
+  await mkdir(join(staticWebRoot, "assets"), { recursive: true });
+  await writeFile(
+    join(staticWebRoot, "index.html"),
+    "<!doctype html><html><head><meta name=\"riffology-server-legacy-product-ui\" content=\"false\" /></head><body><div id=\"root\"></div><script type=\"module\" src=\"/assets/app.js\"></script></body></html>",
+  );
+  await writeFile(join(staticWebRoot, "assets", "app.js"), "globalThis.riffProduct = true;\n");
+  const app = new BackendApp({
+    productOnly: true,
+    recoveryStatus: {
+      state: "recovery_required",
+      code: "product_recovery_failed",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      retryable: false,
+    },
+    repositoryRoot,
+    staticWebRoot,
+    staticLegacyProductRoutes: true,
+  });
+  await app.initialize();
+  const network = await app.listenBrowserNetwork();
+  t.after(async () => {
+    await app.close();
+    await rm(repositoryRoot, { recursive: true, force: true });
+  });
+
+  for (const path of [
+    "/models/model_rollback",
+    "/projects/project_rollback",
+    "/workbench/projects/project_rollback",
+  ]) {
+    const response = await raw(network.app, "GET", path);
+    assert.equal(response.status, 200, path);
+    assert.match(response.text, /id="root"/u, path);
+    assert.match(response.text, /riffology-server-legacy-product-ui" content="true"/u, path);
+  }
+  assert.equal((await raw(network.app, "GET", "/models/../secret")).status, 404);
+  assert.equal((await raw(network.app, "GET", "/projects/project/extra")).status, 404);
 });
 
 const raw = async (

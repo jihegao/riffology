@@ -823,10 +823,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     const exactAllowedTools = validatedScopedMcpTools(allowedTools);
     const name = scopedMcpName(scopeId);
     const existing = this.#scopedMcp.get(scopeId);
-    if (existing?.url === safeMcpUrl
-      && existing.directory === directory
-      && sameAgentTools(existing.allowedTools, exactAllowedTools)) return;
-    if (existing) {
+    if (existing && (existing.directory !== directory
+      || !sameAgentTools(existing.allowedTools, exactAllowedTools))) {
       throw new ApiError(
         409,
         existing.directory !== directory
@@ -837,31 +835,81 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
           : "The active scoped Riff MCP binding cannot change its capability or tool grant.",
       );
     }
-    await this.#json("/mcp", {
-      method: "POST",
-      body: JSON.stringify({
+    this.#scopedMcp.delete(scopeId);
+    let registrationAttempted = false;
+    try {
+      const registry = await this.#json("/mcp", {}, directory);
+      if (Object.hasOwn(registry, name)) {
+        const disconnected = await this.#request(
+          `/mcp/${encodeURIComponent(name)}/disconnect`,
+          { method: "POST" },
+          directory,
+        );
+        if (!disconnected.response.ok && disconnected.response.status !== 404) {
+          throw apiErrorFromResponse(disconnected.response, disconnected.payload);
+        }
+      }
+      registrationAttempted = true;
+      await this.#json("/mcp", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          config: {
+            type: "remote",
+            url: safeMcpUrl,
+            enabled: true,
+            oauth: false,
+            timeout: BROWSER_AGENT_GRANT_TTL_MS + 5_000,
+          },
+        }),
+      }, directory);
+      const connected = await this.#request(
+        `/mcp/${encodeURIComponent(name)}/connect`,
+        { method: "POST" },
+        directory,
+      );
+      if (!connected.response.ok) throw apiErrorFromResponse(connected.response, connected.payload);
+      await this.#waitForMcpConnected(name, directory);
+      this.#scopedMcp.set(scopeId, {
         name,
-        config: {
-          type: "remote",
-          url: safeMcpUrl,
-          enabled: true,
-          oauth: false,
-          timeout: BROWSER_AGENT_GRANT_TTL_MS + 5_000,
-        },
-      }),
-    }, directory);
-    const connected = await this.#request(
-      `/mcp/${encodeURIComponent(name)}/connect`,
-      { method: "POST" },
-      directory,
+        url: safeMcpUrl,
+        directory,
+        allowedTools: exactAllowedTools,
+      });
+    } catch (error) {
+      this.#scopedMcp.delete(scopeId);
+      if (registrationAttempted) {
+        await this.#request(
+          `/mcp/${encodeURIComponent(name)}/disconnect`,
+          { method: "POST" },
+          directory,
+        ).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async #waitForMcpConnected(name: string, directory: string): Promise<void> {
+    const deadline = Date.now() + Math.min(this.#requestTimeoutMs, 5_000);
+    while (Date.now() < deadline) {
+      const registry = await this.#json("/mcp", {}, directory);
+      const status = typeof registry[name]?.status === "string"
+        ? registry[name].status : "missing";
+      if (status === "connected") return;
+      if (["failed", "needs_auth", "needs_client_registration"].includes(status)) {
+        throw new ApiError(
+          503,
+          "opencode_mcp_unavailable",
+          "OpenCode rejected the scoped Riff MCP connection.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new ApiError(
+      503,
+      "opencode_mcp_unavailable",
+      "OpenCode did not connect the scoped Riff MCP server before the bounded deadline.",
     );
-    if (!connected.response.ok) throw apiErrorFromResponse(connected.response, connected.payload);
-    this.#scopedMcp.set(scopeId, {
-      name,
-      url: safeMcpUrl,
-      directory,
-      allowedTools: exactAllowedTools,
-    });
   }
 
   async unbindScopedMcp(

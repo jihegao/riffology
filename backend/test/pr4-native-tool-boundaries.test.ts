@@ -62,6 +62,7 @@ test("prompt-injection-shaped Skill text cannot expand the native OpenCode or MC
   t.after(() => rmSync(workdir, { recursive: true, force: true }));
   const requests: Array<{ path: string; method: string; body: unknown }> = [];
   let promptCount = 0;
+  let scopedMcpName = "";
   const adapter = new HttpOpenCodeAdapter({
     baseUrl: "http://127.0.0.1:4096",
     model: "provider-z/model-2",
@@ -78,8 +79,13 @@ test("prompt-injection-shaped Skill text cannot expand the native OpenCode or MC
       if (path === "/config/providers") {
         return Response.json({ providers: [{ id: "provider-z", models: { "model-2": {} } }] });
       }
-      if (path === "/mcp" && method === "POST") return Response.json({});
-      if (/^\/mcp\/[^/]+\/connect$/u.test(path)) return Response.json({});
+      if (path === "/mcp" && method === "POST") {
+        scopedMcpName = String((body as { name?: unknown })?.name ?? "");
+        return Response.json({});
+      }
+      if (path === "/mcp") return Response.json(scopedMcpName
+        ? { [scopedMcpName]: { status: "connected" } } : {});
+      if (/^\/mcp\/[^/]+\/(?:connect|disconnect)$/u.test(path)) return Response.json({});
       if (path === "/event") return new Response("", { status: 200 });
       if (path === "/session/opaque-session") {
         return Response.json({ id: "opaque-session", directory: workdir });

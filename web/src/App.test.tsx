@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { ProductClient } from "./product/api";
 import type {
@@ -234,9 +234,18 @@ const client = (): ProductClient => ({
 });
 
 describe("Stage 4 Product entry", () => {
+  // Historical Product tests exercise the explicit test-only rollback. The
+  // shipped default is covered below and never exposes a UI affordance.
+  beforeEach(() => {
+    (globalThis as { __RIFFOLOGY_TEST_LEGACY_FALLBACK__?: boolean })
+      .__RIFFOLOGY_TEST_LEGACY_FALLBACK__ = true;
+  });
+
   afterEach(() => {
     history.replaceState({}, "", "/");
     sessionStorage.clear();
+    (globalThis as { __RIFFOLOGY_TEST_LEGACY_FALLBACK__?: boolean })
+      .__RIFFOLOGY_TEST_LEGACY_FALLBACK__ = false;
   });
 
   it("renders separate Model and Project collections with all four entry types", async () => {
@@ -332,6 +341,51 @@ describe("Stage 4 Product entry", () => {
     await waitFor(() => expect(productClient.workspace).toHaveBeenCalledTimes(2));
 
     expect(screen.getByTestId("workspace-owner-card")).toBe(ownerCard);
+  });
+
+  it("reloads a Project after a committed Agent run start so Run polling can begin", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const workspaceMock = vi.mocked(productClient.workspace);
+    productClient.sendTurn = vi.fn(async () => ({
+      mode: "live" as const,
+      turn: {
+        requestKey: "run-start", state: "complete" as const,
+        userMessageId: "message-user", assistantMessageId: "message-assistant",
+        skillUses: [],
+        actions: [{ id: "action-run", actionKind: "run_start",
+          permissionDecision: "allowed" as const, state: "committed" as const,
+          errorCode: null }],
+        goalVerification: null, failure: null,
+      },
+      messages: [],
+    }));
+    render(<App client={productClient} />);
+
+    await user.type(await screen.findByRole("textbox", { name: "Message" }), "Start one Run.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(workspaceMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("keeps polling an active Project Run after a transient workspace read failure", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const queued = { ...projectWorkspace,
+      runs: [{ id: "run-poll", status: "queued", outputs: [] }] } as any;
+    const succeeded = { ...queued, runs: [{ id: "run-poll", status: "succeeded",
+      outputs: [{ id: "output-poll", logicalName: "poll.json", sampleIndex: 0,
+        mediaType: "application/json", sizeBytes: 10 }] }] } as any;
+    const workspaceMock = vi.fn()
+      .mockResolvedValueOnce(queued)
+      .mockRejectedValueOnce(new Error("transient poll failure"))
+      .mockResolvedValue(succeeded);
+    productClient.workspace = workspaceMock;
+    render(<App client={productClient} />);
+
+    expect(await screen.findByRole("button", { name: /^poll\.json-0/u }, { timeout: 3_000 }))
+      .toBeInTheDocument();
+    expect(workspaceMock.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it("does not report a nonexistent Conversation as busy", async () => {
@@ -1097,7 +1151,28 @@ describe("Stage 4 Product entry", () => {
         { fileRef: "invalid-parent", relativePath: "../secret.json", mediaType: "application/json", sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
       ],
       conversations: workspace.conversations.map((item) => ({ ...item, owner: { kind: "project" as const, id: "project-one" } })),
-      experimentConfigurations: [], runs: [],
+      experimentConfigurations: [],
+      runs: [{
+        id: "run-succeeded", projectId: "project-one",
+        experimentConfigurationId: "experiment-one", status: "succeeded" as const,
+        requestedSampleCount: 1, createdAt: "2026-07-25T00:00:00.000Z",
+        updatedAt: "2026-07-25T00:00:02.000Z",
+        startedAt: "2026-07-25T00:00:01.000Z",
+        finishedAt: "2026-07-25T00:00:02.000Z",
+        contractVersion: 4 as const, readOnly: false, legacyDigest: null,
+        runKind: "batch" as const, cancelRequestedAt: null, terminalCode: null,
+        completionCardDisposition: "published", terminalStatus: "succeeded" as const,
+        terminalClosureDigest: "1".repeat(64), lifecycleDigest: "2".repeat(64),
+        seedCount: 1, stepOrHorizon: 1, durationMs: 1_000,
+        resourceOverview: { samples: 1 },
+        outputs: [{
+          id: "output-summary", runId: "run-succeeded", logicalName: "summary.json",
+          outputType: "declared", contractVersion: 4 as const, readOnly: false,
+          legacyDigest: null, sampleIndex: 0, sampleId: "sample-0",
+          declaredRole: "data", mediaType: "application/json", sizeBytes: 18,
+          sha256: "3".repeat(64), createdAt: "2026-07-25T00:00:02.000Z",
+        }],
+      }],
     }));
     productClient.projectFileWorkbenchRenderable = vi.fn(async () => ({
       kind: "markdown" as const, title: "analysis/overview.md", text: "# Snapshot overview",
@@ -1113,6 +1188,11 @@ describe("Stage 4 Product entry", () => {
     await user.click(screen.getByRole("button", { name: /^overview\.md/u }));
     expect(await screen.findByRole("heading", { name: "Snapshot overview" })).toBeInTheDocument();
     expect(productClient.projectFileWorkbenchRenderable).toHaveBeenCalledWith("project-one", "snapshot-file");
+    await user.click(screen.getByRole("button", { name: /^summary\.json-0/u }));
+    expect(await screen.findByRole("heading", { name: "fixture output" })).toBeInTheDocument();
+    expect(productClient.outputRenderable).toHaveBeenCalledWith(
+      "project-one", "run-succeeded", "output-summary",
+    );
     await user.click(screen.getByRole("button", { name: "收起文件栏" }));
     expect(screen.getByRole("button", { name: "文件 ↗" })).toHaveAttribute("aria-expanded", "false");
   });
@@ -1372,5 +1452,225 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByRole("button", { name: "＋ 新会话" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
     expect(screen.getAllByText(/provider is unavailable/u).length).toBeGreaterThan(0);
+  });
+
+  it("clears ready owner and browser projections when Riff enters recovery-required", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    let recoveryRequired = false;
+    productClient.recoveryStatus = vi.fn(async () => recoveryRequired ? {
+      state: "recovery_required" as const,
+      code: "product_recovery_failed",
+      observedAt: "2026-07-25T00:00:03.000Z",
+      retryable: false,
+    } : {
+      state: "ready" as const,
+      observedAt: "2026-07-25T00:00:00.000Z",
+    });
+    render(<App client={productClient} />);
+
+    expect(await screen.findByRole("link", { name: "项目：Baseline study" }))
+      .toBeInTheDocument();
+    recoveryRequired = true;
+    window.dispatchEvent(new Event("riff:workbench-navigation"));
+
+    expect(await screen.findByRole("heading", { name: "工作台需要恢复" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "项目：Baseline study" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByLabelText("页面地址")).toHaveTextContent("riff://unavailable");
+    expect(screen.queryByLabelText("受信状态")).toHaveTextContent("未连接");
+    expect(screen.queryByRole("img", { name: /受信浏览器页面观察/u }))
+      .not.toBeInTheDocument();
+  });
+
+  it("discards an in-flight Browser screenshot after recovery revokes authority", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    let recoveryRequired = false;
+    productClient.recoveryStatus = vi.fn(async () => recoveryRequired ? {
+      state: "recovery_required" as const,
+      code: "product_recovery_failed",
+      observedAt: "2026-07-25T00:00:03.000Z",
+      retryable: false,
+    } : {
+      state: "ready" as const,
+      observedAt: "2026-07-25T00:00:00.000Z",
+    });
+    const browser = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 4,
+      pageGeneration: 8,
+      projectedUrl: "riff-app://projects/project-one?conversation=conversation-main",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    productClient.browserState = vi.fn(async () => browser);
+    let resolveScreenshot!: (value: {
+      schemaVersion: 1;
+      pageGeneration: number;
+      contentType: "image/png";
+      pngBase64: string;
+    }) => void;
+    productClient.browserScreenshot = vi.fn(() => new Promise<{
+      schemaVersion: 1;
+      pageGeneration: number;
+      contentType: "image/png";
+      pngBase64: string;
+    }>((resolve) => {
+      resolveScreenshot = resolve;
+    }));
+    render(<App client={productClient} />);
+
+    await waitFor(() => expect(productClient.browserScreenshot).toHaveBeenCalledTimes(1));
+    recoveryRequired = true;
+    window.dispatchEvent(new Event("riff:workbench-navigation"));
+    expect(await screen.findByRole("heading", { name: "工作台需要恢复" }))
+      .toBeInTheDocument();
+    resolveScreenshot({
+      schemaVersion: 1,
+      pageGeneration: browser.pageGeneration,
+      contentType: "image/png",
+      pngBase64: "iVBORw0KGgo=",
+    });
+
+    await waitFor(() => expect(screen.queryByRole("img", { name: /受信浏览器页面观察/u }))
+      .not.toBeInTheDocument());
+    expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff://unavailable");
+    expect(screen.getByLabelText("受信状态")).toHaveTextContent("未连接");
+  });
+
+  it("does not let an older ready load repopulate the rail after recovery-required", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    let recoveryReads = 0;
+    productClient.recoveryStatus = vi.fn(async () => ++recoveryReads === 1 ? {
+      state: "ready" as const, observedAt: "2026-07-25T00:00:00.000Z",
+    } : {
+      state: "recovery_required" as const, code: "product_recovery_failed",
+      observedAt: "2026-07-25T00:00:01.000Z", retryable: false,
+    });
+    let resolveHome!: (value: Awaited<ReturnType<ProductClient["home"]>>) => void;
+    productClient.home = vi.fn(() => new Promise<Awaited<ReturnType<ProductClient["home"]>>>(
+      (resolve) => { resolveHome = resolve; },
+    ));
+    render(<App client={productClient} />);
+    await waitFor(() => expect(productClient.home).toHaveBeenCalledTimes(1));
+    window.dispatchEvent(new Event("riff:workbench-navigation"));
+    expect(await screen.findByRole("heading", { name: "工作台需要恢复" }))
+      .toBeInTheDocument();
+    resolveHome(home);
+    await waitFor(() => expect(screen.queryByRole("navigation", { name: "项目工作区" }))
+      .not.toBeInTheDocument());
+    expect(screen.queryByRole("link", { name: "项目：Baseline study" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("restarts Browser observation after an owner reload in the same Conversation", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    let projectedUrl = "riff-app://projects/project-one/before";
+    productClient.browserState = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      conversationGeneration: 4,
+      pageGeneration: projectedUrl.endsWith("before") ? 8 : 9,
+      projectedUrl,
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    }));
+    render(<App client={productClient} />);
+
+    await waitFor(() => expect(screen.getByLabelText("页面地址"))
+      .toHaveTextContent("riff-app://projects/project-one/before"));
+    projectedUrl = "riff-app://projects/project-one/after";
+    window.dispatchEvent(new Event("riff:workbench-navigation"));
+
+    await waitFor(() => expect(screen.getByLabelText("页面地址"))
+      .toHaveTextContent("riff-app://projects/project-one/after"));
+    expect(productClient.browserState).toHaveBeenCalledTimes(2);
+  });
+
+  it("never projects Project A while a same-kind Project B workspace load is pending", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.home = vi.fn(async () => ({
+      ...home,
+      projects: [...home.projects, {
+        ...home.projects[0]!, id: "project-two", name: "Second study",
+      }],
+    }));
+    let resolveSecond!: (value: typeof projectWorkspace) => void;
+    productClient.workspace = vi.fn(async (kind, id) => {
+      if (kind !== "project" || id !== "project-two") return projectWorkspace;
+      return new Promise<typeof projectWorkspace>((resolve) => { resolveSecond = resolve; });
+    });
+    render(<App client={productClient} />);
+    expect(await screen.findByRole("complementary", { name: "项目对话" }))
+      .toBeInTheDocument();
+
+    history.pushState({}, "", "/workbench/projects/project-two");
+    window.dispatchEvent(new Event("riff:workbench-navigation"));
+    await waitFor(() => expect(productClient.workspace).toHaveBeenCalledWith(
+      "project", "project-two",
+    ));
+    expect(screen.queryByRole("complementary", { name: "项目对话" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByText("Baseline study / Project Conversation"))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("新项目 / Agent 引导")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Agent 状态：未接管" }))
+      .toBeInTheDocument();
+    expect(screen.getByLabelText("页面地址")).not.toHaveTextContent("project-one");
+
+    resolveSecond({
+      ...projectWorkspace,
+      owner: { ...projectWorkspace.owner, id: "project-two", name: "Second study" },
+      conversations: projectWorkspace.conversations.map((conversation) => ({
+        ...conversation,
+        id: "conversation-second",
+        owner: { kind: "project" as const, id: "project-two" },
+      })),
+    });
+    expect(await screen.findByText("Second study / Project Conversation"))
+      .toBeInTheDocument();
+  });
+
+  it("uses Riffology as the default entry and keeps the legacy surface behind a local configuration switch", async () => {
+    (globalThis as { __RIFFOLOGY_TEST_LEGACY_FALLBACK__?: boolean })
+      .__RIFFOLOGY_TEST_LEGACY_FALLBACK__ = false;
+    history.replaceState({}, "", "/");
+    const defaultEntry = render(<App client={client()} />);
+
+    expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
+    expect(screen.getByRole("button", { name: "新项目" })).toBeInTheDocument();
+    expect(window.location.pathname).toMatch(/^\/workbench\/new\//u);
+    expect(screen.queryByRole("button", { name: "New Model" })).not.toBeInTheDocument();
+
+    defaultEntry.unmount();
+    history.replaceState({}, "", "/?mode=legacy");
+    const legacyModeQuery = render(<App client={client()} />);
+    expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
+    expect(screen.queryByText("Legacy queue / OpenCode")).not.toBeInTheDocument();
+
+    legacyModeQuery.unmount();
+    history.replaceState({}, "", "/?mode=evidence");
+    render(<App client={client()} />);
+    expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
+
+    (globalThis as { __RIFFOLOGY_TEST_LEGACY_FALLBACK__?: boolean })
+      .__RIFFOLOGY_TEST_LEGACY_FALLBACK__ = true;
+    history.replaceState({}, "", "/");
+    render(<App client={client()} />);
+    expect(await screen.findByRole("heading", { name: "Models" })).toBeInTheDocument();
   });
 });

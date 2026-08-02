@@ -9,14 +9,25 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
-import type { BrowserSessionDto, WorkspaceDto } from "./types";
+import type { BrowserSessionDto, ProjectWorkspaceDto, WorkspaceDto } from "./types";
 
-type WorkbenchFile = Readonly<{
+type WorkspaceWorkbenchFile = Readonly<{
   key: string;
+  source: "workspace";
   relativePath: string;
   mediaType: string;
   sizeBytes: number;
 }>;
+type RunOutputWorkbenchFile = Readonly<{
+  key: string;
+  source: "run_output";
+  relativePath: string;
+  mediaType: string;
+  sizeBytes: number;
+  runId?: string;
+  outputId?: string;
+}>;
+type WorkbenchFile = WorkspaceWorkbenchFile | (RunOutputWorkbenchFile & Required<Pick<RunOutputWorkbenchFile, "runId" | "outputId">>);
 
 type FileTreeEntry =
   | Readonly<{ kind: "folder"; name: string; path: string; children: readonly FileTreeEntry[] }>
@@ -53,15 +64,25 @@ export function RiffologyWorkbenchViewer({
   browserBusy: boolean;
   onBrowserReconnect: () => void;
 }>) {
+  const runOutputFiles = workspace.owner.kind === "project"
+    ? (workspace as ProjectWorkspaceDto).runs.flatMap((run) =>
+      run.status === "succeeded" ? run.outputs.flatMap((output): WorkbenchFile[] => {
+        const name = (safeRelativePath(output.logicalName) ?? "").split("/").at(-1) ?? "";
+        return name ? [{ key: `output:${run.id}:${output.id}`, source: "run_output",
+          runId: run.id, outputId: output.id,
+          relativePath: `outputs/${run.id}/${name}${output.sampleIndex === null ? "" : `-${output.sampleIndex}`}`,
+          mediaType: output.mediaType, sizeBytes: output.sizeBytes }] : [];
+      }) : []) : [];
   const files = workspace.files.flatMap((file): WorkbenchFile[] => {
     const relativePath = safeRelativePath(file.relativePath ?? "");
     return relativePath ? [{
-      key: "fileRef" in file ? file.fileRef : file.id,
+      key: `workspace:${"fileRef" in file ? file.fileRef : file.id}`,
+      source: "workspace",
       relativePath,
       mediaType: file.mediaType,
       sizeBytes: file.sizeBytes,
     }] : [];
-  });
+  }).concat(runOutputFiles);
   const compact = useCompactLayout();
   const [selectedKey, setSelectedKey] = useState("");
   const [resource, setResource] = useState<RendererResource>();
@@ -91,14 +112,16 @@ export function RiffologyWorkbenchViewer({
       queueMicrotask(() => viewerRef.current?.focus());
     }
     try {
-      const next = workspace.owner.kind === "project"
+      const next = file.source === "run_output"
+        ? await client.outputRenderable(workspace.owner.id, file.runId, file.outputId)
+        : workspace.owner.kind === "project"
         ? await (() => {
           if (!client.projectFileWorkbenchRenderable) {
             throw new Error("文件投影当前不可用；没有安全读取接口。");
           }
-          return client.projectFileWorkbenchRenderable(workspace.owner.id, file.key);
+          return client.projectFileWorkbenchRenderable(workspace.owner.id, file.key.slice("workspace:".length));
         })()
-        : await client.modelRenderable(workspace.owner.id, file.key);
+        : await client.modelRenderable(workspace.owner.id, file.key.slice("workspace:".length));
       if (operation === request.current) setResource(next);
     } catch (cause) {
       if (operation === request.current) {

@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -24,7 +27,9 @@ const REPOSITORY_ROOT = resolve(import.meta.dirname, "../..");
 const PROVIDER_ID = process.env.A4_6_PROVIDER_ID ?? "opencode-go";
 const MODEL_ID = process.env.A4_6_MODEL_ID ?? "deepseek-v4-pro";
 const QUALIFIED_MODEL_ID = `${PROVIDER_ID}/${MODEL_ID}`;
-const OPENCODE_URL = process.env.OPENCODE_URL ?? "http://127.0.0.1:4096";
+const EXTERNAL_OPENCODE_URL = process.env.A4_6_OPENCODE_URL?.trim();
+const EXTERNAL_OPENCODE_WORKDIR = process.env.A4_6_OPENCODE_WORKDIR?.trim();
+const OPENCODE_EXPECTED_VERSION = process.env.OPENCODE_EXPECTED_VERSION ?? "1.18.11";
 const APP_PORT = Number(process.env.A4_6_APP_PORT ?? 8896);
 const BROKER_PORT = Number(process.env.A4_6_BROKER_PORT ?? 8897);
 const WIND_MODEL_NAME = "Wind Turbine Maintenance";
@@ -33,6 +38,7 @@ const LIVE_MODEL_NAME = "A4-6 Live Model";
 const FIRST_CONVERSATION = "A4-6 Primary";
 const SECOND_CONVERSATION = "A4-6 Secondary";
 const PROJECT_CONVERSATION = "A4-6 Project Conversation";
+const ANALYSIS_CONVERSATION = "A4-6 Analysis Conversation";
 const FIRST_DOCUMENT = "A4-6 Context";
 const SECOND_DOCUMENT = "A4-6 Continuity";
 const ANALYSIS_DOCUMENT = "A4-6 Requested Analysis";
@@ -47,24 +53,12 @@ test("A4-6 continuous real-provider Product exit", async ({
     type: "live-provider",
     description: QUALIFIED_MODEL_ID,
   });
+  if (Boolean(EXTERNAL_OPENCODE_URL) !== Boolean(EXTERNAL_OPENCODE_WORKDIR)) {
+    throw new Error("A4_6_OPENCODE_URL and A4_6_OPENCODE_WORKDIR must be configured together.");
+  }
   const parent = await mkdtemp(join(tmpdir(), "riff-a4-6-"));
-  const openCode = new SwitchableOpenCode(new HttpOpenCodeAdapter({
-    baseUrl: OPENCODE_URL,
-    model: QUALIFIED_MODEL_ID,
-    allowedProviders: [PROVIDER_ID],
-    requestTimeoutMs: 180_000,
-  }));
-  const discovered = await openCode.discoverProviderModels();
-  expect(
-    discovered.map((candidate) => candidate.qualifiedId),
-    `Live provider discovery did not include ${QUALIFIED_MODEL_ID}.`,
-  ).toContain(QUALIFIED_MODEL_ID);
-  const readiness = await openCode.initialize();
-  expect(readiness.status).toBe("ready");
-  expect(readiness.modelId).toBe(QUALIFIED_MODEL_ID);
-  expect(readiness.version).toMatch(/^\d+\.\d+\.\d+/u);
-
-  const controller = await ProductController.create(parent, openCode);
+  let openCodeServer: ManagedOpenCodeServer | undefined;
+  let controller: ProductController | undefined;
   const consoleErrors: string[] = [];
   const publicResponseBodies: string[] = [];
   const pendingResponseReads = new Set<Promise<void>>();
@@ -86,6 +80,26 @@ test("A4-6 continuous real-provider Product exit", async ({
   let primaryConversationUrl = "";
   let projectConversationUrl = "";
   try {
+    openCodeServer = await startOpenCodeServer(parent);
+    const openCode = new SwitchableOpenCode(new HttpOpenCodeAdapter({
+      baseUrl: openCodeServer.baseUrl,
+      workdir: EXTERNAL_OPENCODE_WORKDIR ?? parent,
+      expectedVersion: OPENCODE_EXPECTED_VERSION,
+      model: QUALIFIED_MODEL_ID,
+      allowedProviders: [PROVIDER_ID],
+      requestTimeoutMs: 180_000,
+    }));
+    const discovered = await openCode.discoverProviderModels();
+    expect(
+      discovered.map((candidate) => candidate.qualifiedId),
+      `Live provider discovery did not include ${QUALIFIED_MODEL_ID}.`,
+    ).toContain(QUALIFIED_MODEL_ID);
+    const readiness = await openCode.initialize();
+    expect(readiness.status).toBe("ready");
+    expect(readiness.modelId).toBe(QUALIFIED_MODEL_ID);
+    expect(readiness.version).toMatch(/^\d+\.\d+\.\d+/u);
+
+    controller = await ProductController.create(parent, openCode);
     await controller.start();
 
     // 1. Home exposes the four generic entries through the direct Product server.
@@ -200,17 +214,25 @@ test("A4-6 continuous real-provider Product exit", async ({
     await page.getByRole("button", { name: "New Project" }).click();
     const projectForm = page.locator("form").filter({ hasText: "New Project" });
     await projectForm.getByLabel("Name").fill(WIND_PROJECT_NAME);
-    await projectForm.getByLabel("Executable Model").selectOption({
+    const executableModel = projectForm.getByLabel("Executable Model");
+    await executableModel.selectOption({
       label: WIND_MODEL_NAME,
     });
+    const selectedModelId = await executableModel.inputValue();
     await projectForm.getByRole("button", { name: "Create Project" }).click();
     await expect(page.getByTestId("shell-owner-heading")).toHaveText(
       WIND_PROJECT_NAME,
     );
     await expect.poll(() => visibleExactTextCount(page, WIND_PROJECT_NAME)).toBe(1);
-    await expect(page.getByTestId("workspace-owner-card")).toContainText(
-      "immutable Model copy",
-    );
+    const projectId = new URL(page.url()).pathname.split("/").filter(Boolean).at(-1)!;
+    const projectWorkspaceResponse = await page.evaluate(async (path) => {
+      const response = await fetch(path);
+      return { status: response.status, body: await response.json() };
+    }, `/api/projects/${encodeURIComponent(projectId)}/workspace`);
+    expect(projectWorkspaceResponse.status).toBe(200);
+    const projectWorkspace = projectWorkspaceResponse.body;
+    expect(projectWorkspace.project.sourceModelId).toBe(selectedModelId);
+    expect(projectWorkspace.project.modelSnapshotDigest).toMatch(/^[0-9a-f]{64}$/u);
     await page.getByRole("button", { name: "Create configuration" }).click();
     await expect(page.getByRole("button", { name: "Start batch Run" }))
       .toBeEnabled();
@@ -275,11 +297,16 @@ test("A4-6 continuous real-provider Product exit", async ({
       .toBeVisible();
     await expectDigestCheckedDownload(page);
 
-    // 8. Only the subsequent explicit human request creates analysis.
+    // 8. Only a subsequent explicit human request in a fresh Conversation
+    // creates analysis; prior Run/Experiment session state cannot satisfy it.
+    await createConversation(page, ANALYSIS_CONVERSATION, QUALIFIED_MODEL_ID);
+    projectConversationUrl = page.url();
     await sendTurn(page, [
       `Create an analysis document now using riff_create_analysis_document.`,
-      `Name it exactly "${ANALYSIS_DOCUMENT}" and use text/markdown.`,
-      "Use only the persisted succeeded completion card facts; do not invent metrics.",
+      `Name the document exactly "${ANALYSIS_DOCUMENT}" and use text/markdown.`,
+      'Its content must be exactly "The persisted completion card reports succeeded."',
+      "Call the analysis-document tool exactly once and no other tool.",
+      "Do not call riff_list_run_outputs, riff_read_run_events, or any read tool.",
     ].join(" "));
     await expect(temporaryDocuments(page).getByText(ANALYSIS_DOCUMENT, {
       exact: true,
@@ -451,10 +478,75 @@ test("A4-6 continuous real-provider Product exit", async ({
     }
     expect(consoleErrors).toEqual([]);
   } finally {
-    await controller.close().catch(() => undefined);
+    await controller?.close().catch(() => undefined);
+    await openCodeServer?.close().catch(() => undefined);
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+type ManagedOpenCodeServer = Readonly<{
+  baseUrl: string;
+  close: () => Promise<void>;
+}>;
+
+const startOpenCodeServer = async (workdir: string): Promise<ManagedOpenCodeServer> => {
+  if (EXTERNAL_OPENCODE_URL) {
+    return { baseUrl: EXTERNAL_OPENCODE_URL, close: async () => undefined };
+  }
+  const port = await freePort();
+  const child = spawn(
+    "opencode",
+    ["serve", "--pure", "--hostname", "127.0.0.1", "--port", String(port)],
+    { cwd: workdir, env: process.env, stdio: "ignore" },
+  );
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    await waitForOpenCodeHealth(`${baseUrl}/global/health`);
+  } catch (error) {
+    await stopChild(child).catch(() => undefined);
+    throw error;
+  }
+  return { baseUrl, close: () => stopChild(child) };
+};
+
+const waitForOpenCodeHealth = async (url: string): Promise<void> => {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return;
+    } catch {
+      // The bounded startup window is expected while the local server boots.
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+  }
+  throw new Error("A4-6 temporary OpenCode server did not become healthy.");
+};
+
+const freePort = async (): Promise<number> => new Promise((resolvePort, reject) => {
+  const server = createNetServer();
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    server.close((error) => error
+      ? reject(error)
+      : resolvePort(typeof address === "object" && address ? address.port : 0));
+  });
+});
+
+const stopChild = async (child: ChildProcess): Promise<void> => {
+  if (child.exitCode !== null) return;
+  const exited = once(child, "exit");
+  child.kill("SIGTERM");
+  await Promise.race([
+    exited,
+    new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000)),
+  ]);
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await exited;
+  }
+};
 
 class SwitchableOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   available = true;
@@ -477,40 +569,31 @@ class SwitchableOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
     return this.delegate.initialize();
   }
 
-  async discoverProviderModels() {
+  async discoverProviderModels(...args: Parameters<HttpOpenCodeAdapter["discoverProviderModels"]>) {
     this.#requireAvailable();
-    return this.delegate.discoverProviderModels();
+    return this.delegate.discoverProviderModels(...args);
   }
 
-  async getSession(sessionId: string): Promise<boolean> {
+  async getSession(...args: Parameters<HttpOpenCodeAdapter["getSession"]>): Promise<boolean> {
     this.#requireAvailable();
-    return this.delegate.getSession(sessionId);
+    return this.delegate.getSession(...args);
   }
 
-  async createSession(id: string): Promise<string> {
+  async createSession(...args: Parameters<HttpOpenCodeAdapter["createSession"]>): Promise<string> {
     this.#requireAvailable();
-    const sessionRef = await this.delegate.createSession(id);
+    const sessionRef = await this.delegate.createSession(...args);
     this.createdSessionRefs.add(sessionRef);
     return sessionRef;
   }
 
-  async injectContext(
-    sessionId: string,
-    context: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
+  async injectContext(...args: Parameters<HttpOpenCodeAdapter["injectContext"]>): Promise<void> {
     this.#requireAvailable();
-    return this.delegate.injectContext(sessionId, context, signal);
+    return this.delegate.injectContext(...args);
   }
 
-  async promptWithModel(
-    sessionId: string,
-    binding: { providerId: string; modelId: string },
-    prompt: OpenCodePrompt,
-    signal?: AbortSignal,
-  ): Promise<OpenCodeAssistantResponse> {
+  async promptWithModel(...args: Parameters<HttpOpenCodeAdapter["promptWithModel"]>): Promise<OpenCodeAssistantResponse> {
     this.#requireAvailable();
-    return this.delegate.promptWithModel(sessionId, binding, prompt, signal);
+    return this.delegate.promptWithModel(...args);
   }
 
   async prompt(
@@ -522,8 +605,8 @@ class SwitchableOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
     return this.delegate.prompt(sessionId, prompt, signal);
   }
 
-  async abort(sessionId: string): Promise<void> {
-    return this.delegate.abort(sessionId);
+  async abort(...args: Parameters<HttpOpenCodeAdapter["abort"]>): Promise<void> {
+    return this.delegate.abort(...args);
   }
 
   async bindProject(projectId: string, mcpUrl: string): Promise<void> {
@@ -531,13 +614,13 @@ class SwitchableOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
     return this.delegate.bindProject(projectId, mcpUrl);
   }
 
-  async bindScopedMcp(scopeId: string, mcpUrl: string): Promise<void> {
+  async bindScopedMcp(...args: Parameters<HttpOpenCodeAdapter["bindScopedMcp"]>): Promise<void> {
     this.#requireAvailable();
-    return this.delegate.bindScopedMcp(scopeId, mcpUrl);
+    return this.delegate.bindScopedMcp(...args);
   }
 
-  async unbindScopedMcp(scopeId: string): Promise<void> {
-    return this.delegate.unbindScopedMcp(scopeId);
+  async unbindScopedMcp(...args: Parameters<HttpOpenCodeAdapter["unbindScopedMcp"]>): Promise<void> {
+    return this.delegate.unbindScopedMcp(...args);
   }
 
   async subscribeEvents(
@@ -545,6 +628,30 @@ class SwitchableOpenCode implements OpenCodeAdapter, OpenCodeConversationPort {
   ): Promise<() => void> {
     this.#requireAvailable();
     return this.delegate.subscribeEvents(listener);
+  }
+
+  async runtimeSnapshot(...args: Parameters<HttpOpenCodeAdapter["runtimeSnapshot"]>) {
+    this.#requireAvailable();
+    return this.delegate.runtimeSnapshot(...args);
+  }
+
+  async respondPermission(...args: Parameters<HttpOpenCodeAdapter["respondPermission"]>) {
+    this.#requireAvailable();
+    return this.delegate.respondPermission(...args);
+  }
+
+  async resolvePermissionAuthority(...args: Parameters<HttpOpenCodeAdapter["resolvePermissionAuthority"]>) {
+    this.#requireAvailable();
+    return this.delegate.resolvePermissionAuthority(...args);
+  }
+
+  async respondQuestion(...args: Parameters<HttpOpenCodeAdapter["respondQuestion"]>) {
+    this.#requireAvailable();
+    return this.delegate.respondQuestion(...args);
+  }
+
+  releaseRuntimeBoundary(...args: Parameters<HttpOpenCodeAdapter["releaseRuntimeBoundary"]>): void {
+    this.delegate.releaseRuntimeBoundary(...args);
   }
 
   #requireAvailable(): void {
@@ -606,6 +713,7 @@ class ProductController {
       workspaceRoot: join(this.parent, "legacy-unused"),
       repositoryRoot: REPOSITORY_ROOT,
       staticWebRoot: join(REPOSITORY_ROOT, "web", "dist"),
+      staticLegacyProductRoutes: true,
       productOnly: true,
       recoveryOnlyOnFailure: false,
     });
@@ -793,8 +901,23 @@ const sendTurn = async (
   await composer.fill(text);
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("button", { name: "Connecting…" })).toBeVisible();
-  await expect(page.getByText("Agent: live", { exact: true }))
-    .toBeVisible({ timeout: 180_000 });
+  const deadline = Date.now() + 180_000;
+  let permissionHandled = false;
+  while (Date.now() < deadline) {
+    const permission = page.getByRole("button", { name: "Allow once & Resume" });
+    if (!permissionHandled
+      && await permission.isVisible().catch(() => false)
+      && await permission.isEnabled().catch(() => false)) {
+      permissionHandled = true;
+      await permission.click();
+    }
+    if (await page.getByText("Agent: idle", { exact: true }).isVisible().catch(() => false)) break;
+    if (await page.getByText("Agent: failed", { exact: true }).isVisible().catch(() => false)) {
+      throw new Error("A4-6 real Provider turn reached a failed terminal state.");
+    }
+    await page.waitForTimeout(100);
+  }
+  await expect(page.getByText("Agent: idle", { exact: true })).toBeVisible();
   await expect(composer).toBeEnabled();
 };
 
@@ -803,7 +926,7 @@ const temporaryDocuments = (page: Page) => page.locator("section").filter({
 });
 
 const agentActivity = (page: Page) => page.locator("section").filter({
-  has: page.getByRole("heading", { name: "Agent activity" }),
+  has: page.getByRole("heading", { name: "Agent activity", exact: true }),
 });
 
 const attachments = (page: Page) => page.locator("section").filter({

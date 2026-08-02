@@ -268,6 +268,8 @@ export type BackendOptions = {
   }>;
   repositoryRoot?: string;
   staticWebRoot?: string;
+  /** Explicit local rollback only; never inferred from a browser query. */
+  staticLegacyProductRoutes?: boolean;
   workbenchBrowserBroker?: LocalBrowserBroker;
   workbenchBrowserTargetResolver?: BrowserTargetResolver;
   workbenchBrowserTtlMs?: number;
@@ -1051,7 +1053,10 @@ export class BackendApp {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(name)) return false;
       relativePath = `assets/${name}`;
     } else if (url.pathname !== "/"
-      && !/^\/(?:models|projects)\/[A-Za-z0-9_-]{1,128}$/u.test(url.pathname)) {
+      && !(this.options.staticLegacyProductRoutes
+        ? /^\/(?:workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?|(?:models|projects)\/[A-Za-z0-9_-]{1,160})\/?$/u
+        : /^\/workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?\/?$/u
+      ).test(url.pathname)) {
       return false;
     }
     const path = join(this.#staticWebRoot, relativePath);
@@ -1071,6 +1076,16 @@ export class BackendApp {
       const after = fstatSync(descriptor);
       if (stat.dev !== after.dev || stat.ino !== after.ino || after.size !== bytes.byteLength) {
         throw new Error("static asset changed while reading");
+      }
+      let responseBytes = bytes;
+      if (relativePath === "index.html") {
+        const marker = '<meta name="riffology-server-legacy-product-ui" content="false" />';
+        const html = bytes.toString("utf8");
+        if (!html.includes(marker)) throw new Error("static rollback marker missing");
+        responseBytes = Buffer.from(this.options.staticLegacyProductRoutes
+          ? html.replace(marker,
+            '<meta name="riffology-server-legacy-product-ui" content="true" />')
+          : html, "utf8");
       }
       const contentType = relativePath.endsWith(".html")
         ? "text/html; charset=utf-8"
@@ -1100,14 +1115,14 @@ export class BackendApp {
           ? "no-store"
           : "public, max-age=31536000, immutable",
         "content-security-policy": csp,
-        "content-length": bytes.byteLength,
+        "content-length": responseBytes.byteLength,
         "content-type": contentType,
         "cross-origin-resource-policy": "same-origin",
         "permissions-policy": "camera=(), microphone=(), geolocation=()",
         "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff",
       });
-      if (request.method === "GET") response.end(bytes);
+      if (request.method === "GET") response.end(responseBytes);
       else response.end();
       return true;
     } catch {
