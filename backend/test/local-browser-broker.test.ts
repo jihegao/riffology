@@ -51,6 +51,39 @@ test("real Chromium observes only backend-declared aliases and exposes a narrow 
   );
 });
 
+test("snapshot element names never fall back to an unlabelled input value", async () => {
+  const secret = "sensitive-input-value-must-not-project";
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": "default-src 'none'",
+    });
+    response.end(`<!doctype html><title>Input value fixture</title><input value="${secret}">`);
+  });
+  servers.push(server);
+  const origin = await listen(server);
+  const broker = new LocalBrowserBroker({
+    resolveTarget: (alias) => registerLocalBrowserTarget({
+      alias,
+      url: `${origin}/input`,
+      projectedUrl: `${alias}://input`,
+    }),
+  });
+  brokers.push(broker);
+  const scope = { conversationId: "conversation_input_value", conversationGeneration: 1 };
+  const opened = await broker.open(scope, "riff-app");
+  const lease = await broker.claimAgent(scope, 2);
+  const snapshot = await broker.agentSnapshot(
+    scope,
+    opened.pageGeneration,
+    lease.controlEpoch,
+  );
+  const input = snapshot.elements.find((element) => element.role === "textbox");
+  assert.ok(input);
+  assert.equal(input.name, "textbox");
+  assert.equal(JSON.stringify(snapshot).includes(secret), false);
+});
+
 test("one session is isolated per Conversation generation and older generation is revoked", async () => {
   const origin = await fixtureServer();
   const broker = trackedBroker(origin);
@@ -202,6 +235,85 @@ test("same-scope operations serialize and stale queued operations fail without o
   assert.equal(current.recoveryState, "ready");
   assert.equal(current.pageGeneration, 3);
   assert.ok(Buffer.from((await broker.screenshot(scope, 3)).pngBase64, "base64").byteLength > 1_000);
+});
+
+test("Agent control denies lifecycle bypass and human takeover invalidates in-flight work and refs", async () => {
+  const origin = await fixtureServer();
+  const broker = trackedBroker(origin);
+  const scope = { conversationId: "conversation_takeover", conversationGeneration: 1 };
+  await broker.open(scope, "riff-app");
+  const opened = await broker.open(scope, "riff-artifact");
+  const lease = await broker.claimAgent(scope, 6);
+  const snapshot = await broker.agentSnapshot(scope, opened.pageGeneration, lease.controlEpoch);
+  const oldRef = snapshot.elements[0]!.ref;
+
+  const lifecycle: Array<Promise<unknown>> = [
+    broker.open(scope, "riff-app"),
+    broker.reload(scope, opened.pageGeneration),
+    broker.back(scope, opened.pageGeneration),
+    broker.restart(scope, opened.pageGeneration),
+    broker.reconnect(scope, opened.pageGeneration),
+    broker.closeSession(scope, opened.pageGeneration),
+  ];
+  for (const operation of lifecycle) {
+    await assert.rejects(
+      operation,
+      (error: unknown) => brokerError(error, "browser_agent_controlled"),
+    );
+  }
+
+  const waiting = broker.agentWait(scope, opened.pageGeneration, lease.controlEpoch, 1_000);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const takeover = broker.takeHuman(scope, opened.pageGeneration);
+  await assert.rejects(
+    waiting,
+    (error: unknown) => brokerError(error, "browser_control_stale"),
+  );
+  const human = await takeover;
+  assert.equal(human.controlMode, "human");
+  assert.equal(human.recoveryState, "ready");
+  assert.notEqual(human.pageGeneration, opened.pageGeneration);
+  assert.equal((await broker.screenshot(scope, human.pageGeneration)).contentType, "image/png");
+
+  const observer = await broker.returnObserver(scope, human.pageGeneration);
+  assert.equal(observer.controlMode, "observer");
+  const replacement = await broker.claimAgent(scope, 2);
+  await assert.rejects(
+    broker.agentClick(
+      scope,
+      observer.pageGeneration,
+      replacement.controlEpoch,
+      oldRef,
+    ),
+    (error: unknown) => brokerError(error, "browser_element_stale"),
+  );
+});
+
+test("human control rejects open before target resolution and preserves the current page", async () => {
+  const origin = await fixtureServer();
+  let resolutions = 0;
+  const broker = new LocalBrowserBroker({
+    pageGenerationSeed: 2_000,
+    resolveTarget: (alias) => {
+      resolutions += 1;
+      return registerLocalBrowserTarget({
+        alias,
+        url: `${origin}/home`,
+        projectedUrl: `${alias}://home`,
+      });
+    },
+  });
+  brokers.push(broker);
+  const scope = { conversationId: "conversation_human_open", conversationGeneration: 1 };
+  const opened = await broker.open(scope, "riff-app");
+  const human = await broker.takeHuman(scope, opened.pageGeneration);
+  const before = resolutions;
+  await assert.rejects(
+    broker.open(scope, "riff-artifact"),
+    (error: unknown) => brokerError(error, "browser_human_controlled"),
+  );
+  assert.equal(resolutions, before);
+  assert.deepEqual(await broker.state(scope), human);
 });
 
 test("different Conversations isolate cookies, local storage, and observed network requests", async () => {
@@ -378,7 +490,7 @@ const fixtureServer = async (escapeOrigin?: string): Promise<string> => {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": "default-src 'self'; style-src 'unsafe-inline'",
     });
-    response.end(`<!doctype html><title>Riff fixture</title><style>body{font:30px sans-serif}</style><h1>${request.url}</h1>`);
+    response.end(`<!doctype html><title>Riff fixture</title><style>body{font:30px sans-serif}</style><button type="button">${request.url}</button>`);
   });
   servers.push(server);
   return listen(server);

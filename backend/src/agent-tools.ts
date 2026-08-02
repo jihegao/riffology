@@ -1,3 +1,9 @@
+import {
+  BROWSER_AGENT_TOOLS,
+  isBrowserAgentToolName,
+  type BrowserAgentToolName,
+} from "./browser-agent-tools.ts";
+
 export type AgentOwner = { kind: "model" | "project"; id: string };
 
 export const MODEL_AGENT_TOOLS = [
@@ -10,6 +16,7 @@ export const MODEL_AGENT_TOOLS = [
   "riff_create_temporary_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
+  ...BROWSER_AGENT_TOOLS,
 ] as const;
 
 export const PROJECT_AGENT_TOOLS = [
@@ -20,12 +27,14 @@ export const PROJECT_AGENT_TOOLS = [
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
   "riff_observe_current_visual",
+  ...BROWSER_AGENT_TOOLS,
 ] as const;
 
 export type AgentToolName =
   | (typeof MODEL_AGENT_TOOLS)[number]
   | (typeof PROJECT_AGENT_TOOLS)[number]
-  | "riff_interact_current_visual";
+  | "riff_interact_current_visual"
+  | BrowserAgentToolName;
 
 export type AgentToolGrant = {
   conversationId: string;
@@ -50,7 +59,8 @@ export const toolsForOwner = (owner: AgentOwner): ReadonlySet<AgentToolName> => 
 export const isAgentToolName = (value: string): value is AgentToolName =>
   (MODEL_AGENT_TOOLS as readonly string[]).includes(value)
   || (PROJECT_AGENT_TOOLS as readonly string[]).includes(value)
-  || value === "riff_interact_current_visual";
+  || value === "riff_interact_current_visual"
+  || isBrowserAgentToolName(value);
 
 export const assertToolInputCannotOverrideScope = (input: Readonly<Record<string, unknown>>): void => {
   const forbidden = new Set([

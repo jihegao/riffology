@@ -845,6 +845,42 @@ test("intent classifier is conservative for questions and conditionals", () => {
   assert.equal(explicitImperative("Explain the model"), false);
 });
 
+test("Model and Project browser intents require the scoped MCP while authority remains dormant", async (t) => {
+  const { store, runtime } = setup(t, true);
+  const preparedScopes: any[] = [];
+  runtime.configureBrowserAuthority({
+    async prepareDormant(input: unknown) { preparedScopes.push(input); },
+    async revokeTurn() {},
+    async revokeAll() {},
+    async activatePermission() { throw new Error("not activated by prepare"); },
+    async execute() { throw new Error("not activated by prepare"); },
+  } as any);
+  store.startAgentTurn({ turnId: "turn_browser_model", userMessageId: "message_browser_model", conversationId: "conversation_model", requestKey: "browser-model", text: "click the button", createdAt: NOW });
+  store.startAgentTurn({ turnId: "turn_browser_project", userMessageId: "message_browser_project", conversationId: "conversation_project", requestKey: "browser-project", text: "滚动页面", createdAt: NOW });
+  store.bindAgentSession({ id: "session_browser_model", conversationId: "conversation_model", expectedGeneration: 0, state: "available", externalSessionRef: "opaque-browser-model", at: NOW });
+  store.bindAgentSession({ id: "session_browser_project", conversationId: "conversation_project", expectedGeneration: 0, state: "available", externalSessionRef: "opaque-browser-project", at: NOW });
+  const model = await runtime.prepare({
+    conversationId: "conversation_model",
+    turnId: "turn_browser_model",
+    text: "click the button",
+    attachmentIds: [],
+    workspace: { owner: { kind: "model", id: "model_alpha" }, directory: "/server/model" },
+  });
+  const project = await runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_browser_project",
+    text: "滚动页面",
+    attachmentIds: [],
+    workspace: { owner: { kind: "project", id: "project_alpha" }, directory: "/server/project" },
+  });
+  t.after(async () => { await model.release(); await project.release(); });
+  assert.equal(model.requiresMcp, true);
+  assert.equal(project.requiresMcp, true);
+  assert.ok(model.allowedTools.includes("browser_click"));
+  assert.ok(project.allowedTools.includes("browser_scroll"));
+  assert.equal(preparedScopes.length, 2);
+});
+
 test("only a digest-marked Project human turn exposes one empty-schema visual interaction", async (t) => {
   const calls: unknown[] = [];
   const visualAuthority = {

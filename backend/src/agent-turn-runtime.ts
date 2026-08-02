@@ -19,6 +19,15 @@ import { SimulationSkillCatalog, type LoadedSimulationSkill } from "./simulation
 import { VisualAgentAuthority } from "./agent-visual-authority.ts";
 import { rendererDto } from "./renderer-registry.ts";
 import { validateExecutionDescriptionV2 } from "./execution-protocol-v2.ts";
+import { BrowserAgentAuthority } from "./browser-agent-authority.ts";
+import {
+  BROWSER_AGENT_TOOLS,
+  isBrowserAgentToolName,
+} from "./browser-agent-tools.ts";
+import type {
+  OpenCodeConversationRuntimeSnapshot,
+  OpenCodeWorkspaceBinding,
+} from "./opencode-adapter.ts";
 
 const VISUAL_OBSERVATION_OPERATIONS = Object.freeze({
   structured: "observe_structured",
@@ -37,7 +46,7 @@ export type PreparedAgentTurnRuntime = Readonly<{
   allowedTools: readonly AgentToolName[];
   context: Pick<AgentContextInput, "attachments" | "documents" | "selectedSkills">;
   promptAttachments: Array<{ id: string; mediaType: string; workspaceRelativePath: string }>;
-  release(): void;
+  release(): Promise<void>;
 }>;
 
 export class AgentTurnRuntime implements AgentToolExecutor {
@@ -54,6 +63,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     }>,
   ) => boolean;
   readonly #consumedVisualInteractionGrants = new WeakSet<AgentToolGrant>();
+  #browserAuthority?: BrowserAgentAuthority;
 
   constructor(store: ProductStoreV2, skills: SimulationSkillCatalog, options: {
     now?: () => string;
@@ -76,7 +86,14 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       ?? (() => true);
   }
 
-  async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[]; confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation }): Promise<PreparedAgentTurnRuntime> {
+  configureBrowserAuthority(authority: BrowserAgentAuthority): void {
+    if (this.#browserAuthority && this.#browserAuthority !== authority) {
+      throw new Error("Browser Agent authority is already configured.");
+    }
+    this.#browserAuthority = authority;
+  }
+
+  async prepare(input: { conversationId: string; turnId: string; text: string; attachmentIds: string[]; workspace?: OpenCodeWorkspaceBinding; confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation }): Promise<PreparedAgentTurnRuntime> {
     const conversation = this.store.getConversation(input.conversationId);
     const authorityScope = {
       conversationIds: new Set([input.conversationId]),
@@ -109,6 +126,10 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       ? runtime.session.generation
       : (runtime.session?.generation ?? 0) + 1;
     const allowedTools = new Set(toolsForOwner(conversation.owner));
+    const browserRequested = explicitBrowserIntent(intentText);
+    if (!browserRequested || !input.workspace || !this.#browserAuthority) {
+      for (const tool of BROWSER_AGENT_TOOLS) allowedTools.delete(tool);
+    }
     if (!this.visualAuthority?.observationAvailable) {
       allowedTools.delete("riff_observe_current_visual");
     }
@@ -144,16 +165,33 @@ export class AgentTurnRuntime implements AgentToolExecutor {
         "The resource is being permanently deleted.",
       );
     }
-    const capability = this.mcp.grant({
-      conversationId: input.conversationId,
-      owner: conversation.owner,
-      turnId: input.turnId,
-      externalSessionGeneration: Math.max(1, generation),
-      allowedTools,
-      intentAuthority,
-      attachmentIds: new Set(input.attachmentIds),
-      ...(allowedTools.has("riff_interact_current_visual") ? { confirmedVisualInteraction: input.confirmedVisualInteraction } : {}),
-    });
+    if (browserRequested && input.workspace && this.#browserAuthority) {
+      await this.#browserAuthority.prepareDormant({
+        scope: {
+          conversationId: input.conversationId,
+          conversationGeneration: Math.max(1, generation),
+        },
+        turnId: input.turnId,
+        workspace: input.workspace,
+        operations: new Set(BROWSER_AGENT_TOOLS.filter((tool) => allowedTools.has(tool))),
+      });
+    }
+    let capability: string;
+    try {
+      capability = this.mcp.grant({
+        conversationId: input.conversationId,
+        owner: conversation.owner,
+        turnId: input.turnId,
+        externalSessionGeneration: Math.max(1, generation),
+        allowedTools,
+        intentAuthority,
+        attachmentIds: new Set(input.attachmentIds),
+        ...(allowedTools.has("riff_interact_current_visual") ? { confirmedVisualInteraction: input.confirmedVisualInteraction } : {}),
+      });
+    } catch (error) {
+      await this.#browserAuthority?.revokeTurn(input.conversationId, input.turnId);
+      throw error;
+    }
     const exactAllowedTools = Object.freeze(
       [...allowedTools].sort((left, right) => left.localeCompare(right, "en")),
     );
@@ -162,7 +200,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       turnId: input.turnId,
       externalSessionGeneration: Math.max(1, generation),
       intentAuthority,
-      requiresMcp: intentAuthority === "explicit" || Boolean(input.confirmedVisualInteraction)
+      requiresMcp: browserRequested || intentAuthority === "explicit" || Boolean(input.confirmedVisualInteraction)
         || input.attachmentIds.length > 0 || Boolean(loadedSkill)
         || /\b(?:model|workspace|file|document|attachment|schema|dependency|visual|observe|screenshot)\b|(?:模型|工作区|文件|文档|附件|模式|依赖|可视化|观察|截图)/iu.test(intentText),
       allowedTools: exactAllowedTools,
@@ -173,16 +211,58 @@ export class AgentTurnRuntime implements AgentToolExecutor {
         selectedSkills: loadedSkill ? [{ id: loadedSkill.id, version: loadedSkill.version, instructions: loadedSkill.instructions }] : [],
       },
       promptAttachments: attachments.map(({ metadata }) => ({ id: metadata.id, mediaType: metadata.mediaType, workspaceRelativePath: metadata.relativePath })),
-      release: () => {
+      release: async () => {
         this.mcp.revoke(capability);
         this.visualAuthority?.revokeTurn(input.conversationId, input.turnId);
+        await this.#browserAuthority?.revokeTurn(input.conversationId, input.turnId);
       },
     });
   }
 
-  revokeAll(): void {
+  async revokeAll(): Promise<void> {
     this.mcp.revokeAll();
     this.visualAuthority?.revokeAll();
+    await this.#browserAuthority?.revokeAll();
+  }
+
+  async revokeBrowserTurn(conversationId: string, turnId: string): Promise<void> {
+    await this.#browserAuthority?.revokeTurn(conversationId, turnId);
+  }
+
+  async browserPendingInteractions(
+    conversationId: string,
+    turnId: string,
+  ): Promise<OpenCodeConversationRuntimeSnapshot["interactions"]> {
+    const pending = await this.#browserAuthority?.pendingForTurn(conversationId, turnId) ?? [];
+    return Object.freeze(pending.map((item) => Object.freeze({
+      id: item.id,
+      kind: "permission" as const,
+      title: "Permission required",
+      permission: `Allow ${item.tool} once for ${item.targetSummary}? Budget ${item.remainingBudget}; `
+        + `expires at ${new Date(item.expiresAtMs).toISOString()}.`,
+    })));
+  }
+
+  async respondBrowserPermission(input: Readonly<{
+    id: string;
+    conversationId: string;
+    turnId: string;
+    externalSessionGeneration: number;
+    workspace: OpenCodeWorkspaceBinding;
+    decision: "once" | "reject";
+  }>): Promise<boolean> {
+    if (!this.#browserAuthority) return false;
+    const pending = await this.#browserAuthority.pendingForTurn(
+      input.conversationId,
+      input.turnId,
+    );
+    if (!pending.some((item) => item.id === input.id)) return false;
+    if (input.decision === "once") {
+      await this.#browserAuthority.approvePending(input);
+    } else {
+      await this.#browserAuthority.rejectPending(input);
+    }
+    return true;
   }
 
   revokeVisualRun(runId: string): void {
@@ -230,6 +310,19 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       "riff_transition_temporary_document",
       "riff_adopt_attachment",
     ]).has(tool)) throw new AgentRuntimeError("explicit_intent_required", "This durable action requires an explicit imperative.");
+    if (isBrowserAgentToolName(tool)) {
+      if (!this.#browserAuthority) throw new AgentRuntimeError(
+        "browser_authority_unavailable",
+        "Browser authority is unavailable.",
+      );
+      return await this.#browserAuthority.execute({
+        conversationId: grant.conversationId,
+        turnId: grant.turnId,
+        externalSessionGeneration: grant.externalSessionGeneration,
+        tool,
+        arguments: input,
+      });
+    }
     switch (tool) {
       case "riff_read_owner_summary": return this.#ownerSummary(grant.owner);
       case "riff_list_model_workspace": return this.#listModelWorkspace(grant);
@@ -876,6 +969,9 @@ export const explicitImperative = (text: string): boolean => {
   if (!normalized || /\?|\b(?:if|maybe|might|could|would|should we|discuss|explain|suggest|consider|how|what|why)\b|(?:如果|也许|可能|是否|能否|可以吗|讨论|解释|建议|如何|为什么)/u.test(normalized)) return false;
   return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|采用|拒绝|取代|删除)|^(?:请)?(?:把|将(?!来))[^?？\n]{1,500}(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|采用|拒绝|取代|删除)/u.test(normalized);
 };
+
+const explicitBrowserIntent = (text: string): boolean =>
+  /\b(?:browser|web\s*page|page\s+snapshot|screenshot|click|type|scroll|reload|navigate)\b|(?:浏览器|网页|页面快照|截图|点击|输入|滚动|刷新页面|打开页面)/iu.test(text);
 
 const PROJECT_OPERATION_BOUNDARY =
   "(?:^|[.!?;]\\s*|\\b(?:and|then)\\s+|[。！？；]\\s*|(?:并且|然后)\\s*)";

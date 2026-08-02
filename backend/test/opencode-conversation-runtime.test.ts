@@ -518,6 +518,208 @@ test("runtime snapshot stays on the current turn boundary and exposes only redac
   adapter.releaseRuntimeBoundary("opaque-session");
 });
 
+test("browser permission rejects final assistant evidence changed immediately before reply", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let mcpName = "";
+  let ref = `element_${"a".repeat(32)}`;
+  let replies = 0;
+  let raceFinalEvidence = false;
+  let permissionReadsAfterRace = 0;
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        const projectedRef = raceFinalEvidence && permissionReadsAfterRace >= 2
+          ? `element_${"b".repeat(32)}` : ref;
+        return Response.json(prompted ? [
+        { info: { id: "browser-user", sessionID: "opaque-session", role: "user" }, parts: [] },
+        { info: { id: "browser-assistant", sessionID: "opaque-session", role: "assistant", parentID: "browser-user", ...(terminal ? { time: { completed: 2 } } : {}) }, parts: [
+          { type: "tool", callID: "browser-call", tool: `${mcpName}_browser_click`, state: { status: terminal ? "completed" : "running", input: { ref: projectedRef } } },
+          ...(terminal ? [{ type: "text", text: "Browser action complete." }] : []),
+        ] },
+      ] : []);
+      }
+      if (path === "/permission") {
+        if (raceFinalEvidence) permissionReadsAfterRace += 1;
+        return Response.json([{
+        id: "permission-browser",
+        sessionID: "opaque-session",
+        permission: "external",
+        patterns: ["browser"],
+        always: [],
+        tool: { messageID: "browser-assistant", callID: "browser-call" },
+      }]);
+      }
+      if (path.startsWith("/permission/")) {
+        replies += 1;
+        assert.deepEqual(JSON.parse(String(init?.body)), { reply: "once" });
+        return Response.json({ ok: true });
+      }
+      if (path === "/question") return Response.json([]);
+      if (path === "/mcp" && init?.method === "POST") {
+        mcpName = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (path === "/mcp") return Response.json({ [mcpName]: { status: "connected" } });
+      if (path.startsWith("/mcp/")) return Response.json({});
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted
+    ? { "opaque-session": { type: terminal ? "idle" : "busy" } }
+    : {}));
+  const scopeId = "browser-permission-scope";
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=browser-secret-capability",
+    ["browser_click"],
+  );
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    {
+      text: "Click the button",
+      system: "bounded",
+      attachments: [],
+      scopedMcpScopeId: scopeId,
+      scopedMcpTools: ["browser_click"],
+    },
+  );
+  await waitUntil(() => prompted, "browser prompt dispatch");
+  const first = await adapter.runtimeSnapshot("opaque-session", scopeId);
+  const permission = first.interactions.find((item) => item.kind === "permission")!;
+  const serialized = JSON.stringify(permission);
+  assert.doesNotMatch(serialized, /operationCommitment|scopedToolName|element_[0-9a-f]+|browser-secret/u);
+  assert.match(
+    permission.permission,
+    /fixed active grant alias \(riff-app, riff-visual, or riff-artifact\).*browser_click.*budget 12.*120 seconds/iu,
+  );
+  const authority = await adapter.resolvePermissionAuthority(
+    "opaque-session",
+    permission.id,
+  );
+  assert.equal(authority?.toolName, "browser_click");
+  assert.match(authority?.operationCommitment ?? "", /^[0-9a-f]{64}$/u);
+
+  raceFinalEvidence = true;
+  await assert.rejects(
+    adapter.respondPermission(
+      "opaque-session",
+      permission.id,
+      "once",
+      undefined,
+      authority!,
+    ),
+    (error: any) => error.code === "interaction_not_pending",
+  );
+  assert.equal(replies, 0);
+  assert.ok(permissionReadsAfterRace >= 2,
+    "the final rejection must follow a fresh permission read and assistant evidence read");
+  terminal = true;
+  await operation;
+});
+
+const assertBrowserPermissionEvidenceRejected = async (
+  t: any,
+  mode: "duplicate" | "legacy_part_input",
+): Promise<void> => {
+  let prompted = false;
+  let terminal = false;
+  let mcpName = "";
+  const ref = `element_${"c".repeat(32)}`;
+  const toolPart = () => ({
+    type: "tool",
+    callID: "browser-call",
+    tool: `${mcpName}_browser_click`,
+    ...(mode === "legacy_part_input" ? { input: { ref } } : {}),
+    state: {
+      status: terminal ? "completed" : "running",
+      ...(mode === "duplicate" ? { input: { ref } } : {}),
+    },
+  });
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "browser-user", sessionID: "opaque-session", role: "user" }, parts: [] },
+        {
+          info: {
+            id: "browser-assistant", sessionID: "opaque-session", role: "assistant",
+            parentID: "browser-user", ...(terminal ? { time: { completed: 2 } } : {}),
+          },
+          parts: [
+            toolPart(),
+            ...(mode === "duplicate" ? [toolPart()] : []),
+            ...(terminal ? [{ type: "text", text: "done" }] : []),
+          ],
+        },
+      ] : []);
+      if (path === "/permission") return Response.json([{
+        id: "permission-browser",
+        sessionID: "opaque-session",
+        permission: "external",
+        patterns: ["browser"],
+        always: [],
+        tool: { messageID: "browser-assistant", callID: "browser-call" },
+      }]);
+      if (path === "/question") return Response.json([]);
+      if (path === "/mcp" && init?.method === "POST") {
+        mcpName = JSON.parse(String(init.body)).name;
+        return Response.json({});
+      }
+      if (path === "/mcp") return Response.json({ [mcpName]: { status: "connected" } });
+      if (path.startsWith("/mcp/")) return Response.json({});
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => Response.json(prompted
+    ? { "opaque-session": { type: terminal ? "idle" : "busy" } }
+    : {}));
+  const scopeId = `browser-evidence-${mode}`;
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=browser-secret-capability",
+    ["browser_click"],
+  );
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    {
+      text: "Click",
+      system: "bounded",
+      attachments: [],
+      scopedMcpScopeId: scopeId,
+      scopedMcpTools: ["browser_click"],
+    },
+  );
+  await waitUntil(() => prompted, "browser evidence prompt dispatch");
+  const snapshot = await adapter.runtimeSnapshot("opaque-session", scopeId);
+  assert.deepEqual(snapshot.interactions.filter((item) => item.kind === "permission"), []);
+  assert.equal(await adapter.resolvePermissionAuthority(
+    "opaque-session",
+    "permission_00000000000000000000000000000000",
+  ), null);
+  terminal = true;
+  await operation.catch(() => undefined);
+};
+
+test("browser permission rejects duplicate assistant messageID and callID evidence", async (t) => {
+  await assertBrowserPermissionEvidenceRejected(t, "duplicate");
+});
+
+test("browser permission rejects legacy part.input without state.input", async (t) => {
+  await assertBrowserPermissionEvidenceRejected(t, "legacy_part_input");
+});
+
 test("adapter reuses one OpenCode session across turns with server-generated user message IDs", async (t) => {
   const messages: any[] = [];
   let promptNumber = 0;

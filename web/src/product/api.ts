@@ -100,6 +100,8 @@ export interface ProductClient {
   browserClose?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserRestart?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserReconnect?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserTakeover?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
+  browserReturn?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   downloadModelFile(modelId: string, fileId: string): Promise<void>;
   createExperiment(input: Readonly<{
     projectId: string;
@@ -411,18 +413,20 @@ export class HttpProductClient implements ProductClient {
     );
   }
 
-  browserState(conversationId: string): Promise<BrowserSessionDto> {
-    return this.#request(`/api/conversations/${encodeURIComponent(conversationId)}/browser`);
+  async browserState(conversationId: string): Promise<BrowserSessionDto> {
+    return normalizeBrowserSessionDto(await this.#request(
+      `/api/conversations/${encodeURIComponent(conversationId)}/browser`,
+    ));
   }
 
-  browserOpen(
+  async browserOpen(
     conversationId: string,
     alias: "riff-app" | "riff-visual" | "riff-artifact",
   ): Promise<BrowserSessionDto> {
-    return this.#request(`/api/conversations/${encodeURIComponent(conversationId)}/browser/open`, {
+    return normalizeBrowserSessionDto(await this.#request(`/api/conversations/${encodeURIComponent(conversationId)}/browser/open`, {
       method: "POST",
       body: JSON.stringify({ alias }),
-    });
+    }));
   }
 
   browserReload(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
@@ -445,6 +449,14 @@ export class HttpProductClient implements ProductClient {
     return this.#browserOperation(conversationId, "reconnect", state);
   }
 
+  browserTakeover(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "takeover", state);
+  }
+
+  browserReturn(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
+    return this.#browserOperation(conversationId, "return", state);
+  }
+
   browserScreenshot(
     conversationId: string,
     state: BrowserSessionDto,
@@ -460,7 +472,7 @@ export class HttpProductClient implements ProductClient {
 
   #browserOperation(
     conversationId: string,
-    action: "reload" | "back" | "close" | "restart" | "reconnect",
+    action: "reload" | "back" | "close" | "restart" | "reconnect" | "takeover" | "return",
     state: BrowserSessionDto,
   ): Promise<BrowserSessionDto> {
     return this.#request(
@@ -472,7 +484,7 @@ export class HttpProductClient implements ProductClient {
           pageGeneration: state.pageGeneration,
         }),
       },
-    );
+    ).then(normalizeBrowserSessionDto);
   }
 
   downloadModelFile(modelId: string, fileId: string): Promise<void> {
@@ -1315,6 +1327,53 @@ const normalizeGoalVerification = (
 
 const objectRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" ? value as Record<string, unknown> : null;
+
+const normalizeBrowserSessionDto = (value: unknown): BrowserSessionDto => {
+  const keys = [
+    "schemaVersion", "conversationGeneration", "pageGeneration", "projectedUrl",
+    "trustState", "controlMode", "remainingBudget", "recoveryState", "canGoBack",
+    "canReload", "expiresAt",
+  ] as const;
+  const record = !Array.isArray(value) ? objectRecord(value) : null;
+  if (!record || Object.keys(record).length !== keys.length
+    || Object.keys(record).some((key) => !keys.includes(key as typeof keys[number]))
+    || record.schemaVersion !== 1
+    || !Number.isSafeInteger(record.conversationGeneration)
+    || Number(record.conversationGeneration) < 1
+    || !Number.isSafeInteger(record.pageGeneration)
+    || Number(record.pageGeneration) < 0
+    || !(record.projectedUrl === null
+      || typeof record.projectedUrl === "string" && record.projectedUrl.length > 0
+      && record.projectedUrl.length <= 4_096
+      && !/[\u0000-\u001f\u007f]/u.test(record.projectedUrl))
+    || !["trusted_riff", "none"].includes(String(record.trustState))
+    || !["observer", "agent", "human"].includes(String(record.controlMode))
+    || !(record.remainingBudget === null
+      || Number.isSafeInteger(record.remainingBudget)
+      && Number(record.remainingBudget) >= 0 && Number(record.remainingBudget) <= 1_000_000)
+    || !["ready", "closed", "expired", "disconnected", "unavailable"]
+      .includes(String(record.recoveryState))
+    || typeof record.canGoBack !== "boolean"
+    || typeof record.canReload !== "boolean"
+    || !(record.expiresAt === null
+      || typeof record.expiresAt === "string" && record.expiresAt.length <= 64
+      && !Number.isNaN(Date.parse(record.expiresAt)))) {
+    throw new ProductApiError(502, "invalid_response", "The Browser session response is invalid.");
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    conversationGeneration: Number(record.conversationGeneration),
+    pageGeneration: Number(record.pageGeneration),
+    projectedUrl: record.projectedUrl as string | null,
+    trustState: record.trustState as BrowserSessionDto["trustState"],
+    controlMode: record.controlMode as BrowserSessionDto["controlMode"],
+    remainingBudget: record.remainingBudget as number | null,
+    recoveryState: record.recoveryState as BrowserSessionDto["recoveryState"],
+    canGoBack: record.canGoBack,
+    canReload: record.canReload,
+    expiresAt: record.expiresAt as string | null,
+  });
+};
 
 const publicRuntimeText = (value: unknown): string | null =>
   typeof value === "string" ? value.slice(0, 4_000) : null;

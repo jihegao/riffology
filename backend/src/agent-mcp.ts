@@ -8,6 +8,11 @@ import {
   type AgentToolGrant,
   type AgentToolName,
 } from "./agent-tools.ts";
+import {
+  browserAgentOperationCommitment,
+  browserAgentToolDefinitions,
+  isBrowserAgentToolName,
+} from "./browser-agent-tools.ts";
 
 type RpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: unknown };
 type RpcResponse = { jsonrpc: "2.0"; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
@@ -189,6 +194,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     "Perform the single exact visual interaction explicitly confirmed by the human in this turn.",
     {},
   ),
+  ...browserAgentToolDefinitions,
 };
 
 export class AgentMcpServer {
@@ -308,6 +314,40 @@ export class AgentMcpServer {
           },
         };
       }
+      if (name === "browser_screenshot") {
+        const screenshot = result && typeof result === "object" && !Array.isArray(result)
+          ? result as Record<string, unknown> : null;
+        if (!screenshot
+          || Object.keys(screenshot).length !== 4
+          || !["schemaVersion", "pageGeneration", "contentType", "pngBase64"]
+            .every((key) => Object.hasOwn(screenshot, key))
+          || screenshot.schemaVersion !== 1
+          || !Number.isSafeInteger(screenshot.pageGeneration)
+          || Number(screenshot.pageGeneration) < 0
+          || screenshot.contentType !== "image/png"
+          || typeof screenshot.pngBase64 !== "string"
+          || !validBoundedPngBase64(screenshot.pngBase64, 4 * 1024 * 1024)) {
+          throw new Error("Invalid Browser screenshot result.");
+        }
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  schemaVersion: 1,
+                  kind: "browser_screenshot",
+                  pageGeneration: screenshot.pageGeneration,
+                  contentType: "image/png",
+                }),
+              },
+              { type: "image", data: screenshot.pngBase64, mimeType: "image/png" },
+            ],
+          },
+        };
+      }
       return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) ?? "null" }] } };
     } catch (error) {
       const message = error instanceof AgentToolPermissionError ? error.message : "The scoped Agent action failed.";
@@ -341,6 +381,9 @@ function normalizeToolInput(
   name: AgentToolName,
   input: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (isBrowserAgentToolName(name)) {
+    return { ...browserAgentOperationCommitment(name, input).normalized };
+  }
   if (name !== "riff_publish_model_generated_views" || typeof input.views !== "string") {
     return input;
   }
@@ -357,7 +400,8 @@ function normalizeToolInput(
 }
 
 function validateInput(name: AgentToolName, input: Record<string, unknown>): void {
-  const allowed: Record<AgentToolName, readonly string[]> = {
+  if (isBrowserAgentToolName(name)) return;
+  const allowed: Partial<Record<AgentToolName, readonly string[]>> = {
     riff_read_owner_summary: [],
     riff_list_model_workspace: [],
     riff_read_model_file: ["fileId"],
@@ -380,7 +424,7 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_observe_current_visual: ["kind"],
     riff_interact_current_visual: [],
   };
-  if (Object.keys(input).some((key) => !allowed[name].includes(key))) throw new AgentToolPermissionError("Agent tool input includes an unsupported field.");
+  if (Object.keys(input).some((key) => !allowed[name]!.includes(key))) throw new AgentToolPermissionError("Agent tool input includes an unsupported field.");
   const text = (key: string, maximum: number): void => {
     const value = input[key];
     if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > maximum) throw new AgentToolPermissionError(`Agent tool ${key} is invalid.`);
@@ -440,13 +484,13 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
 
 const rpcError = (id: string | number | null, code: number, message: string): RpcResponse => ({ jsonrpc: "2.0", id, error: { code, message } });
 
-const validBoundedPngBase64 = (value: string): boolean => {
-  if (value.length > 2_796_208
+const validBoundedPngBase64 = (value: string, maximumBytes = 2 * 1024 * 1024): boolean => {
+  if (value.length > Math.ceil(maximumBytes / 3) * 4
     || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
     return false;
   }
   const bytes = Buffer.from(value, "base64");
-  return bytes.byteLength <= 2 * 1024 * 1024
+  return bytes.byteLength <= maximumBytes
     && bytes.subarray(0, 8).equals(Buffer.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
     ]));

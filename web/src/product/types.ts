@@ -118,8 +118,8 @@ export type BrowserSessionDto = Readonly<{
   pageGeneration: number;
   projectedUrl: string | null;
   trustState: "trusted_riff" | "none";
-  controlMode: "observer";
-  remainingBudget: null;
+  controlMode: "observer" | "agent" | "human";
+  remainingBudget: number | null;
   recoveryState: BrowserRecoveryState;
   canGoBack: boolean;
   canReload: boolean;

@@ -134,6 +134,61 @@ test("screenshot observation is returned as bounded MCP image content", async ()
   ]);
 });
 
+test("Browser screenshot is returned as strict bounded MCP image content", async () => {
+  const pngBase64 = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  ]).toString("base64");
+  const server = new AgentMcpServer({
+    async execute() {
+      return { schemaVersion: 1, pageGeneration: 9, contentType: "image/png", pngBase64 };
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_browser_shot",
+    owner: { kind: "model", id: "model_browser_shot" },
+    turnId: "turn_browser_shot",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "model", id: "model_browser_shot" }),
+  });
+  const response = await server.handle(capability, call("browser_screenshot"));
+  assert.deepEqual((response?.result as any).content, [{
+    type: "text",
+    text: JSON.stringify({
+      schemaVersion: 1,
+      kind: "browser_screenshot",
+      pageGeneration: 9,
+      contentType: "image/png",
+    }),
+  }, { type: "image", data: pngBase64, mimeType: "image/png" }]);
+
+  for (const invalid of [{
+    schemaVersion: 1,
+    pageGeneration: 9,
+    contentType: "image/png",
+    pngBase64,
+    capability: "must-not-pass",
+  }, {
+    schemaVersion: 1,
+    pageGeneration: 9,
+    contentType: "image/png",
+    pngBase64: Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(4 * 1024 * 1024),
+    ]).toString("base64"),
+  }]) {
+    const rejecting = new AgentMcpServer({ async execute() { return invalid; } });
+    const rejectedCapability = rejecting.grant({
+      conversationId: "conversation_browser_shot",
+      owner: { kind: "model", id: "model_browser_shot" },
+      turnId: "turn_browser_shot_invalid",
+      externalSessionGeneration: 1,
+      allowedTools: toolsForOwner({ kind: "model", id: "model_browser_shot" }),
+    });
+    const denied = await rejecting.handle(rejectedCapability, call("browser_screenshot"));
+    assert.equal((denied?.result as any).isError, true);
+  }
+});
+
 test("legacy CDP configuration never exposes or dispatches a Project Agent browser tool", async () => {
   const prior = process.env.RIFF_CDP_URL;
   process.env.RIFF_CDP_URL = "http://127.0.0.1:9222";
