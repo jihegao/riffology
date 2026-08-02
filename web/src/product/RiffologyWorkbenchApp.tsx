@@ -75,7 +75,12 @@ export function RiffologyWorkbenchApp({
   const [browserScreenshot, setBrowserScreenshot] = useState<string>();
   const [browserError, setBrowserError] = useState<string>();
   const [browserBusy, setBrowserBusy] = useState(false);
+  const [agentActionBusy, setAgentActionBusy] = useState(false);
+  const [agentMenuChecking, setAgentMenuChecking] = useState(false);
+  const [pausableRequestKey, setPausableRequestKey] = useState<string>();
   const browserRequestRef = useRef(0);
+  const browserStateRef = useRef<BrowserSessionDto | undefined>(undefined);
+  const browserBusyRef = useRef(false);
   const fileToggleRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
@@ -171,8 +176,54 @@ export function RiffologyWorkbenchApp({
     return () => { active = false; };
   }, [client, currentConversation?.id, browserScreenshotData]);
 
+  useEffect(() => { browserStateRef.current = browser; }, [browser]);
+  useEffect(() => { browserBusyRef.current = browserBusy; }, [browserBusy]);
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    if (!currentConversation || !client.browserState) return () => { active = false; };
+    const poll = async () => {
+      if (polling || browserBusyRef.current) return;
+      polling = true;
+      const requestEpoch = browserRequestRef.current;
+      try {
+        const next = await client.browserState!(currentConversation.id);
+        const previous = browserStateRef.current;
+        if (!active || requestEpoch !== browserRequestRef.current
+          || browserFingerprint(previous) === browserFingerprint(next)) return;
+        browserStateRef.current = next;
+        setBrowser(next);
+        if (next.recoveryState === "ready"
+          && (!previous || next.pageGeneration !== previous.pageGeneration
+            || next.recoveryState !== previous.recoveryState
+            || next.projectedUrl !== previous.projectedUrl)) {
+          const screenshot = await browserScreenshotData(currentConversation.id, next);
+          if (active && requestEpoch === browserRequestRef.current) {
+            setBrowserScreenshot(screenshot);
+          }
+        }
+      } catch {
+        // The initial loader and explicit controls own user-visible errors.
+      } finally {
+        polling = false;
+      }
+    };
+    const timer = window.setInterval(() => { void poll(); }, 750);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [client, currentConversation?.id, browserScreenshotData]);
+
+  useEffect(() => {
+    setPausableRequestKey(undefined);
+    setAgentMenuChecking(false);
+  }, [currentConversation?.id]);
+
   const browserAction = async (action: "back" | "reload" | "reconnect") => {
     if (!currentConversation || !browser) return;
+    if (browser.controlMode === "agent") return;
     const operation = action === "back" ? client.browserBack
       : action === "reload" ? client.browserReload : client.browserReconnect;
     if (!operation) return;
@@ -194,6 +245,65 @@ export function RiffologyWorkbenchApp({
     }
   };
 
+  const browserControl = async (action: "takeover" | "return") => {
+    if (!currentConversation || !browser) return;
+    const operation = action === "takeover" ? client.browserTakeover : client.browserReturn;
+    if (!operation) return;
+    const requestId = ++browserRequestRef.current;
+    setAgentActionBusy(true);
+    setBrowserBusy(true);
+    setBrowserError(undefined);
+    try {
+      const next = await operation.call(client, currentConversation.id, browser);
+      const screenshot = await browserScreenshotData(currentConversation.id, next);
+      if (requestId !== browserRequestRef.current) return;
+      setBrowser(next);
+      setBrowserScreenshot(screenshot);
+    } catch (cause) {
+      if (requestId === browserRequestRef.current) {
+        setBrowserError(cause instanceof Error ? cause.message : "浏览器控制不可用。");
+      }
+    } finally {
+      if (requestId === browserRequestRef.current) setBrowserBusy(false);
+      setAgentActionBusy(false);
+    }
+  };
+
+  const pauseAgent = async () => {
+    if (!currentConversation || !client.conversationRuntime || !client.stopConversation) return;
+    setAgentActionBusy(true);
+    setBrowserError(undefined);
+    try {
+      const runtime = await client.conversationRuntime(currentConversation.id);
+      if (runtime.activeTurn?.canStop) {
+        await client.stopConversation({
+          conversationId: currentConversation.id,
+          requestKey: runtime.activeTurn.requestKey,
+        });
+        setPausableRequestKey(undefined);
+      }
+    } catch (cause) {
+      setBrowserError(cause instanceof Error ? cause.message : "Agent 暂停失败。");
+    } finally {
+      setAgentActionBusy(false);
+    }
+  };
+
+  const inspectAgentMenu = async () => {
+    setPausableRequestKey(undefined);
+    if (!currentConversation || !client.conversationRuntime || !client.stopConversation) return;
+    setAgentMenuChecking(true);
+    try {
+      const runtime = await client.conversationRuntime(currentConversation.id);
+      setPausableRequestKey(runtime.activeTurn?.canStop
+        ? runtime.activeTurn.requestKey : undefined);
+    } catch {
+      setPausableRequestKey(undefined);
+    } finally {
+      setAgentMenuChecking(false);
+    }
+  };
+
   return (
     <div className="riffology-workbench-app">
       <a className="product-skip-link" href="#riffology-workbench-main">跳到主要内容</a>
@@ -212,6 +322,13 @@ export function RiffologyWorkbenchApp({
           browserBusy={browserBusy}
           onBrowserBack={() => void browserAction("back")}
           onBrowserReload={() => void browserAction("reload")}
+          agentActionBusy={agentActionBusy}
+          canPauseAgent={Boolean(pausableRequestKey)}
+          agentMenuChecking={agentMenuChecking}
+          onAgentMenuOpen={() => void inspectAgentMenu()}
+          onPauseAgent={() => void pauseAgent()}
+          onBrowserTakeover={() => void browserControl("takeover")}
+          onBrowserReturn={() => void browserControl("return")}
         />
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
@@ -277,6 +394,13 @@ function WorkbenchChrome({
   browserBusy,
   onBrowserBack,
   onBrowserReload,
+  agentActionBusy,
+  canPauseAgent,
+  agentMenuChecking,
+  onAgentMenuOpen,
+  onPauseAgent,
+  onBrowserTakeover,
+  onBrowserReturn,
 }: Readonly<{
   route: WorkbenchRoute;
   workspace?: WorkspaceDto;
@@ -287,7 +411,31 @@ function WorkbenchChrome({
   browserBusy: boolean;
   onBrowserBack: () => void;
   onBrowserReload: () => void;
+  agentActionBusy: boolean;
+  canPauseAgent: boolean;
+  agentMenuChecking: boolean;
+  onAgentMenuOpen: () => void;
+  onPauseAgent: () => void;
+  onBrowserTakeover: () => void;
+  onBrowserReturn: () => void;
 }>) {
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const agentMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!agentMenuOpen) return;
+    const dismiss = (event: MouseEvent) => {
+      if (!agentMenuRef.current?.contains(event.target as Node)) setAgentMenuOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAgentMenuOpen(false);
+    };
+    document.addEventListener("mousedown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [agentMenuOpen]);
   const projectPath = route.page === "project"
     ? `riff://project/${encodeURIComponent(route.projectId)}` : "riff://unbound-workspace";
   const conversation = route.page === "project" && workspace?.owner.kind === "project"
@@ -296,6 +444,13 @@ function WorkbenchChrome({
   const agentState = conversation?.sessionState === "available" ? "可用"
     : conversation?.sessionState === "connecting" ? "连接中"
       : conversation?.sessionState === "read_only" ? "只读" : "未接管";
+  const projectedAgentState = browser?.controlMode === "agent" ? "控制中"
+    : browser?.controlMode === "human" ? "人工" : agentState;
+  const navigationLocked = browser?.controlMode === "agent";
+  const runMenuAction = (action: () => void) => {
+    setAgentMenuOpen(false);
+    action();
+  };
   return <div className="riffology-workbench-chrome">
     <span className="riffology-context-projection">
       <i aria-hidden="true" />
@@ -304,10 +459,10 @@ function WorkbenchChrome({
         : "新项目 / Agent 引导"}
     </span>
     <nav aria-label="浏览器导航" className="riffology-browser-navigation">
-      <button type="button" disabled={!browser?.canGoBack || browserBusy}
+      <button type="button" disabled={!browser?.canGoBack || browserBusy || navigationLocked}
         onClick={onBrowserBack} aria-label="后退">←</button>
       <button type="button" disabled title="前进将在后续浏览历史阶段提供" aria-label="前进">→</button>
-      <button type="button" disabled={!browser?.canReload || browserBusy}
+      <button type="button" disabled={!browser?.canReload || browserBusy || navigationLocked}
         onClick={onBrowserReload} aria-label="刷新">↻</button>
     </nav>
     <output className="riffology-url-projection" aria-label="页面地址">
@@ -316,7 +471,34 @@ function WorkbenchChrome({
     <span className="riffology-trust-state" aria-label="受信状态">
       {!browser || browser.trustState === "trusted_riff" ? "受信 Riff" : "未连接"}
     </span>
-    <button type="button" className="riffology-agent-state" disabled aria-label={`Agent 状态：${agentState}`}>Agent · {agentState}</button>
+    <div className="riffology-agent-menu" ref={agentMenuRef}>
+      <button type="button" className="riffology-agent-state"
+        aria-label={`Agent 状态：${projectedAgentState}`}
+        aria-haspopup="menu" aria-expanded={agentMenuOpen}
+        onClick={() => setAgentMenuOpen((open) => {
+          if (!open) onAgentMenuOpen();
+          return !open;
+        })}>
+        Agent · {projectedAgentState}
+      </button>
+      {agentMenuOpen && <div className="riffology-agent-menu-popover" role="menu" aria-label="Agent 控制">
+        {browser?.controlMode === "agent" && browser.remainingBudget !== null
+          && <span className="riffology-agent-budget">剩余动作 {browser.remainingBudget}</span>}
+        <button type="button" role="menuitem"
+          disabled={!canPauseAgent || agentActionBusy || agentMenuChecking}
+          onClick={() => runMenuAction(onPauseAgent)}>暂停当前轮次</button>
+        {!canPauseAgent && <span className="riffology-agent-menu-status" role="status">
+          {agentMenuChecking ? "检查当前轮次…" : "当前没有可暂停轮次"}
+        </span>}
+        <button type="button" role="menuitem"
+          disabled={!browser || browser.recoveryState !== "ready"
+            || browser.controlMode === "human" || agentActionBusy}
+          onClick={() => runMenuAction(onBrowserTakeover)}>人工接管浏览器</button>
+        <button type="button" role="menuitem"
+          disabled={browser?.controlMode !== "human" || agentActionBusy}
+          onClick={() => runMenuAction(onBrowserReturn)}>交还为观察模式</button>
+      </div>}
+    </div>
     <span className="riffology-opencode-version" aria-label="OpenCode 基线版本">OpenCode 1.18.11</span>
     <button ref={fileToggleRef} type="button" className="riffology-file-toggle" disabled={route.page !== "project"}
       aria-expanded={route.page === "project" ? filesOpen : undefined}
@@ -326,6 +508,21 @@ function WorkbenchChrome({
 
 const compactWorkbench = (): boolean =>
   typeof globalThis.matchMedia === "function" && globalThis.matchMedia("(max-width: 760px)").matches;
+
+const browserFingerprint = (state?: BrowserSessionDto): string => state
+  ? [
+    state.conversationGeneration,
+    state.pageGeneration,
+    state.projectedUrl ?? "",
+    state.trustState,
+    state.controlMode,
+    state.remainingBudget ?? "",
+    state.recoveryState,
+    state.canGoBack ? 1 : 0,
+    state.canReload ? 1 : 0,
+    state.expiresAt ?? "",
+  ].join("\u0000")
+  : "";
 
 const isProjectWorkspace = (workspace?: WorkspaceDto): workspace is ProjectWorkspaceDto =>
   workspace?.owner.kind === "project";

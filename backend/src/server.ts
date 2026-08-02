@@ -101,6 +101,7 @@ import {
   type BrowserTargetResolver,
   type RiffBrowserAlias,
 } from "./local-browser-broker.ts";
+import { BrowserAgentAuthority } from "./browser-agent-authority.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -274,8 +275,13 @@ export type BackendOptions = {
 
 type WorkbenchObservationTarget = Readonly<{
   scope: BrowserConversationScope;
-  projectId: string;
+  owner: WorkbenchObservationOwner;
   expiresAtMs: number;
+}>;
+
+export type WorkbenchObservationOwner = Readonly<{
+  kind: "model" | "project";
+  id: string;
 }>;
 
 /** Process-local registry for the unguessable, expiring read-only observation route. */
@@ -292,13 +298,13 @@ export class WorkbenchObservationTargetRegistry {
     this.#now = now;
   }
 
-  register(scope: BrowserConversationScope, projectId: string): string {
+  register(scope: BrowserConversationScope, owner: WorkbenchObservationOwner): string {
     this.revokeConversation(scope.conversationId);
     let token: string;
     do token = randomBytes(32).toString("base64url"); while (this.#targets.has(token));
     this.#targets.set(token, Object.freeze({
       scope: Object.freeze({ ...scope }),
-      projectId,
+      owner: Object.freeze({ ...owner }),
       expiresAtMs: this.#now() + this.#ttlMs,
     }));
     return token;
@@ -330,6 +336,13 @@ export class WorkbenchObservationTargetRegistry {
 
   clear(): void { this.#targets.clear(); }
 }
+
+export const workbenchObservationTargetMatches = (
+  target: Readonly<{ scope: BrowserConversationScope; owner: WorkbenchObservationOwner }>,
+  generation: number | null,
+  owner: WorkbenchObservationOwner,
+): boolean => generation === target.scope.conversationGeneration
+  && owner.kind === target.owner.kind && owner.id === target.owner.id;
 
 export type BrowserFrameListenerInspector = (
   target: HealthyVisualFrameTarget,
@@ -538,6 +551,7 @@ export class BackendApp {
   #browserWebSockets?: BrowserWebSocketBridge;
   #browserBrokerOrigin?: string;
   #workbenchBrowserBroker?: LocalBrowserBroker;
+  #browserAgentAuthority?: BrowserAgentAuthority;
   readonly #workbenchObservationTargets: WorkbenchObservationTargetRegistry;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
@@ -887,19 +901,26 @@ export class BackendApp {
                   if (configured) return configured;
                   if (alias !== "riff-app" || !this.productStore) return null;
                   const conversation = this.productStore.getConversation(scope.conversationId);
-                  if (conversation.owner.kind !== "project") return null;
+                  const runtime = await this.productStore.getConversationRuntime(scope.conversationId);
+                  if (!runtime.session || runtime.session.generation !== scope.conversationGeneration
+                    || !this.#workbenchOwnerExists(conversation.owner)) return null;
                   const token = this.#workbenchObservationTargets.register(
                     scope,
-                    conversation.owner.id,
+                    conversation.owner,
                   );
+                  const collection = conversation.owner.kind === "model" ? "models" : "projects";
                   return registerLocalBrowserTarget({
                     alias,
                     url: `${app.origin}/browser/observe/${token}`,
-                    projectedUrl: `riff-app://projects/${encodeURIComponent(conversation.owner.id)}`
+                    projectedUrl: `riff-app://${collection}/${encodeURIComponent(conversation.owner.id)}`
                       + `?conversation=${encodeURIComponent(scope.conversationId)}`,
                   });
                 },
               });
+            this.#browserAgentAuthority = new BrowserAgentAuthority(
+              this.#workbenchBrowserBroker,
+            );
+            this.#agentTurnRuntime?.configureBrowserAuthority(this.#browserAgentAuthority);
           },
           appHandler: async (request, response, address) => {
             if (await this.#handleBrowserFramePlatform(request, response, address)) return;
@@ -918,6 +939,7 @@ export class BackendApp {
         this.#browserBrokerOrigin = undefined;
         await this.#workbenchBrowserBroker?.shutdown().catch(() => undefined);
         this.#workbenchBrowserBroker = undefined;
+        this.#browserAgentAuthority = undefined;
         this.#workbenchObservationTargets.clear();
         throw error;
       }
@@ -930,7 +952,7 @@ export class BackendApp {
   async close(): Promise<void> {
     // Revoke every process-local authority synchronously before any fallible
     // asynchronous drain can yield or reject.
-    this.#agentTurnRuntime?.revokeAll();
+    await this.#agentTurnRuntime?.revokeAll();
     for (const sessionId of this.#mcpCapabilities.keys()) this.closeSession(sessionId);
     this.mcp?.revokeAll();
     this.#unsubscribeOpenCode?.();
@@ -968,6 +990,7 @@ export class BackendApp {
           listenerError ??= error;
         } finally {
           this.#workbenchBrowserBroker = undefined;
+          this.#browserAgentAuthority = undefined;
           this.#workbenchObservationTargets.clear();
         }
         try {
@@ -1128,15 +1151,16 @@ export class BackendApp {
           declared.scope.conversationId,
         );
         const conversation = this.productStore.getConversation(declared.scope.conversationId);
-        if (!runtime.session
-          || runtime.session.generation !== declared.scope.conversationGeneration
-          || conversation.owner.kind !== "project"
-          || conversation.owner.id !== declared.projectId) {
+        if (!workbenchObservationTargetMatches(
+          declared,
+          runtime.session?.generation ?? null,
+          conversation.owner,
+        ) || !this.#workbenchOwnerExists(conversation.owner)) {
           this.#workbenchObservationTargets.revoke(declared.scope);
           throw new BrowserFrameCapabilityError(409, "browser_conversation_stale");
         }
         browserWorkbenchObservationPage(response, request.method, {
-          projectId: declared.projectId,
+          owner: declared.owner,
           conversationId: declared.scope.conversationId,
           conversationGeneration: declared.scope.conversationGeneration,
         });
@@ -1181,7 +1205,7 @@ export class BackendApp {
       const cors = browserCorsHeaders(address.origin);
       if (bootstrap) {
         const result = frames.bootstrap(admission);
-        this.#agentTurnRuntime?.revokeAll();
+        await this.#agentTurnRuntime?.revokeAll();
         networkJsonWithHeaders(response, 201, {
           schemaVersion: 1,
           generation: result.generation,
@@ -1391,6 +1415,7 @@ export class BackendApp {
     const action = parts[4];
     if (parts.length > 5 || action && ![
       "open", "reload", "back", "screenshot", "close", "restart", "reconnect",
+      "takeover", "return",
     ].includes(action)) {
       return false;
     }
@@ -1461,11 +1486,24 @@ export class BackendApp {
       );
       const pageGeneration = exactBrowserInteger(body.pageGeneration, 0, Number.MAX_SAFE_INTEGER);
       const scope = await this.#currentBrowserScope(parts[2], conversationGeneration);
-      const dto = action === "reload" ? await broker.reload(scope, pageGeneration)
+      let dto: unknown;
+      if (action === "takeover" || action === "return") {
+        const authority = this.#browserAgentAuthority;
+        if (!authority) {
+          throw new ApiError(503, "browser_agent_unavailable", "Browser control is unavailable.");
+        }
+        dto = action === "takeover"
+          ? await authority.takeoverConversation(scope, pageGeneration)
+          : await authority.returnConversationToObserver(scope, pageGeneration);
+      } else if (action === "close") {
+        await this.#browserAgentAuthority?.revokeConversation(scope.conversationId);
+        dto = await broker.closeSession(scope, pageGeneration);
+      } else {
+        dto = action === "reload" ? await broker.reload(scope, pageGeneration)
         : action === "back" ? await broker.back(scope, pageGeneration)
-          : action === "close" ? await broker.closeSession(scope, pageGeneration)
-            : action === "restart" ? await broker.restart(scope, pageGeneration)
-              : await broker.reconnect(scope, pageGeneration);
+          : action === "restart" ? await broker.restart(scope, pageGeneration)
+            : await broker.reconnect(scope, pageGeneration);
+      }
       await this.#revalidateBrowserScope(scope);
       if (action === "close") this.#revokeWorkbenchObservationTargets(scope);
       privateApiJson(response, 200, dto);
@@ -1521,6 +1559,18 @@ export class BackendApp {
 
   #revokeWorkbenchObservationTargets(scope: BrowserConversationScope): void {
     this.#workbenchObservationTargets.revoke(scope);
+  }
+
+  #workbenchOwnerExists(owner: WorkbenchObservationOwner): boolean {
+    if (!this.productStore) return false;
+    try {
+      return owner.kind === "project"
+        ? this.productStore.getProject(owner.id).id === owner.id
+        : this.productStore.listModels({ includeArchived: true, includeTrashed: true })
+          .some((model) => model.id === owner.id);
+    } catch {
+      return false;
+    }
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2079,7 +2129,7 @@ const browserWorkbenchObservationPage = (
   response: ServerResponse,
   method: string | undefined,
   projection: Readonly<{
-    projectId: string;
+    owner: WorkbenchObservationOwner;
     conversationId: string;
     conversationGeneration: number;
   }>,
@@ -2089,15 +2139,15 @@ const browserWorkbenchObservationPage = (
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Riffology project observation</title>
+<title>Riffology owner observation</title>
 <style>body{margin:0;padding:48px;font:16px/1.5 system-ui,sans-serif;background:#fff;color:#1d1d1f}main{max-width:760px;margin:auto}h1{font-size:32px}dl{display:grid;grid-template-columns:max-content 1fr;gap:8px 20px}dt{color:#62666d}dd{margin:0;overflow-wrap:anywhere}</style>
 </head>
 <body>
-<main data-riff-observation="project">
+<main data-riff-observation="${projection.owner.kind}">
 <p>Riffology · read-only observation</p>
-<h1>Project workspace</h1>
+<h1>Owner workspace</h1>
 <dl>
-<dt>Project</dt><dd>${escapeObservationHtml(projection.projectId)}</dd>
+<dt>Owner</dt><dd>${projection.owner.kind === "model" ? "Model" : "Project"} · ${escapeObservationHtml(projection.owner.id)}</dd>
 <dt>Conversation</dt><dd>${escapeObservationHtml(projection.conversationId)}</dd>
 <dt>Generation</dt><dd>${projection.conversationGeneration}</dd>
 </dl>

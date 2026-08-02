@@ -2,7 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { ApiError } from "./errors.ts";
+import { canonicalJsonV2 } from "./canonical-json-v2.ts";
 import { isAgentToolName, type AgentToolName } from "./agent-tools.ts";
+import {
+  BROWSER_AGENT_ACTION_BUDGET,
+  BROWSER_AGENT_GRANT_TTL_MS,
+  browserAgentOperationCommitment,
+  isBrowserAgentToolName,
+} from "./browser-agent-tools.ts";
 import type { AgentStatus } from "./types.ts";
 
 export type OpenCodeReadiness = {
@@ -75,6 +82,11 @@ export type OpenCodeConversationRuntimeSnapshot = {
   scopedMcp: { label: "Riff tools"; status: "connected" | "disconnected" | "unavailable" };
 };
 
+export type OpenCodePermissionAuthority = Readonly<{
+  toolName: AgentToolName;
+  operationCommitment: string;
+}>;
+
 export type OpenCodeAssistantResponse = {
   messageId: string | null;
   text: string;
@@ -143,7 +155,13 @@ export interface OpenCodeConversationPort {
     publicRequestId: string,
     response: "once" | "reject",
     workspace: OpenCodeWorkspaceBinding,
+    expectedAuthority?: OpenCodePermissionAuthority,
   ): Promise<void>;
+  resolvePermissionAuthority?(
+    sessionId: string,
+    publicRequestId: string,
+    workspace: OpenCodeWorkspaceBinding,
+  ): Promise<OpenCodePermissionAuthority | null>;
   respondQuestion?(
     sessionId: string,
     publicRequestId: string,
@@ -198,6 +216,13 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     failureBoundaryId: string | null;
     scopedMcpScopeId: string | undefined;
   }>();
+  readonly #permissionAuthorities = new Map<string, Readonly<{
+    authority: OpenCodePermissionAuthority;
+    upstreamId: string;
+    messageId: string;
+    callId: string;
+    scopedToolName: string;
+  }>>();
   readonly #baseUrl?: URL;
   readonly #requestTimeoutMs: number;
   readonly #maxResponseBytes: number;
@@ -531,6 +556,9 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       ...permissions.map(runtimeUpstreamId).filter((id): id is string => Boolean(id)),
       ...questions.map(runtimeUpstreamId).filter((id): id is string => Boolean(id)),
     ].filter((value): value is string => Boolean(value));
+    for (const key of this.#permissionAuthorities.keys()) {
+      if (key.startsWith(`${sessionId}\u0000`)) this.#permissionAuthorities.delete(key);
+    }
     const interactions = [
       ...runtimePermissions(
         permissions,
@@ -540,6 +568,15 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         scopedBinding?.name,
         scopedBinding?.allowedTools ?? [],
         sensitiveValues,
+        (publicRequestId, proof) => {
+          this.#permissionAuthorities.set(
+            `${sessionId}\u0000${publicRequestId}`,
+            Object.freeze({
+              ...proof,
+              authority: Object.freeze({ ...proof.authority }),
+            }),
+          );
+        },
       ),
       ...runtimeQuestions(
         questions,
@@ -568,6 +605,9 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     const boundary = this.#runtimeBoundaries.get(sessionId);
     if (boundary && (!workspace || sameWorkspace(boundary.workspace, workspace))) {
       this.#runtimeBoundaries.delete(sessionId);
+      for (const key of this.#permissionAuthorities.keys()) {
+        if (key.startsWith(`${sessionId}\u0000`)) this.#permissionAuthorities.delete(key);
+      }
     }
   }
 
@@ -576,6 +616,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     publicRequestId: string,
     response: "once" | "reject",
     workspace?: OpenCodeWorkspaceBinding,
+    expectedAuthority?: OpenCodePermissionAuthority,
   ): Promise<void> {
     await this.#ensureReady(workspace);
     assertOpaqueId(sessionId, "OpenCode session ID");
@@ -588,14 +629,86 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       interaction.kind === "permission" && interaction.id === publicRequestId)) {
       throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
     }
+    const privateRecord = this.#permissionAuthorities.get(`${sessionId}\u0000${publicRequestId}`);
+    if (expectedAuthority && (!privateRecord
+      || privateRecord.authority.toolName !== expectedAuthority.toolName
+      || privateRecord.authority.operationCommitment !== expectedAuthority.operationCommitment)) {
+      throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+    }
     const requests = await this.#list("/permission", undefined, directory);
-    const upstream = upstreamRuntimeRequest(requests, "permission", sessionId, publicRequestId);
+    const upstream = expectedAuthority
+      ? privateRecord?.upstreamId ?? null
+      : upstreamRuntimeRequest(requests, "permission", sessionId, publicRequestId);
     if (!upstream) throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+    const currentPermission = requests.find((item) => item?.sessionID === sessionId
+      && runtimeUpstreamId(item) === upstream);
+    if (!currentPermission || expectedAuthority
+      && runtimeRequestId(
+        "permission",
+        sessionId,
+        upstream,
+        currentPermission,
+        expectedAuthority.operationCommitment,
+      ) !== publicRequestId) {
+      throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+    }
+    if (expectedAuthority) {
+      const boundary = this.#runtimeBoundaries.get(sessionId);
+      const scopedBinding = boundary?.scopedMcpScopeId
+        ? this.#scopedMcp.get(boundary.scopedMcpScopeId) : undefined;
+      const denyProof = (): never => {
+        this.#permissionAuthorities.delete(`${sessionId}\u0000${publicRequestId}`);
+        throw new ApiError(409, "interaction_not_pending", "The permission request is no longer pending for this turn.");
+      };
+      if (!boundary || !scopedBinding || !privateRecord
+        || privateRecord.upstreamId !== upstream
+        || currentPermission?.tool?.messageID !== privateRecord.messageId
+        || currentPermission?.tool?.callID !== privateRecord.callId) denyProof();
+      const messages = await this.#sessionMessages(
+        sessionId,
+        AbortSignal.timeout(this.#requestTimeoutMs),
+        directory,
+      );
+      const assistants = currentRuntimeAttempt(messages, boundary.userMessageId, boundary);
+      const evidence = assistantToolCalls(assistants)
+        .get(`${privateRecord.messageId}\u0000${privateRecord.callId}`);
+      const exactTool = evidence
+        ? exactScopedToolName(evidence.tool, scopedBinding.name, scopedBinding.allowedTools)
+        : null;
+      let currentCommitment: string | null = null;
+      if (exactTool && isBrowserAgentToolName(exactTool)
+        && evidence?.inputSource === "state") {
+        try {
+          currentCommitment = browserAgentOperationCommitment(
+            exactTool,
+            runtimeToolInput(evidence?.input),
+          ).digest;
+        } catch { currentCommitment = null; }
+      }
+      if (!evidence || evidence.tool !== privateRecord.scopedToolName
+        || exactTool !== privateRecord.authority.toolName
+        || currentCommitment !== privateRecord.authority.operationCommitment
+        || privateRecord.authority.toolName !== expectedAuthority.toolName
+        || privateRecord.authority.operationCommitment !== expectedAuthority.operationCommitment) {
+        denyProof();
+      }
+    }
     await this.#assertSessionWorkspace(sessionId, directory);
     await this.#json(`/permission/${encodeURIComponent(upstream)}/reply`, {
       method: "POST",
       body: JSON.stringify({ reply: response }),
     }, directory);
+  }
+
+  async resolvePermissionAuthority(
+    sessionId: string,
+    publicRequestId: string,
+    workspace?: OpenCodeWorkspaceBinding,
+  ): Promise<OpenCodePermissionAuthority | null> {
+    const snapshot = await this.runtimeSnapshot(sessionId, undefined, workspace);
+    if (!snapshot.interactions.some((interaction) =>
+      interaction.kind === "permission" && interaction.id === publicRequestId)) return null;
+    return this.#permissionAuthorities.get(`${sessionId}\u0000${publicRequestId}`)?.authority ?? null;
   }
 
   async respondQuestion(
@@ -680,7 +793,16 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     }
     await this.#json("/mcp", {
       method: "POST",
-      body: JSON.stringify({ name, config: { type: "remote", url: safeMcpUrl, enabled: true, oauth: false, timeout: 10_000 } }),
+      body: JSON.stringify({
+        name,
+        config: {
+          type: "remote",
+          url: safeMcpUrl,
+          enabled: true,
+          oauth: false,
+          timeout: BROWSER_AGENT_GRANT_TTL_MS + 5_000,
+        },
+      }),
     }, directory);
     const connected = await this.#request(
       `/mcp/${encodeURIComponent(name)}/connect`,
@@ -1613,8 +1735,10 @@ const runtimeRequestId = (
   sessionId: string,
   upstreamId: string,
   item: any,
+  operationCommitment?: string,
 ): string => `${kind}_${createHash("sha256")
-  .update(`${kind}\u0000${sessionId}\u0000${upstreamId}\u0000${runtimeRequestCommitment(kind, item)}`)
+  .update(`${kind}\u0000${sessionId}\u0000${upstreamId}\u0000${runtimeRequestCommitment(kind, item)}`
+    + `\u0000${operationCommitment ?? ""}`)
   .digest("hex")
   .slice(0, 32)}`;
 
@@ -1641,6 +1765,16 @@ const runtimePermissions = (
   scopedMcpName: string | undefined,
   allowedTools: readonly AgentToolName[],
   sensitiveValues: readonly string[],
+  recordAuthority: (
+    publicRequestId: string,
+    proof: Readonly<{
+      upstreamId: string;
+      messageId: string;
+      callId: string;
+      scopedToolName: string;
+      authority: OpenCodePermissionAuthority;
+    }>,
+  ) => void,
 ): OpenCodeRuntimeInteraction[] => {
   if (!scopedMcpName) return [];
   const allowedCalls = assistantToolCalls(assistants);
@@ -1649,17 +1783,59 @@ const runtimePermissions = (
     const upstreamId = runtimeUpstreamId(item);
     const ownerMessageId = String(item?.tool?.messageID ?? "");
     const callId = String(item?.tool?.callID ?? "");
-    const tool = allowedCalls.get(`${ownerMessageId}\u0000${callId}`);
+    const call = allowedCalls.get(`${ownerMessageId}\u0000${callId}`);
+    const tool = call?.tool;
     if (item?.sessionID !== sessionId || !upstreamId || !assistantMessageIds.has(ownerMessageId)
       || !isExactScopedTool(tool, scopedMcpName, allowedTools)
       || !validPermissionRequest(item)) continue;
+    const exactTool = exactScopedToolName(tool, scopedMcpName, allowedTools);
+    if (!exactTool) continue;
+    let operationCommitment: string | undefined;
+    let browserAliasSummary = "fixed active grant alias (riff-app, riff-visual, or riff-artifact)";
+    if (isBrowserAgentToolName(exactTool)) {
+      if (call?.inputSource !== "state") continue;
+      try {
+        const committed = browserAgentOperationCommitment(
+          exactTool,
+          runtimeToolInput(call?.input),
+        );
+        operationCommitment = committed.digest;
+        if (exactTool === "browser_open") {
+          browserAliasSummary = `alias ${String(committed.normalized.alias)}`;
+        }
+      } catch { continue; }
+    }
     const label = publicToolLabel(tool, scopedMcpName) ?? "Riff tool";
+    const browserSummary = isBrowserAgentToolName(exactTool)
+      ? `Allow Browser control for this turn? Target ${browserAliasSummary}; operation ${exactTool}; `
+        + `budget ${BROWSER_AGENT_ACTION_BUDGET}; expires within `
+        + `${Math.floor(BROWSER_AGENT_GRANT_TTL_MS / 1_000)} seconds.`
+      : `Allow ${label} once for the current turn?`;
+    const publicRequestId = runtimeRequestId(
+      "permission",
+      sessionId,
+      upstreamId,
+      item,
+      operationCommitment,
+    );
+    if (isBrowserAgentToolName(exactTool)) {
+      recordAuthority(publicRequestId, Object.freeze({
+        upstreamId,
+        messageId: ownerMessageId,
+        callId,
+        scopedToolName: tool!,
+        authority: Object.freeze({
+          toolName: exactTool,
+          operationCommitment: operationCommitment!,
+        }),
+      }));
+    }
     result.push({
-      id: runtimeRequestId("permission", sessionId, upstreamId, item),
+      id: publicRequestId,
       kind: "permission",
       title: "Permission required",
       permission: safeOptionalPublicText(
-        `Allow ${label} once for the current turn?`,
+        browserSummary,
         500,
         sensitiveValues,
       ) ?? "Allow this Riff tool once for the current turn?",
@@ -1684,7 +1860,7 @@ const runtimeQuestions = (
     const callId = String(item?.tool?.callID ?? "");
     if (item?.sessionID !== sessionId || !upstreamId || !Array.isArray(item.questions)
       || !assistantMessageIds.has(ownerMessageId)
-      || allowedCalls.get(`${ownerMessageId}\u0000${callId}`) !== "question") continue;
+      || allowedCalls.get(`${ownerMessageId}\u0000${callId}`)?.tool !== "question") continue;
     const questions = item.questions.slice(0, 16).flatMap((question: any, questionIndex: number) => {
       const header = safeOptionalPublicText(question?.header, 100, sensitiveValues);
       const text = safeOptionalPublicText(question?.question, 2_000, sensitiveValues);
@@ -1754,12 +1930,19 @@ const runtimeTools = (
   return [...latest.values()];
 };
 
+const exactScopedToolName = (
+  value: string | null | undefined,
+  scopedMcpName: string | undefined,
+  allowedTools: readonly AgentToolName[],
+): AgentToolName | null => scopedMcpName && value
+  ? allowedTools.find((tool) => value === `${scopedMcpName}_${tool}`) ?? null
+  : null;
+
 const isExactScopedTool = (
   value: string | null | undefined,
   scopedMcpName: string | undefined,
   allowedTools: readonly AgentToolName[],
-): boolean => Boolean(scopedMcpName && value
-  && allowedTools.some((tool) => value === `${scopedMcpName}_${tool}`));
+): boolean => exactScopedToolName(value, scopedMcpName, allowedTools) !== null;
 
 const currentRuntimeAttempt = (
   messages: any[],
@@ -1911,55 +2094,100 @@ const publicToolLabel = (value: unknown, scopedMcpName: string | undefined): str
   return "Agent tool";
 };
 
-const assistantToolCalls = (assistants: any[]): Map<string, string> => {
-  const result = new Map<string, string>();
+const assistantToolCalls = (
+  assistants: any[],
+): Map<string, {
+  tool: string;
+  input: Readonly<Record<string, unknown>>;
+  inputSource: "state" | "legacy_part" | "empty";
+} | null> => {
+  const result = new Map<string, {
+    tool: string;
+    input: Readonly<Record<string, unknown>>;
+    inputSource: "state" | "legacy_part" | "empty";
+  } | null>();
   for (const assistant of assistants) {
     const ownerMessageId = messageId(assistant);
     if (!ownerMessageId || !Array.isArray(assistant.parts)) continue;
     for (const part of assistant.parts) {
       const callId = boundedOpaqueRuntimeValue(part?.callID ?? part?.callId, 500);
       const tool = boundedOpaqueRuntimeValue(part?.tool, 500);
-      if (part?.type === "tool" && callId && tool) {
-        result.set(`${ownerMessageId}\u0000${callId}`, tool);
+      const state = part?.state;
+      const stateInput = state && typeof state === "object" && !Array.isArray(state)
+        && Object.hasOwn(state, "input")
+        && state.input && typeof state.input === "object" && !Array.isArray(state.input)
+        ? state.input as Readonly<Record<string, unknown>> : null;
+      // OpenCode versions before the pinned state.input projection exposed
+      // non-Browser tool input on the part (or omitted it for inputless tools).
+      // Keep that compatibility for ordinary Riff/question projection only.
+      const legacyInput = part?.input && typeof part.input === "object" && !Array.isArray(part.input)
+        ? part.input as Readonly<Record<string, unknown>> : null;
+      const input = stateInput ?? legacyInput ?? Object.freeze({});
+      if (part?.type === "tool" && callId && tool && input) {
+        const key = `${ownerMessageId}\u0000${callId}`;
+        // Duplicate assistant evidence is ambiguous. Never let a later part win.
+        result.set(key, result.has(key) ? null : {
+          tool,
+          input,
+          inputSource: stateInput ? "state" : legacyInput ? "legacy_part" : "empty",
+        });
       }
     }
   }
   return result;
 };
 
+const runtimeToolInput = (value: unknown): Readonly<Record<string, unknown>> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid browser tool input");
+  }
+  return value as Readonly<Record<string, unknown>>;
+};
+
 const runtimeRequestCommitment = (
   kind: "permission" | "question",
   item: any,
-): string => JSON.stringify(kind === "permission"
+): string => canonicalJsonV2(kind === "permission"
   ? {
-      permission: typeof item?.permission === "string" ? item.permission : null,
-      patterns: item?.patterns,
-      always: item?.always,
+      permission: boundedCommitmentText(item?.permission, 500),
+      patterns: boundedCommitmentStrings(item?.patterns, 256, 4_000),
+      always: boundedCommitmentStrings(item?.always, 256, 4_000),
       tool: {
-        messageID: typeof item?.tool?.messageID === "string" ? item.tool.messageID : null,
-        callID: typeof item?.tool?.callID === "string" ? item.tool.callID : null,
+        messageID: boundedCommitmentText(item?.tool?.messageID, 500),
+        callID: boundedCommitmentText(item?.tool?.callID, 500),
       },
     }
   : {
       tool: {
-        messageID: typeof item?.tool?.messageID === "string" ? item.tool.messageID : null,
-        callID: typeof item?.tool?.callID === "string" ? item.tool.callID : null,
+        messageID: boundedCommitmentText(item?.tool?.messageID, 500),
+        callID: boundedCommitmentText(item?.tool?.callID, 500),
       },
       questions: Array.isArray(item?.questions)
         ? item.questions.slice(0, 16).map((question: any) => ({
-            header: typeof question?.header === "string" ? question.header : null,
-            question: typeof question?.question === "string" ? question.question : null,
+            header: boundedCommitmentText(question?.header, 100),
+            question: boundedCommitmentText(question?.question, 2_000),
             multiple: question?.multiple === true,
             custom: question?.custom !== false,
             options: Array.isArray(question?.options)
               ? question.options.slice(0, 32).map((option: any) => ({
-                  label: typeof option?.label === "string" ? option.label : null,
-                  description: typeof option?.description === "string" ? option.description : null,
+                  label: boundedCommitmentText(option?.label, 200),
+                  description: boundedCommitmentText(option?.description, 1_000),
                 }))
               : [],
           }))
         : [],
-    });
+    }).toString("utf8");
+
+const boundedCommitmentText = (value: unknown, maximum: number): string | null =>
+  typeof value === "string" && value.length > 0 && value.length <= maximum
+    && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null;
+
+const boundedCommitmentStrings = (
+  value: unknown,
+  maximumItems: number,
+  maximumItemLength: number,
+): readonly string[] | null => boundedStringArray(value, maximumItems, maximumItemLength)
+  ? Object.freeze([...(value as string[])]) : null;
 
 const validPermissionRequest = (item: any): boolean =>
   boundedOpaqueRuntimeValue(item?.permission, 500) !== null

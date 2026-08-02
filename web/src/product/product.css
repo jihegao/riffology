@@ -1152,7 +1152,34 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   white-space: nowrap;
 }
 .riffology-trust-state { border-color: #afcfc4; color: #22604e; background: #edf6f1; }
-.riffology-agent-state:disabled { opacity: 1; }
+.riffology-agent-menu { position: relative; flex: 0 0 auto; }
+.riffology-agent-state[aria-expanded="true"] { border-color: #245f50; box-shadow: 0 0 0 2px #afcfc466; }
+.riffology-agent-menu-popover {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 196px;
+  gap: 4px;
+  border: 1px solid #cbd4cf;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fff;
+  box-shadow: 0 12px 30px #17232124;
+}
+.riffology-agent-menu-popover button {
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 9px;
+  color: #263632;
+  background: transparent;
+  text-align: left;
+}
+.riffology-agent-menu-popover button:hover:not(:disabled),
+.riffology-agent-menu-popover button:focus-visible { background: #edf6f1; outline: 2px solid #2d7461; outline-offset: -2px; }
+.riffology-agent-menu-popover button:disabled { color: #909a96; }
+.riffology-agent-budget, .riffology-agent-menu-status { padding: 4px 9px 7px; color: #53635e; font-size: .66rem; }
 .riffology-file-toggle { border-color: #245f50; color: #fff; background: #245f50; font-weight: 750; }
 .riffology-file-toggle:disabled { border-color: #cbd4cf; color: #87918d; background: #f4f4f1; }
 .riffology-workbench-brand {

@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { AgentTurnRuntime } from "../src/agent-turn-runtime.ts";
 import { AgentWorkspaceService } from "../src/agent-workspace-service.ts";
+import {
+  BrowserAgentAuthority,
+  BrowserAgentAuthorityError,
+} from "../src/browser-agent-authority.ts";
+import { browserAgentOperationCommitment } from "../src/browser-agent-tools.ts";
+import {
+  LocalBrowserBroker,
+  registerLocalBrowserTarget,
+} from "../src/local-browser-broker.ts";
 import type {
   OpenCodeAssistantResponse,
   OpenCodeConversationPort,
@@ -27,11 +38,14 @@ class ControlledOpenCode implements OpenCodeConversationPort {
   readonly holds = new Map<string, Deferred>();
   readonly aborted: string[] = [];
   readonly permissionResponses: string[] = [];
+  readonly permissionDecisions: Array<"once" | "reject"> = [];
   readonly returned = new Set<string>();
   readonly creating: string[] = [];
   readonly controlWorkspaces: OpenCodeWorkspaceBinding[] = [];
   cleanupHold?: Deferred;
   createHold?: Deferred;
+  onAbort?: () => void;
+  permissionAuthority: { toolName: "browser_open"; operationCommitment: string } | null = null;
   #nextSession = 0;
 
   hold(text: string): Deferred { const value = deferred(); this.holds.set(text, value); return value; }
@@ -74,6 +88,7 @@ class ControlledOpenCode implements OpenCodeConversationPort {
     };
   }
   async abort(sessionId: string, workspace: OpenCodeWorkspaceBinding): Promise<void> {
+    this.onAbort?.();
     this.controlWorkspaces.push(workspace);
     this.aborted.push(sessionId);
   }
@@ -101,17 +116,21 @@ class ControlledOpenCode implements OpenCodeConversationPort {
   async respondPermission(
     _sessionId: string,
     publicRequestId: string,
-    _response: "once" | "reject",
+    response: "once" | "reject",
     workspace: OpenCodeWorkspaceBinding,
   ): Promise<void> {
     this.controlWorkspaces.push(workspace);
     this.permissionResponses.push(publicRequestId);
+    this.permissionDecisions.push(response);
+  }
+  async resolvePermissionAuthority(): Promise<typeof this.permissionAuthority> {
+    return this.permissionAuthority;
   }
 }
 
-const waitFor = async (predicate: () => boolean): Promise<void> => {
+const waitFor = async (predicate: () => boolean | Promise<boolean>): Promise<void> => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail("timed out waiting for concurrent turn state");
@@ -259,4 +278,317 @@ test("turn controls close at durable terminal state and serialize Stop ahead of 
     );
     assert.equal((await stoppedDuringSetup).turn.state, "failed");
   } finally { store.close(); rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("native OpenCode Browser permission is rejected and cannot bypass the Riffology pending gate", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-native-browser-permission-"));
+  const store = ProductStoreV2.open(join(parent, "store"));
+  const openCode = new ControlledOpenCode();
+  openCode.permissionAuthority = {
+    toolName: "browser_open",
+    operationCommitment: "a".repeat(64),
+  };
+  const service = new AgentWorkspaceService(
+    store,
+    openCode,
+    () => "2026-07-22T09:00:00.000Z",
+  );
+  try {
+    const created = await service.createModel({
+      commandId: "native-browser-model-command",
+      name: "Native permission",
+      providerId: "provider",
+      modelId: "model",
+    });
+    const hold = openCode.hold("native browser permission");
+    const running = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-native-browser",
+      text: "native browser permission",
+    });
+    await waitFor(() => openCode.starts.some((item) => item.text === "native browser permission"));
+    await assert.rejects(
+      service.resumeTurn({
+        conversationId: created.conversation.id,
+        requestKey: "request-native-browser",
+        interactionId: "permission_public",
+        response: { kind: "permission", decision: "once" },
+      }),
+      (error: any) => error?.code === "browser_permission_gate_required",
+    );
+    assert.deepEqual(openCode.permissionDecisions, ["reject"]);
+    const stopping = service.stopTurn(created.conversation.id, "request-native-browser");
+    hold.resolve();
+    await stopping;
+    await running;
+  } finally {
+    store.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("stopTurn synchronously revokes an in-flight Browser wait before OpenCode abort", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-agent-stop-browser-"));
+  const store = ProductStoreV2.open(join(parent, "store"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end("<!doctype html><title>Stop Browser fixture</title><button aria-label='Ready'>Ready</button>");
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "::1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://localhost:${address.port}`;
+  const broker = new LocalBrowserBroker({
+    resolveTarget: (alias) => registerLocalBrowserTarget({
+      alias,
+      url: `${origin}/control`,
+      projectedUrl: `${alias}://control`,
+    }),
+  });
+  const authority = new BrowserAgentAuthority(broker);
+  const openCode = new ControlledOpenCode();
+  let prepared: { turnId: string; workspace: OpenCodeWorkspaceBinding } | null = null;
+  let revocationStarted = false;
+  const events: string[] = [];
+  const controlledRuntime = {
+    async prepare(input: any) {
+      prepared = { turnId: input.turnId, workspace: input.workspace };
+      await authority.prepareDormant({
+        scope: { conversationId: input.conversationId, conversationGeneration: 1 },
+        turnId: input.turnId,
+        workspace: input.workspace,
+        target: "riff-app",
+        operations: new Set(["browser_open", "browser_wait"] as const),
+        budget: 4,
+      });
+      return Object.freeze({
+        capability: "test-browser-capability",
+        turnId: input.turnId,
+        externalSessionGeneration: 1,
+        intentAuthority: "explicit" as const,
+        requiresMcp: false,
+        allowedTools: Object.freeze([]),
+        context: { attachments: [], documents: [], selectedSkills: [] },
+        promptAttachments: [],
+        release: async () => authority.revokeTurn(input.conversationId, input.turnId),
+      });
+    },
+    revokeBrowserTurn(conversationId: string, turnId: string) {
+      revocationStarted = true;
+      events.push("browser-revoke");
+      return authority.revokeTurn(conversationId, turnId);
+    },
+  } as unknown as AgentTurnRuntime;
+  const service = new AgentWorkspaceService(
+    store,
+    openCode,
+    () => "2026-07-22T09:00:00.000Z",
+    undefined,
+    controlledRuntime,
+  );
+  try {
+    const created = await service.createModel({
+      commandId: "stop-browser-model-command",
+      name: "Stop Browser",
+      providerId: "provider",
+      modelId: "model",
+    });
+    const hold = openCode.hold("wait in browser");
+    const running = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-stop-browser",
+      text: "wait in browser",
+    });
+    await waitFor(() => openCode.starts.some((item) => item.text === "wait in browser"));
+    assert.ok(prepared);
+    const common = {
+      conversationId: created.conversation.id,
+      turnId: prepared.turnId,
+      externalSessionGeneration: 1,
+    };
+    const activate = async (tool: "browser_open" | "browser_wait", input: Record<string, unknown>) =>
+      authority.activatePermission({
+        ...common,
+        workspace: prepared!.workspace,
+        tool,
+        operationCommitment: browserAgentOperationCommitment(tool, input).digest,
+      });
+    await activate("browser_open", { alias: "riff-app" });
+    await authority.execute({
+      ...common,
+      tool: "browser_open",
+      arguments: { alias: "riff-app" },
+    });
+    await activate("browser_wait", { milliseconds: 2_000 });
+    const waiting = authority.execute({
+      ...common,
+      tool: "browser_wait",
+      arguments: { milliseconds: 2_000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    openCode.onAbort = () => {
+      events.push("opencode-abort");
+      assert.equal(revocationStarted, true,
+        "Browser grant must be synchronously invalidated before OpenCode abort is observed");
+    };
+    const stopping = service.stopTurn(created.conversation.id, "request-stop-browser");
+    await assert.rejects(
+      waiting,
+      (error: unknown) => error instanceof BrowserAgentAuthorityError
+        && error.code === "browser_control_stale",
+    );
+    const stopped = await stopping;
+    assert.equal(stopped.turnActive, false);
+    assert.deepEqual(events.slice(0, 2), ["browser-revoke", "opencode-abort"]);
+    await assert.rejects(
+      activate("browser_wait", { milliseconds: 50 }),
+      (error: unknown) => error instanceof BrowserAgentAuthorityError
+        && error.code === "browser_grant_unavailable",
+    );
+    await assert.rejects(
+      authority.execute({
+        ...common,
+        tool: "browser_wait",
+        arguments: { milliseconds: 2_000 },
+      }),
+      (error: unknown) => error instanceof BrowserAgentAuthorityError
+        && error.code === "browser_grant_unavailable",
+    );
+    assert.equal((await running).turn.state, "failed");
+    hold.resolve();
+  } finally {
+    await broker.shutdown();
+    await new Promise<void>((resolve) => {
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
+    store.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("Conversation runtime projects and resolves a server-owned Browser permission without OpenCode permission reply", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-agent-browser-permission-"));
+  const store = ProductStoreV2.open(join(parent, "store"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end("<!doctype html><title>Permission fixture</title><button aria-label='Ready'>Ready</button>");
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "::1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const broker = new LocalBrowserBroker({
+    resolveTarget: (alias) => registerLocalBrowserTarget({
+      alias,
+      url: `http://localhost:${address.port}/control`,
+      projectedUrl: `${alias}://control`,
+    }),
+  });
+  const authority = new BrowserAgentAuthority(broker);
+  const openCode = new ControlledOpenCode();
+  let prepared: { turnId: string; workspace: OpenCodeWorkspaceBinding } | null = null;
+  const controlledRuntime = {
+    async prepare(input: any) {
+      prepared = { turnId: input.turnId, workspace: input.workspace };
+      await authority.prepareDormant({
+        scope: { conversationId: input.conversationId, conversationGeneration: 1 },
+        turnId: input.turnId,
+        workspace: input.workspace,
+        operations: new Set(["browser_open"] as const),
+      });
+      return Object.freeze({
+        capability: "test-browser-pending-capability",
+        turnId: input.turnId,
+        externalSessionGeneration: 1,
+        intentAuthority: "explicit" as const,
+        requiresMcp: false,
+        allowedTools: Object.freeze([]),
+        context: { attachments: [], documents: [], selectedSkills: [] },
+        promptAttachments: [],
+        release: async () => authority.revokeTurn(input.conversationId, input.turnId),
+      });
+    },
+    async browserPendingInteractions(conversationId: string, turnId: string) {
+      return (await authority.pendingForTurn(conversationId, turnId)).map((item) => ({
+        id: item.id,
+        kind: "permission" as const,
+        title: "Permission required",
+        permission: `Allow ${item.tool} once for ${item.targetSummary}?`,
+      }));
+    },
+    async respondBrowserPermission(input: any) {
+      const pending = await authority.pendingForTurn(input.conversationId, input.turnId);
+      if (!pending.some((item) => item.id === input.id)) return false;
+      if (input.decision === "once") await authority.approvePending(input);
+      else await authority.rejectPending(input);
+      return true;
+    },
+    revokeBrowserTurn(conversationId: string, turnId: string) {
+      return authority.revokeTurn(conversationId, turnId);
+    },
+  } as unknown as AgentTurnRuntime;
+  const service = new AgentWorkspaceService(
+    store,
+    openCode,
+    () => "2026-07-22T09:00:00.000Z",
+    undefined,
+    controlledRuntime,
+  );
+  try {
+    const created = await service.createModel({
+      commandId: "browser-permission-model-command",
+      name: "Browser permission",
+      providerId: "provider",
+      modelId: "model",
+    });
+    const hold = openCode.hold("open browser");
+    const running = service.runTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-browser-permission",
+      text: "open browser",
+    });
+    await waitFor(() => openCode.starts.some((item) => item.text === "open browser"));
+    assert.ok(prepared);
+    const opening = authority.execute({
+      conversationId: created.conversation.id,
+      turnId: prepared.turnId,
+      externalSessionGeneration: 1,
+      tool: "browser_open",
+      arguments: { alias: "riff-app" },
+    });
+    await waitFor(() => authority.pendingForTurn(
+      created.conversation.id,
+      prepared!.turnId,
+    ).then((items) => items.length === 1));
+    const runtime = await service.conversationRuntime(created.conversation.id);
+    assert.equal(runtime.status, "waiting_for_user");
+    const permission = runtime.interactions.find((item) => item.kind === "permission")!;
+    assert.match(permission.id, /^browser_permission_[0-9a-f]{32}$/u);
+    assert.doesNotMatch(JSON.stringify(permission), /commitment|digest|capability|localhost/iu);
+    await service.resumeTurn({
+      conversationId: created.conversation.id,
+      requestKey: "request-browser-permission",
+      interactionId: permission.id,
+      response: { kind: "permission", decision: "once" },
+    });
+    assert.equal((await opening as any).controlMode, "agent");
+    assert.deepEqual(openCode.permissionResponses, [],
+      "the Browser gate is owned by Riffology, not OpenCode permission state");
+    hold.resolve();
+    assert.equal((await running).turn.state, "complete");
+  } finally {
+    await broker.shutdown();
+    await new Promise<void>((resolve) => {
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
+    store.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
 });

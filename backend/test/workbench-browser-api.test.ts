@@ -11,7 +11,11 @@ import type {
   OpenCodeProviderModel,
   OpenCodeReadiness,
 } from "../src/opencode-adapter.ts";
-import { BackendApp, WorkbenchObservationTargetRegistry } from "../src/server.ts";
+import {
+  BackendApp,
+  WorkbenchObservationTargetRegistry,
+  workbenchObservationTargetMatches,
+} from "../src/server.ts";
 import { registerLocalBrowserTarget } from "../src/local-browser-broker.ts";
 
 const NOW = "2026-08-02T00:00:00.000Z";
@@ -20,15 +24,26 @@ test("default observation target tokens expire and revoke with their exact scope
   let now = 1_000;
   const registry = new WorkbenchObservationTargetRegistry(1_000, () => now);
   const scope = { conversationId: "conversation_registry", conversationGeneration: 4 };
-  const token = registry.register(scope, "project_registry");
+  const token = registry.register(scope, { kind: "project", id: "project_registry" });
   assert.equal(token.length, 43);
-  assert.equal(registry.resolve(token)?.projectId, "project_registry");
+  assert.deepEqual(registry.resolve(token)?.owner, { kind: "project", id: "project_registry" });
   now += 1_001;
   assert.equal(registry.resolve(token), null);
 
-  const revoked = registry.register(scope, "project_registry");
+  const revoked = registry.register(scope, { kind: "project", id: "project_registry" });
   registry.revoke(scope);
   assert.equal(registry.resolve(revoked), null);
+});
+
+test("observation targets bind exact Model or Project owner and reject cross-owner reuse", () => {
+  const scope = { conversationId: "conversation_owner", conversationGeneration: 6 };
+  const model = { scope, owner: { kind: "model" as const, id: "owner_same" } };
+  const project = { scope, owner: { kind: "project" as const, id: "owner_same" } };
+  assert.equal(workbenchObservationTargetMatches(model, 6, model.owner), true);
+  assert.equal(workbenchObservationTargetMatches(project, 6, project.owner), true);
+  assert.equal(workbenchObservationTargetMatches(model, 6, project.owner), false);
+  assert.equal(workbenchObservationTargetMatches(project, 6, model.owner), false);
+  assert.equal(workbenchObservationTargetMatches(model, 7, model.owner), false);
 });
 
 test("workbench Browser HTTP API admits only aliases and generation-fences observation", {
@@ -91,6 +106,7 @@ test("workbench Browser HTTP API admits only aliases and generation-fences obser
   );
   assert.equal(openedResponse.status, 200, await openedResponse.clone().text());
   const opened = await openedResponse.json() as any;
+  let current = opened;
   assert.equal(opened.conversationGeneration, 1);
   assert.equal(opened.projectedUrl, "riff-app://projects/project_browser_api");
   assert.equal(opened.trustState, "trusted_riff");
@@ -103,6 +119,34 @@ test("workbench Browser HTTP API admits only aliases and generation-fences obser
   );
   assert.equal(screenshot.status, 200, await screenshot.clone().text());
   assert.equal((await screenshot.json() as any).contentType, "image/png");
+
+  const takeoverResponse = await mutation(
+    network.app.origin,
+    browserSession,
+    "/api/conversations/conversation_browser_api/browser/takeover",
+    { conversationGeneration: 1, pageGeneration: current.pageGeneration },
+  );
+  assert.equal(takeoverResponse.status, 200, await takeoverResponse.clone().text());
+  current = await takeoverResponse.json() as any;
+  assert.equal(current.controlMode, "human");
+  assert.equal(current.recoveryState, "ready");
+  const returnResponse = await mutation(
+    network.app.origin,
+    browserSession,
+    "/api/conversations/conversation_browser_api/browser/return",
+    { conversationGeneration: 1, pageGeneration: current.pageGeneration },
+  );
+  assert.equal(returnResponse.status, 200, await returnResponse.clone().text());
+  current = await returnResponse.json() as any;
+  assert.equal(current.controlMode, "observer");
+
+  const looseTakeover = await mutation(
+    network.app.origin,
+    browserSession,
+    "/api/conversations/conversation_browser_api/browser/takeover",
+    { conversationGeneration: 1, pageGeneration: current.pageGeneration, capability: "caller" },
+  );
+  assert.equal(looseTakeover.status, 422);
 
   const callerUrl = await mutation(
     network.app.origin,
@@ -118,7 +162,7 @@ test("workbench Browser HTTP API admits only aliases and generation-fences obser
     network.app.origin,
     browserSession,
     "/api/conversations/conversation_browser_api/browser/reload",
-    { conversationGeneration: 1, pageGeneration: opened.pageGeneration },
+    { conversationGeneration: 1, pageGeneration: current.pageGeneration },
   );
   await targetPending;
   app.productStore!.bindAgentSession({
@@ -184,6 +228,20 @@ test("default riff-app observation never bootstraps the SPA or rotates the outer
   );
   assert.equal(state.status, 200, await state.clone().text());
   assert.equal((await state.json() as any).recoveryState, "ready");
+
+  const modelOpenedResponse = await mutation(
+    network.app.origin,
+    outerSession,
+    "/api/conversations/conversation_model_browser_api/browser/open",
+    { alias: "riff-app" },
+  );
+  assert.equal(modelOpenedResponse.status, 200, await modelOpenedResponse.clone().text());
+  const modelOpened = await modelOpenedResponse.json() as any;
+  assert.equal(
+    modelOpened.projectedUrl,
+    "riff-app://models/model_browser_api?conversation=conversation_model_browser_api",
+  );
+  assert.equal(modelOpened.trustState, "trusted_riff");
 });
 
 const seed = (app: BackendApp): void => {
@@ -241,6 +299,14 @@ const seed = (app: BackendApp): void => {
     providerModelId: "model-browser-api",
     createdAt: NOW,
   });
+  app.productStore!.createConversation({
+    id: "conversation_model_browser_api",
+    owner: { kind: "model", id: "model_browser_api" },
+    name: "Model Browser API conversation",
+    providerId: "provider-browser-api",
+    providerModelId: "model-browser-api",
+    createdAt: NOW,
+  });
   app.productStore!.createMessage({
     id: "message_browser_api_user",
     conversationId: "conversation_browser_api",
@@ -250,12 +316,29 @@ const seed = (app: BackendApp): void => {
     text: "Open the declared Riff page.",
     createdAt: NOW,
   });
+  app.productStore!.createMessage({
+    id: "message_model_browser_api_user",
+    conversationId: "conversation_model_browser_api",
+    ordinal: 0,
+    role: "user",
+    status: "complete",
+    text: "Open the declared Riff Model page.",
+    createdAt: NOW,
+  });
   app.productStore!.bindAgentSession({
     id: "session_browser_api_1",
     conversationId: "conversation_browser_api",
     expectedGeneration: 0,
     state: "available",
     externalSessionRef: "opaque-browser-api-1",
+    at: NOW,
+  });
+  app.productStore!.bindAgentSession({
+    id: "session_model_browser_api_1",
+    conversationId: "conversation_model_browser_api",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-model-browser-api-1",
     at: NOW,
   });
 };

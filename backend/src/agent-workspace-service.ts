@@ -23,6 +23,7 @@ import {
   type OpenCodeProviderModel,
   type OpenCodeWorkspaceBinding,
 } from "./opencode-adapter.ts";
+import { isBrowserAgentToolName } from "./browser-agent-tools.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import {
   experimentConfigurationRecordDigest,
@@ -145,10 +146,12 @@ export type ConversationRuntimeDto = Readonly<{
 
 type ActiveConversationTurn = {
   requestKey: string;
+  turnId: string;
   agentName: string | null;
   controller: AbortController;
   externalSessionRef: string | null;
   workspace: OpenCodeWorkspaceBinding | null;
+  externalSessionGeneration: number | null;
   mcpBound: boolean;
   controlState: "open" | "stopping" | "terminal";
   controlTail: Promise<void>;
@@ -1514,7 +1517,16 @@ export class AgentWorkspaceService {
       }
     }
     if (!active) upstream = this.#runtimeCache.get(conversationId) ?? null;
-    const interactions = controlsOpen ? upstream?.interactions ?? [] : [];
+    const browserInteractions = controlsOpen && active && this.turnRuntime
+      ? await this.turnRuntime.browserPendingInteractions(conversationId, active.turnId)
+      : [];
+    const interactions = controlsOpen
+      ? Object.freeze([
+          ...browserInteractions,
+          ...(upstream?.interactions ?? []).filter((candidate) =>
+            !browserInteractions.some((browser) => browser.id === candidate.id)),
+        ])
+      : [];
     const tools = upstream?.tools ?? [];
     const goalVerification = active
       ? null
@@ -1592,6 +1604,7 @@ export class AgentWorkspaceService {
     }
     const releaseControl = await this.#acquireTurnControl(active);
     let pending: Promise<AgentTurnResult> | undefined;
+    let browserRevocation: Promise<void> | undefined;
     try {
       if (this.#activeTurns.get(conversationId) !== active
         || active.requestKey !== requestKey
@@ -1600,6 +1613,13 @@ export class AgentWorkspaceService {
       }
       active.controlState = "stopping";
       pending = this.#pendingTurns.get(`${conversationId}\u0000${requestKey}`);
+      // revokeBrowserTurn begins by synchronously invalidating the Broker
+      // control epoch. Invoke it before either local or upstream OpenCode abort
+      // so an in-flight Browser action cannot complete after Stop.
+      browserRevocation = this.turnRuntime?.revokeBrowserTurn(
+        conversationId,
+        active.turnId,
+      );
       active.controller.abort(new ApiError(409, "opencode_session_aborted", "The user stopped the target Agent turn."));
       if (active.externalSessionRef && active.workspace) {
         void this.openCode.abort(active.externalSessionRef, active.workspace).catch(() => undefined);
@@ -1607,6 +1627,7 @@ export class AgentWorkspaceService {
     } finally {
       releaseControl();
     }
+    await browserRevocation?.catch(() => undefined);
     await pending?.catch(() => undefined);
     return this.conversationRuntime(conversationId);
   }
@@ -1669,6 +1690,19 @@ export class AgentWorkspaceService {
         || !active.workspace) {
         throw new ApiError(409, "turn_not_waiting", "The requested Agent turn is not waiting for this response.");
       }
+      if (input.response.kind === "permission"
+        && this.turnRuntime
+        && active.externalSessionGeneration !== null
+        && await this.turnRuntime.respondBrowserPermission({
+          id: interactionId,
+          conversationId,
+          turnId: active.turnId,
+          externalSessionGeneration: active.externalSessionGeneration,
+          workspace: active.workspace,
+          decision: input.response.decision,
+        })) {
+        return this.conversationRuntime(conversationId);
+      }
       if (!this.openCode.runtimeSnapshot) {
         throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode interaction controls are unavailable.");
       }
@@ -1688,12 +1722,42 @@ export class AgentWorkspaceService {
       }
       if (input.response.kind === "permission") {
         if (!this.openCode.respondPermission) throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode permission controls are unavailable.");
-        await this.openCode.respondPermission(
+        const authority = await this.openCode.resolvePermissionAuthority?.(
           active.externalSessionRef,
           interactionId,
-          input.response.decision,
           active.workspace,
-        );
+        ) ?? null;
+        const browserPermission = authority && isBrowserAgentToolName(authority.toolName)
+          ? authority : null;
+        if (browserPermission) {
+          // OpenCode's prompt-level tool enablement normally bypasses its native
+          // permission queue. If an operator configuration nevertheless creates
+          // one, it must never mint Browser authority outside the Riffology-owned
+          // pending gate. Reject upstream and revoke the turn fail-closed.
+          await this.turnRuntime?.revokeBrowserTurn(conversationId, active.turnId);
+          await this.openCode.respondPermission(
+            active.externalSessionRef,
+            interactionId,
+            "reject",
+            active.workspace,
+            browserPermission,
+          );
+          if (input.response.decision === "once") {
+            throw new ApiError(
+              409,
+              "browser_permission_gate_required",
+              "Browser control can only be approved through the Riffology permission gate.",
+            );
+          }
+        } else {
+          await this.openCode.respondPermission(
+            active.externalSessionRef,
+            interactionId,
+            input.response.decision,
+            active.workspace,
+            undefined,
+          );
+        }
       } else {
         if (!this.openCode.respondQuestion) throw new ApiError(503, "opencode_runtime_unavailable", "OpenCode question controls are unavailable.");
         await this.openCode.respondQuestion(
@@ -1838,10 +1902,12 @@ export class AgentWorkspaceService {
 
     const active = {
       requestKey,
+      turnId,
       agentName,
       controller: new AbortController(),
       externalSessionRef: null as string | null,
       workspace: null as OpenCodeWorkspaceBinding | null,
+      externalSessionGeneration: null as number | null,
       mcpBound: false,
       controlState: "open" as ActiveConversationTurn["controlState"],
       controlTail: Promise.resolve(),
@@ -1888,8 +1954,16 @@ export class AgentWorkspaceService {
       workspace = session.workspace;
       active.externalSessionRef = session.externalSessionRef;
       active.workspace = session.workspace;
+      active.externalSessionGeneration = session.generation;
       this.#assertTurnControlOpen(conversationId, active);
-      prepared = await this.turnRuntime?.prepare({ conversationId, turnId, text, attachmentIds: attachmentIds.map(boundedId), ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}) });
+      prepared = await this.turnRuntime?.prepare({
+        conversationId,
+        turnId,
+        text,
+        attachmentIds: attachmentIds.map(boundedId),
+        workspace: session.workspace,
+        ...(confirmedOperation ? { confirmedVisualInteraction: confirmedOperation } : {}),
+      });
       this.#assertTurnControlOpen(conversationId, active);
       if (prepared && prepared.externalSessionGeneration !== session.generation) {
         throw new ApiError(
@@ -2023,7 +2097,7 @@ export class AgentWorkspaceService {
           );
         } catch { /* durable terminal state remains authoritative */ }
       }
-      prepared?.release();
+      await prepared?.release();
       if (mcpBound && prepared && workspace) {
         await this.openCode.unbindScopedMcp?.(conversationId, workspace)
           .catch(() => undefined);

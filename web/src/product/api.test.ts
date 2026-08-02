@@ -594,6 +594,8 @@ describe("Product browser client", () => {
 
     const opened = await client.browserOpen("conversation / one", "riff-app");
     await client.browserReload("conversation / one", opened);
+    await client.browserTakeover("conversation / one", opened);
+    await client.browserReturn("conversation / one", opened);
     await client.browserScreenshot("conversation / one", opened);
 
     expect(calls[1]?.input).toBe(
@@ -605,9 +607,45 @@ describe("Product browser client", () => {
       conversationGeneration: 3,
       pageGeneration: 5,
     });
-    expect(calls[3]?.input).toContain(
+    expect(calls[3]?.input).toContain("/browser/takeover");
+    expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({
+      conversationGeneration: 3,
+      pageGeneration: 5,
+    });
+    expect(calls[4]?.input).toContain("/browser/return");
+    expect(calls[5]?.input).toContain(
       "conversationGeneration=3&pageGeneration=5",
     );
+  });
+
+  it("rejects Browser control projections with undeclared modes or fields", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response(JSON.stringify({
+        schemaVersion: 1,
+        generation: 1,
+        csrfToken: "csrf-token",
+        brokerOrigin: "http://localhost:8788",
+        expiresAt: "2026-08-02T00:15:00.000Z",
+      }), { status: 201 });
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        conversationGeneration: 3,
+        pageGeneration: 5,
+        projectedUrl: "riff-app://project",
+        trustState: "trusted_riff",
+        controlMode: "root",
+        remainingBudget: 3,
+        recoveryState: "ready",
+        canGoBack: false,
+        canReload: true,
+        expiresAt: "2026-08-02T00:15:00.000Z",
+        capability: "must-not-pass",
+      }), { status: 200 });
+    }));
+    await expect(new HttpProductClient().browserState("conversation-one"))
+      .rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("derives the exact visual host page from the bootstrapped platform origin", async () => {

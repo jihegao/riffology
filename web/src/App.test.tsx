@@ -1093,6 +1093,89 @@ describe("Stage 4 Product entry", () => {
     expect(productClient.browserReload).toHaveBeenCalled();
   });
 
+  it("polls Browser Agent control and exposes only the header Agent menu controls", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const observer = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 4,
+      pageGeneration: 20,
+      projectedUrl: "riff-app://projects/project-one?conversation=conversation-main",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: true,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    const agent = { ...observer, controlMode: "agent" as const, remainingBudget: 7 };
+    let current: any = observer;
+    let reads = 0;
+    productClient.browserState = vi.fn(async () => {
+      reads += 1;
+      if (reads === 2 && current.controlMode === "observer") current = agent;
+      return current;
+    });
+    productClient.browserOpen = vi.fn(async () => observer);
+    productClient.browserScreenshot = vi.fn(async (_conversationId, state) => ({
+      schemaVersion: 1 as const,
+      pageGeneration: state.pageGeneration,
+      contentType: "image/png" as const,
+      pngBase64: "iVBORw0KGgo=",
+    }));
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-menu",
+      status: "busy" as const,
+      activeTurn: { requestKey: "turn-menu-exact", canStop: true, canRetry: false },
+      parts: [],
+      pendingInteractions: [],
+      goalVerification: null,
+      agent: { selectedName: null, locked: true },
+      mcp: { state: "connected" as const, label: "Riff tools" },
+    }));
+    productClient.stopConversation = vi.fn(async () => ({}));
+    productClient.browserTakeover = vi.fn(async () => {
+      current = { ...observer, pageGeneration: 21, controlMode: "human" as const };
+      return current;
+    });
+    productClient.browserReturn = vi.fn(async () => {
+      current = { ...observer, pageGeneration: 22 };
+      return current;
+    });
+    render(<App client={productClient} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Agent 状态：控制中" }))
+      .toBeInTheDocument(), { timeout: 2_500 });
+    expect(screen.getByRole("button", { name: "后退" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: /控制/u })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Agent 状态：控制中" }));
+    expect(screen.getByText("剩余动作 7")).toBeInTheDocument();
+    const pause = screen.getByRole("menuitem", { name: "暂停当前轮次" });
+    await waitFor(() => expect(pause).toBeEnabled());
+    await user.click(pause);
+    expect(productClient.stopConversation).toHaveBeenCalledWith({
+      conversationId: "conversation-main",
+      requestKey: "turn-menu-exact",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Agent 状态：控制中" }));
+    await user.click(screen.getByRole("menuitem", { name: "人工接管浏览器" }));
+    expect(productClient.browserTakeover).toHaveBeenCalledWith("conversation-main", agent);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Agent 状态：人工" }))
+      .toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Agent 状态：人工" }));
+    await user.click(screen.getByRole("menuitem", { name: "交还为观察模式" }));
+    expect(productClient.browserReturn).toHaveBeenCalledWith(
+      "conversation-main",
+      expect.objectContaining({ controlMode: "human", pageGeneration: 21 }),
+    );
+  });
+
   it("renews an expired Browser Broker observation only through explicit alias open", async () => {
     history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
     const productClient = client();
