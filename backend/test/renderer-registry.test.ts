@@ -33,6 +33,13 @@ test("workbench HTML projection is isolated to declared inert documents", () => 
     "<img/onerror='alert(1)'>", "<p>nul\u0000byte</p>",
   ]) assert.throws(() => workbenchRendererDto(input(unsafe)), RendererRegistryError);
   assert.equal(workbenchRendererDto(input("<style>h1 { color: #245f50 }</style><h1>Styled</h1>")).kind, "safe_html");
+  assert.equal(workbenchRendererDto(input(
+    "<svg xmlns='http://www.w3.org/2000/svg'><defs><marker id='arrow'/></defs><line marker-end='url(#arrow)'/></svg>",
+  )).kind, "safe_html");
+  assert.throws(
+    () => workbenchRendererDto(input("<style>.x { background: url(https://example.invalid/pixel) }</style>")),
+    RendererRegistryError,
+  );
 });
 
 test("renderer registry selects only declared safe media and preserves active content as opaque", () => {

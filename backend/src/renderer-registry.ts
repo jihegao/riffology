@@ -142,12 +142,25 @@ const safeHtml = (html: string): void => {
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(html)) {
     throw new RendererRegistryError("HTML contains invalid control characters.");
   }
-  if (/<\/?(?:script|form|iframe|object|embed|base|meta|link|frame|frameset|portal|input|button|textarea|select|option|svg|math)\b/iu.test(html)
+  if (/<\/?(?:script|form|iframe|object|embed|base|link|frame|frameset|portal|input|button|textarea|select|option|math|foreignobject|animate(?:motion|transform)?|set|discard|mpath|use|image|audio|video)\b/iu.test(html)
+    || /<meta\b[^>]*\bhttp-equiv\s*=/iu.test(html)
     || /[\s/]on[a-z0-9_-]+\s*=/iu.test(html)
     || /\b(?:href|src|srcset|action|formaction|poster|data|background|cite|ping)\s*=/iu.test(html)
-    || /(?:\burl\s*\(|@import\b|\bexpression\s*\(|\bbehavior\s*:|-moz-binding\s*:)/iu.test(html)) {
+    || /(?:@import\b|\bexpression\s*\(|\bbehavior\s*:|-moz-binding\s*:)/iu.test(html)
+    || hasNonFragmentUrl(html)) {
     throw new RendererRegistryError("HTML contains active content or an external URL.");
   }
+};
+
+/** SVG definitions use local `url(#marker)` references. They cannot load a
+ * resource, and the preview iframe has an originless sandbox plus a no-network
+ * CSP. Any other CSS URL remains rejected. */
+const hasNonFragmentUrl = (html: string): boolean => {
+  const withoutLocalReferences = html.replace(
+    /\burl\s*\(\s*(?:["']\s*)?#[a-z][a-z0-9:_-]*(?:\s*["'])?\s*\)/giu,
+    "",
+  );
+  return /\burl\s*\(/iu.test(withoutLocalReferences);
 };
 
 const utf8 = (bytes: Uint8Array): string => {

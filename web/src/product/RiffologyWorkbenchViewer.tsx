@@ -121,7 +121,12 @@ export function RiffologyWorkbenchViewer({
           }
           return client.projectFileWorkbenchRenderable(workspace.owner.id, file.key.slice("workspace:".length));
         })()
-        : await client.modelRenderable(workspace.owner.id, file.key.slice("workspace:".length));
+        : client.modelWorkbenchRenderable
+          ? await client.modelWorkbenchRenderable(
+            workspace.owner.id,
+            file.key.slice("workspace:".length),
+          )
+          : await client.modelRenderable(workspace.owner.id, file.key.slice("workspace:".length));
       if (operation === request.current) setResource(next);
     } catch (cause) {
       if (operation === request.current) {

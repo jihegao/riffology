@@ -182,6 +182,12 @@ const addFixtureData = (app: BackendApp): void => {
       relativePath: "preview.html",
       mediaType: "text/html",
       bytes: Buffer.from("<script>globalThis.unsafe = true</script>\n"),
+    }, {
+      id: "file_a4_api_safe_html",
+      kind: "model_visual_asset",
+      relativePath: "diagram.html",
+      mediaType: "text/html",
+      bytes: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'><defs><marker id='arrow'/></defs><line marker-end='url(#arrow)'/></svg>\n"),
     }],
   });
   app.productStore!.createProjectFromModel({
@@ -393,6 +399,20 @@ test("A4-1 browser API exposes closed collections and replays confirmed delete a
   assert.equal(activeRenderable.reason, "active_content");
   assert.match(activeRenderable.sha256, /^[0-9a-f]{64}$/u);
   assert.equal(JSON.stringify(activeRenderable).includes("<script>"), false);
+  const unsafeWorkbenchRenderableResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/workbench-renderables/file_a4_api_active`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(unsafeWorkbenchRenderableResponse.status, 422);
+  const safeWorkbenchRenderableResponse = await fetch(
+    `${baseUrl}/api/models/model_a4_api/workbench-renderables/file_a4_api_safe_html`,
+    { headers: readHeaders(session) },
+  );
+  assert.equal(safeWorkbenchRenderableResponse.status, 200);
+  const safeWorkbenchRenderable = await safeWorkbenchRenderableResponse.json() as any;
+  assert.equal(safeWorkbenchRenderable.kind, "safe_html");
+  assert.equal(safeWorkbenchRenderable.title, "visuals/diagram.html");
+  assert.match(safeWorkbenchRenderable.html, /marker-end='url\(#arrow\)'/u);
   const activeDownloadResponse = await fetch(
     `${baseUrl}/api/models/model_a4_api/files/file_a4_api_active/download`,
     { headers: readHeaders(session) },

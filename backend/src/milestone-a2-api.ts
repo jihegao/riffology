@@ -563,6 +563,10 @@ export class MilestoneA2Api {
         privateJson(response, 200, this.service.modelRenderable(modelId, parts[4]));
         return true;
       }
+      if (request.method === "GET" && parts.length === 5 && parts[3] === "workbench-renderables") {
+        privateJson(response, 200, this.service.modelWorkbenchRenderable(modelId, parts[4]));
+        return true;
+      }
       if (request.method === "GET" && parts.length === 4
         && parts[3] === "generated-views") {
         privateJson(response, 200, this.service.generatedViews(modelId));

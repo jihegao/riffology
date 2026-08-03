@@ -442,13 +442,25 @@ export class AgentWorkspaceService {
   startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheckDto> { return this.technicalChecks.start(modelId, commandId); }
   getTechnicalCheck(modelId: string, checkId: string): TechnicalCheckDto { return this.technicalChecks.read(modelId, checkId); }
   modelRenderable(modelIdInput: string, fileIdInput: string): RendererDto {
+    return this.#modelRenderable(modelIdInput, fileIdInput, false);
+  }
+
+  modelWorkbenchRenderable(modelIdInput: string, fileIdInput: string): RendererDto {
+    return this.#modelRenderable(modelIdInput, fileIdInput, true);
+  }
+
+  #modelRenderable(
+    modelIdInput: string,
+    fileIdInput: string,
+    allowSafeHtml: boolean,
+  ): RendererDto {
     const modelId = boundedId(modelIdInput);
     const fileId = boundedId(fileIdInput);
     try {
       const workspace = this.modelWorkspace(modelId);
       const file = workspace.files.find((candidate) => candidate.id === fileId);
       if (!file) throw new ApiError(404, "resource_not_found", "The declared Model resource does not exist.");
-      return rendererDto({
+      return (allowSafeHtml ? workbenchRendererDto : rendererDto)({
         title: file.relativePath,
         mediaType: file.mediaType,
         sizeBytes: file.sizeBytes,

@@ -91,6 +91,7 @@ export interface ProductClient {
   workspace(kind: OwnerKind, id: string): Promise<WorkspaceDto>;
   startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheck>;
   modelRenderable(modelId: string, fileId: string): Promise<RendererResource>;
+  modelWorkbenchRenderable?(modelId: string, fileId: string): Promise<RendererResource>;
   generatedViews?(modelId: string): Promise<GeneratedViewSet | null>;
   generatedViewRenderable?(modelId: string, viewId: string): Promise<RendererResource>;
   modelChangeSets?(
@@ -402,6 +403,12 @@ export class HttpProductClient implements ProductClient {
   modelRenderable(modelId: string, fileId: string): Promise<RendererResource> {
     return this.#request(
       `/api/models/${encodeURIComponent(modelId)}/renderables/${encodeURIComponent(fileId)}`,
+    );
+  }
+
+  modelWorkbenchRenderable(modelId: string, fileId: string): Promise<RendererResource> {
+    return this.#request(
+      `/api/models/${encodeURIComponent(modelId)}/workbench-renderables/${encodeURIComponent(fileId)}`,
     );
   }
 
