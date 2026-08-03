@@ -1186,6 +1186,10 @@ describe("Stage 4 Product entry", () => {
 
     expect(await screen.findByRole("complementary", { name: "模型对话" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "模型文件与页面查看器" })).toBeInTheDocument();
+    const composerDock = await screen.findByTestId("conversation-composer-dock");
+    const modelSelection = await screen.findByLabelText("Model for this conversation");
+    expect(composerDock).toContainElement(modelSelection);
+    expect(modelSelection).toHaveValue("provider/model");
     await waitFor(() => expect(screen.getByLabelText("页面地址")).toHaveTextContent(
       "riff-app://models/model-one?conversation=conversation-main",
     ));

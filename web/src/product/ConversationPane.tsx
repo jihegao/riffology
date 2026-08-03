@@ -371,8 +371,27 @@ export function ConversationPane({
               : "Respond to, stop, or finish the active turn before starting another message."}
             sending={sending}
             bundle={activeBundle}
+            providers={providers}
             agents={agents}
             runtime={runtime}
+            onProviderChange={async (providerId, modelId) => {
+              const conversation = activeBundle.conversation;
+              setError(undefined);
+              try {
+                await client.changeConversationProvider({
+                  commandId: crypto.randomUUID(),
+                  conversationId: conversation.id,
+                  expectedRecordDigest: conversation.recordDigest,
+                  providerId,
+                  modelId,
+                });
+                await refreshConversation(conversation.id);
+              } catch (cause) {
+                if (selectedIdRef.current === conversation.id) {
+                  setError(messageOf(cause, "The model selection could not be updated."));
+                }
+              }
+            }}
             onSend={async (text, attachmentIds, agentName) => {
               const conversationId = activeBundle.conversation.id;
               setSendingConversationId(conversationId);
@@ -694,7 +713,7 @@ function ConversationControls({
           )}>Move to trash</button>
         </div>
       </details>
-      <div className="product-provider-binding">
+      {!compact && <div className="product-provider-binding">
         <strong>Provider / model</strong>
         {conversation.provider.locked ? (
           <p>
@@ -739,7 +758,7 @@ function ConversationControls({
             )}
           </form>
         )}
-      </div>
+      </div>}
     </section>
   );
 }
@@ -1203,21 +1222,29 @@ function Composer({
   disabledMessage,
   sending,
   bundle,
+  providers,
   agents,
   runtime,
+  onProviderChange,
   onSend,
 }: Readonly<{
   disabled: boolean;
   disabledMessage?: string;
   sending: boolean;
   bundle: ConversationBundle;
+  providers?: ProviderDiscovery;
   agents?: AgentDiscovery;
   runtime?: ConversationRuntimeProjection;
+  onProviderChange: (providerId: string, modelId: string) => Promise<void>;
   onSend: (text: string, attachmentIds: readonly string[], agentName?: string) => Promise<void>;
 }>) {
   const [text, setText] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
   const [agentName, setAgentName] = useState("");
+  const [providerPending, setProviderPending] = useState(false);
+  const providerOptions = providers?.mode === "live" ? providers.providerModels : [];
+  const selectedProvider = `${bundle.conversation.provider.providerId}/${bundle.conversation.provider.modelId}`;
+  const providerLocked = bundle.conversation.provider.locked;
   useEffect(() => {
     if (runtime?.agent.selectedName) setAgentName(runtime.agent.selectedName);
   }, [runtime?.agent.selectedName]);
@@ -1229,7 +1256,30 @@ function Composer({
       setText("");
       void onSend(accepted, attachmentIds, agentName || undefined);
     }}>
-      <label>
+      <label className="product-composer-model">
+        Model for this conversation
+        <select
+          aria-label="Model for this conversation"
+          value={selectedProvider}
+          disabled={disabled || sending || providerPending || providerLocked || providerOptions.length === 0}
+          title={providerLocked ? "Model selection is locked after the first accepted message." : undefined}
+          onChange={(event) => {
+            const selection = providerOptions.find((provider) => provider.qualifiedId === event.target.value);
+            if (!selection) return;
+            setProviderPending(true);
+            void onProviderChange(selection.providerId, selection.modelId)
+              .finally(() => setProviderPending(false));
+          }}
+        >
+          {!providerOptions.some((provider) => provider.qualifiedId === selectedProvider) && (
+            <option value={selectedProvider}>{selectedProvider}</option>
+          )}
+          {providerOptions.map((provider) => (
+            <option key={provider.qualifiedId} value={provider.qualifiedId}>{provider.qualifiedId}</option>
+          ))}
+        </select>
+      </label>
+      <label className="product-composer-agent">
         Agent for this turn
         <select
           value={agentName}
@@ -1247,7 +1297,7 @@ function Composer({
           Agent selection is locked for the active turn.
         </p>
       )}
-      <label>
+      <label className="product-composer-message">
         Message
         <textarea
           required
