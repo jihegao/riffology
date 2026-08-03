@@ -310,6 +310,14 @@ export class AgentMcpServer {
   readonly #grants = new Map<string, AgentToolGrant>();
   readonly #inFlightConsequential = new Set<string>();
   readonly #consumedConsequential = new Set<string>();
+  /**
+   * An allow-once commitment may be reached by OpenCode, then rejected before
+   * the executor starts because its arguments attempt to override server-owned
+   * scope or otherwise fail local validation.  That attempt did not consume a
+   * mutation budget.  Remember it so a fresh human approval for corrected,
+   * different arguments can replace only that rejected commitment.
+   */
+  readonly #rejectedBeforeExecutionConsequential = new Set<string>();
   readonly #executor: AgentToolExecutor;
   readonly #now: () => number;
   readonly #ttlMs: number;
@@ -317,7 +325,12 @@ export class AgentMcpServer {
   constructor(executor: AgentToolExecutor, options: { now?: () => number; ttlMs?: number } = {}) {
     this.#executor = executor;
     this.#now = options.now ?? Date.now;
-    this.#ttlMs = options.ttlMs ?? 10 * 60_000;
+    // Large, reviewable payloads (for example a standalone model-design HTML
+    // asset) can take several minutes for the provider to construct before the
+    // permission card is even presented. Keep the grant bounded, but leave a
+    // practical human review window; turn completion/stop still revokes it
+    // immediately and consequential authority remains exact-operation-only.
+    this.#ttlMs = options.ttlMs ?? 30 * 60_000;
   }
 
   grant(input: {
@@ -350,6 +363,7 @@ export class AgentMcpServer {
     this.#grants.delete(capability);
     this.#inFlightConsequential.delete(capability);
     this.#consumedConsequential.delete(capability);
+    this.#rejectedBeforeExecutionConsequential.delete(capability);
   }
 
   revokeConversation(conversationId: string): void {
@@ -366,6 +380,7 @@ export class AgentMcpServer {
     this.#grants.clear();
     this.#inFlightConsequential.clear();
     this.#consumedConsequential.clear();
+    this.#rejectedBeforeExecutionConsequential.clear();
   }
 
   authorizeConsequentialOperation(
@@ -382,11 +397,22 @@ export class AgentMcpServer {
       );
     }
     if (grant.operationCommitment) {
-      this.revoke(capability);
-      throw new AgentToolPermissionError(
-        "A competing consequential permission revoked this capability.",
-      );
+      if (grant.operationCommitment.tool === authority.toolName
+        && grant.operationCommitment.digest === authority.operationCommitment) {
+        // A response retry for the identical pending OpenCode permission is
+        // safe: it grants neither a different tool nor different arguments.
+        // This must remain idempotent so a delayed UI/network retry does not
+        // turn the original allow-once into a competing authorization.
+        return;
+      }
+      if (!this.#rejectedBeforeExecutionConsequential.has(capability)) {
+        this.revoke(capability);
+        throw new AgentToolPermissionError(
+          "A competing consequential permission revoked this capability.",
+        );
+      }
     }
+    this.#rejectedBeforeExecutionConsequential.delete(capability);
     grant.operationCommitment = Object.freeze({
       tool: authority.toolName,
       digest: authority.operationCommitment,
@@ -422,26 +448,37 @@ export class AgentMcpServer {
       if (!isAgentToolName(name) || !grant.allowedTools.has(name)) throw new AgentToolPermissionError("That Agent tool is not available in this scope.");
       const rawInput = record(params.arguments ?? {});
       const consequential = CONSEQUENTIAL_AGENT_TOOLS.has(name);
+      let consequentialCommitment: Readonly<{ tool: AgentToolName; digest: string }> | null = null;
       if (consequential && this.#consumedConsequential.has(capability!)) {
         throw new AgentToolPermissionError(
           "This turn's single consequential operation has already been consumed.",
         );
       }
       if (consequential) {
-        let commitment: Readonly<{ tool: AgentToolName; digest: string }> | null = null;
-        try { commitment = agentToolOperationCommitment(name, rawInput); }
+        try { consequentialCommitment = agentToolOperationCommitment(name, rawInput); }
         catch { /* stable permission failure below */ }
-        if (!commitment || grant.operationCommitment?.tool !== name
-          || grant.operationCommitment.digest !== commitment.digest) {
+        if (!consequentialCommitment || grant.operationCommitment?.tool !== name
+          || grant.operationCommitment.digest !== consequentialCommitment.digest) {
           throw new AgentToolPermissionError(
             "This exact consequential operation requires allow-once permission.",
           );
         }
       }
-      const input = normalizeToolInput(name, rawInput);
-      assertToolInputCannotOverrideScope(input);
-      validateInput(name, input);
+      let input: Record<string, unknown>;
+      try {
+        input = normalizeToolInput(name, rawInput);
+        assertToolInputCannotOverrideScope(input);
+        validateInput(name, input);
+      } catch (error) {
+        if (consequential && consequentialCommitment
+          && grant.operationCommitment?.tool === consequentialCommitment.tool
+          && grant.operationCommitment.digest === consequentialCommitment.digest) {
+          this.#rejectedBeforeExecutionConsequential.add(capability!);
+        }
+        throw error;
+      }
       if (consequential) {
+        this.#rejectedBeforeExecutionConsequential.delete(capability!);
         this.#inFlightConsequential.add(capability!);
         this.#consumedConsequential.add(capability!);
       }

@@ -13,6 +13,7 @@ import type {
 } from "./types";
 
 type WorkbenchRoute =
+  | Readonly<{ page: "home" }>
   | Readonly<{ page: "new"; workspaceKey: string }>
   | Readonly<{ page: "model"; modelId: string; conversationId?: string }>
   | Readonly<{ page: "project"; projectId: string; conversationId?: string }>
@@ -22,6 +23,9 @@ const createUnboundWorkspaceHref = () =>
   `/workbench/new/${crypto.randomUUID()}`;
 
 const readWorkbenchRoute = (): WorkbenchRoute => {
+  if (window.location.pathname === "/workbench/home" || window.location.pathname === "/workbench/home/") {
+    return { page: "home" };
+  }
   if (window.location.pathname === "/"
     || window.location.pathname === "/workbench"
     || window.location.pathname === "/workbench/"
@@ -85,6 +89,7 @@ export function RiffologyWorkbenchApp({
   client = defaultProductClient,
 }: Readonly<{ client?: ProductClient }>) {
   const [route, setRoute] = useState<WorkbenchRoute>(() => readWorkbenchRoute());
+  const [lastOwner, setLastOwner] = useState<Readonly<{ kind: "model" | "project"; id: string }>>();
   const [recovery, setRecovery] = useState<ProductRecoveryStatus | "checking">("checking");
   const [home, setHome] = useState<HomeDto>();
   const [workspace, setWorkspace] = useState<WorkspaceDto>();
@@ -183,6 +188,11 @@ export function RiffologyWorkbenchApp({
       window.removeEventListener("riff:workbench-navigation", update);
     };
   }, []);
+
+  useEffect(() => {
+    if (route.page === "project") setLastOwner({ kind: "project", id: route.projectId });
+    if (route.page === "model") setLastOwner({ kind: "model", id: route.modelId });
+  }, [route]);
 
   useEffect(() => {
     setRecovery("checking");
@@ -438,10 +448,19 @@ export function RiffologyWorkbenchApp({
     <div className="riffology-workbench-app">
       <a className="product-skip-link" href="#riffology-workbench-main">跳到主要内容</a>
       <header className="riffology-workbench-header">
-        <a href="/" className="riffology-workbench-brand" aria-label="Riffology 首页">
+        <a href="/workbench/home" className="riffology-workbench-brand" aria-label="Riffology 首页"
+          onClick={(event) => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+            event.preventDefault();
+            navigateWorkbench("/workbench/home");
+          }}>
           <span aria-hidden="true" className="riffology-workbench-mark">R</span>
           <strong>Riffology</strong>
         </a>
+        <button type="button" className="riffology-home-trigger" aria-label="打开项目与会话"
+          title="项目与会话" onClick={() => navigateWorkbench("/workbench/home")}>
+          <span aria-hidden="true"><i /><i /><i /><i /></span>
+        </button>
         <WorkbenchChrome
           route={route}
           authorityReady={recovery !== "checking" && recovery.state === "ready"}
@@ -465,14 +484,6 @@ export function RiffologyWorkbenchApp({
         />
       </header>
       <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
-        {recovery !== "checking" && recovery.state === "ready" && <ProjectRail
-          models={home?.models ?? []}
-          projects={home?.projects ?? []}
-          currentOwner={route.page === "project"
-            ? { kind: "project", id: route.projectId }
-            : route.page === "model" ? { kind: "model", id: route.modelId } : undefined}
-          unbound={route.page === "new"}
-        />}
         {recovery === "checking" && <WorkbenchState title="正在恢复工作台…" />}
         {recovery !== "checking" && recovery.state === "recovery_required" && (
           <WorkbenchState title="工作台需要恢复" detail="Riffology 当前不会接受工作区写入。" />
@@ -482,6 +493,8 @@ export function RiffologyWorkbenchApp({
         )}
         {recovery !== "checking" && recovery.state === "ready" && !error
           && route.page === "not_found" && <WorkbenchState title="没有这个工作台" />}
+        {recovery !== "checking" && recovery.state === "ready" && !error
+          && route.page === "home" && home && <RiffologyHome home={home} currentOwner={lastOwner} />}
         {recovery !== "checking" && recovery.state === "ready" && !error
           && route.page === "new" && !workspaceBinding && (
           <WorkbenchState title="正在载入项目引导…" />
@@ -689,47 +702,81 @@ const browserFingerprint = (state?: BrowserSessionDto): string => state
   ].join("\u0000")
   : "";
 
-function ProjectRail({ models, projects, currentOwner, unbound }: Readonly<{
-  models: readonly ModelSummary[];
-  projects: readonly ProjectSummary[];
+function RiffologyHome({ home, currentOwner }: Readonly<{
+  home: HomeDto;
   currentOwner?: Readonly<{ kind: "model" | "project"; id: string }>;
-  unbound: boolean;
 }>) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = (value: string) => !needle || value.toLocaleLowerCase().includes(needle);
+  const models = home.models.filter((model) => matches(model.name));
+  const projects = home.projects.filter((project) => matches(project.name));
+  const recent = (home.recentConversations ?? []).filter((conversation) =>
+    matches(conversation.name) || matches(conversation.owner.name));
   return (
-    <nav className="riffology-project-rail" aria-label="项目工作区">
-      <button type="button" className="riffology-new-project"
-        aria-current={unbound ? "page" : undefined}
-        onClick={() => navigateWorkbench(createUnboundWorkspaceHref())}>
-        <span aria-hidden="true">＋</span><small>新项目</small>
-      </button>
-      <ul>
-        {models.map((model) => (
-          <li key={`model:${model.id}`}>
-            <a href={workbenchModelHref(model.id)}
-              aria-current={currentOwner?.kind === "model" && model.id === currentOwner.id ? "page" : undefined}
-              aria-label={`模型：${model.name}`} title={`Model · ${model.name}`}
-              onClick={(event) => {
-                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
-                event.preventDefault();
-                navigateWorkbench(workbenchModelHref(model.id));
-              }}>{projectInitials(model.name)}</a>
-          </li>
-        ))}
-        {projects.map((project) => (
-          <li key={`project:${project.id}`}>
-            <a href={workbenchProjectHref(project.id)}
-              aria-current={currentOwner?.kind === "project" && project.id === currentOwner.id ? "page" : undefined}
-              aria-label={`项目：${project.name}`} title={`Project · ${project.name}`}
+    <section className="riffology-home" aria-label="项目与会话">
+      <div className="riffology-home-search">
+        <label>
+          <span aria-hidden="true">⌕</span>
+          <input value={query} onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索项目、模型或会话…" />
+        </label>
+      </div>
+      <aside className="riffology-home-projects" aria-label="项目和模型">
+        <div className="riffology-home-section-heading">
+          <strong>项目</strong>
+          <button type="button" aria-label="新项目" title="新项目"
+            onClick={() => navigateWorkbench(createUnboundWorkspaceHref())}>＋</button>
+        </div>
+        <ul>
+          {projects.map((project) => (
+            <li key={`project:${project.id}`}>
+              <a href={workbenchProjectHref(project.id)} aria-label={`项目：${project.name}`}
+                aria-current={currentOwner?.kind === "project" && currentOwner.id === project.id ? "page" : undefined}
               onClick={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
                 event.preventDefault();
                 navigateWorkbench(workbenchProjectHref(project.id));
-              }}>{projectInitials(project.name)}</a>
-          </li>
-        ))}
-      </ul>
-      <span className="riffology-user-avatar" aria-label="当前用户 JG">JG</span>
-    </nav>
+              }}><span aria-hidden="true">{projectInitials(project.name)}</span>{project.name}</a>
+            </li>
+          ))}
+          {models.map((model) => (
+            <li key={`model:${model.id}`}>
+              <a href={workbenchModelHref(model.id)} aria-label={`模型：${model.name}`}
+                aria-current={currentOwner?.kind === "model" && currentOwner.id === model.id ? "page" : undefined}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                event.preventDefault();
+                navigateWorkbench(workbenchModelHref(model.id));
+              }}><span aria-hidden="true">{projectInitials(model.name)}</span>{model.name}</a>
+            </li>
+          ))}
+          {projects.length + models.length === 0 && <li className="riffology-home-empty">没有匹配的项目或模型。</li>}
+        </ul>
+        <footer><button type="button" disabled>设置</button><button type="button" disabled>帮助</button></footer>
+      </aside>
+      <section className="riffology-home-recent" aria-label="最近会话">
+        <header><strong>最近会话</strong><button type="button"
+          onClick={() => navigateWorkbench(createUnboundWorkspaceHref())}>新项目</button></header>
+        <ul>
+          {recent.map((conversation) => (
+            <li key={conversation.id}>
+              <a href={workbenchOwnerHref(conversation.owner.kind, conversation.owner.id, conversation.id)}
+                aria-label={`会话：${conversation.name} · ${conversation.owner.name}`}
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                  event.preventDefault();
+                  navigateWorkbench(workbenchOwnerHref(conversation.owner.kind, conversation.owner.id, conversation.id));
+                }}>
+                <span aria-hidden="true">{projectInitials(conversation.owner.name)}</span>
+                <strong>{conversation.name}</strong><small>{conversation.owner.name}</small>
+              </a>
+            </li>
+          ))}
+          {recent.length === 0 && <li className="riffology-home-empty">暂无可继续的活跃会话。</li>}
+        </ul>
+      </section>
+    </section>
   );
 }
 

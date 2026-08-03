@@ -52,6 +52,12 @@ export type HomeDto = Readonly<{
   collectionDigest: string;
   models: readonly ModelSummary[];
   projects: readonly ProjectSummary[];
+  recentConversations?: readonly Readonly<{
+    id: string;
+    owner: Readonly<{ kind: "model" | "project"; id: string; name: string }>;
+    name: string;
+    updatedAt: string;
+  }>[];
   newProjectModels: readonly ExecutableModelOption[];
   providerAvailability:
     | Readonly<{ mode: "live"; providerModelCount: number }>

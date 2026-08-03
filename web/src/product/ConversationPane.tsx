@@ -221,6 +221,21 @@ export function ConversationPane({
   const activeBundle = bundle?.conversation.lifecycleState === "active"
     ? bundle
     : undefined;
+  const handleConversationChanged = async (removed: boolean) => {
+    if (!activeBundle) return;
+    await refreshCollections();
+    if (selectedIdRef.current !== activeBundle.conversation.id) return;
+    if (removed) {
+      selectedIdRef.current = undefined;
+      setBundle(undefined);
+      setReadOnlyReason(undefined);
+      if (navigateConversation) navigateConversation();
+      else navigateProduct(workspaceHref(ownerKind, ownerId));
+      focusConversationNavigation();
+      return;
+    }
+    await refreshConversation(activeBundle.conversation.id);
+  };
 
   return (
     <div className="product-conversation-content" ref={paneRef}>
@@ -248,6 +263,18 @@ export function ConversationPane({
               }}
             />
           </div>
+        )}
+        {presentation === "riffology" && activeBundle && (
+          <ConversationControls
+            client={client}
+            conversation={activeBundle.conversation}
+            providers={providers}
+            compact
+            onChanged={handleConversationChanged}
+            onError={(message) => {
+              if (selectedIdRef.current === activeBundle.conversation.id) setError(message);
+            }}
+          />
         )}
         <div className={`product-agent-status product-agent-status-${status}`} role="status">
           <strong>Agent: {status.replaceAll("_", " ")}</strong>
@@ -287,28 +314,15 @@ export function ConversationPane({
       >
         {activeBundle && (
           <>
-          <ConversationControls
+          {presentation === "product" && <ConversationControls
             client={client}
             conversation={activeBundle.conversation}
             providers={providers}
-            onChanged={async (removed) => {
-              await refreshCollections();
-              if (selectedIdRef.current !== activeBundle.conversation.id) return;
-              if (removed) {
-                selectedIdRef.current = undefined;
-                setBundle(undefined);
-                setReadOnlyReason(undefined);
-                if (navigateConversation) navigateConversation();
-                else navigateProduct(workspaceHref(ownerKind, ownerId));
-                focusConversationNavigation();
-              } else {
-                await refreshConversation(activeBundle.conversation.id);
-              }
-            }}
+            onChanged={handleConversationChanged}
             onError={(message) => {
               if (selectedIdRef.current === activeBundle.conversation.id) setError(message);
             }}
-          />
+          />}
           <RuntimeControls
             client={client}
             conversationId={activeBundle.conversation.id}
@@ -614,12 +628,14 @@ function ConversationControls({
   client,
   conversation,
   providers,
+  compact = false,
   onChanged,
   onError,
 }: Readonly<{
   client: ProductClient;
   conversation: ConversationSummary;
   providers?: ProviderDiscovery;
+  compact?: boolean;
   onChanged: (removed: boolean) => Promise<void>;
   onError: (message: string) => void;
 }>) {
@@ -642,7 +658,7 @@ function ConversationControls({
     }
   };
   return (
-    <section className="product-conversation-controls" aria-label="Conversation controls">
+    <section className={`product-conversation-controls${compact ? " product-conversation-controls-compact" : ""}`} aria-label="Conversation controls">
       <details>
         <summary>Manage Conversation</summary>
         <form onSubmit={(event) => {
@@ -760,7 +776,7 @@ function RuntimeControls({
     } catch (cause) {
       onError(messageOf(cause, `The Agent could not ${label}.`));
     } finally {
-      setPending(undefined);
+      setPending((current) => current === label ? undefined : current);
     }
   };
   const active = runtime.activeTurn;
@@ -813,7 +829,7 @@ function RuntimeControls({
           key={interaction.id}
           interaction={interaction}
           pending={pending === interaction.id}
-          disabled={Boolean(pending)}
+          disabled={Boolean(pending && pending !== "retry")}
           onPermission={(decision) => invoke(interaction.id,
             client.respondConversationInteraction && interaction.kind === "permission"
               ? () => client.respondConversationInteraction!({
@@ -1235,6 +1251,7 @@ function Composer({
         Message
         <textarea
           required
+          placeholder="Ask anything, / for commands, @ for context…"
           rows={4}
           maxLength={64_000}
           value={text}

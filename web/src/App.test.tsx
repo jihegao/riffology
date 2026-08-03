@@ -45,6 +45,12 @@ const home: HomeDto = {
     recentActivityKind: "resource_created",
     allowedActions: ["open", "rename", "archive", "trash"],
   }],
+  recentConversations: [{
+    id: "conversation-main",
+    owner: { kind: "project", id: "project-one", name: "Baseline study" },
+    name: "Main",
+    updatedAt: "2026-07-25T00:00:00.000Z",
+  }],
   newProjectModels: [{
     id: "model-one",
     name: "General maintenance",
@@ -1051,18 +1057,83 @@ describe("Stage 4 Product entry", () => {
     }));
   });
 
+  it("keeps a permission card actionable while the retry request remains pending", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/models/model-one?conversation=conversation-main");
+    const productClient = client();
+    let project!: (value: any) => void;
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "runtime-retryable",
+      status: "failed" as const,
+      activeTurn: { requestKey: "turn-old", canStop: false, canRetry: true },
+      parts: [],
+      pendingInteractions: [],
+      goalVerification: null,
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "disconnected" as const, label: "Riff tools" },
+    }));
+    productClient.subscribeConversationRuntime = vi.fn(async (_id, onProjection) => {
+      project = onProjection;
+      return () => {};
+    });
+    productClient.retryConversation = vi.fn(() => new Promise<never>(() => {}));
+    productClient.respondConversationInteraction = vi.fn(async () => ({}));
+    render(<App client={productClient} />);
+
+    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    project({
+      schemaVersion: 1,
+      revision: "runtime-retry-waiting",
+      status: "waiting_for_user",
+      activeTurn: { requestKey: "turn-new", canStop: true, canRetry: false },
+      parts: [],
+      pendingInteractions: [{
+        id: "permission-after-retry",
+        kind: "permission",
+        title: "Allow scoped Model update",
+        prompt: "Apply one Model file operation?",
+        decisions: ["allow_once", "reject"],
+      }],
+      goalVerification: null,
+      agent: { selectedName: null, locked: true },
+      mcp: { state: "connected", label: "Riff tools" },
+    });
+
+    const permission = await screen.findByRole("button", { name: "Allow once & Resume" });
+    expect(permission).toBeEnabled();
+    await user.click(permission);
+    expect(productClient.respondConversationInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-main",
+        requestKey: "turn-new",
+        interactionId: "permission-after-retry",
+        kind: "permission",
+        decision: "allow_once",
+      }),
+    );
+  });
+
   it("keeps the Riffology Stage 2 workbench on a non-default route", async () => {
+    const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
     render(<App client={client()} />);
 
     expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
-    expect(screen.getByRole("navigation", { name: "项目工作区" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新项目" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "项目工作区" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开项目与会话" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "＋ 新会话" })).toBeEnabled();
     expect(screen.getByRole("complementary", { name: "项目对话" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "项目文件与页面查看器" })).toBeInTheDocument();
     expect(screen.queryByText("Terminal")).not.toBeInTheDocument();
     expect(screen.queryByText("Share")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "打开项目与会话" }));
+    expect(await screen.findByRole("region", { name: "项目与会话" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "项目：Baseline study" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "会话：Main · Baseline study" })).toHaveAttribute(
+      "href", "/workbench/projects/project-one?conversation=conversation-main",
+    );
   });
 
   it("opens a Model in the Riffology workbench with its Conversation and bounded file projection", async () => {
@@ -1118,8 +1189,10 @@ describe("Stage 4 Product entry", () => {
     await waitFor(() => expect(screen.getByLabelText("页面地址")).toHaveTextContent(
       "riff-app://models/model-one?conversation=conversation-main",
     ));
-    expect(screen.getByRole("link", { name: "模型：General maintenance" }))
+    await user.click(screen.getByRole("button", { name: "打开项目与会话" }));
+    expect(await screen.findByRole("link", { name: "模型：General maintenance" }))
       .toHaveAttribute("aria-current", "page");
+    await user.click(screen.getByRole("link", { name: "模型：General maintenance" }));
     expect(await screen.findByRole("img", {
       name: "General maintenance 的受信浏览器页面观察",
     })).toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
@@ -1133,7 +1206,7 @@ describe("Stage 4 Product entry", () => {
     render(<App client={productClient} />);
     expect(await screen.findByRole("complementary", { name: "模型对话" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^model\.md/u })).toBeInTheDocument();
-    expect(productClient.workspace).toHaveBeenCalledTimes(2);
+    expect(productClient.workspace).toHaveBeenCalledTimes(3);
   });
 
   it("shows the Stage 3 file rail and renders only a bounded Project file projection", async () => {
@@ -1469,7 +1542,7 @@ describe("Stage 4 Product entry", () => {
     });
     render(<App client={productClient} />);
 
-    expect(await screen.findByRole("link", { name: "项目：Baseline study" }))
+    expect(await screen.findByRole("button", { name: "打开项目与会话" }))
       .toBeInTheDocument();
     recoveryRequired = true;
     window.dispatchEvent(new Event("riff:workbench-navigation"));
@@ -1565,10 +1638,9 @@ describe("Stage 4 Product entry", () => {
     expect(await screen.findByRole("heading", { name: "工作台需要恢复" }))
       .toBeInTheDocument();
     resolveHome(home);
-    await waitFor(() => expect(screen.queryByRole("navigation", { name: "项目工作区" }))
-      .not.toBeInTheDocument());
-    expect(screen.queryByRole("link", { name: "项目：Baseline study" }))
-      .not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "工作台需要恢复" }))
+      .toBeInTheDocument());
+    expect(screen.queryByRole("region", { name: "项目与会话" })).not.toBeInTheDocument();
   });
 
   it("restarts Browser observation after an owner reload in the same Conversation", async () => {
@@ -1652,7 +1724,7 @@ describe("Stage 4 Product entry", () => {
     const defaultEntry = render(<App client={client()} />);
 
     expect(await screen.findByRole("banner")).toHaveTextContent("Riffology");
-    expect(screen.getByRole("button", { name: "新项目" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开项目与会话" })).toBeInTheDocument();
     expect(window.location.pathname).toMatch(/^\/workbench\/new\//u);
     expect(screen.queryByRole("button", { name: "New Model" })).not.toBeInTheDocument();
 

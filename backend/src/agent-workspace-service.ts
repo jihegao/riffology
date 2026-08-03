@@ -68,6 +68,7 @@ import {
   orderedProjects,
   publicPermanentDeletePreview,
   type HomeDto,
+  type HomeRecentConversationDto,
   type ModelSummaryDto,
   type ProjectSummaryDto,
   type PublicPermanentDeletePreviewDto,
@@ -657,10 +658,23 @@ export class AgentWorkspaceService {
   async home(): Promise<HomeDto> {
     const models = orderedModels(this.store, this.store.listModels());
     const projects = orderedProjects(this.store, this.store.listProjects());
+    const recentConversations: HomeRecentConversationDto[] = [...models, ...projects]
+      .flatMap((owner) => this.store.listConversations({ kind: owner.kind, id: owner.id })
+        .filter((conversation) => conversation.lifecycleState === "active")
+        .map((conversation) => Object.freeze({
+          id: conversation.id,
+          owner: Object.freeze({ kind: owner.kind, id: owner.id, name: owner.name }),
+          name: conversation.name,
+          updatedAt: conversation.updatedAt,
+        })))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)
+        || left.id.localeCompare(right.id))
+      .slice(0, 24);
     return homeDto(
       this.#now(),
       models,
       projects,
+      recentConversations,
       executableModelOptions(models),
       await this.discoverProviders(),
     );
@@ -969,20 +983,22 @@ export class AgentWorkspaceService {
     );
     const turnId = stableId("bootstrap_turn", `${workspaceKey}:${requestKey}`);
     const userAt = this.#now();
+    let workspace: OpenCodeWorkspaceBinding | undefined;
+    let externalSessionRef: string | null = null;
     try {
       this.store.appendWorkspaceBootstrapMessage({
         workspaceKey, id: userMessageId, role: "user", status: "complete",
         text, createdAt: userAt,
       });
       let runtime = this.store.getWorkspaceBootstrapRuntime(workspaceKey);
-      const workspace: OpenCodeWorkspaceBinding = Object.freeze({
+      workspace = Object.freeze({
         owner: Object.freeze({ kind: "workspace" as const, id: workspaceKey }),
         directory: runtime.directory,
       });
       await this.#requireProviderModel(
         binding.provider.providerId, binding.provider.modelId, workspace,
       );
-      let externalSessionRef = runtime.session.externalSessionRef;
+      externalSessionRef = runtime.session.externalSessionRef;
       if (runtime.session.state === "available" && externalSessionRef) {
         let alive = false;
         try { alive = await this.openCode.getSession(externalSessionRef, workspace); }
@@ -1029,7 +1045,7 @@ export class AgentWorkspaceService {
           throw error;
         }
       }
-      if (!externalSessionRef || !this.#scopedMcpUrl
+      if (!externalSessionRef || !workspace || !this.#scopedMcpUrl
         || !this.openCode.bindScopedMcp || !this.openCode.unbindScopedMcp) {
         throw new ApiError(503, "opencode_mcp_unavailable", "OpenCode cannot bind the project-guide tools.");
       }
@@ -1120,6 +1136,25 @@ export class AgentWorkspaceService {
           ? "provider_unavailable"
           : api.code.startsWith("opencode_") ? "opencode_unavailable"
             : "agent_failed";
+      // A timed-out or failed OpenCode turn can leave a pending question/tool
+      // interaction upstream. Retire that exact session before returning the
+      // safe read-only projection; otherwise the next bootstrap turn reuses a
+      // busy session and fails again without ever reaching the Riff tools.
+      if (externalSessionRef && workspace) {
+        await this.openCode.abort(externalSessionRef, workspace).catch(() => undefined);
+        try {
+          const currentRuntime = this.store.getWorkspaceBootstrapRuntime(workspaceKey);
+          if (currentRuntime.session.state === "available"
+            && currentRuntime.session.externalSessionRef === externalSessionRef) {
+            this.store.loseWorkspaceBootstrapSession({
+              workspaceKey,
+              generation: currentRuntime.session.generation,
+              expectedExternalSessionRef: externalSessionRef,
+              updatedAt: this.#now(),
+            });
+          }
+        } catch { /* preserve the original stable failure */ }
+      }
       try {
         this.store.appendWorkspaceBootstrapMessage({
           workspaceKey,
@@ -3374,6 +3409,9 @@ const workspaceBootstrapContext = (
 const workspaceBootstrapSystemPrompt = (binding: WorkspaceBinding): string =>
   `You are the Riffology project guide for one unbound workspace. `
   + `Use only the four riff_bootstrap tools to inspect or persist Riff data. `
+  + `Do not load skills, use unavailable tools, or ask clarifying questions; `
+  + `use the user's stated defaults and perform the one explicitly requested `
+  + `bootstrap operation with its matching tool, then stop. `
   + `Never claim a Model or Project exists unless a tool returns a durable receipt. `
   + `Object and provider references are opaque, generation-bound capabilities. `
   + `The current WorkspaceBinding generation is ${binding.generation} and digest is ${binding.bindingDigest}.`;
@@ -3398,7 +3436,9 @@ const bootstrapConsequentialTools = (
   return candidates.length === 1 ? Object.freeze(candidates) : Object.freeze([]);
 };
 const bootstrapRequestedName = (text: string): string | null => {
-  const matched = /\bnamed\s+["']?(.{1,200}?)["']?(?=\s+from\b|\s+with\b|[.!?。！？]|$)/iu.exec(text)?.[1]
+  const matched = /\bnamed\s+["']([^"']{1,200})["']/iu.exec(text)?.[1]
+    ?? /\bnamed\s+["']?(.{1,200}?)["']?(?=\s+from\b|\s+with\b|[.!?。！？]|$)/iu.exec(text)?.[1]
+    ?? /名为[“"']([^”"']{1,200})[”"']/u.exec(text)?.[1]
     ?? /名为[“"']?([^。！？]{1,200}?)[”"']?(?=\s*(?:来自|基于|并|，|。|！|？|$))/u.exec(text)?.[1];
   if (!matched) return null;
   try { return boundedName(matched.replace(/["'”’]+$/u, "").trim(), "name"); }

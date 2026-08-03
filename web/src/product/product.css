@@ -1062,7 +1062,6 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-workbench-app button, .riffology-workbench-app input,
 .riffology-workbench-app select, .riffology-workbench-app textarea { font: inherit; }
 .riffology-workbench-app {
-  --riffology-rail-width: 74px;
   --riffology-chat-width: 472px;
   display: flex;
   min-width: 320px;
@@ -1189,6 +1188,21 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   color: #172321;
   text-decoration: none;
 }
+.riffology-home-trigger {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  margin-left: 8px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  color: #52615c;
+  background: transparent;
+}
+.riffology-home-trigger:hover, .riffology-home-trigger:focus-visible { background: #eceeea; outline: 2px solid #2d7461; outline-offset: 1px; }
+.riffology-home-trigger > span { display: grid; grid-template-columns: repeat(2, 5px); gap: 3px; }
+.riffology-home-trigger i { display: block; width: 5px; height: 5px; border: 1px solid currentColor; }
 .riffology-workbench-mark {
   display: grid;
   width: 32px;
@@ -1204,7 +1218,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-columns: var(--riffology-rail-width) var(--riffology-chat-width) minmax(0, 1fr) auto;
+  grid-template-columns: var(--riffology-chat-width) minmax(0, 1fr) auto;
   overflow: hidden;
 }
 .riffology-project-rail {
@@ -1273,22 +1287,23 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   display: flex;
   min-width: 0;
   min-height: 0;
-  grid-column: 2;
+  grid-column: 1;
   overflow: hidden;
-  border-right: 1px solid #cbd4cf;
-  background: #f7f6f2;
+  border-right: 1px solid #e4e4e0;
+  background: #fff;
 }
 .riffology-chat-pane .product-conversation-content { gap: 0; }
 .riffology-chat-pane .product-conversation-toolbar {
+  position: relative;
   gap: .55rem;
-  border-bottom: 1px solid #d7ddd9;
-  padding: 0 18px 10px;
-  background: #f4f3ee;
+  border-bottom: 1px solid #ecece9;
+  padding: 0 20px 9px;
+  background: #fff;
 }
 .riffology-conversation-heading {
   display: flex;
   min-width: 0;
-  min-height: 62px;
+  min-height: 58px;
   grid-column: 1 / -1;
   align-items: center;
   justify-content: space-between;
@@ -1297,37 +1312,139 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-conversation-heading > div { display: grid; min-width: 0; gap: 3px; }
 .riffology-conversation-heading strong,
 .riffology-conversation-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.riffology-conversation-heading strong { font-size: .82rem; }
-.riffology-conversation-heading span { color: #73807b; font-size: .64rem; }
+.riffology-conversation-heading strong { font-size: .86rem; font-weight: 700; }
+.riffology-conversation-heading span { color: #8a908d; font-size: .64rem; }
 .riffology-conversation-heading .product-new-conversation {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
   flex: 0 0 auto;
-  border-color: #c6cfca;
-  padding: .48rem .62rem;
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
   color: #24322f;
-  background: #fff;
-  font-size: .65rem;
+  background: transparent;
+  font-size: 0;
 }
-.riffology-chat-pane .product-agent-status { margin-top: 0; }
+.riffology-conversation-heading .product-new-conversation::before { content: "+"; font-size: 1.28rem; font-weight: 350; line-height: 1; }
+.riffology-conversation-heading .product-new-conversation:hover { background: #f1f1ee; }
+.riffology-chat-pane .product-agent-status {
+  position: absolute;
+  top: 22px;
+  right: 61px;
+  width: 12px;
+  height: 12px;
+  min-height: 0;
+  margin: 0;
+  border: 2px solid #b5bbb8;
+  border-radius: 50%;
+  padding: 0;
+  color: transparent;
+  background: transparent;
+  font-size: 0;
+}
+.riffology-chat-pane .product-agent-status > * { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.riffology-chat-pane .product-agent-status-busy,
+.riffology-chat-pane .product-agent-status-waiting_for_tool,
+.riffology-chat-pane .product-agent-status-connecting { border-color: #2d7461 #dce6e1 #dce6e1 #2d7461; animation: riffology-agent-spin .8s linear infinite; }
+.riffology-chat-pane .product-agent-status-failed,
+.riffology-chat-pane .product-agent-status-read_only { border-color: #bc5d55; }
+.riffology-chat-pane .product-conversation-list { display: none; }
+.riffology-chat-pane .product-conversation-controls-compact {
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  right: 94px;
+  display: block;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.riffology-chat-pane .product-conversation-controls-compact details { position: relative; }
+.riffology-chat-pane .product-conversation-controls-compact summary {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  color: transparent;
+  cursor: pointer;
+  font-size: 0;
+  list-style: none;
+}
+.riffology-chat-pane .product-conversation-controls-compact summary::-webkit-details-marker { display: none; }
+.riffology-chat-pane .product-conversation-controls-compact summary::after { color: #66716d; content: "•••"; font-size: .8rem; letter-spacing: 1px; }
+.riffology-chat-pane .product-conversation-controls-compact summary:hover { background: #f1f1ee; }
+.riffology-chat-pane .product-conversation-controls-compact details > :not(summary) {
+  min-width: 235px;
+  margin-top: 7px;
+  border: 1px solid #deded9;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+  box-shadow: 0 12px 32px #17232120;
+}
+.riffology-chat-pane .product-conversation-controls-compact details > form { display: grid; gap: 8px; }
+.riffology-chat-pane .product-conversation-controls-compact .product-provider-binding {
+  position: absolute;
+  top: 35px;
+  right: 0;
+  display: none;
+  width: 235px;
+  margin: 10px 0 0;
+  border: 1px solid #deded9;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+  box-shadow: 0 12px 32px #17232120;
+}
+.riffology-chat-pane .product-conversation-controls-compact details[open] ~ .product-provider-binding { display: grid; }
+.riffology-chat-pane .product-conversation-controls-compact details[open] summary { margin-bottom: 0; }
 .riffology-chat-pane .product-conversation-scroll-region {
-  gap: .85rem;
-  padding: 18px 22px;
+  gap: 1rem;
+  padding: 24px 28px;
+  background: #fff;
 }
 .riffology-chat-pane .product-composer-dock {
-  border-top: 1px solid #d7ddd9;
-  padding: 18px 22px 20px;
+  border-top: 1px solid #ecece9;
+  padding: 16px 20px 18px;
+  background: #fff;
 }
 .riffology-chat-pane .product-composer {
-  border-color: #aebbb5;
-  border-radius: 15px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  border-color: #deded9;
+  border-radius: 13px;
+  padding: 12px 12px 10px;
   background: #fff;
+  box-shadow: 0 2px 5px #1723210a;
 }
+.riffology-chat-pane .product-composer > label { min-width: 0; font-size: 0; }
+.riffology-chat-pane .product-composer > label:first-child { grid-row: 2; grid-column: 1; align-self: center; width: fit-content; }
+.riffology-chat-pane .product-composer > label:first-child select { width: auto; max-width: 170px; border: 0; padding: 3px 20px 3px 4px; color: #626b68; background: transparent; font-size: .72rem; font-weight: 620; }
+.riffology-chat-pane .product-composer > label:has(textarea) { grid-row: 1; grid-column: 1 / -1; }
+.riffology-chat-pane .product-composer textarea { min-height: 72px; border: 0; border-radius: 7px; padding: 3px 4px; outline: 0; box-shadow: none; font-size: .86rem; line-height: 1.45; resize: vertical; }
+.riffology-chat-pane .product-composer textarea::placeholder { color: #969b99; opacity: 1; }
+.riffology-chat-pane .product-composer > button { grid-row: 2; grid-column: 2; display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 8px; padding: 0; color: #fff; background: #8f9693; font-size: 0; }
+.riffology-chat-pane .product-composer > button::before { content: "↑"; font-size: 1.2rem; font-weight: 430; line-height: 1; }
+.riffology-chat-pane .product-composer > button:not(:disabled) { background: #245f50; }
+.riffology-chat-pane .product-composer > :is(fieldset, p) { grid-column: 1 / -1; }
 .riffology-chat-pane .product-message {
-  border-radius: 14px;
-  padding: 14px 16px;
-  background: #fff;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
 }
-.riffology-chat-pane .product-message-user { margin-left: 22%; background: #dfeae5; }
-.riffology-chat-pane .product-runtime-part { border-radius: 12px; }
+.riffology-chat-pane .product-message strong,
+.riffology-chat-pane .product-message small { display: none; }
+.riffology-chat-pane .product-message p { margin: 0; color: #262b29; font-size: .89rem; line-height: 1.66; }
+.riffology-chat-pane .product-message-user { margin-left: 14%; border-radius: 10px; padding: 11px 13px; background: #f2f3f1; }
+.riffology-chat-pane .product-message-list { gap: 1.3rem; }
+.riffology-chat-pane .product-runtime-controls { gap: .4rem; border: 0; border-left: 2px solid #cbd9d4; border-radius: 0; padding: 0 0 0 10px; background: transparent; }
+.riffology-chat-pane .product-runtime-actions > div:first-child { display: none; }
+.riffology-chat-pane .product-runtime-actions { justify-content: flex-end; }
+.riffology-chat-pane .product-runtime-part { border-radius: 8px; }
 .riffology-chat-pane .product-interaction-card-permission {
   border-color: #d6b56f;
   background: #f5ead2;
@@ -1335,10 +1452,11 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-chat-pane .product-interaction-card-permission .product-interaction-kind {
   color: #725625;
 }
+@keyframes riffology-agent-spin { to { transform: rotate(360deg); } }
 .riffology-stage2-viewer {
   min-width: 0;
   min-height: 0;
-  grid-column: 3;
+  grid-column: 2;
   overflow: hidden;
   background: #fff;
 }
@@ -1346,7 +1464,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-column: 3;
+  grid-column: 2;
   grid-template-rows: auto minmax(0, 1fr);
   align-items: stretch;
   overflow: auto;
@@ -1395,7 +1513,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-column: 4;
+  grid-column: 3;
   grid-template-rows: auto minmax(0, 1fr) auto;
   width: var(--riffology-file-rail-width);
   overflow: visible;
@@ -1446,7 +1564,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-workbench-state {
   display: grid;
   min-width: 0;
-  grid-column: 2 / -1;
+  grid-column: 1 / -1;
   align-content: center;
   justify-items: center;
   padding: 2rem;
@@ -1504,42 +1622,83 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-unbound-viewer { padding: clamp(2rem, 8vw, 8rem); }
 .riffology-unbound-viewer h1 { max-width: 20ch; font-family: Georgia, serif; font-size: 2.5rem; }
 
+.riffology-home {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(250px, 360px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+}
+.riffology-home-search {
+  grid-column: 1 / -1;
+  padding: clamp(28px, 5vw, 66px) clamp(24px, 11vw, 190px) 30px;
+}
+.riffology-home-search label { display: flex; align-items: center; gap: 10px; max-width: 980px; margin: 0 auto; border-radius: 9px; padding: 0 15px; color: #8a918e; background: #f5f5f3; }
+.riffology-home-search label span { font-size: 1.35rem; line-height: 1; }
+.riffology-home-search input { width: 100%; border: 0; outline: 0; padding: 13px 0; color: #303735; background: transparent; font-size: .92rem; }
+.riffology-home-search input::placeholder { color: #949a97; }
+.riffology-home-projects { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; padding: 0 clamp(24px, 5vw, 80px) 34px; }
+.riffology-home-section-heading, .riffology-home-recent > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #606865; font-size: .8rem; }
+.riffology-home-section-heading button, .riffology-home-recent > header button { border: 0; border-radius: 6px; padding: 5px 7px; color: #68736f; background: transparent; font: inherit; cursor: pointer; }
+.riffology-home-section-heading button:hover, .riffology-home-recent > header button:hover { color: #214f44; background: #eef3f0; }
+.riffology-home-projects ul, .riffology-home-recent ul { display: grid; align-content: start; gap: 3px; margin: 24px 0 0; padding: 0; list-style: none; overflow-y: auto; }
+.riffology-home-projects a { display: flex; min-width: 0; align-items: center; gap: 9px; border-radius: 8px; padding: 7px 8px; color: #4e5955; font-size: .84rem; text-decoration: none; }
+.riffology-home-projects a:hover { color: #21312d; background: #f0f1ef; }
+.riffology-home-projects a > span, .riffology-home-recent a > span { display: grid; width: 21px; height: 21px; flex: 0 0 auto; place-items: center; border-radius: 5px; color: #fff; background: #527e71; font-size: .61rem; font-weight: 800; }
+.riffology-home-projects footer { display: grid; gap: 4px; margin-top: 24px; }
+.riffology-home-projects footer button { justify-self: start; border: 0; padding: 5px 8px; color: #89918e; background: transparent; font-size: .75rem; }
+.riffology-home-recent { min-width: 0; padding: 0 clamp(24px, 5vw, 80px) 34px 0; }
+.riffology-home-recent > header { max-width: 980px; }
+.riffology-home-recent > header button { color: #4d5e58; font-weight: 650; }
+.riffology-home-recent ul { max-width: 980px; gap: 5px; }
+.riffology-home-recent a { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; align-items: center; border-radius: 8px; padding: 8px; color: #303735; text-decoration: none; }
+.riffology-home-recent a:hover { background: #f4f5f3; }
+.riffology-home-recent a > span { grid-row: 1 / span 2; background: #be5b9e; }
+.riffology-home-recent a strong { overflow: hidden; font-size: .86rem; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.riffology-home-recent a small { color: #8b9390; font-size: .68rem; }
+.riffology-home-empty { padding: 9px 8px; color: #929996; font-size: .75rem; }
+
 @media (max-width: 760px) {
-  .riffology-workbench-app { --riffology-rail-width: 58px; }
   .riffology-workbench-header { padding-inline: 13px; }
-  .riffology-workbench-main { grid-template-columns: var(--riffology-rail-width) minmax(0, 1fr); }
-  .riffology-project-rail { padding-inline: 4px; }
-  .riffology-new-project { width: 50px; }
-  .riffology-project-rail li a, .riffology-user-avatar,
-  .riffology-new-project > span { width: 38px; height: 38px; }
-  .riffology-chat-pane { grid-column: 2; }
+  .riffology-workbench-brand strong { display: none; }
+  .riffology-home-trigger { margin-left: 2px; }
+  .riffology-workbench-main { grid-template-columns: minmax(0, 1fr); }
+  .riffology-chat-pane { grid-column: 1; }
   .riffology-stage2-viewer { display: none; }
-  .riffology-stage3-viewer { display: none; grid-column: 2; }
+  .riffology-stage3-viewer { display: none; grid-column: 1; }
   .riffology-workbench-main:has(.riffology-stage3-viewer.has-selection) .riffology-chat-pane { display: none; }
   .riffology-stage3-viewer.has-selection { display: grid; }
   .riffology-viewer-back { display: inline-flex; flex: 0 0 auto; border: 0; padding: 5px 0; color: #245f50; background: transparent; font-size: .66rem; font-weight: 720; }
   .riffology-viewer-header { gap: 8px; padding: 11px 13px; }
   .riffology-renderer-wrap { padding: 12px; }
   .product-sandboxed-html { min-height: calc(100vh - 150px); }
-  .riffology-file-backdrop { position: fixed; z-index: 29; inset: 60px 0 0 58px; display: block; border: 0; background: #1723215c; }
+  .riffology-file-backdrop { position: fixed; z-index: 29; inset: 60px 0 0; display: block; border: 0; background: #1723215c; }
   .riffology-file-rail {
     position: fixed;
     z-index: 30;
     top: 60px;
     right: 0;
     bottom: 0;
-    width: min(var(--riffology-file-rail-width), calc(100vw - 58px));
+    width: min(var(--riffology-file-rail-width), 100vw);
     box-shadow: -8px 0 24px #17232124;
   }
-  .riffology-file-rail.is-closed { width: min(var(--riffology-file-rail-width), calc(100vw - 58px)); transform: translateX(100%); }
+  .riffology-file-rail.is-closed { width: min(var(--riffology-file-rail-width), 100vw); transform: translateX(100%); }
   .riffology-file-resizer { display: none; }
   .riffology-workbench-chrome { gap: 4px; }
   .riffology-context-projection, .riffology-url-projection, .riffology-trust-state, .riffology-agent-state, .riffology-opencode-version { display: none; }
-  .riffology-workbench-state { grid-column: 2; }
+  .riffology-workbench-state { grid-column: 1; }
   .riffology-chat-pane .product-conversation-scroll-region { padding: 14px; }
   .riffology-chat-pane .product-composer-dock { padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
   .riffology-conversation-heading { padding-inline: 14px; }
   .riffology-conversation-heading .product-new-conversation { padding-inline: .45rem; }
+  .riffology-home { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); overflow-y: auto; }
+  .riffology-home-search { padding: 24px 16px 22px; }
+  .riffology-home-projects, .riffology-home-recent { padding: 0 16px 24px; }
+  .riffology-home-projects { grid-template-rows: auto auto auto; }
+  .riffology-home-projects ul, .riffology-home-recent ul { max-height: 14rem; margin-top: 13px; overflow-y: auto; }
+  .riffology-home-recent > header { margin-top: 8px; }
 }
 
 @media (min-width: 761px) and (max-width: 1280px) {

@@ -68,12 +68,20 @@ export type ExecutableModelOptionDto = Readonly<{
   recordDigest: string;
 }>;
 
+export type HomeRecentConversationDto = Readonly<{
+  id: string;
+  owner: Readonly<{ kind: "model" | "project"; id: string; name: string }>;
+  name: string;
+  updatedAt: string;
+}>;
+
 export type HomeDto = Readonly<{
   schemaVersion: 1;
   generatedAt: string;
   collectionDigest: string;
   models: readonly ModelSummaryDto[];
   projects: readonly ProjectSummaryDto[];
+  recentConversations: readonly HomeRecentConversationDto[];
   newProjectModels: readonly ExecutableModelOptionDto[];
   providerAvailability:
     | { mode: "live"; providerModelCount: number }
@@ -186,6 +194,7 @@ export const homeDto = (
   generatedAt: string,
   models: readonly ModelSummaryDto[],
   projects: readonly ProjectSummaryDto[],
+  recentConversations: readonly HomeRecentConversationDto[],
   newProjectModels: readonly ExecutableModelOptionDto[],
   providers: ProviderDiscoveryDto,
 ): HomeDto => Object.freeze({
@@ -195,10 +204,14 @@ export const homeDto = (
     schemaVersion: 1,
     models: models.map((model) => [model.id, model.recordDigest]),
     projects: projects.map((project) => [project.id, project.recordDigest]),
+    recentConversations: recentConversations.map((conversation) => [
+      conversation.id, conversation.owner.kind, conversation.owner.id, conversation.updatedAt,
+    ]),
     newProjectModels: newProjectModels.map((model) => [model.id, model.recordDigest]),
   }),
   models,
   projects,
+  recentConversations,
   newProjectModels,
   providerAvailability: providers.mode === "live"
     ? Object.freeze({

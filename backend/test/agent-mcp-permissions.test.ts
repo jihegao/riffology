@@ -53,6 +53,41 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
 });
 
+test("default Agent capability leaves a bounded human review window for large operations", async () => {
+  let now = 0;
+  const server = new AgentMcpServer(
+    { async execute() { return { ok: true }; } },
+    { now: () => now },
+  );
+  const capability = server.grant({
+    conversationId: "conversation_large_review",
+    owner: { kind: "model", id: "model_large_review" },
+    turnId: "turn_large_review",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "model", id: "model_large_review" }),
+  });
+
+  now = 10 * 60_000 + 1;
+  assert.equal(
+    (await server.handle(capability, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    }))?.error,
+    undefined,
+  );
+
+  now = 30 * 60_000;
+  assert.equal(
+    (await server.handle(capability, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    }))?.error?.code,
+    -32001,
+  );
+});
+
 test("Experiment MCP definitions publish the closed ExperimentConfigurationV1 envelope", async () => {
   const server = new AgentMcpServer({ async execute() { return {}; } });
   const capability = server.grant({
@@ -217,6 +252,77 @@ test("a second pending consequential approval revokes instead of overwriting the
     assert.equal(response?.error?.code, -32001);
   }
   assert.equal(calls, 0);
+});
+
+test("repeating an identical pending consequential approval is idempotent", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() { calls += 1; return { ok: true }; },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_idempotent_permission",
+    owner: { kind: "project", id: "project_idempotent_permission" },
+    turnId: "turn_idempotent_permission",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_start_run"]),
+  });
+  const input = { requestKey: "same_request", configurationId: "configuration_a" };
+  authorize(server, capability, "riff_start_run", input);
+  assert.doesNotThrow(() => authorize(server, capability, "riff_start_run", input));
+  const response = await server.handle(capability, call("riff_start_run", input));
+  assert.equal((response?.result as any).isError, undefined);
+  assert.equal(calls, 1);
+});
+
+test("a fresh approval can replace an exact operation rejected before execution", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() { calls += 1; return { ok: true }; },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_corrected_permission",
+    owner: { kind: "model", id: "model_corrected_permission" },
+    turnId: "turn_corrected_permission",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_apply_model_changes"]),
+  });
+  const malformed = {
+    requestKey: "apply_visual",
+    changes: [{
+      objectFileId: "file_visual",
+      kind: "model_visual_asset",
+      relativePath: "diagram.html",
+      mediaType: "text/html",
+      text: "<html></html>",
+      expectedPriorSha256: null,
+    }],
+    executionDescription: { ownerId: "attempted_scope_override" },
+  };
+  authorize(server, capability, "riff_apply_model_changes", malformed);
+  const rejected = await server.handle(
+    capability,
+    call("riff_apply_model_changes", malformed),
+  );
+  assert.equal((rejected?.result as any).isError, true);
+  assert.match((rejected?.result as any).content[0].text, /server-owned scope/u);
+  assert.equal(calls, 0);
+
+  const corrected = {
+    requestKey: "apply_visual",
+    changes: malformed.changes,
+  };
+  assert.doesNotThrow(() => authorize(
+    server,
+    capability,
+    "riff_apply_model_changes",
+    corrected,
+  ));
+  const applied = await server.handle(
+    capability,
+    call("riff_apply_model_changes", corrected),
+  );
+  assert.equal((applied?.result as any).isError, undefined);
+  assert.equal(calls, 1);
 });
 
 test("a failed consequential Agent operation still consumes the turn budget", async () => {

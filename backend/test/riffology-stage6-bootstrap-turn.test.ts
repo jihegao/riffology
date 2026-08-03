@@ -32,6 +32,9 @@ class BootstrapOpenCode implements OpenCodeConversationPort {
   capability: string | null = null;
   service: AgentWorkspaceService | null = null;
   createOwner = false;
+  createName = "Agent-created Model";
+  failPrompt = false;
+  abortCount = 0;
 
   async discoverProviderModels(): Promise<OpenCodeProviderModel[]> {
     return [
@@ -75,6 +78,7 @@ class BootstrapOpenCode implements OpenCodeConversationPort {
   ): Promise<OpenCodeAssistantResponse> {
     this.workspaces.push(workspace);
     this.promptCount += 1;
+    if (this.failPrompt) throw new Error("upstream busy");
     assert.deepEqual(prompt.scopedMcpTools, this.createOwner
       ? ["riff_bootstrap_create_model", "riff_bootstrap_list_objects"]
       : ["riff_bootstrap_list_objects"]);
@@ -129,7 +133,7 @@ class BootstrapOpenCode implements OpenCodeConversationPort {
         jsonrpc: "2.0", id: 3, method: "tools/call",
         params: { name: "riff_bootstrap_create_model", arguments: {
           requestKey: "tool_create_model",
-          name: "Agent-created Model",
+          name: this.createName,
           providerRef: inventory.providers[0].providerRef,
           expectedGeneration: inventory.generation,
           expectedBindingDigest: inventory.bindingDigest,
@@ -143,7 +147,7 @@ class BootstrapOpenCode implements OpenCodeConversationPort {
       content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
     };
   }
-  async abort(): Promise<void> {}
+  async abort(): Promise<void> { this.abortCount += 1; }
 }
 
 const serviceFor = (store: ProductStoreV2, openCode: BootstrapOpenCode) => {
@@ -401,6 +405,84 @@ test("unbound bootstrap conversation is durable across turns and Store restart",
       "First question", "guide:1", "Second question", "guide:2",
     ]);
     assert.equal(openCode.createCount, 1);
+  } finally {
+    store?.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap extracts a quoted Chinese model name exactly", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-stage6-bootstrap-name-"));
+  let store: ProductStoreV2 | undefined;
+  try {
+    store = ProductStoreV2.open(join(parent, "store"));
+    const openCode = new BootstrapOpenCode();
+    openCode.createOwner = true;
+    openCode.createName = "航空保障三级物流网络";
+    const service = serviceFor(store, openCode);
+    const created = await service.createWorkspaceBinding({
+      commandId: "workspace_name_create", workspaceKey: "workspace_name",
+    });
+    const selected = await service.updateWorkspaceBinding({
+      commandId: "workspace_name_provider",
+      workspaceKey: "workspace_name",
+      expectedGeneration: created.binding.generation,
+      expectedBindingDigest: created.binding.bindingDigest,
+      draft: "请创建一个名为“航空保障三级物流网络”的模型，只创建 Model。",
+      provider: { providerId: "provider", modelId: "model" },
+    });
+    const result = await service.runWorkspaceBootstrapTurn({
+      workspaceKey: "workspace_name", requestKey: "turn_name",
+      expectedGeneration: selected.binding.generation,
+      expectedBindingDigest: selected.binding.bindingDigest,
+      text: "请创建一个名为“航空保障三级物流网络”的模型，只创建 Model，不创建 Project，也不要运行仿真。",
+    });
+    assert.equal(result.mode, "live");
+    assert.equal(result.binding.owner?.kind, "model");
+  } finally {
+    store?.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("failed bootstrap turn retires the upstream session before the next retry", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "riff-stage6-bootstrap-failure-"));
+  let store: ProductStoreV2 | undefined;
+  try {
+    store = ProductStoreV2.open(join(parent, "store"));
+    const openCode = new BootstrapOpenCode();
+    openCode.failPrompt = true;
+    const service = serviceFor(store, openCode);
+    const created = await service.createWorkspaceBinding({
+      commandId: "workspace_failure_create", workspaceKey: "workspace_failure",
+    });
+    const selected = await service.updateWorkspaceBinding({
+      commandId: "workspace_failure_provider",
+      workspaceKey: "workspace_failure",
+      expectedGeneration: created.binding.generation,
+      expectedBindingDigest: created.binding.bindingDigest,
+      draft: "Create a Model named Retry Model",
+      provider: { providerId: "provider", modelId: "model" },
+    });
+    const failed = await service.runWorkspaceBootstrapTurn({
+      workspaceKey: "workspace_failure", requestKey: "turn_failed",
+      expectedGeneration: selected.binding.generation,
+      expectedBindingDigest: selected.binding.bindingDigest,
+      text: "Create a Model named Retry Model.",
+    });
+    assert.equal(failed.mode, "read_only");
+    assert.equal(openCode.abortCount, 1);
+    assert.equal(store.getWorkspaceBootstrapRuntime("workspace_failure").session.state, "lost");
+
+    openCode.failPrompt = false;
+    const retried = await service.runWorkspaceBootstrapTurn({
+      workspaceKey: "workspace_failure", requestKey: "turn_retry",
+      expectedGeneration: failed.binding.generation,
+      expectedBindingDigest: failed.binding.bindingDigest,
+      text: "List available objects.",
+    });
+    assert.equal(retried.mode, "live");
+    assert.equal(openCode.createCount, 2);
   } finally {
     store?.close();
     rmSync(parent, { recursive: true, force: true });

@@ -352,6 +352,14 @@ test("A4-1 browser API exposes closed collections and replays confirmed delete a
   assert.equal(home.schemaVersion, 1);
   assert.equal(home.models.length, 1);
   assert.equal(home.projects.length, 1);
+  assert.ok(Array.isArray(home.recentConversations));
+  assert.ok(home.recentConversations.every((conversation: any) =>
+    typeof conversation.id === "string"
+    && ["model", "project"].includes(conversation.owner?.kind)
+    && typeof conversation.owner?.id === "string"
+    && typeof conversation.owner?.name === "string"
+    && typeof conversation.name === "string"
+    && typeof conversation.updatedAt === "string"));
   assert.equal(home.newProjectModels.length, 1);
   assert.equal(home.providerAvailability.mode, "live");
   assert.match(home.collectionDigest, /^[0-9a-f]{64}$/u);
