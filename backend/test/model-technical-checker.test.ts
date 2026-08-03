@@ -51,7 +51,7 @@ test("technical checker returns digest-bound executable evidence and never publi
         sampleIndex: 0,
         sampleId: "<digest>",
         parameters: { stepLimit: 2, demand: 1 },
-        seed: null,
+        seed: 1,
       });
       writeDeclaredSmokeOutput(input);
     }

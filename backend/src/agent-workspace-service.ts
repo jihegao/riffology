@@ -120,6 +120,22 @@ export type AgentDiscoveryDto =
   | { mode: "live"; agents: OpenCodeAgent[] }
   | { mode: "read_only"; reason: "opencode_unavailable" | "opencode_auth_failed"; agents: [] };
 
+export type ComposerCommandId = "stop" | "retry" | "check-model";
+
+export type ComposerCapabilitiesDto = Readonly<{
+  schemaVersion: 1;
+  revision: string;
+  commands: readonly Readonly<{
+    id: ComposerCommandId;
+    slash: `/${ComposerCommandId}`;
+    label: string;
+    description: string;
+    availability: "enabled" | "disabled";
+    reason?: string;
+  }>[];
+  skills: readonly Readonly<{ id: string; version: string; description: string }>[];
+}>;
+
 export type PublicAgentGoalVerification = Readonly<{
   disposition: AgentGoalDisposition;
   reasonCode: string;
@@ -2323,6 +2339,88 @@ export class AgentWorkspaceService {
       activity,
     };
     return Object.freeze({ revision: canonicalDigest(body), ...body });
+  }
+
+  async composerCapabilities(conversationIdInput: string): Promise<ComposerCapabilitiesDto> {
+    const conversationId = boundedId(conversationIdInput);
+    const conversation = this.getConversation(conversationId);
+    const runtime = await this.conversationRuntime(conversationId);
+    const stopEnabled = runtime.turnActive
+      && (runtime.status === "busy"
+        || runtime.status === "waiting_for_tool"
+        || runtime.status === "waiting_for_user");
+    const retryEnabled = !runtime.turnActive
+      && runtime.status === "failed"
+      && runtime.failure?.retryable === true;
+    const modelEnabled = conversation.owner.kind === "model"
+      && conversation.lifecycleState === "active"
+      && !runtime.turnActive;
+    const command = (
+      id: ComposerCommandId,
+      label: string,
+      description: string,
+      enabled: boolean,
+      reason: string,
+    ) => Object.freeze({
+      id,
+      slash: `/${id}` as `/${ComposerCommandId}`,
+      label,
+      description,
+      availability: enabled ? "enabled" as const : "disabled" as const,
+      ...(enabled ? {} : { reason }),
+    });
+    const skills = this.turnRuntime?.skills.list().map((skill) => Object.freeze({
+      id: skill.id,
+      version: skill.version,
+      description: skill.description,
+    })) ?? [];
+    const body = {
+      schemaVersion: 1 as const,
+      commands: Object.freeze([
+        command("stop", "Stop turn", "Stop the active Agent turn.", stopEnabled, "No stoppable Agent turn is active."),
+        command("retry", "Retry turn", "Retry the latest retryable Agent turn.", retryEnabled, "No retryable Agent turn is available."),
+        command("check-model", "Run Model check", "Run a receipt-backed technical check for this Model.", modelEnabled, conversation.owner.kind !== "model"
+          ? "Only Model Conversations can run a Model technical check."
+            : runtime.turnActive ? "Finish the active Agent turn first."
+              : conversation.lifecycleState !== "active" ? "The Model is not active."
+              : "The Model check is unavailable."),
+      ]),
+      skills: Object.freeze(skills),
+    };
+    return Object.freeze({ revision: canonicalDigest(body), ...body });
+  }
+
+  async executeComposerCommand(input: {
+    conversationId: string;
+    commandId: ComposerCommandId;
+    commandKey: string;
+    expectedRevision: string;
+  }): Promise<unknown> {
+    const conversationId = boundedId(input.conversationId);
+    const commandKey = boundedKey(input.commandKey, "commandKey");
+    const expectedRevision = boundedDigest(input.expectedRevision, "expectedRevision");
+    const capabilities = await this.composerCapabilities(conversationId);
+    if (capabilities.revision !== expectedRevision) {
+      throw new ApiError(409, "composer_capabilities_stale", "The Conversation capabilities changed; refresh before running this command.");
+    }
+    const selected = capabilities.commands.find((command) => command.id === input.commandId);
+    if (!selected || selected.availability !== "enabled") {
+      throw new ApiError(409, "composer_command_unavailable", selected?.reason ?? "The requested Conversation command is unavailable.");
+    }
+    const runtime = await this.conversationRuntime(conversationId);
+    if (input.commandId === "stop") {
+      if (!runtime.activeRequestKey) throw new ApiError(409, "turn_not_active", "The requested Agent turn is not active.");
+      return this.stopTurn(conversationId, runtime.activeRequestKey);
+    }
+    if (input.commandId === "retry") {
+      if (!runtime.activeRequestKey) throw new ApiError(409, "turn_not_retryable", "The latest Agent turn is not safely retryable.");
+      return this.retryTurn({ conversationId, sourceRequestKey: runtime.activeRequestKey, requestKey: commandKey });
+    }
+    const conversation = this.getConversation(conversationId);
+    if (conversation.owner.kind !== "model") {
+      throw new ApiError(403, "model_check_owner_required", "Only Model Conversations can run a Model technical check.");
+    }
+    return this.startTechnicalCheck(conversation.owner.id, commandKey);
   }
 
   async stopTurn(conversationIdInput: string, requestKeyInput: string): Promise<ConversationRuntimeDto> {

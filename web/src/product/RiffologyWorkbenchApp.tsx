@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type RefObject } from "react";
 import { defaultProductClient, ProductApiError, type ProductClient, type ProductRecoveryStatus } from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { RiffologyWorkbenchViewer } from "./RiffologyWorkbenchViewer";
@@ -21,6 +21,25 @@ type WorkbenchRoute =
 
 const createUnboundWorkspaceHref = () =>
   `/workbench/new/${crypto.randomUUID()}`;
+
+const CHAT_PANE_STORAGE_KEY = "riffology.chat-pane-width.v1";
+const CHAT_PANE_MIN = 320;
+const CHAT_PANE_DEFAULT = 472;
+const CHAT_PANE_MAX = 640;
+const CHAT_PANE_STEP = 16;
+
+const clampChatPaneWidth = (value: number, availableWidth = Number.POSITIVE_INFINITY) => {
+  const dynamicMax = Math.min(CHAT_PANE_MAX, Math.max(CHAT_PANE_MIN, availableWidth - 320));
+  return Math.round(Math.min(dynamicMax, Math.max(CHAT_PANE_MIN, value)));
+};
+
+const readChatPaneWidth = () => {
+  if (typeof window === "undefined") return CHAT_PANE_DEFAULT;
+  try {
+    const parsed = Number(window.localStorage?.getItem?.(CHAT_PANE_STORAGE_KEY));
+    return Number.isFinite(parsed) ? clampChatPaneWidth(parsed) : CHAT_PANE_DEFAULT;
+  } catch { return CHAT_PANE_DEFAULT; }
+};
 
 const readWorkbenchRoute = (): WorkbenchRoute => {
   if (window.location.pathname === "/workbench/home" || window.location.pathname === "/workbench/home/") {
@@ -105,12 +124,37 @@ export function RiffologyWorkbenchApp({
   const [browserBusy, setBrowserBusy] = useState(false);
   const [agentActionBusy, setAgentActionBusy] = useState(false);
   const [agentMenuChecking, setAgentMenuChecking] = useState(false);
+  const [chatPaneWidth, setChatPaneWidth] = useState(readChatPaneWidth);
   const [pausableRequestKey, setPausableRequestKey] = useState<string>();
   const browserRequestRef = useRef(0);
   const browserStateRef = useRef<BrowserSessionDto | undefined>(undefined);
   const browserBusyRef = useRef(false);
   const loadEpochRef = useRef(0);
   const fileToggleRef = useRef<HTMLButtonElement>(null);
+  const workbenchMainRef = useRef<HTMLElement>(null);
+  const chatWidthRef = useRef(chatPaneWidth);
+
+  useEffect(() => {
+    chatWidthRef.current = chatPaneWidth;
+    try { window.localStorage?.setItem?.(CHAT_PANE_STORAGE_KEY, String(chatPaneWidth)); } catch { /* optional preference */ }
+  }, [chatPaneWidth]);
+
+  useEffect(() => {
+    const main = workbenchMainRef.current;
+    if (!main) return;
+    const clamp = () => {
+      const next = clampChatPaneWidth(chatWidthRef.current, main.clientWidth);
+      setChatPaneWidth((current) => current === next ? current : next);
+    };
+    clamp();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", clamp);
+      return () => window.removeEventListener("resize", clamp);
+    }
+    const observer = new ResizeObserver(clamp);
+    observer.observe(main);
+    return () => observer.disconnect();
+  }, [route.page]);
 
   const load = useCallback(async () => {
     const epoch = ++loadEpochRef.current;
@@ -483,7 +527,13 @@ export function RiffologyWorkbenchApp({
           onBrowserReturn={() => void browserControl("return")}
         />
       </header>
-      <main id="riffology-workbench-main" className="riffology-workbench-main" tabIndex={-1}>
+      <main
+        id="riffology-workbench-main"
+        className="riffology-workbench-main"
+        ref={workbenchMainRef}
+        style={{ "--riffology-chat-width": `${chatPaneWidth}px` } as CSSProperties}
+        tabIndex={-1}
+      >
         {recovery === "checking" && <WorkbenchState title="正在恢复工作台…" />}
         {recovery !== "checking" && recovery.state === "recovery_required" && (
           <WorkbenchState title="工作台需要恢复" detail="Riffology 当前不会接受工作区写入。" />
@@ -536,6 +586,11 @@ export function RiffologyWorkbenchApp({
                     conversationId,
                   )}
               />
+              <ChatPaneResizer
+                width={chatPaneWidth}
+                onWidthChange={setChatPaneWidth}
+                availableWidth={workbenchMainRef.current?.clientWidth}
+              />
             </aside>
             <RiffologyWorkbenchViewer client={client} workspace={ownerWorkspace}
               filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
@@ -549,6 +604,58 @@ export function RiffologyWorkbenchApp({
         )}
       </main>
     </div>
+  );
+}
+
+function ChatPaneResizer({
+  width,
+  availableWidth,
+  onWidthChange,
+}: Readonly<{
+  width: number;
+  availableWidth?: number;
+  onWidthChange: (width: number) => void;
+}>) {
+  const startRef = useRef<Readonly<{ x: number; width: number }> | undefined>(undefined);
+  const maxWidth = clampChatPaneWidth(CHAT_PANE_MAX, availableWidth);
+  const setWidth = (next: number) => onWidthChange(clampChatPaneWidth(next, availableWidth));
+  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    startRef.current = { x: event.clientX, width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const start = startRef.current;
+    if (!start) return;
+    setWidth(start.width + event.clientX - start.x);
+  };
+  const stopPointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (startRef.current && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    startRef.current = undefined;
+  };
+  return (
+    <div
+      className="riffology-chat-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整对话栏宽度"
+      aria-valuemin={CHAT_PANE_MIN}
+      aria-valuemax={maxWidth}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={stopPointer}
+      onPointerCancel={stopPointer}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowLeft") { event.preventDefault(); setWidth(width - CHAT_PANE_STEP); }
+        else if (event.key === "ArrowRight") { event.preventDefault(); setWidth(width + CHAT_PANE_STEP); }
+        else if (event.key === "Home") { event.preventDefault(); setWidth(CHAT_PANE_MIN); }
+        else if (event.key === "End") { event.preventDefault(); setWidth(maxWidth); }
+      }}
+    />
   );
 }
 

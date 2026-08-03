@@ -81,6 +81,22 @@ export type ProviderDiscovery =
     providerModels: readonly [];
   }>;
 
+export type ComposerCommandId = "stop" | "retry" | "check-model";
+
+export type ComposerCapabilities = Readonly<{
+  schemaVersion: 1;
+  revision: string;
+  commands: readonly Readonly<{
+    id: ComposerCommandId;
+    slash: `/${ComposerCommandId}`;
+    label: string;
+    description: string;
+    availability: "enabled" | "disabled";
+    reason?: string;
+  }>[];
+  skills: readonly Readonly<{ id: string; version: string; description: string }>[];
+}>;
+
 export type WorkspaceBinding = Readonly<{
   schemaVersion: 1;
   workspaceKey: string;

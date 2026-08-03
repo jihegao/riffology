@@ -170,7 +170,9 @@ export class ModelTechnicalChecker {
           runId: "technical_check",
           sampleIndex: 0,
           parameters: description.inputs.smoke,
-          seed: null,
+          // A fixed seed makes the post-write smoke reproducible and binds
+          // its evidence to the captured workspace digest.
+          seed: 1,
         });
         writeFileSync(inputPath, `${canonicalJsonV2(batchInput)}\n`, { mode: 0o600 });
         const smoke = await this.#execute("smoke", checkWorkspace, [

@@ -706,6 +706,24 @@ export class MilestoneA2Api {
         json(response, 200, this.service.listConversationActivity(conversationId));
         return true;
       }
+      if (request.method === "GET" && parts.length === 4 && parts[3] === "composer-capabilities") {
+        privateJson(response, 200, await this.service.composerCapabilities(conversationId));
+        return true;
+      }
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "composer-commands") {
+        const body = await strictJsonBody(request, ["commandId", "commandKey", "expectedRevision"]);
+        const commandId = requiredString(body.commandId, "commandId");
+        if (!(["stop", "retry", "check-model"] as const).includes(commandId as "stop" | "retry" | "check-model")) {
+          throw new ApiError(422, "invalid_composer_command", "The Conversation command is invalid.");
+        }
+        privateJson(response, 200, await this.service.executeComposerCommand({
+          conversationId,
+          commandId: commandId as "stop" | "retry" | "check-model",
+          commandKey: requiredString(body.commandKey, "commandKey"),
+          expectedRevision: requiredString(body.expectedRevision, "expectedRevision"),
+        }));
+        return true;
+      }
       if (request.method === "GET" && parts.length === 4 && parts[3] === "runtime") {
         privateJson(response, 200, publicConversationRuntime(
           await this.service.conversationRuntime(conversationId),

@@ -280,11 +280,23 @@ body:has(> #root > .product-app) { min-width: 320px; min-height: 100vh; margin: 
   gap: 1rem;
   padding: .15rem .25rem .25rem 0;
   overflow-y: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
 }
 .product-composer-dock {
+  display: grid;
+  gap: .65rem;
   min-width: 0;
   padding-bottom: env(safe-area-inset-bottom);
+}
+.product-question-interaction-dock {
+  display: grid;
+  max-height: min(42vh, 24rem);
+  gap: .65rem;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .15rem .2rem .15rem 0;
 }
 .product-conversation-list { min-width: 0; margin: 0; overflow-x: auto; }
 .product-conversation-list ul, .product-message-list, .product-conversation-records ul,
@@ -1285,6 +1297,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-user-avatar { margin-top: auto; border-radius: 50%; background: #dce6e1; }
 .riffology-chat-pane {
   display: flex;
+  position: relative;
   min-width: 0;
   min-height: 0;
   grid-column: 1;
@@ -1292,6 +1305,28 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   border-right: 1px solid #e4e4e0;
   background: #fff;
 }
+.riffology-chat-resizer {
+  position: absolute;
+  z-index: 12;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.riffology-chat-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  content: "";
+  background: transparent;
+}
+.riffology-chat-resizer:hover::after,
+.riffology-chat-resizer:focus-visible::after { background: #2d7461; }
+.riffology-chat-resizer:focus-visible { outline: 2px solid #2d7461; outline-offset: -1px; }
 .riffology-chat-pane .product-conversation-content { gap: 0; }
 .riffology-chat-pane .product-conversation-toolbar {
   position: relative;
@@ -1393,9 +1428,15 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   background: #fff;
 }
 .riffology-chat-pane .product-composer-dock {
+  gap: 10px;
   border-top: 1px solid #ecece9;
   padding: 16px 20px 18px;
   background: #fff;
+}
+.riffology-chat-pane .product-question-interaction-dock {
+  max-height: min(42vh, 24rem);
+  gap: 8px;
+  padding: 0 2px 0 0;
 }
 .riffology-chat-pane .product-composer {
   grid-template-columns: minmax(0, 1fr) minmax(0, .7fr) auto;
@@ -1415,6 +1456,42 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
 .riffology-chat-pane .product-composer > .product-composer-message { grid-row: 1; grid-column: 1 / -1; }
 .riffology-chat-pane .product-composer textarea { min-height: 72px; border: 0; border-radius: 7px; padding: 3px 4px; outline: 0; box-shadow: none; font-size: .86rem; line-height: 1.45; resize: vertical; }
 .riffology-chat-pane .product-composer textarea::placeholder { color: #969b99; opacity: 1; }
+.product-composer-message { position: relative; }
+.product-composer-command-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  border: 1px solid #b8d2c8;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #245f50;
+  background: #edf6f1;
+  font-size: .7rem;
+}
+.product-composer-command-chip button { border: 0; padding: 0 2px; color: inherit; background: transparent; cursor: pointer; }
+.product-composer-menu {
+  position: absolute;
+  z-index: 8;
+  right: 0;
+  bottom: calc(100% - 1px);
+  display: grid;
+  width: min(100%, 360px);
+  max-height: 260px;
+  gap: 3px;
+  overflow-y: auto;
+  border: 1px solid #cbd4cf;
+  border-radius: 9px;
+  padding: 6px;
+  background: #fff;
+  box-shadow: 0 10px 24px #17232124;
+}
+.product-composer-menu button { display: grid; gap: 2px; border: 0; border-radius: 6px; padding: 7px 8px; color: #263632; background: transparent; text-align: left; }
+.product-composer-menu button:hover:not(:disabled), .product-composer-menu button[aria-selected="true"] { background: #edf6f1; outline: 2px solid #b8d2c8; outline-offset: -2px; }
+.product-composer-menu button:disabled { color: #89948f; cursor: not-allowed; }
+.product-composer-menu button strong { font-size: .72rem; }
+.product-composer-menu button span, .product-composer-menu button small, .product-composer-menu-empty { color: #6d7974; font-size: .64rem; line-height: 1.35; }
+.product-composer-menu-empty { padding: 10px; }
 .riffology-chat-pane .product-composer > button { grid-row: 2; grid-column: 3; display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 8px; padding: 0; color: #fff; background: #8f9693; font-size: 0; }
 .riffology-chat-pane .product-composer > button::before { content: "↑"; font-size: 1.2rem; font-weight: 430; line-height: 1; }
 .riffology-chat-pane .product-composer > button:not(:disabled) { background: #245f50; }
@@ -1655,6 +1732,7 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   .riffology-home-trigger { margin-left: 2px; }
   .riffology-workbench-main { grid-template-columns: minmax(0, 1fr); }
   .riffology-chat-pane { grid-column: 1; }
+  .riffology-chat-resizer { display: none; }
   .riffology-stage2-viewer { display: none; }
   .riffology-stage3-viewer { display: none; grid-column: 1; }
   .riffology-workbench-main:has(.riffology-stage3-viewer.has-selection) .riffology-chat-pane { display: none; }

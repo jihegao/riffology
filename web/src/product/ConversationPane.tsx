@@ -1,6 +1,7 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,8 @@ import type {
   OwnerKind,
   PermanentDeletePreview,
   ProviderDiscovery,
+  ComposerCapabilities,
+  ComposerCommandId,
 } from "./types";
 
 type ConversationCollections = Readonly<{
@@ -64,6 +67,8 @@ export function ConversationPane({
   const [error, setError] = useState<string>();
   const [readOnlyReason, setReadOnlyReason] = useState<string>();
   const paneRef = useRef<HTMLDivElement>(null);
+  const scrollRegionRef = useRef<HTMLDivElement>(null);
+  const scrollTopRef = useRef(0);
   const selected = useMemo(
     () => [...collections.active, ...collections.archived, ...collections.trashed]
       .find((conversation) => conversation.id === selectedConversationId)
@@ -111,6 +116,8 @@ export function ConversationPane({
 
   useEffect(() => {
     let current = true;
+    scrollTopRef.current = 0;
+    if (scrollRegionRef.current) scrollRegionRef.current.scrollTop = 0;
     setBundle(undefined);
     setReadOnlyReason(undefined);
     if (!selected) return () => { current = false; };
@@ -129,6 +136,11 @@ export function ConversationPane({
     });
     return () => { current = false; };
   }, [client, selected?.id]);
+
+  useLayoutEffect(() => {
+    const scrollRegion = scrollRegionRef.current;
+    if (scrollRegion) scrollRegion.scrollTop = scrollTopRef.current;
+  }, [runtime?.revision]);
 
   useEffect(() => {
     let current = true;
@@ -307,10 +319,14 @@ export function ConversationPane({
       </div>
       <div
         className="product-conversation-scroll-region"
+        ref={scrollRegionRef}
         data-testid="conversation-scroll-region"
         role="region"
         aria-label="Conversation activity"
         tabIndex={0}
+        onScroll={(event) => {
+          scrollTopRef.current = event.currentTarget.scrollTop;
+        }}
       >
         {activeBundle && (
           <>
@@ -359,7 +375,15 @@ export function ConversationPane({
       </div>
       {activeBundle && (
         <div className="product-composer-dock" data-testid="conversation-composer-dock">
+          <QuestionInteractionDock
+            client={client}
+            conversationId={activeBundle.conversation.id}
+            runtime={runtime}
+            onChanged={() => refreshConversation(activeBundle.conversation.id)}
+            onError={setError}
+          />
           <Composer
+            client={client}
             disabled={status === "read_only"
               || status === "busy"
               || status === "waiting_for_tool"
@@ -417,6 +441,25 @@ export function ConversationPane({
               } finally {
                 setSendingConversationId((current) =>
                   current === conversationId ? undefined : current);
+              }
+            }}
+            onCommand={async (commandId, commandKey, expectedRevision) => {
+              const conversationId = activeBundle.conversation.id;
+              setError(undefined);
+              try {
+                if (!client.executeComposerCommand) throw new Error("Conversation commands are unavailable.");
+                await client.executeComposerCommand({
+                  conversationId,
+                  commandId,
+                  commandKey,
+                  expectedRevision,
+                });
+                await refreshConversation(conversationId);
+                if (commandId === "check-model") await onOwnerChanged?.();
+              } catch (cause) {
+                if (selectedIdRef.current === conversationId) {
+                  setError(messageOf(cause, "The Conversation command could not be completed."));
+                }
               }
             }}
           />
@@ -843,7 +886,9 @@ function RuntimeControls({
       {runtime.goalVerification && (
         <GoalVerificationCard verification={runtime.goalVerification} />
       )}
-      {runtime.pendingInteractions.map((interaction) => (
+      {runtime.pendingInteractions
+        .filter((interaction) => interaction.kind === "permission")
+        .map((interaction) => (
         <InteractionResponse
           key={interaction.id}
           interaction={interaction}
@@ -859,16 +904,86 @@ function RuntimeControls({
                 decision,
               })
               : undefined)}
-          onQuestion={(response) => invoke(interaction.id,
-            client.respondConversationInteraction && interaction.kind === "question"
+          onQuestion={() => Promise.resolve()}
+        />
+      ))}
+    </section>
+  );
+}
+
+function QuestionInteractionDock({
+  client,
+  conversationId,
+  runtime,
+  onChanged,
+  onError,
+}: Readonly<{
+  client: ProductClient;
+  conversationId: string;
+  runtime?: ConversationRuntimeProjection;
+  onChanged: () => Promise<void>;
+  onError: (message: string) => void;
+}>) {
+  const [pending, setPending] = useState<string>();
+  const dockRef = useRef<HTMLDivElement>(null);
+  const questionInteractions = runtime?.pendingInteractions.filter(
+    (interaction) => interaction.kind === "question",
+  ) ?? [];
+  const questionKey = questionInteractions.map((interaction) => interaction.id).join("\u0000");
+  const seenQuestionKeyRef = useRef("");
+
+  useEffect(() => {
+    if (questionKey === seenQuestionKeyRef.current) return;
+    seenQuestionKeyRef.current = questionKey;
+    if (!questionKey) return;
+    requestAnimationFrame(() => {
+      const firstAnswerable = dockRef.current?.querySelector<HTMLElement>(
+        "input:not(:disabled), textarea:not(:disabled), button:not(:disabled)",
+      );
+      firstAnswerable?.focus({ preventScroll: true });
+    });
+  }, [questionKey]);
+
+  const invoke = async (interactionId: string, operation: (() => Promise<unknown>) | undefined) => {
+    if (!operation || pending) return;
+    setPending(interactionId);
+    try {
+      await operation();
+      await onChanged();
+    } catch (cause) {
+      onError(messageOf(cause, "The question response could not be submitted."));
+    } finally {
+      setPending((current) => current === interactionId ? undefined : current);
+    }
+  };
+
+  if (questionInteractions.length === 0) return null;
+  return (
+    <section
+      ref={dockRef}
+      className="product-question-interaction-dock"
+      data-testid="conversation-question-dock"
+      aria-label="Pending questions"
+    >
+      {questionInteractions.map((interaction) => (
+        <InteractionResponse
+          key={interaction.id}
+          interaction={interaction}
+          pending={pending === interaction.id}
+          disabled={Boolean(pending)}
+          onPermission={() => Promise.resolve()}
+          onQuestion={(response) => invoke(
+            interaction.id,
+            client.respondConversationInteraction
               ? () => client.respondConversationInteraction!({
                 conversationId,
-                requestKey: active?.requestKey ?? "",
+                requestKey: runtime?.activeTurn?.requestKey ?? "",
                 interactionId: interaction.id,
                 kind: "question",
                 response,
               })
-              : undefined)}
+              : undefined,
+          )}
         />
       ))}
     </section>
@@ -1218,6 +1333,7 @@ function AttachmentForm({
 }
 
 function Composer({
+  client,
   disabled,
   disabledMessage,
   sending,
@@ -1227,7 +1343,9 @@ function Composer({
   runtime,
   onProviderChange,
   onSend,
+  onCommand,
 }: Readonly<{
+  client: ProductClient;
   disabled: boolean;
   disabledMessage?: string;
   sending: boolean;
@@ -1237,21 +1355,58 @@ function Composer({
   runtime?: ConversationRuntimeProjection;
   onProviderChange: (providerId: string, modelId: string) => Promise<void>;
   onSend: (text: string, attachmentIds: readonly string[], agentName?: string) => Promise<void>;
+  onCommand: (commandId: ComposerCommandId, commandKey: string, expectedRevision: string) => Promise<void>;
 }>) {
   const [text, setText] = useState("");
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
   const [agentName, setAgentName] = useState("");
   const [providerPending, setProviderPending] = useState(false);
+  const [capabilities, setCapabilities] = useState<ComposerCapabilities>();
+  const [menu, setMenu] = useState<"commands" | "skills">();
+  const [menuQuery, setMenuQuery] = useState("");
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [selectedCommand, setSelectedCommand] = useState<Readonly<{
+    id: ComposerCommandId;
+    label: string;
+    expectedRevision: string;
+  }>>();
   const providerOptions = providers?.mode === "live" ? providers.providerModels : [];
   const selectedProvider = `${bundle.conversation.provider.providerId}/${bundle.conversation.provider.modelId}`;
   const providerLocked = bundle.conversation.provider.locked;
   useEffect(() => {
     if (runtime?.agent.selectedName) setAgentName(runtime.agent.selectedName);
   }, [runtime?.agent.selectedName]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!client.composerCapabilities) {
+      setCapabilities(undefined);
+      return;
+    }
+    void client.composerCapabilities(bundle.conversation.id).then((next) => {
+      if (!cancelled) setCapabilities(next);
+    }).catch(() => {
+      if (!cancelled) setCapabilities(undefined);
+    });
+    return () => { cancelled = true; };
+  }, [bundle.conversation.id, client, runtime?.revision]);
+  const commandOptions = capabilities?.commands.filter((command) =>
+    command.slash.includes(menuQuery.trim().toLowerCase())
+      || command.label.toLowerCase().includes(menuQuery.trim().toLowerCase())) ?? [];
+  const skillOptions = capabilities?.skills.filter((skill) =>
+    skill.id.includes(menuQuery.trim().toLowerCase())
+      || skill.description.toLowerCase().includes(menuQuery.trim().toLowerCase())) ?? [];
+  const closeMenu = () => { setMenu(undefined); setMenuQuery(""); setMenuIndex(0); };
+  const submitCommand = () => {
+    if (!selectedCommand || disabled || sending) return;
+    const command = selectedCommand;
+    setSelectedCommand(undefined);
+    void onCommand(command.id, crypto.randomUUID(), command.expectedRevision);
+  };
   return (
     <form className="product-composer" onSubmit={(event) => {
       event.preventDefault();
-      if (!text.trim()) return;
+      if (selectedCommand) { submitCommand(); return; }
+      if (!text.trim() || text.trim().startsWith("/")) return;
       const accepted = text.trim();
       setText("");
       void onSend(accepted, attachmentIds, agentName || undefined);
@@ -1299,6 +1454,12 @@ function Composer({
       )}
       <label className="product-composer-message">
         Message
+        {selectedCommand && (
+          <span className="product-composer-command-chip" role="status">
+            /{selectedCommand.id} · {selectedCommand.label}
+            <button type="button" aria-label="Remove command" onClick={() => setSelectedCommand(undefined)}>×</button>
+          </span>
+        )}
         <textarea
           required
           placeholder="Ask anything, / for commands, @ for context…"
@@ -1306,8 +1467,77 @@ function Composer({
           maxLength={64_000}
           value={text}
           disabled={disabled || sending}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setText(next);
+            if (selectedCommand) return;
+            if (/^\/[^\s]*$/u.test(next)) {
+              setMenu("commands");
+              setMenuQuery(next.slice(1));
+              setMenuIndex(0);
+            } else if (/^\$[^\s]*$/u.test(next)) {
+              setMenu("skills");
+              setMenuQuery(next.slice(1));
+              setMenuIndex(0);
+            } else if (menu) closeMenu();
+          }}
+          onKeyDown={(event) => {
+            const options = menu === "commands" ? commandOptions : skillOptions;
+            if (menu && event.key === "Escape") { event.preventDefault(); closeMenu(); return; }
+            if (menu && event.key === "ArrowDown") { event.preventDefault(); setMenuIndex((current) => Math.min(current + 1, Math.max(0, options.length - 1))); return; }
+            if (menu && event.key === "ArrowUp") { event.preventDefault(); setMenuIndex((current) => Math.max(0, current - 1)); return; }
+            if (menu && event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              const option = options[menuIndex];
+              if (!option) return;
+              if (menu === "commands") {
+                const command = option as ComposerCapabilities["commands"][number];
+                if (command.availability === "enabled") {
+                  setSelectedCommand({ id: command.id, label: command.label, expectedRevision: capabilities!.revision });
+                  setText("");
+                  closeMenu();
+                }
+              } else {
+                const skill = option as ComposerCapabilities["skills"][number];
+                setText(`$${skill.id} `);
+                closeMenu();
+              }
+            }
+          }}
         />
+        {menu && (
+          <div className="product-composer-menu" role="listbox" aria-label={menu === "commands" ? "Conversation commands" : "Allowed Skills"}>
+            {(menu === "commands" ? commandOptions : skillOptions).length === 0 && (
+              <span className="product-composer-menu-empty">{menu === "skills" ? "No allowed Skills" : "No matching commands"}</span>
+            )}
+            {(menu === "commands" ? commandOptions : skillOptions).map((option, index) => {
+              const command = menu === "commands" ? option as ComposerCapabilities["commands"][number] : undefined;
+              const skill = menu === "skills" ? option as ComposerCapabilities["skills"][number] : undefined;
+              const disabledOption = command?.availability === "disabled";
+              return (
+                <button
+                  type="button"
+                  key={command?.id ?? skill?.id}
+                  role="option"
+                  aria-selected={index === menuIndex}
+                  disabled={disabledOption}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    if (command) {
+                      setSelectedCommand({ id: command.id, label: command.label, expectedRevision: capabilities!.revision });
+                      setText("");
+                    } else if (skill) setText(`$${skill.id} `);
+                    closeMenu();
+                  }}
+                >
+                  <strong>{command?.slash ?? `$${skill?.id}`}</strong>
+                  <span>{command?.description ?? skill?.description}</span>
+                  {disabledOption && <small>{command?.reason}</small>}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </label>
       {bundle.attachments.length > 0 && (
         <fieldset>
@@ -1333,8 +1563,11 @@ function Composer({
             ?? "Agent replies are read-only while the configured provider is unavailable. Lifecycle controls remain available."}
         </p>
       )}
-      <button type="submit" className="product-primary" disabled={disabled || sending || !text.trim()}>
-        {sending ? "Connecting…" : "Send"}
+      {text.trim().startsWith("/") && !selectedCommand && (
+        <p className="product-form-note" role="status">Select a supported command from the menu before sending.</p>
+      )}
+      <button type="submit" className="product-primary" disabled={disabled || sending || (!selectedCommand && !text.trim())}>
+        {sending ? "Connecting…" : selectedCommand ? "Run command" : "Send"}
       </button>
     </form>
   );
