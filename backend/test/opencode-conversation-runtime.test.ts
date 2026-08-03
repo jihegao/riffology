@@ -324,6 +324,52 @@ test("provider discovery is stable, deduplicated, allowlisted, and has no first-
   assert.equal(noFallbackRequests, 0, "initialize must not discover or select a fallback without explicit model");
 });
 
+test("opencode-go DeepSeek V4 models require catalogue discovery and preserve qualified IDs", async (t) => {
+  const workdir = await mkdtemp(join(tmpdir(), "riff-opencode-go-provider-discovery-"));
+  t.after(() => rm(workdir, { recursive: true, force: true }));
+  const catalogue = [
+    { id: "opencode-go", models: {
+      "deepseek-v4-flash": {},
+      "deepseek-v4-pro": {},
+    } },
+    { id: "other-provider", models: { "deepseek-v4-pro": {} } },
+  ];
+  const makeAdapter = (model: string, allowedProviders: string[] = ["opencode-go"]) => new HttpOpenCodeAdapter({
+    baseUrl: "http://127.0.0.1:4096",
+    model,
+    workdir,
+    expectedVersion: "test",
+    allowedProviders,
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/global/health") return Response.json({ healthy: true, version: "test" });
+      if (path === "/path") return Response.json({ directory: workdir });
+      if (path === "/config/providers") return Response.json({ providers: catalogue });
+      return new Response(null, { status: 404 });
+    },
+  });
+  const expected = [
+    { providerId: "opencode-go", modelId: "deepseek-v4-flash", qualifiedId: "opencode-go/deepseek-v4-flash" },
+    { providerId: "opencode-go", modelId: "deepseek-v4-pro", qualifiedId: "opencode-go/deepseek-v4-pro" },
+  ];
+
+  for (const model of expected.map((item) => item.qualifiedId)) {
+    const adapter = makeAdapter(model);
+    assert.deepEqual(await adapter.initialize(), { status: "ready", modelId: model, version: "test" });
+    assert.deepEqual(await adapter.discoverProviderModels(), expected);
+  }
+
+  const disallowed = makeAdapter("other-provider/deepseek-v4-pro");
+  const disallowedReadiness = await disallowed.initialize();
+  assert.equal(disallowedReadiness.status, "error");
+  assert.equal(disallowedReadiness.lastError?.code, "opencode_provider_not_allowed");
+
+  const missing = makeAdapter("opencode-go/deepseek-v4-missing");
+  const missingReadiness = await missing.initialize();
+  assert.equal(missingReadiness.status, "error");
+  assert.equal(missingReadiness.lastError?.code, "opencode_model_unavailable");
+});
+
 test("adapter sends every A2 prompt with its explicit provider/model and disabled built-ins", async (t) => {
   const bodies: any[] = [];
   const sessionPermissionBodies: any[] = [];

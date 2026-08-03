@@ -743,6 +743,68 @@ test("restart preserves completed transcript while provider loss persists a fail
   }
 });
 
+test("opencode-go DeepSeek V4 conversations restore on the exact model and stay read-only when it disappears", async () => {
+  const base = await mkdtemp(join(tmpdir(), "riff-a2-opencode-go-"));
+  const openCode = new ApiOpenCode();
+  openCode.catalogue = [
+    { providerId: "opencode-go", modelId: "deepseek-v4-flash", qualifiedId: "opencode-go/deepseek-v4-flash" },
+    { providerId: "opencode-go", modelId: "deepseek-v4-pro", qualifiedId: "opencode-go/deepseek-v4-pro" },
+  ];
+  const first = await start(base, openCode);
+  const createdResponse = await post(`${first.baseUrl}/api/models`, {
+    commandId: "opencode-go-model",
+    name: "DeepSeek V4 Flash Model",
+    providerId: "opencode-go",
+    modelId: "deepseek-v4-flash",
+  });
+  assert.equal(createdResponse.status, 201, await createdResponse.clone().text());
+  const created = await createdResponse.json() as any;
+  const conversationId = created.conversation.id;
+  const firstTurn = await post(`${first.baseUrl}/api/conversations/${conversationId}/turns`, {
+    requestKey: "opencode-go-first-turn", text: "Inspect this selected model.", attachmentIds: [],
+  });
+  assert.equal(firstTurn.status, 200, await firstTurn.clone().text());
+  assert.equal((await firstTurn.json() as any).mode, "live");
+  assert.deepEqual(openCode.prompts.at(-1)?.binding, {
+    providerId: "opencode-go", modelId: "deepseek-v4-flash",
+  });
+  await first.app.close();
+
+  const second = await start(base, openCode);
+  try {
+    const restored = await post(`${second.baseUrl}/api/conversations/${conversationId}/turns`, {
+      requestKey: "opencode-go-restored-turn", text: "Continue after restart.", attachmentIds: [],
+    });
+    assert.equal(restored.status, 200, await restored.clone().text());
+    assert.equal((await restored.json() as any).mode, "live");
+    assert.deepEqual(openCode.prompts.at(-1)?.binding, {
+      providerId: "opencode-go", modelId: "deepseek-v4-flash",
+    });
+
+    openCode.catalogue = [
+      { providerId: "opencode-go", modelId: "deepseek-v4-pro", qualifiedId: "opencode-go/deepseek-v4-pro" },
+    ];
+    const missingModel = await post(`${second.baseUrl}/api/conversations/${conversationId}/turns`, {
+      requestKey: "opencode-go-model-missing", text: "Do not fabricate a reply.", attachmentIds: [],
+    });
+    assert.equal(missingModel.status, 200);
+    const missingModelPayload = await missingModel.json() as any;
+    assert.equal(missingModelPayload.mode, "read_only");
+    assert.equal(missingModelPayload.reason, "model_unavailable");
+    assert.equal(openCode.prompts.at(-1)?.binding.modelId, "deepseek-v4-flash");
+
+    openCode.catalogue = [];
+    const missingProvider = await post(`${second.baseUrl}/api/conversations/${conversationId}/turns`, {
+      requestKey: "opencode-go-provider-missing", text: "Still do not fabricate a reply.", attachmentIds: [],
+    });
+    assert.equal(missingProvider.status, 200);
+    assert.equal((await missingProvider.json() as any).reason, "provider_unavailable");
+  } finally {
+    await second.app.close();
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("an empty synchronous OpenCode response fails durably without assistant fabrication", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "riff-a2-empty-"));
   const openCode = new ApiOpenCode();

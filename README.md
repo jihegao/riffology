@@ -297,13 +297,15 @@ server credentials:
 
 ```dotenv
 OPENCODE_API_KEY=your-provider-key          # consumed by your local OpenCode provider configuration
-OPENCODE_MODEL=provider_id/model_id
+# Select one exact model returned by the local /config/providers catalogue:
+OPENCODE_MODEL=opencode-go/deepseek-v4-flash
+# OPENCODE_MODEL=opencode-go/deepseek-v4-pro
 OPENCODE_URL=http://127.0.0.1:4096
 # Exact server version required by this Product startup contract (the launcher defaults to 1.18.11).
 OPENCODE_EXPECTED_VERSION=1.18.11
 # Canonical absolute directory opened by the local OpenCode Server.
 OPENCODE_WORKDIR=/absolute/path/to/developer-repo-root
-OPENCODE_ALLOWED_PROVIDERS=provider_id
+OPENCODE_ALLOWED_PROVIDERS=opencode-go
 # Optional only when the local OpenCode server requires basic auth.
 OPENCODE_SERVER_USERNAME=opencode
 OPENCODE_SERVER_PASSWORD=
