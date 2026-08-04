@@ -51,7 +51,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("capability-driven review rail", () => {
   it("does not steal initial desktop focus and restores focus for explicit rail toggles", async () => {
     render(<ReviewRail
-      ownerKey="model:model-one:digest-one"
+      ownerKey="project:project-one:digest-one"
       files={files}
       loadFile={vi.fn(async () => ({
         kind: "code" as const,
@@ -74,7 +74,7 @@ describe("capability-driven review rail", () => {
   it("supports file review, keyboard resizing, local progress, and whole-set apply receipts", async () => {
     const onApply = vi.fn(async () => receipt("apply"));
     render(<ReviewRail
-      ownerKey="model:model-one:digest-one"
+      ownerKey="project:project-one:digest-one"
       files={files}
       changeSets={[changeSet()]}
       loadFile={vi.fn(async () => ({
@@ -104,7 +104,7 @@ describe("capability-driven review rail", () => {
   it("keeps stale apply disabled while allowing the whole proposal to be rejected", async () => {
     const onReject = vi.fn(async () => receipt("reject"));
     render(<ReviewRail
-      ownerKey="model:model-one:digest-one"
+      ownerKey="project:project-one:digest-one"
       files={files}
       changeSets={[changeSet("stale")]}
       loadFile={vi.fn(async () => ({
@@ -144,7 +144,7 @@ describe("capability-driven review rail", () => {
             <div className="product-workbench-layout">
               <main className="product-workbench-canvas">Canvas</main>
               <ReviewRail
-                ownerKey="model:model-one:digest-one"
+                ownerKey="project:project-one:digest-one"
                 files={files}
                 loadFile={vi.fn(async () => ({
                   kind: "code" as const,
@@ -202,7 +202,7 @@ describe("capability-driven review rail", () => {
     render(<div className="product-app">
       <button type="button">Pane selector control</button>
       <ReviewRail
-        ownerKey="model:model-one:digest-one"
+        ownerKey="project:project-one:digest-one"
         files={files}
         loadFile={vi.fn(async () => ({
           kind: "code" as const,

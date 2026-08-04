@@ -407,7 +407,7 @@ describe("Product browser client", () => {
             receiptDigest: "a".repeat(64),
             evidence: {
               openCodeTerminal: "idle",
-              intentKind: "model_visual",
+              intentKind: "project_visual",
               actionCount: 2,
               terminalActionCount: 2,
               committedActionCount: 2,
@@ -435,7 +435,7 @@ describe("Product browser client", () => {
       receiptDigest: "a".repeat(64),
       evidence: {
         openCodeTerminal: "idle",
-        intentKind: "model_visual",
+        intentKind: "project_visual",
         actionCount: 2,
         terminalActionCount: 2,
         committedActionCount: 2,

@@ -1340,7 +1340,7 @@ const normalizeGoalVerification = (
   const intentKinds = new Set([
     "response_delivery",
     "explicit_mutation",
-    "model_visual",
+    "project_visual",
   ]);
   const count = (item: unknown): item is number =>
     Number.isSafeInteger(item) && Number(item) >= 0 && Number(item) <= 1_000_000;
