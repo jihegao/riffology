@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { AgentTurnRuntime, explicitImperative } from "../src/agent-turn-runtime.ts";
+import { AgentTurnRuntime, explicitImperative, imperativeClauses } from "../src/agent-turn-runtime.ts";
 import { agentToolOperationCommitment, type AgentToolName } from "../src/agent-tools.ts";
 import { normalizeVisualAgentOperation, visualAgentOperationCommitment, type VisualAgentAuthority } from "../src/agent-visual-authority.ts";
 import { planExperiment } from "../src/experiment-planner.ts";
@@ -810,6 +810,199 @@ test("intent classifier is conservative for questions and conditionals", () => {
   assert.equal(explicitImperative("Could you update the model?"), false);
   assert.equal(explicitImperative("如果修改模型会怎样"), false);
   assert.equal(explicitImperative("Explain the model"), false);
+  assert.deepEqual(
+    imperativeClauses("为什么没有控制器，另外加入控制器并运行"),
+    ["另外加入控制器并运行"],
+  );
+  assert.equal(
+    explicitImperative("Why is there no controller, and add one then run"),
+    true,
+  );
+});
+
+test("Project intent routes mixed clauses to one delivery and visual open never claims Browser authority", async (t) => {
+  const { store, runtime } = setup(t, true);
+  const preparedScopes: unknown[] = [];
+  runtime.configureBrowserAuthority({
+    async prepareDormant(input: unknown) { preparedScopes.push(input); },
+    async revokeTurn() {}, async revokeAll() {},
+    async activatePermission() { throw new Error("must remain dormant"); },
+    async execute() { throw new Error("must not execute"); },
+  } as any);
+
+  const cases = [
+    {
+      turnId: "turn_project_segmented_delivery",
+      messageId: "message_project_segmented_delivery",
+      text: "为什么没有控制器，另外加入控制器并运行",
+      expected: "riff_deliver_project_changes",
+    },
+    {
+      turnId: "turn_project_visual_start",
+      messageId: "message_project_visual_start",
+      text: "启动可视化仿真",
+      expected: "riff_start_run",
+    },
+    {
+      turnId: "turn_project_visual_run_phrase",
+      messageId: "message_project_visual_run_phrase",
+      text: "运行可视化",
+      expected: "riff_start_run",
+    },
+    {
+      turnId: "turn_project_modify_then_open",
+      messageId: "message_project_modify_then_open",
+      text: "请修改后打开仿真页面",
+      expected: "riff_deliver_project_changes",
+    },
+    {
+      turnId: "turn_project_visual_open",
+      messageId: "message_project_visual_open",
+      text: "打开当前可视化页面",
+      expected: "riff_open_current_visualization",
+    },
+  ] as const;
+  for (const [index, item] of cases.entries()) {
+    store.startAgentTurn({
+      turnId: item.turnId,
+      userMessageId: item.messageId,
+      conversationId: "conversation_project",
+      requestKey: item.turnId,
+      text: item.text,
+      createdAt: NOW,
+    });
+    store.bindAgentSession({
+      id: `session_${item.turnId}`,
+      conversationId: "conversation_project",
+      expectedGeneration: index,
+      state: "available",
+      externalSessionRef: `opaque-${item.turnId}`,
+      at: NOW,
+    });
+    const prepared = await runtime.prepare({
+      conversationId: "conversation_project",
+      turnId: item.turnId,
+      text: item.text,
+      attachmentIds: [],
+      workspace: {
+        owner: { kind: "project", id: "project_alpha" },
+        directory: "/server/project",
+      },
+    });
+    assert.ok(prepared.allowedTools.includes(item.expected));
+    if (item.expected !== "riff_open_current_visualization") {
+      assert.equal(
+        prepared.allowedTools.filter((tool) => new Set([
+          "riff_deliver_project_changes", "riff_start_run",
+          "riff_start_project_technical_check",
+        ]).has(tool)).length,
+        1,
+      );
+    } else {
+      assert.ok(!prepared.allowedTools.some((tool) => tool.startsWith("browser_")));
+      const response = await runtime.handle(
+        prepared.capability,
+        call("riff_open_current_visualization"),
+      );
+      assert.equal((response?.result as any).isError, true);
+      assert.equal(
+        JSON.parse((response?.result as any).content[0].text).error.code,
+        "no_active_visual_service",
+      );
+    }
+    await prepared.release();
+  }
+  assert.deepEqual(preparedScopes, []);
+});
+
+test("Project composite delivery preserves a post-write failure as partialEffect", async (t) => {
+  const { store, runtime } = setup(t, true);
+  const calls: unknown[] = [];
+  runtime.configureProjectOperations({
+    startTechnicalCheck: async () => ({}),
+    createExperiment: () => ({}), startRun: () => ({}), cancelRun: () => ({}),
+    trashRun: () => ({}), restoreRun: () => ({}), transitionOwner: () => ({}),
+    async deliverProjectChanges(input: unknown) {
+      calls.push(input);
+      return {
+        receiptDigest: "a".repeat(64),
+        affectedResources: [{ kind: "project_file", id: "file_public", sha256: "b".repeat(64) }],
+        result: {
+          status: "failed",
+          partialEffect: true,
+          workspaceDigest: "c".repeat(64),
+          mutationReceipt: {
+            beforeWorkspaceDigest: "d".repeat(64),
+            afterWorkspaceDigest: "c".repeat(64),
+          },
+          technicalCheck: { status: "failed", workspaceDigest: "c".repeat(64) },
+          run: null,
+        },
+      };
+    },
+  } as any);
+  const text = "修改项目代码并运行";
+  store.startAgentTurn({
+    turnId: "turn_project_delivery",
+    userMessageId: "message_project_delivery",
+    conversationId: "conversation_project",
+    requestKey: "project-delivery",
+    text,
+    createdAt: NOW,
+  });
+  store.bindAgentSession({
+    id: "session_project_delivery",
+    conversationId: "conversation_project",
+    expectedGeneration: 0,
+    state: "available",
+    externalSessionRef: "opaque-project-delivery",
+    at: NOW,
+  });
+  const prepared = await runtime.prepare({
+    conversationId: "conversation_project",
+    turnId: "turn_project_delivery",
+    text,
+    attachmentIds: [],
+  });
+  t.after(() => prepared.release());
+  const args = {
+    requestKey: "delivery-a",
+    expectedWorkspaceDigest: "d".repeat(64),
+    changes: [{
+      fileRef: null,
+      kind: "code",
+      relativePath: "controller.py",
+      mediaType: "text/x-python",
+      text: "value = 1\n",
+      expectedPriorSha256: null,
+    }],
+    run: { configurationId: "experiment_project" },
+  };
+  authorize(runtime, prepared.capability, "riff_deliver_project_changes", args);
+  const response = await runtime.handle(
+    prepared.capability,
+    call("riff_deliver_project_changes", args),
+  );
+  assert.equal((response?.result as any).isError, undefined, JSON.stringify(response));
+  const result = JSON.parse((response?.result as any).content[0].text);
+  assert.equal(result.state, "committed");
+  assert.equal(result.delivery.status, "failed");
+  assert.equal(result.delivery.partialEffect, true);
+  assert.equal(result.delivery.workspaceDigest, "c".repeat(64));
+  assert.doesNotMatch(
+    JSON.stringify(result),
+    /modelId|sourceModelId|modelSnapshotDigest|ownerKind|ownerId|projectId/u,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    projectId: "project_alpha",
+    conversationId: "conversation_project",
+    turnId: "turn_project_delivery",
+    commandId: (calls[0] as any).commandId,
+    expectedWorkspaceDigest: "d".repeat(64),
+    changes: args.changes,
+    run: args.run,
+  });
 });
 
 test("Model and Project browser intents require the scoped MCP while authority remains dormant", async (t) => {

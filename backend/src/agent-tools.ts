@@ -26,6 +26,8 @@ export const PROJECT_AGENT_TOOLS = [
   "riff_read_owner_summary",
   "riff_list_project_workspace",
   "riff_read_project_file",
+  "riff_start_project_technical_check",
+  "riff_deliver_project_changes",
   "riff_list_experiment_configurations",
   "riff_create_experiment_configuration",
   "riff_update_experiment_configuration",
@@ -41,6 +43,7 @@ export const PROJECT_AGENT_TOOLS = [
   "riff_create_analysis_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
+  "riff_open_current_visualization",
   "riff_observe_current_visual",
   ...BROWSER_AGENT_TOOLS,
 ] as const;
@@ -74,6 +77,7 @@ export const READ_ONLY_AGENT_TOOLS: ReadonlySet<AgentToolName> = new Set([
   "riff_read_model_file",
   "riff_list_project_workspace",
   "riff_read_project_file",
+  "riff_open_current_visualization",
   "riff_list_experiment_configurations",
   "riff_list_runs",
   "riff_list_run_outputs",
@@ -90,6 +94,8 @@ export const legacyPromptToolsCompatible = (
 export const CONSEQUENTIAL_AGENT_TOOLS: ReadonlySet<AgentToolName> = new Set([
   "riff_apply_model_changes",
   "riff_start_model_technical_check",
+  "riff_start_project_technical_check",
+  "riff_deliver_project_changes",
   "riff_create_experiment_configuration",
   "riff_update_experiment_configuration",
   "riff_start_run",

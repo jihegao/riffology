@@ -52,12 +52,33 @@ export type PreparedAgentTurnRuntime = Readonly<{
 
 type ProjectAgentOperations = Readonly<{
   startTechnicalCheck(input: Readonly<{ modelId: string; commandId: string }>): Promise<unknown>;
+  startProjectTechnicalCheck?: (input: Readonly<{
+    projectId: string;
+    commandId: string;
+    expectedWorkspaceDigest: string;
+  }>) => Promise<ProjectOperationEnvelope>;
+  deliverProjectChanges?: (input: Readonly<{
+    projectId: string;
+    conversationId: string;
+    turnId: string;
+    commandId: string;
+    expectedWorkspaceDigest: string;
+    changes: readonly Readonly<Record<string, unknown>>[];
+    executionDescription?: Readonly<Record<string, unknown>>;
+    run?: Readonly<{ configurationId: string }>;
+  }>) => Promise<ProjectOperationEnvelope>;
   createExperiment(input: Readonly<{ projectId: string; commandId: string; name: string; configuration: Record<string, unknown> }>): unknown;
   startRun(input: Readonly<{ projectId: string; commandId: string; experimentConfigId: string; completionConversationId?: string }>): unknown;
   cancelRun(input: Readonly<{ projectId: string; runId: string; commandId: string }>): unknown;
   trashRun(input: any): unknown;
   restoreRun(input: any): unknown;
   transitionOwner(input: any): unknown;
+}>;
+
+type ProjectOperationEnvelope = Readonly<{
+  receiptDigest: string;
+  affectedResources: readonly Readonly<Record<string, unknown>>[];
+  result: Readonly<Record<string, unknown>>;
 }>;
 
 export class AgentTurnRuntime implements AgentToolExecutor {
@@ -130,7 +151,8 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     const runtime = await this.store.getConversationRuntime(input.conversationId);
     if (!runtime) throw new ApiError(409, "conversation_not_ready", "The conversation is not ready for an Agent turn.");
     const intentText = input.text.replace(/(?:^|\s)\$[a-z0-9][a-z0-9-]{1,63}(?=\s|$)/gu, " ").trim();
-    const intentAuthority = explicitImperative(intentText) ? "explicit" : "proposal_only";
+    const imperativeText = imperativeClauses(intentText).join(". ");
+    const intentAuthority = imperativeText ? "explicit" : "proposal_only";
     const loadedSkill = this.#routeSkill(input.text, input.conversationId, input.turnId);
     const attachments = input.attachmentIds.map((id) => {
       const metadata = this.store.getConversationAttachment(id);
@@ -145,7 +167,8 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       ? runtime.session.generation
       : (runtime.session?.generation ?? 0) + 1;
     const allowedTools = new Set(toolsForOwner(conversation.owner));
-    const browserRequested = explicitBrowserIntent(intentText);
+    const browserRequested = explicitBrowserIntent(intentText)
+      && !currentVisualizationOpenIntent(intentText);
     if (!browserRequested || !input.workspace || !this.#browserAuthority) {
       for (const tool of BROWSER_AGENT_TOOLS) allowedTools.delete(tool);
     }
@@ -163,7 +186,7 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       } catch { allowedTools.delete("riff_interact_current_visual"); }
     }
     const operationSelection = consequentialOperationSelection(
-      conversation.owner, intentText, intentAuthority,
+      conversation.owner, imperativeText || intentText, intentAuthority,
     );
     for (const tool of CONSEQUENTIAL_AGENT_TOOLS) allowedTools.delete(tool);
     if (operationSelection) allowedTools.add(operationSelection.tool);
@@ -334,6 +357,8 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     if (grant.intentAuthority !== "explicit" && new Set<AgentToolName>([
       "riff_apply_model_changes",
       "riff_start_model_technical_check",
+      "riff_start_project_technical_check",
+      "riff_deliver_project_changes",
       "riff_create_experiment_configuration",
       "riff_update_experiment_configuration",
       "riff_start_run",
@@ -371,6 +396,10 @@ export class AgentTurnRuntime implements AgentToolExecutor {
         return this.#listExperimentConfigurations(grant);
       case "riff_list_project_workspace": return this.#listProjectWorkspace(grant);
       case "riff_read_project_file": return this.#readProjectFile(grant, String(input.fileRef));
+      case "riff_start_project_technical_check":
+        return this.#startProjectTechnicalCheck(grant, input);
+      case "riff_deliver_project_changes":
+        return this.#deliverProjectChanges(grant, input);
       case "riff_create_experiment_configuration": return this.#createExperimentConfiguration(grant, input);
       case "riff_update_experiment_configuration":
         return this.#updateExperimentConfiguration(grant, input);
@@ -393,6 +422,8 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       case "riff_create_temporary_document": return this.#createTemporaryDocument(grant, input);
       case "riff_transition_temporary_document": return this.#transitionTemporaryDocument(grant, input);
       case "riff_adopt_attachment": return this.#adoptAttachment(grant, input);
+      case "riff_open_current_visualization":
+        return this.#openCurrentVisualization(grant);
       case "riff_observe_current_visual": {
         if (grant.owner.kind !== "project" || !this.visualAuthority) {
           throw new AgentRuntimeError(
@@ -524,6 +555,105 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       && scopedRef("project_file", grant.owner.id, file.id, file.sha256) === fileRef);
     if (!stored) throw new AgentRuntimeError("file_scope_mismatch", "The Project file reference is stale.");
     return { ...selected, content: this.store.readObjectFile(stored.id).toString("utf8") };
+  }
+
+  async #startProjectTechnicalCheck(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+  ) {
+    this.#requireProject(grant);
+    if (!this.#projectOperations?.startProjectTechnicalCheck) {
+      throw new AgentRuntimeError(
+        "project_operations_unavailable",
+        "Project technical-check operations are unavailable.",
+      );
+    }
+    const requestKey = boundedText(input.requestKey, 256);
+    const expectedWorkspaceDigest = boundedDigest(input.expectedWorkspaceDigest);
+    return await this.#commitExternalProjectOperation(
+      grant,
+      "project_technical_check_start",
+      requestKey,
+      input,
+      () => this.#projectOperations!.startProjectTechnicalCheck!({
+        projectId: grant.owner.id,
+        commandId: stableId(
+          "command", `${grant.turnId}:project-technical-check:${requestKey}`,
+        ),
+        expectedWorkspaceDigest,
+      }),
+    );
+  }
+
+  async #deliverProjectChanges(
+    grant: AgentToolGrant,
+    input: Readonly<Record<string, unknown>>,
+  ) {
+    this.#requireProject(grant);
+    if (!this.#projectOperations?.deliverProjectChanges) {
+      throw new AgentRuntimeError(
+        "project_operations_unavailable",
+        "Project delivery operations are unavailable.",
+      );
+    }
+    const parsed = parseProjectDeliveryInput(input);
+    return await this.#commitExternalProjectOperation(
+      grant,
+      "project_delivery",
+      parsed.requestKey,
+      input,
+      () => this.#projectOperations!.deliverProjectChanges!({
+        projectId: grant.owner.id,
+        conversationId: grant.conversationId,
+        turnId: grant.turnId,
+        commandId: stableId(
+          "command", `${grant.turnId}:project-delivery:${parsed.requestKey}`,
+        ),
+        expectedWorkspaceDigest: parsed.expectedWorkspaceDigest,
+        changes: parsed.changes,
+        ...(parsed.executionDescription
+          ? { executionDescription: parsed.executionDescription }
+          : {}),
+        ...(parsed.run ? { run: parsed.run } : {}),
+      }),
+    );
+  }
+
+  #openCurrentVisualization(grant: AgentToolGrant) {
+    this.#requireProject(grant);
+    try {
+      const target = this.store.currentHealthyVisualAgentTarget(grant.owner.id, {
+        now: this.#now(),
+      });
+      const run = this.store.listRuns(grant.owner.id, { includeTrashed: false })
+        .find((candidate) => candidate.id === target.runId);
+      if (!run || run.contractVersion !== 4 || run.runKind !== "visual") {
+        throw new Error("visual run missing");
+      }
+      const sourceDigest = (run as unknown as {
+        sourceDigest?: unknown;
+        projectSnapshotDigest?: unknown;
+      }).sourceDigest
+        ?? (run as unknown as { projectSnapshotDigest?: unknown }).projectSnapshotDigest;
+      if (typeof sourceDigest !== "string" || !/^[0-9a-f]{64}$/u.test(sourceDigest)) {
+        throw new Error("visual source digest missing");
+      }
+      return Object.freeze({
+        schemaVersion: 1,
+        state: "healthy",
+        serviceRef: scopedRef(
+          "visual_service", grant.owner.id, target.runId, sourceDigest,
+        ),
+        runRef: scopedRef("run", grant.owner.id, run.id, canonical(run)),
+        sourceDigest,
+        frameAvailable: true,
+      });
+    } catch (error) {
+      throw new AgentRuntimeError(
+        "no_active_visual_service",
+        "The current Project has no sole healthy visual service.",
+      );
+    }
   }
 
   async #startModelTechnicalCheck(
@@ -849,6 +979,50 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       // producing its public projection.  Never assert rollback here.
       throw error;
     }
+  }
+
+  async #commitExternalProjectOperation(
+    grant: AgentToolGrant,
+    actionKind: "project_technical_check_start" | "project_delivery",
+    requestKey: string,
+    intent: Readonly<Record<string, unknown>>,
+    operation: () => Promise<ProjectOperationEnvelope>,
+  ) {
+    const actionId = stableId(
+      "action", `${grant.turnId}:${actionKind}:${requestKey}`,
+    );
+    let action = this.#recordProposed(actionId, grant, actionKind, intent);
+    if (["denied", "rolled_back", "failed"].includes(action.state)) {
+      return safeActionResult(action);
+    }
+    const at = this.#now();
+    const transactionId = `mutation_agent_${createHash("sha256")
+      .update(actionId).digest("hex").slice(0, 32)}`;
+    if (action.state === "proposed") {
+      action = this.store.transitionActionRecord({
+        id: actionId, expectedState: "proposed", state: "authorized", at,
+      });
+    }
+    if (action.state === "authorized") {
+      action = this.store.transitionActionRecord({
+        id: actionId, expectedState: "authorized", state: "staging",
+        mutationTransactionId: transactionId, at,
+      });
+    }
+    const envelope = validateProjectOperationEnvelope(await operation(), actionKind);
+    if (action.state === "staging") {
+      action = this.store.commitReceiptBackedAgentAction({
+        actionId,
+        mutationTransactionId: transactionId,
+        receiptDigest: envelope.receiptDigest,
+        affectedResources: envelope.affectedResources,
+        committedAt: at,
+      });
+    }
+    return safeActionResult(action, {
+      delivery: envelope.result,
+      receiptDigest: envelope.receiptDigest,
+    });
   }
 
   #verifiedOperationEvidence(
@@ -1527,11 +1701,19 @@ const consequentialOperationSelection = (
     add(/\b(?:update|change|modify|replace|apply|write)\b[^.!?。！？]{0,80}\b(?:model|code|file|workspace)\b|(?:更新|修改|替换|应用|写入)[^。！？]{0,50}(?:模型|代码|文件|工作区)/iu.test(text),
       "riff_apply_model_changes");
   } else {
+    const projectMutation = /\b(?:update|change|modify|replace|apply|write|add|remove|delete)\b[^.!?。！？]{0,80}\b(?:project|code|file|workspace|dependency|controller|interface|simulation|visualization|page)\b|(?:更新|修改|替换|应用|写入|加入|新增|添加|删除)[^。！？]{0,50}(?:项目|代码|文件|工作区|依赖|控制器|界面|仿真|可视化|页面)/iu.test(text);
+    const visualStart = /\b(?:start|run|launch)\b[^.!?。！？]{0,50}\b(?:visual(?:ization)?|simulation|visual\s+run)\b|(?:启动|运行)[^。！？]{0,30}(?:可视化仿真|可视化运行|可视化|仿真页面|仿真)/iu.test(text);
+    const chainedRun = /\b(?:and|then)\s+run\b|(?:并|然后|再)运行/u.test(text);
+    add(projectMutation,
+      "riff_deliver_project_changes");
+    add(!projectMutation && /\b(?:start|run|perform)\b[^.!?。！？]{0,60}\btechnical[ -]?check\b|(?:启动|运行|执行)[^。！？]{0,30}(?:技术检查|技术校验)/iu.test(text),
+      "riff_start_project_technical_check");
     add(/\b(?:create|add|make)\b[^.!?。！？]{0,50}\bexperiment(?:\s+configuration)?\b|(?:创建|新增|建立)[^。！？]{0,30}(?:实验配置|实验)/iu.test(text),
       "riff_create_experiment_configuration");
     add(explicitExperimentUpdateIntent(text),
       "riff_update_experiment_configuration");
-    add(/\b(?:start|run|launch)\b[^.!?。！？]{0,40}\b(?:the\s+)?run\b|(?:启动|运行)[^。！？]{0,25}(?:仿真运行|运行任务|实验运行)/iu.test(text),
+    add(!projectMutation && (visualStart || chainedRun
+      || /\b(?:start|run|launch)\b[^.!?。！？]{0,40}\b(?:the\s+)?run\b|(?:启动|运行)[^。！？]{0,25}(?:仿真运行|运行任务|实验运行)/iu.test(text)),
       "riff_start_run");
     add(/\bcancel\b[^.!?。！？]{0,40}\brun\b|取消[^。！？]{0,25}(?:运行任务|实验运行|仿真运行)/iu.test(text),
       "riff_cancel_run");
@@ -1540,6 +1722,9 @@ const consequentialOperationSelection = (
     add(/\brestore\b[^.!?。！？]{0,40}\brun\b|恢复[^。！？]{0,25}(?:运行任务|实验运行|仿真运行)/iu.test(text),
       "riff_restore_run");
     add(explicitAnalysisDocumentIntent(text), "riff_create_analysis_document");
+    // A write followed by open/run remains one consequential delivery. The
+    // optional Run is part of riff_deliver_project_changes, never a second
+    // permission.
   }
   add(/\badopt\b[^.!?。！？]{0,50}\battachment\b|采用[^。！？]{0,30}附件/iu.test(text),
     "riff_adopt_attachment");
@@ -1559,14 +1744,27 @@ const consequentialOperationSelection = (
   return Object.freeze(selected);
 };
 
-export const explicitImperative = (text: string): boolean => {
-  const normalized = text.trim().toLowerCase();
+const explicitImperativeClause = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase()
+    .replace(/^(?:另外|同时|然后|再)\s*/u, "");
   if (!normalized || /\?|\b(?:if|maybe|might|could|would|should we|discuss|explain|suggest|consider|how|what|why)\b|(?:如果|也许|可能|是否|能否|可以吗|讨论|解释|建议|如何|为什么)/u.test(normalized)) return false;
-  return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|start|run|cancel|archive|restore|trash|rename|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|启动|运行|取消|归档|恢复|移入回收站|重命名|采用|拒绝|取代|删除)|^(?:请)?(?:把|将(?!来))[^?？\n]{1,500}(?:设置|修改|更新|替换|新增|创建|建立|写入|应用|启动|运行|取消|归档|恢复|移入回收站|重命名|采用|拒绝|取代|删除)/u.test(normalized);
+  return /^(?:please\s+)?(?:set|change|update|replace|add|create|write|modify|apply|start|run|cancel|archive|restore|trash|rename|adopt|reject|supersede|remove|delete)\b|^(?:请)?(?:设置|修改|更新|替换|新增|加入|添加|创建|建立|写入|应用|启动|运行|取消|归档|恢复|移入回收站|重命名|采用|拒绝|取代|删除)|^(?:请)?(?:把|将(?!来))[^?？\n]{1,500}(?:设置|修改|更新|替换|新增|加入|添加|创建|建立|写入|应用|启动|运行|取消|归档|恢复|移入回收站|重命名|采用|拒绝|取代|删除)/u.test(normalized);
 };
+
+export const imperativeClauses = (text: string): readonly string[] =>
+  Object.freeze(text
+    .split(/(?:[.!?;。！？；]\s*|[,，]\s*(?=(?:另外|同时|然后|再|请))|\s+\b(?:and|then)\b\s+)/iu)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause && explicitImperativeClause(clause)));
+
+export const explicitImperative = (text: string): boolean =>
+  imperativeClauses(text).length > 0;
 
 const explicitBrowserIntent = (text: string): boolean =>
   /\b(?:browser|web\s*page|page\s+snapshot|screenshot|click|type|scroll|reload|navigate)\b|(?:浏览器|网页|页面快照|截图|点击|输入|滚动|刷新页面|打开页面)/iu.test(text);
+
+const currentVisualizationOpenIntent = (text: string): boolean =>
+  /\b(?:open|show|view)\b[^.!?。！？]{0,40}\b(?:current\s+)?(?:visual(?:ization)?|simulation)(?:\s+page)?\b|(?:打开|显示|查看)[^。！？]{0,25}(?:当前)?(?:可视化|仿真页面)/iu.test(text);
 
 const PROJECT_OPERATION_BOUNDARY =
   "(?:^|[.!?;]\\s*|\\b(?:and|then)\\s+|[。！？；]\\s*|(?:并且|然后)\\s*)";
@@ -1762,6 +1960,141 @@ const closedInput = (
   keys: readonly string[],
 ): boolean =>
   Object.keys(value).sort().join("\u0000") === [...keys].sort().join("\u0000");
+
+const parseProjectDeliveryInput = (
+  input: Readonly<Record<string, unknown>>,
+) => {
+  const requestKey = boundedText(input.requestKey, 256);
+  const expectedWorkspaceDigest = boundedDigest(input.expectedWorkspaceDigest);
+  if (!Array.isArray(input.changes) || input.changes.length < 1
+    || input.changes.length > 64) {
+    throw new AgentRuntimeError(
+      "invalid_tool_input", "Project delivery changes are invalid.",
+    );
+  }
+  const changes = input.changes.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || !closedInput(value as Record<string, unknown>, [
+        "fileRef", "kind", "relativePath", "mediaType", "text",
+        "expectedPriorSha256",
+      ])) {
+      throw new AgentRuntimeError(
+        "invalid_tool_input", "Project delivery change is invalid.",
+      );
+    }
+    const change = value as Record<string, unknown>;
+    const fileRef = change.fileRef === null
+      ? null : boundedText(change.fileRef, 256);
+    const kind = String(change.kind);
+    if (!new Set(["code", "environment", "visual_asset"]).has(kind)) {
+      throw new AgentRuntimeError(
+        "invalid_tool_input", "Project delivery file kind is invalid.",
+      );
+    }
+    const relativePath = safeLogicalName(boundedText(change.relativePath, 400));
+    const mediaType = boundedText(change.mediaType, 200);
+    const text = boundedText(change.text, 1_000_000, true);
+    const expectedPriorSha256 = change.expectedPriorSha256 === null
+      ? null : boundedDigest(change.expectedPriorSha256);
+    if ((fileRef === null) !== (expectedPriorSha256 === null)) {
+      throw new AgentRuntimeError(
+        "invalid_tool_input",
+        "New Project files require null fileRef and prior digest; existing files require both.",
+      );
+    }
+    return Object.freeze({
+      fileRef, kind, relativePath, mediaType, text, expectedPriorSha256,
+    });
+  });
+  let executionDescription: Readonly<Record<string, unknown>> | undefined;
+  if (input.executionDescription !== undefined) {
+    try {
+      executionDescription = validateExecutionDescriptionV2(
+        input.executionDescription,
+      ) as unknown as Readonly<Record<string, unknown>>;
+    } catch {
+      throw new AgentRuntimeError(
+        "invalid_tool_input", "Project execution description is invalid.",
+      );
+    }
+  }
+  let run: Readonly<{ configurationId: string }> | undefined;
+  if (input.run !== undefined) {
+    if (!input.run || typeof input.run !== "object" || Array.isArray(input.run)
+      || !closedInput(input.run as Record<string, unknown>, ["configurationId"])) {
+      throw new AgentRuntimeError(
+        "invalid_tool_input", "Project delivery Run request is invalid.",
+      );
+    }
+    run = Object.freeze({
+      configurationId: boundedId(
+        (input.run as Record<string, unknown>).configurationId,
+      ),
+    });
+  }
+  return Object.freeze({
+    requestKey,
+    expectedWorkspaceDigest,
+    changes: Object.freeze(changes),
+    ...(executionDescription ? { executionDescription } : {}),
+    ...(run ? { run } : {}),
+  });
+};
+
+const validateProjectOperationEnvelope = (
+  envelope: ProjectOperationEnvelope,
+  actionKind: "project_technical_check_start" | "project_delivery",
+): ProjectOperationEnvelope => {
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+    || !/^[0-9a-f]{64}$/u.test(String(envelope.receiptDigest))
+    || !Array.isArray(envelope.affectedResources)
+    || !envelope.result || typeof envelope.result !== "object"
+    || Array.isArray(envelope.result)
+    || canonicalJsonV2(envelope.result).byteLength > 256_000) {
+    throw new AgentRuntimeError(
+      "invalid_domain_receipt", "The Project operation receipt is invalid.",
+    );
+  }
+  const expectedKeys = actionKind === "project_delivery"
+    ? ["status", "partialEffect", "workspaceDigest", "mutationReceipt", "technicalCheck", "run"]
+    : ["status", "partialEffect", "workspaceDigest", "technicalCheck"];
+  const result = envelope.result;
+  if (!closedInput(result, expectedKeys)
+    || !new Set(["succeeded", "failed"]).has(String(result.status))
+    || typeof result.partialEffect !== "boolean"
+    || !/^[0-9a-f]{64}$/u.test(String(result.workspaceDigest))
+    || (result.status === "succeeded" && result.partialEffect !== false)
+    || (actionKind === "project_technical_check_start"
+      && result.partialEffect !== false)
+    || (actionKind === "project_delivery" && !result.mutationReceipt)
+    || (actionKind === "project_delivery" && result.status === "failed"
+      && result.partialEffect !== true)) {
+    throw new AgentRuntimeError(
+      "invalid_domain_receipt", "The Project operation result is invalid.",
+    );
+  }
+  const forbidden = new Set([
+    "modelId", "sourceModelId", "modelSnapshotDigest", "owner", "ownerId",
+    "ownerKind", "path", "port", "url", "pid", "sessionId",
+  ]);
+  const inspect = (value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach(inspect);
+    if (!value || typeof value !== "object") return;
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (forbidden.has(key)) throw new AgentRuntimeError(
+        "invalid_domain_receipt", "The Project operation result leaks private scope.",
+      );
+      inspect(nested);
+    }
+  };
+  inspect(result);
+  return Object.freeze({
+    receiptDigest: envelope.receiptDigest,
+    affectedResources: Object.freeze(envelope.affectedResources.map((item) =>
+      Object.freeze({ ...item }))),
+    result: Object.freeze({ ...result }),
+  });
+};
 const safeActionResult = (
   action: ActionRecordDto,
   extra: Readonly<Record<string, unknown>> = {},

@@ -192,8 +192,57 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     "List immutable logical files in the current Project fixed Model copy.", {},
   ),
   riff_read_project_file: definition(
-    "Read one bounded Project fixed-copy file by opaque file reference.",
+    "Read one bounded Project workspace file by opaque file reference.",
     { fileRef: { type: "string" } }, ["fileRef"],
+  ),
+  riff_start_project_technical_check: definition(
+    "Start one receipt-backed technical check for the current Project workspace digest.",
+    {
+      requestKey: { type: "string" },
+      expectedWorkspaceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    },
+    ["requestKey", "expectedWorkspaceDigest"],
+  ),
+  riff_deliver_project_changes: definition(
+    "Perform one authorized Project delivery: atomically write digest-bound workspace changes, reread the resulting digest, run the technical check, and optionally start one Run. A post-write failure is returned with partialEffect=true and an immutable mutation receipt.",
+    {
+      requestKey: { type: "string" },
+      expectedWorkspaceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      changes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 64,
+        items: {
+          type: "object",
+          properties: {
+            fileRef: { anyOf: [{ type: "string" }, { type: "null" }] },
+            kind: { type: "string", enum: ["code", "environment", "visual_asset"] },
+            relativePath: { type: "string" },
+            mediaType: { type: "string" },
+            text: { type: "string" },
+            expectedPriorSha256: {
+              anyOf: [
+                { type: "string", pattern: "^[0-9a-f]{64}$" },
+                { type: "null" },
+              ],
+            },
+          },
+          required: [
+            "fileRef", "kind", "relativePath", "mediaType", "text",
+            "expectedPriorSha256",
+          ],
+          additionalProperties: false,
+        },
+      },
+      executionDescription: { type: "object" },
+      run: {
+        type: "object",
+        properties: { configurationId: { type: "string" } },
+        required: ["configurationId"],
+        additionalProperties: false,
+      },
+    },
+    ["requestKey", "expectedWorkspaceDigest", "changes"],
   ),
   riff_create_experiment_configuration: definition(
     "Create one receipt-backed Experiment configuration for the current Project.",
@@ -289,6 +338,10 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
   riff_adopt_attachment: definition("Copy a current-conversation attachment into its bound object with a purpose.", {
     attachmentId: { type: "string" }, purpose: { type: "string" }, logicalName: { type: "string" },
   }, ["attachmentId", "purpose", "logicalName"]),
+  riff_open_current_visualization: definition(
+    "Request the current Project's sole healthy visual service projection. This has no arguments, does not start a Run, and never acquires Browser Agent authority.",
+    {},
+  ),
   riff_observe_current_visual: definition(
     "Read one bounded, untrusted observation from the current Project's sole healthy visual attempt.",
     {
@@ -572,10 +625,23 @@ export class AgentMcpServer {
         ? (error as { code: string }).code : null;
       const staleCapability = runtimeCode === "stale_capability"
         || runtimeCode === "scope_changed";
+      const safeRuntimeCode = runtimeCode === "no_active_visual_service"
+        || runtimeCode === "project_operations_unavailable"
+        || runtimeCode === "invalid_tool_input"
+        || runtimeCode === "invalid_domain_receipt"
+        ? runtimeCode : null;
       const message = denied ? error.message
         : staleCapability ? "The Agent capability no longer matches its active durable scope."
+          : safeRuntimeCode === "no_active_visual_service"
+            ? "The current Project has no healthy visual service to open."
+            : safeRuntimeCode === "project_operations_unavailable"
+              ? "Project operations are unavailable in this runtime."
+              : safeRuntimeCode === "invalid_tool_input"
+                ? "The Project operation input is invalid."
+                : safeRuntimeCode === "invalid_domain_receipt"
+                  ? "The Project operation receipt could not be verified."
           : "The scoped Agent action failed.";
-      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: budgetExhausted ? "operation_budget_exhausted" : denied ? "tool_not_allowed" : staleCapability ? "stale_capability" : "tool_failed", message } }) }] } };
+      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: budgetExhausted ? "operation_budget_exhausted" : denied ? "tool_not_allowed" : staleCapability ? "stale_capability" : safeRuntimeCode ?? "tool_failed", message } }) }] } };
     }
   }
 
@@ -719,6 +785,8 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_list_experiment_configurations: [],
     riff_list_project_workspace: [],
     riff_read_project_file: ["fileRef"],
+    riff_start_project_technical_check: ["requestKey", "expectedWorkspaceDigest"],
+    riff_deliver_project_changes: ["requestKey", "expectedWorkspaceDigest", "changes", "executionDescription", "run"],
     riff_create_experiment_configuration: ["requestKey", "name", "configuration"],
     riff_update_experiment_configuration: [
       "requestKey",
@@ -741,6 +809,7 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_create_temporary_document: ["name", "mediaType", "content"],
     riff_transition_temporary_document: ["documentId", "transition"],
     riff_adopt_attachment: ["attachmentId", "purpose", "logicalName"],
+    riff_open_current_visualization: [],
     riff_observe_current_visual: ["kind"],
     riff_interact_current_visual: [],
   };
@@ -769,6 +838,38 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
   if (name === "riff_read_model_file") text("fileId", 256);
   if (name === "riff_start_model_technical_check") text("requestKey", 256);
   if (name === "riff_read_project_file") text("fileRef", 256);
+  if (name === "riff_start_project_technical_check") {
+    text("requestKey", 256); text("expectedWorkspaceDigest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(String(input.expectedWorkspaceDigest))) {
+      throw new AgentToolPermissionError("Agent Project workspace digest is invalid.");
+    }
+  }
+  if (name === "riff_deliver_project_changes") {
+    text("requestKey", 256); text("expectedWorkspaceDigest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(String(input.expectedWorkspaceDigest))
+      || !Array.isArray(input.changes) || input.changes.length < 1
+      || input.changes.length > 64
+      || input.changes.some((change) => !change || typeof change !== "object"
+        || Array.isArray(change))) {
+      throw new AgentToolPermissionError("Agent Project delivery input is invalid.");
+    }
+    if (input.executionDescription !== undefined
+      && (!input.executionDescription || typeof input.executionDescription !== "object"
+        || Array.isArray(input.executionDescription))) {
+      throw new AgentToolPermissionError("Agent Project execution description is invalid.");
+    }
+    if (input.run !== undefined) {
+      if (!input.run || typeof input.run !== "object" || Array.isArray(input.run)
+        || Object.keys(input.run as Record<string, unknown>).some((key) => key !== "configurationId")) {
+        throw new AgentToolPermissionError("Agent Project delivery Run input is invalid.");
+      }
+      const run = input.run as Record<string, unknown>;
+      if (typeof run.configurationId !== "string" || !run.configurationId.trim()
+        || Buffer.byteLength(run.configurationId) > 256) {
+        throw new AgentToolPermissionError("Agent Project delivery Run input is invalid.");
+      }
+    }
+  }
   if (name === "riff_create_experiment_configuration") {
     text("requestKey", 256); text("name", 200);
     if (!input.configuration || typeof input.configuration !== "object"

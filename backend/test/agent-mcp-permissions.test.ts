@@ -53,6 +53,47 @@ test("Agent capabilities bind conversation, owner, turn, generation and exact to
   assert.equal((await server.handle(expiring, { jsonrpc: "2.0", id: 1, method: "tools/list" }))?.error?.code, -32001);
 });
 
+test("Project-only MCP publishes composite delivery and no-argument visual-open contracts", async () => {
+  const server = new AgentMcpServer({ async execute() { return { ok: true }; } });
+  const capability = server.grant({
+    conversationId: "conversation_project_only",
+    owner: { kind: "project", id: "project_only" },
+    turnId: "turn_project_only",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "project", id: "project_only" }),
+  });
+  const listed = await server.handle(capability, {
+    jsonrpc: "2.0", id: 1, method: "tools/list",
+  });
+  const tools = (listed?.result as any).tools as any[];
+  const names = tools.map((tool) => tool.name);
+  assert.ok(names.includes("riff_start_project_technical_check"));
+  assert.ok(names.includes("riff_deliver_project_changes"));
+  assert.ok(names.includes("riff_open_current_visualization"));
+  assert.ok(names.includes("riff_list_experiment_configurations"));
+  assert.ok(names.includes("riff_start_run"));
+  assert.ok(names.includes("riff_list_run_outputs"));
+  assert.ok(!names.includes("riff_apply_model_changes"));
+  assert.deepEqual(
+    tools.find((tool) => tool.name === "riff_open_current_visualization")
+      ?.inputSchema,
+    { type: "object", properties: {}, additionalProperties: false },
+  );
+  const delivery = tools.find((tool) =>
+    tool.name === "riff_deliver_project_changes")?.inputSchema;
+  assert.deepEqual(delivery.required, [
+    "requestKey", "expectedWorkspaceDigest", "changes",
+  ]);
+  assert.deepEqual(
+    delivery.properties.changes.items.properties.kind.enum,
+    ["code", "environment", "visual_asset"],
+  );
+  assert.doesNotMatch(
+    JSON.stringify(delivery),
+    /modelId|sourceModelId|modelSnapshotDigest|ownerKind|ownerId/u,
+  );
+});
+
 test("default Agent capability leaves a bounded human review window for large operations", async () => {
   let now = 0;
   const server = new AgentMcpServer(

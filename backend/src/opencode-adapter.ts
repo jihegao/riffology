@@ -2055,6 +2055,25 @@ export const consequentialPermissionSummary = (
   switch (tool) {
     case "riff_start_model_technical_check":
       return "Start a technical check for the current Model.";
+    case "riff_start_project_technical_check":
+      return "Start a technical check for the current Project workspace digest.";
+    case "riff_deliver_project_changes": {
+      const changes = Array.isArray(input.changes) ? input.changes.slice(0, 64) : [];
+      const paths = changes.flatMap((change) => {
+        if (!change || typeof change !== "object" || Array.isArray(change)) return [];
+        const path = publicValue(
+          (change as Record<string, unknown>).relativePath, 240,
+        );
+        return path && !path.startsWith("/") && !path.includes("..") ? [path] : [];
+      }).slice(0, 8);
+      const run = input.run && typeof input.run === "object"
+        && !Array.isArray(input.run)
+        ? publicValue((input.run as Record<string, unknown>).configurationId, 256)
+        : null;
+      return `Deliver ${changes.length} Project file operation(s)`
+        + `${paths.length ? `: ${paths.join(", ")}` : ""}; then run the technical check`
+        + `${run ? ` and start Experiment ${run}` : ""}. File contents are hidden.`;
+    }
     case "riff_apply_model_changes": {
       let changes: unknown = input.changes;
       if (typeof changes === "string" && changes.length <= 256_000) {
