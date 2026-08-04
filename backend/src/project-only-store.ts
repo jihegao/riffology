@@ -71,6 +71,31 @@ export type ProjectTechnicalCheckRecord = Readonly<{
   finishedAt: string | null;
 }>;
 
+export type ProjectTemplateRecord = Readonly<{
+  id: string;
+  version: string;
+  description: string;
+  runMode: ProjectRunMode;
+  contentDigest: string;
+  createdAt: string;
+}>;
+
+export type ProjectRunRecord = Readonly<{
+  id: string;
+  projectId: string;
+  experimentConfigurationId: string;
+  runKind: "batch" | "visual";
+  status: ProjectRunStatus;
+  sourceWorkspaceDigest: string;
+  frozenConfiguration: Record<string, unknown>;
+  sourceFilesRetained: false;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  terminalCode: string | null;
+}>;
+
 export type CreateProjectInput = Readonly<{
   id: string;
   name: string;
@@ -229,6 +254,20 @@ export class ProjectOnlyStore {
       }
     });
     return this.project(input.id);
+  }
+
+  templates(): ProjectTemplateRecord[] {
+    this.#assertOpen();
+    return (this.#database.prepare(`SELECT id, version, description, run_mode, content_digest, created_at
+      FROM project_templates ORDER BY created_at, id, version`).all() as any[])
+      .map((row) => Object.freeze({
+        id: row.id,
+        version: row.version,
+        description: row.description,
+        runMode: row.run_mode,
+        contentDigest: row.content_digest,
+        createdAt: row.created_at,
+      }));
   }
 
   project(id: string): ProjectRecord {
@@ -459,31 +498,17 @@ export class ProjectOnlyStore {
     });
   }
 
-  run(id: string): Readonly<{
-    id: string;
-    projectId: string;
-    experimentConfigurationId: string;
-    runKind: "batch" | "visual";
-    status: ProjectRunStatus;
-    sourceWorkspaceDigest: string;
-    frozenConfiguration: Record<string, unknown>;
-    sourceFilesRetained: false;
-    createdAt: string;
-  }> {
+  run(id: string): ProjectRunRecord {
     this.#assertOpen();
     const row = this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(id) as any;
     if (!row) throw new ProjectOnlyStoreError("run_not_found", "Run does not exist.");
-    return Object.freeze({
-      id: row.id,
-      projectId: row.project_id,
-      experimentConfigurationId: row.experiment_configuration_id,
-      runKind: row.run_kind,
-      status: row.status,
-      sourceWorkspaceDigest: row.source_workspace_digest,
-      frozenConfiguration: JSON.parse(row.frozen_configuration_json),
-      sourceFilesRetained: false,
-      createdAt: row.created_at,
-    });
+    return runRecord(row);
+  }
+
+  runs(projectId: string): ProjectRunRecord[] {
+    this.#assertOpen();
+    return (this.#database.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY created_at, id")
+      .all(projectId) as any[]).map(runRecord);
   }
 
   deliveryReceipt(commandId: string): Readonly<{
@@ -611,6 +636,22 @@ const fileRecord = (row: any): ProjectFileRecord => Object.freeze({
   sha256: row.sha256,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+});
+
+const runRecord = (row: any): ProjectRunRecord => Object.freeze({
+  id: row.id,
+  projectId: row.project_id,
+  experimentConfigurationId: row.experiment_configuration_id,
+  runKind: row.run_kind,
+  status: row.status,
+  sourceWorkspaceDigest: row.source_workspace_digest,
+  frozenConfiguration: JSON.parse(row.frozen_configuration_json),
+  sourceFilesRetained: false,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+  terminalCode: row.terminal_code,
 });
 
 const assertId = (id: string): void => {

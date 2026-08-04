@@ -102,6 +102,8 @@ import {
   type RiffBrowserAlias,
 } from "./local-browser-broker.ts";
 import { BrowserAgentAuthority } from "./browser-agent-authority.ts";
+import { ProjectOnlyHttpApi } from "./project-only-http-api.ts";
+import type { ProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -236,6 +238,7 @@ export type BackendOptions = {
   gate3FaultInjector?: (checkpoint: Gate3ActivationCheckpoint) => void;
   a2ProductRoot?: string;
   productStore?: ProductStoreV2;
+  projectOnlyRuntime?: Extract<ProjectOnlyServerRuntime, { mode: "ready" }>;
   a2OpenCode?: OpenCodeConversationPort;
   a2TechnicalChecker?: ModelTechnicalCheckerPort;
   a2SkillRoot?: string;
@@ -530,6 +533,7 @@ export class BackendApp {
   gate2?: Gate2Runtime;
   gate3?: Gate3Runtime;
   readonly productStore?: ProductStoreV2;
+  readonly projectOnlyApi?: ProjectOnlyHttpApi;
   readonly productRunDispatcher?: ProductRunDispatcher;
   readonly a2?: MilestoneA2Api;
   readonly #agentTurnRuntime?: AgentTurnRuntime;
@@ -565,7 +569,7 @@ export class BackendApp {
       options.workbenchBrowserTtlMs,
     );
     this.#productMode = Boolean(
-      options.productOnly || options.productStore || options.a2ProductRoot,
+      options.productOnly || options.productStore || options.a2ProductRoot || options.projectOnlyRuntime,
     );
     this.#repositoryRoot = options.repositoryRoot
       ? canonicalDirectory(options.repositoryRoot, "repository_root")
@@ -579,6 +583,12 @@ export class BackendApp {
       : undefined;
     this.#recoveryStatus = options.recoveryStatus;
     this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
+    if (options.projectOnlyRuntime) {
+      this.projectOnlyApi = new ProjectOnlyHttpApi(
+        options.projectOnlyRuntime.store,
+        options.projectOnlyRuntime.projectOperations,
+      );
+    }
     if (!this.#productMode) {
       if (!options.workspaceRoot || !options.mesa || !options.openCode) {
         throw new Error("The retired legacy test runtime requires explicit dependencies.");
@@ -1007,6 +1017,7 @@ export class BackendApp {
     }));
     await attempt(() => this.gate2?.close());
     await attempt(() => this.productRunDispatcher?.stop());
+    await attempt(() => this.projectOnlyApi?.store.close());
     await attempt(() => this.productStore?.close());
     if (firstError) throw firstError;
   }
@@ -1055,7 +1066,7 @@ export class BackendApp {
     } else if (url.pathname !== "/"
       && !(this.options.staticLegacyProductRoutes
         ? /^\/(?:workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?|(?:models|projects)\/[A-Za-z0-9_-]{1,160})\/?$/u
-        : /^\/workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?\/?$/u
+        : /^\/workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|projects\/[A-Za-z0-9_-]{1,160}))?\/?$/u
       ).test(url.pathname)) {
       return false;
     }
@@ -1620,6 +1631,7 @@ export class BackendApp {
           );
         }
       }
+      if (this.projectOnlyApi && await this.projectOnlyApi.handle(request, response, url, parts)) return;
       if (await this.#handleWorkbenchBrowser(request, response, url, parts)) return;
       if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
       if (this.#productMode) {

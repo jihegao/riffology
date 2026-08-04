@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { opencodeFromEnvironment } from "./opencode-adapter.ts";
+import { ModelTechnicalChecker } from "./model-technical-checker.ts";
+import { openProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
 import { BackendApp } from "./server.ts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -13,25 +14,34 @@ const productRoot = resolve(
 );
 const port = Number(process.env.PORT ?? 8787);
 const brokerPort = Number(process.env.RIFF_VISUAL_BROKER_PORT ?? 8788);
-const openCode = opencodeFromEnvironment();
 const staticWebRoot = join(repositoryRoot, "web", "dist");
 let app: BackendApp;
 try {
-  app = new BackendApp({
-    openCode,
-    a2OpenCode: openCode,
-    a2ProductRoot: productRoot,
-    ...(process.env.RIFF_SKILL_ROOT ? { a2SkillRoot: process.env.RIFF_SKILL_ROOT } : {}),
-    a2AllowedSkills: (process.env.RIFF_ALLOWED_SKILLS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
-    a3InstallPreinstalledWind: true,
-    a3InstallPreinstalledWindVisual: true,
-    a3PreinstalledWindRepositoryRoot: repositoryRoot,
-    repositoryRoot,
-    staticWebRoot,
-    staticLegacyProductRoutes: process.env.RIFF_LEGACY_PRODUCT_UI === "true",
-    recoveryOnlyOnFailure: true,
-    promptTimeoutMs: Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS ?? 30_000),
+  const runtime = openProjectOnlyServerRuntime({
+    root: productRoot,
+    checker: new ModelTechnicalChecker({
+      pythonExecutable: process.env.RIFF_MODEL_PYTHON
+        ?? resolve(repositoryRoot, "mesa_service", ".venv", "bin", "python"),
+    }),
   });
+  app = runtime.mode === "ready"
+    ? new BackendApp({
+      projectOnlyRuntime: runtime,
+      repositoryRoot,
+      staticWebRoot,
+      recoveryOnlyOnFailure: true,
+    })
+    : new BackendApp({
+      productOnly: true,
+      recoveryStatus: {
+        state: "recovery_required",
+        code: runtime.code,
+        observedAt: new Date().toISOString(),
+        retryable: runtime.retryable,
+      },
+      repositoryRoot,
+      staticWebRoot,
+    });
 } catch (error) {
   const failureClass = error instanceof Error ? error.name : "UnknownError";
   console.error(`Riff Product store startup entered recovery-only mode (${failureClass}).`);
@@ -45,7 +55,6 @@ try {
     },
     repositoryRoot,
     staticWebRoot,
-    staticLegacyProductRoutes: process.env.RIFF_LEGACY_PRODUCT_UI === "true",
   });
 }
 
