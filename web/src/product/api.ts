@@ -4,13 +4,14 @@ import type {
   ConversationAttachment,
   ConversationBundle,
   ConversationRuntimeProjection,
+  ComposerCapabilities,
+  ComposerCommandId,
   ConversationMessage,
   ConversationSummary,
   HomeDto,
   GeneratedViewSet,
-  ModelChangeSet,
-  ModelMutationReceipt,
-  ModelCreationDto,
+  ProjectChangeSet,
+  ProjectMutationReceipt,
   OwnerKind,
   ProductLifecycleReceipt,
   PermanentDeletePreview,
@@ -77,40 +78,36 @@ export interface ProductClient {
     text: string;
   }>): Promise<WorkspaceBootstrapTurn>;
   agents?(ownerKind: OwnerKind, ownerId: string): Promise<AgentDiscovery>;
-  createModel(input: Readonly<{
-    commandId: string;
-    name: string;
-    providerId: string;
-    modelId: string;
-  }>): Promise<ModelCreationDto>;
   createProject(input: Readonly<{
     commandId: string;
     name: string;
-    modelId: string;
+    provider: Readonly<{ providerId: string; modelId: string }>;
+    source:
+      | Readonly<{ kind: "blank" }>
+      | Readonly<{ kind: "template"; templateId: string; templateVersion: string }>
+      | Readonly<{ kind: "import"; filename: string; mediaType: string; base64: string }>;
   }>): Promise<ProjectCreationDto>;
-  workspace(kind: OwnerKind, id: string): Promise<WorkspaceDto>;
-  startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheck>;
-  modelRenderable(modelId: string, fileId: string): Promise<RendererResource>;
-  modelWorkbenchRenderable?(modelId: string, fileId: string): Promise<RendererResource>;
-  generatedViews?(modelId: string): Promise<GeneratedViewSet | null>;
-  generatedViewRenderable?(modelId: string, viewId: string): Promise<RendererResource>;
-  modelChangeSets?(
-    modelId: string,
-    state?: ModelChangeSet["state"],
-  ): Promise<readonly ModelChangeSet[]>;
-  applyModelChangeSet?(input: Readonly<{
-    modelId: string;
+  workspace(projectId: string): Promise<WorkspaceDto>;
+  startTechnicalCheck(projectId: string, commandId: string): Promise<TechnicalCheck>;
+  projectGeneratedViews?(projectId: string): Promise<GeneratedViewSet | null>;
+  projectGeneratedViewRenderable?(projectId: string, viewId: string): Promise<RendererResource>;
+  projectChangeSets?(
+    projectId: string,
+    state?: ProjectChangeSet["state"],
+  ): Promise<readonly ProjectChangeSet[]>;
+  applyProjectChangeSet?(input: Readonly<{
+    projectId: string;
     changeSetId: string;
     commandId: string;
     expectedChangeSetDigest: string;
     expectedWorkspaceDigest: string;
-  }>): Promise<ModelMutationReceipt>;
-  rejectModelChangeSet?(input: Readonly<{
-    modelId: string;
+  }>): Promise<ProjectMutationReceipt>;
+  rejectProjectChangeSet?(input: Readonly<{
+    projectId: string;
     changeSetId: string;
     commandId: string;
     expectedChangeSetDigest: string;
-  }>): Promise<ModelMutationReceipt>;
+  }>): Promise<ProjectMutationReceipt>;
   projectFileRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   projectFileWorkbenchRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   browserState?(conversationId: string): Promise<BrowserSessionDto>;
@@ -123,7 +120,6 @@ export interface ProductClient {
   browserReconnect?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserTakeover?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserReturn?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
-  downloadModelFile(modelId: string, fileId: string): Promise<void>;
   createExperiment(input: Readonly<{
     projectId: string;
     commandId: string;
@@ -193,6 +189,13 @@ export interface ProductClient {
     modelId: string;
   }>): Promise<ConversationSummary>;
   conversationBundle(conversationId: string): Promise<ConversationBundle>;
+  composerCapabilities?(conversationId: string): Promise<ComposerCapabilities>;
+  executeComposerCommand?(input: Readonly<{
+    conversationId: string;
+    commandId: ComposerCommandId;
+    commandKey: string;
+    expectedRevision: string;
+  }>): Promise<unknown>;
   conversationRuntime?(conversationId: string): Promise<ConversationRuntimeProjection>;
   subscribeConversationRuntime?(
     conversationId: string,
@@ -358,22 +361,14 @@ export class HttpProductClient implements ProductClient {
     };
   }
 
-  createModel(input: Readonly<{
-    commandId: string;
-    name: string;
-    providerId: string;
-    modelId: string;
-  }>): Promise<ModelCreationDto> {
-    return this.#request<ModelCreationDto>("/api/models", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
   createProject(input: Readonly<{
     commandId: string;
     name: string;
-    modelId: string;
+    provider: Readonly<{ providerId: string; modelId: string }>;
+    source:
+      | Readonly<{ kind: "blank" }>
+      | Readonly<{ kind: "template"; templateId: string; templateVersion: string }>
+      | Readonly<{ kind: "import"; filename: string; mediaType: string; base64: string }>;
   }>): Promise<ProjectCreationDto> {
     return this.#request<ProjectCreationDto>("/api/projects", {
       method: "POST",
@@ -381,69 +376,52 @@ export class HttpProductClient implements ProductClient {
     });
   }
 
-  async workspace(kind: OwnerKind, id: string): Promise<WorkspaceDto> {
-    const collection = kind === "model" ? "models" : "projects";
+  async workspace(id: string): Promise<WorkspaceDto> {
     const workspace = await this.#request<unknown>(
-      `/api/${collection}/${encodeURIComponent(id)}/workspace`,
+      `/api/projects/${encodeURIComponent(id)}/workspace`,
     );
-    if (kind === "project") return normalizeWorkspace(kind, workspace);
-    const conversationResult = await this.#request<{
-      conversations: WorkspaceDto["conversations"];
-    }>(`/api/objects/model/${encodeURIComponent(id)}/conversations`);
-    return normalizeWorkspace(kind, workspace, conversationResult.conversations);
+    return normalizeWorkspace(workspace);
   }
 
-  startTechnicalCheck(modelId: string, commandId: string): Promise<TechnicalCheck> {
-    return this.#request(`/api/models/${encodeURIComponent(modelId)}/technical-checks`, {
+  startTechnicalCheck(projectId: string, commandId: string): Promise<TechnicalCheck> {
+    return this.#request(`/api/projects/${encodeURIComponent(projectId)}/technical-checks`, {
       method: "POST",
       body: JSON.stringify({ commandId }),
     });
   }
 
-  modelRenderable(modelId: string, fileId: string): Promise<RendererResource> {
+  projectGeneratedViews(projectId: string): Promise<GeneratedViewSet | null> {
     return this.#request(
-      `/api/models/${encodeURIComponent(modelId)}/renderables/${encodeURIComponent(fileId)}`,
+      `/api/projects/${encodeURIComponent(projectId)}/generated-views`,
     );
   }
 
-  modelWorkbenchRenderable(modelId: string, fileId: string): Promise<RendererResource> {
+  projectGeneratedViewRenderable(projectId: string, viewId: string): Promise<RendererResource> {
     return this.#request(
-      `/api/models/${encodeURIComponent(modelId)}/workbench-renderables/${encodeURIComponent(fileId)}`,
+      `/api/projects/${encodeURIComponent(projectId)}/generated-views/${encodeURIComponent(viewId)}/renderable`,
     );
   }
 
-  generatedViews(modelId: string): Promise<GeneratedViewSet | null> {
-    return this.#request(
-      `/api/models/${encodeURIComponent(modelId)}/generated-views`,
-    );
-  }
-
-  generatedViewRenderable(modelId: string, viewId: string): Promise<RendererResource> {
-    return this.#request(
-      `/api/models/${encodeURIComponent(modelId)}/generated-views/${encodeURIComponent(viewId)}/renderable`,
-    );
-  }
-
-  async modelChangeSets(
-    modelId: string,
-    state?: ModelChangeSet["state"],
-  ): Promise<readonly ModelChangeSet[]> {
+  async projectChangeSets(
+    projectId: string,
+    state?: ProjectChangeSet["state"],
+  ): Promise<readonly ProjectChangeSet[]> {
     const query = state ? `?state=${encodeURIComponent(state)}` : "";
-    const result = await this.#request<{ changeSets: ModelChangeSet[] }>(
-      `/api/models/${encodeURIComponent(modelId)}/change-sets${query}`,
+    const result = await this.#request<{ changeSets: ProjectChangeSet[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/change-sets${query}`,
     );
     return result.changeSets;
   }
 
-  applyModelChangeSet(input: Readonly<{
-    modelId: string;
+  applyProjectChangeSet(input: Readonly<{
+    projectId: string;
     changeSetId: string;
     commandId: string;
     expectedChangeSetDigest: string;
     expectedWorkspaceDigest: string;
-  }>): Promise<ModelMutationReceipt> {
+  }>): Promise<ProjectMutationReceipt> {
     return this.#request(
-      `/api/models/${encodeURIComponent(input.modelId)}/change-sets/${encodeURIComponent(input.changeSetId)}/apply`,
+      `/api/projects/${encodeURIComponent(input.projectId)}/change-sets/${encodeURIComponent(input.changeSetId)}/apply`,
       {
         method: "POST",
         body: JSON.stringify({
@@ -455,14 +433,14 @@ export class HttpProductClient implements ProductClient {
     );
   }
 
-  rejectModelChangeSet(input: Readonly<{
-    modelId: string;
+  rejectProjectChangeSet(input: Readonly<{
+    projectId: string;
     changeSetId: string;
     commandId: string;
     expectedChangeSetDigest: string;
-  }>): Promise<ModelMutationReceipt> {
+  }>): Promise<ProjectMutationReceipt> {
     return this.#request(
-      `/api/models/${encodeURIComponent(input.modelId)}/change-sets/${encodeURIComponent(input.changeSetId)}/reject`,
+      `/api/projects/${encodeURIComponent(input.projectId)}/change-sets/${encodeURIComponent(input.changeSetId)}/reject`,
       {
         method: "POST",
         body: JSON.stringify({
@@ -557,13 +535,6 @@ export class HttpProductClient implements ProductClient {
         }),
       },
     ).then(normalizeBrowserSessionDto);
-  }
-
-  downloadModelFile(modelId: string, fileId: string): Promise<void> {
-    return this.#download(
-      `/api/models/${encodeURIComponent(modelId)}/files/${encodeURIComponent(fileId)}/download`,
-      "riff-model-resource.bin",
-    );
   }
 
   createExperiment(input: Readonly<{
@@ -853,6 +824,31 @@ export class HttpProductClient implements ProductClient {
       skillUses: Object.freeze(activity.skillUses),
       actions: Object.freeze(activity.actions),
     });
+  }
+
+  async composerCapabilities(conversationId: string): Promise<ComposerCapabilities> {
+    return normalizeComposerCapabilities(await this.#request(
+      `/api/conversations/${encodeURIComponent(conversationId)}/composer-capabilities`,
+    ));
+  }
+
+  executeComposerCommand(input: Readonly<{
+    conversationId: string;
+    commandId: ComposerCommandId;
+    commandKey: string;
+    expectedRevision: string;
+  }>): Promise<unknown> {
+    return this.#request(
+      `/api/conversations/${encodeURIComponent(input.conversationId)}/composer-commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId: input.commandId,
+          commandKey: input.commandKey,
+          expectedRevision: input.expectedRevision,
+        }),
+      },
+    );
   }
 
   async conversationRuntime(conversationId: string): Promise<ConversationRuntimeProjection> {
@@ -1450,6 +1446,56 @@ const normalizeBrowserSessionDto = (value: unknown): BrowserSessionDto => {
 const publicRuntimeText = (value: unknown): string | null =>
   typeof value === "string" ? value.slice(0, 4_000) : null;
 
+const normalizeComposerCapabilities = (value: unknown): ComposerCapabilities => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProductApiError(502, "invalid_product_response", "The Composer capability response is invalid.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1 || typeof record.revision !== "string"
+    || !/^[0-9a-f]{64}$/u.test(record.revision)
+    || !Array.isArray(record.commands) || !Array.isArray(record.skills)) {
+    throw new ProductApiError(502, "invalid_product_response", "The Composer capability response is invalid.");
+  }
+  const commands = record.commands.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ProductApiError(502, "invalid_product_response", "The Composer command response is invalid.");
+    }
+    const command = raw as Record<string, unknown>;
+    if (!["stop", "retry", "check-project"].includes(String(command.id))
+      || command.slash !== `/${String(command.id)}`
+      || typeof command.label !== "string" || typeof command.description !== "string"
+      || !["enabled", "disabled"].includes(String(command.availability))
+      || command.reason !== undefined && typeof command.reason !== "string") {
+      throw new ProductApiError(502, "invalid_product_response", "The Composer command response is invalid.");
+    }
+    return Object.freeze({
+      id: command.id as ComposerCapabilities["commands"][number]["id"],
+      slash: command.slash as ComposerCapabilities["commands"][number]["slash"],
+      label: command.label,
+      description: command.description,
+      availability: command.availability as "enabled" | "disabled",
+      ...(command.reason === undefined ? {} : { reason: command.reason }),
+    });
+  });
+  const skills = record.skills.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ProductApiError(502, "invalid_product_response", "The Skill capability response is invalid.");
+    }
+    const skill = raw as Record<string, unknown>;
+    if (typeof skill.id !== "string" || typeof skill.version !== "string"
+      || typeof skill.description !== "string") {
+      throw new ProductApiError(502, "invalid_product_response", "The Skill capability response is invalid.");
+    }
+    return Object.freeze({ id: skill.id, version: skill.version, description: skill.description });
+  });
+  return Object.freeze({
+    schemaVersion: 1,
+    revision: record.revision,
+    commands: Object.freeze(commands),
+    skills: Object.freeze(skills),
+  });
+};
+
 const normalizeRuntimeStatus = (
   value: unknown,
 ): ConversationRuntimeProjection["status"] | null => {
@@ -1462,68 +1508,46 @@ const normalizeRuntimeStatus = (
     : null;
 };
 
-const normalizeWorkspace = (
-  kind: OwnerKind,
-  value: unknown,
-  modelConversations?: WorkspaceDto["conversations"],
-): WorkspaceDto => {
+const normalizeWorkspace = (value: unknown): WorkspaceDto => {
   if (!value || typeof value !== "object") {
     throw new ProductApiError(500, "invalid_response", "The workspace response is invalid.");
   }
   const record = value as Record<string, unknown>;
-  const rawOwner = record[kind];
-  const conversations = kind === "model" ? modelConversations : record.conversations;
+  const rawOwner = record.project;
+  const conversations = record.conversations;
   if (!rawOwner || typeof rawOwner !== "object" || !Array.isArray(conversations)) {
     throw new ProductApiError(500, "invalid_response", "The workspace response is invalid.");
   }
   const owner = rawOwner as Record<string, unknown>;
   if (typeof owner.id !== "string" || typeof owner.name !== "string"
-    || kind === "project"
-      && !["active", "archived", "trashed"].includes(String(owner.lifecycleState))) {
+    || !["active", "archived", "trashed"].includes(String(owner.lifecycleState))
+    || !["draft", "checking", "executable", "failed"].includes(String(owner.technicalStatus))) {
     throw new ProductApiError(500, "invalid_response", "The workspace owner is invalid.");
   }
   const base = {
     owner: Object.freeze({
       id: owner.id,
       name: owner.name,
-      kind,
-      lifecycleState: kind === "model"
-        ? "active"
-        : owner.lifecycleState as WorkspaceDto["owner"]["lifecycleState"],
-      ...(kind === "model" && typeof owner.technicalStatus === "string"
-        ? { technicalStatus: owner.technicalStatus as WorkspaceDto["owner"]["technicalStatus"] }
-        : {}),
+      kind: "project" as const,
+      lifecycleState: owner.lifecycleState as WorkspaceDto["owner"]["lifecycleState"],
+      technicalStatus: owner.technicalStatus as WorkspaceDto["owner"]["technicalStatus"],
     }),
     conversations: Object.freeze(conversations as WorkspaceDto["conversations"]),
   };
-  if (kind === "model") {
-    if (typeof record.digest !== "string" || !Array.isArray(record.files)
-      || !record.execution || typeof record.execution !== "object") {
-      throw new ProductApiError(500, "invalid_response", "The Model workspace projection is invalid.");
-    }
-    return Object.freeze({
-      ...base,
-      owner: Object.freeze({ ...base.owner, kind: "model" as const }),
-      digest: record.digest,
-      execution: record.execution,
-      files: Object.freeze(record.files),
-    }) as WorkspaceDto;
-  }
   if (!Array.isArray(record.files) || !Array.isArray(record.experimentConfigurations)
     || !Array.isArray(record.runs) || !record.execution
     || typeof record.execution !== "object"
     || typeof record.executionDescriptionDigest !== "string"
-    || typeof owner.sourceModelId !== "string"
-    || typeof owner.modelSnapshotDigest !== "string") {
+    || typeof record.workspaceDigest !== "string"
+    || !record.executionLock || typeof record.executionLock !== "object") {
     throw new ProductApiError(500, "invalid_response", "The Project workspace projection is invalid.");
   }
   return Object.freeze({
     ...base,
-    owner: Object.freeze({ ...base.owner, kind: "project" as const }),
-    sourceModelId: owner.sourceModelId,
-    modelSnapshotDigest: owner.modelSnapshotDigest,
+    workspaceDigest: record.workspaceDigest,
     execution: record.execution,
     executionDescriptionDigest: record.executionDescriptionDigest,
+    executionLock: Object.freeze(record.executionLock),
     files: Object.freeze(record.files),
     experimentConfigurations: Object.freeze(record.experimentConfigurations),
     runs: Object.freeze(record.runs),

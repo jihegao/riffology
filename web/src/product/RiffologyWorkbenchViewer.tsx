@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
-import type { BrowserSessionDto, ProjectWorkspaceDto, WorkspaceDto } from "./types";
+import type { BrowserSessionDto, ProjectWorkspaceDto } from "./types";
 
 type WorkspaceWorkbenchFile = Readonly<{
   key: string;
@@ -54,7 +54,7 @@ export function RiffologyWorkbenchViewer({
   onBrowserReconnect,
 }: Readonly<{
   client: ProductClient;
-  workspace: WorkspaceDto;
+  workspace: ProjectWorkspaceDto;
   filesOpen: boolean;
   onFilesOpenChange: (open: boolean) => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
@@ -64,19 +64,18 @@ export function RiffologyWorkbenchViewer({
   browserBusy: boolean;
   onBrowserReconnect: () => void;
 }>) {
-  const runOutputFiles = workspace.owner.kind === "project"
-    ? (workspace as ProjectWorkspaceDto).runs.flatMap((run) =>
+  const runOutputFiles = workspace.runs.flatMap((run) =>
       run.status === "succeeded" ? run.outputs.flatMap((output): WorkbenchFile[] => {
         const name = (safeRelativePath(output.logicalName) ?? "").split("/").at(-1) ?? "";
         return name ? [{ key: `output:${run.id}:${output.id}`, source: "run_output",
           runId: run.id, outputId: output.id,
           relativePath: `outputs/${run.id}/${name}${output.sampleIndex === null ? "" : `-${output.sampleIndex}`}`,
           mediaType: output.mediaType, sizeBytes: output.sizeBytes }] : [];
-      }) : []) : [];
+      }) : []);
   const files = workspace.files.flatMap((file): WorkbenchFile[] => {
     const relativePath = safeRelativePath(file.relativePath ?? "");
     return relativePath ? [{
-      key: `workspace:${"fileRef" in file ? file.fileRef : file.id}`,
+      key: `workspace:${file.fileRef}`,
       source: "workspace",
       relativePath,
       mediaType: file.mediaType,
@@ -96,8 +95,7 @@ export function RiffologyWorkbenchViewer({
     setSelectedKey("");
     setResource(undefined);
     setError(undefined);
-  }, [workspace.owner.id, "modelSnapshotDigest" in workspace
-    ? workspace.modelSnapshotDigest : workspace.digest]);
+  }, [workspace.owner.id, workspace.workspaceDigest]);
 
   const selected = files.find((file) => file.key === selectedKey);
   const selectFile = async (file: WorkbenchFile) => {
@@ -114,19 +112,12 @@ export function RiffologyWorkbenchViewer({
     try {
       const next = file.source === "run_output"
         ? await client.outputRenderable(workspace.owner.id, file.runId, file.outputId)
-        : workspace.owner.kind === "project"
-        ? await (() => {
+        : await (() => {
           if (!client.projectFileWorkbenchRenderable) {
             throw new Error("文件投影当前不可用；没有安全读取接口。");
           }
           return client.projectFileWorkbenchRenderable(workspace.owner.id, file.key.slice("workspace:".length));
-        })()
-        : client.modelWorkbenchRenderable
-          ? await client.modelWorkbenchRenderable(
-            workspace.owner.id,
-            file.key.slice("workspace:".length),
-          )
-          : await client.modelRenderable(workspace.owner.id, file.key.slice("workspace:".length));
+        })();
       if (operation === request.current) setResource(next);
     } catch (cause) {
       if (operation === request.current) {
@@ -149,7 +140,7 @@ export function RiffologyWorkbenchViewer({
   return <>
     <section ref={viewerRef}
       className={`riffology-stage3-viewer ${selected ? "has-selection" : ""}`}
-      aria-label={workspace.owner.kind === "project" ? "项目文件与页面查看器" : "模型文件与页面查看器"}
+      aria-label="项目文件与页面查看器"
       tabIndex={-1}>
       {selected && <header className="riffology-viewer-header">
         <button type="button" className="riffology-viewer-back" onClick={returnToConversation}>← 返回对话</button>
@@ -196,7 +187,7 @@ function BrowserViewer({
   onReconnect,
 }: Readonly<{
   ownerName: string;
-  ownerKind: "model" | "project";
+  ownerKind: "project";
   fileCount: number;
   browser?: BrowserSessionDto;
   screenshot?: string;
@@ -226,14 +217,14 @@ function BrowserViewer({
 
 function ViewerEmpty({ ownerName, ownerKind, fileCount, detail }: Readonly<{
   ownerName: string;
-  ownerKind: "model" | "project";
+  ownerKind: "project";
   fileCount: number;
   detail?: string;
 }>) {
   return <div className="riffology-viewer-empty" role="status">
     <p className="product-eyebrow">RIFF {ownerKind.toUpperCase()} · READ ONLY</p>
     <h1>{ownerName}</h1>
-    <p>{detail ?? `从最右侧文件栏选择一个已声明的 ${ownerKind === "project" ? "Project 快照" : "Model"} 文件。`}</p>
+    <p>{detail ?? "从最右侧文件栏选择一个 Project 工作区文件。"}</p>
     <small>{fileCount} 个可用文件 · 内容由 Riff 的只读 renderable 投影提供。</small>
   </div>;
 }
@@ -252,7 +243,7 @@ function ProjectFileRail({
   onSelect,
   fileToggleRef,
 }: Readonly<{
-  ownerKind: "model" | "project";
+  ownerKind: "project";
   files: readonly WorkbenchFile[];
   selectedKey: string;
   open: boolean;
@@ -336,13 +327,13 @@ function ProjectFileRail({
         aria-label="调整文件栏宽度" aria-valuemin={RAIL_MIN} aria-valuemax={RAIL_MAX}
         aria-valuenow={width} tabIndex={open && !compact ? 0 : -1} onKeyDown={onResizeKeyDown}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} />
-      <header><div><strong>文件</strong><span>{files.length} 个 {ownerKind === "project" ? "Project 快照" : "Model"}文件</span></div>
+      <header><div><strong>文件</strong><span>{files.length} 个 Project 文件</span></div>
         <button ref={closeRef} type="button" onClick={close} aria-label="收起文件栏">收起</button>
       </header>
       {tree.length > 0 && <ul className="riffology-file-tree" aria-label="只读项目文件">
         <FileTree entries={tree} selectedKey={selectedKey} onSelect={onSelect} />
       </ul>}
-      {tree.length === 0 && <p className="riffology-file-empty">没有可展示的 {ownerKind === "project" ? "Project 快照" : "Model"}文件。</p>}
+      {tree.length === 0 && <p className="riffology-file-empty">没有可展示的 Project 文件。</p>}
       <footer><i aria-hidden="true" />{ownerKind === "project" ? "项目" : "模型"}结构 · 只读投影</footer>
     </aside>
   </>;

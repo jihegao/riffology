@@ -455,7 +455,7 @@ export function ConversationPane({
                   expectedRevision,
                 });
                 await refreshConversation(conversationId);
-                if (commandId === "check-model") await onOwnerChanged?.();
+                if (commandId === "check-project") await onOwnerChanged?.();
               } catch (cause) {
                 if (selectedIdRef.current === conversationId) {
                   setError(messageOf(cause, "The Conversation command could not be completed."));
@@ -1786,7 +1786,7 @@ const goalVerificationCopy = (
   },
   outcome_unknown: {
     title: "Outcome unknown",
-    description: "An action may have taken effect before the turn stopped. Review the current Model or Project before sending another instruction.",
+    description: "An action may have taken effect before the turn stopped. Review the current Project before sending another instruction.",
   },
   budget_exhausted: {
     title: "Budget exhausted",

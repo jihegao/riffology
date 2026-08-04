@@ -17,7 +17,6 @@ import { WorkspacePane } from "./WorkspacePane";
 import { navigateProduct, readProductRoute, workspaceHref } from "./router";
 import type {
   HomeDto,
-  ModelSummary,
   OwnerKind,
   ProductRoute,
   ProjectSummary,
@@ -141,7 +140,7 @@ function RecoveryRequiredPage({
       <p className="product-eyebrow">RECOVERY REQUIRED</p>
       <h1>Riffology is not accepting workspace changes yet.</h1>
       <p role="alert">
-        Startup recovery could not establish a safe writable state. Models, Projects,
+        Startup recovery could not establish a safe writable state. Projects,
         Conversations, Runs, and visual access remain unavailable.
       </p>
       <p>
@@ -187,14 +186,14 @@ function HomePage({ client }: Readonly<{ client: ProductClient }>) {
     <main id="product-main" className="product-home" tabIndex={-1}>
       <section className="product-hero" aria-labelledby="home-heading">
         <div>
-          <p className="product-eyebrow">MODELS AND EXPERIMENTS</p>
+          <p className="product-eyebrow">PROJECTS AND EXPERIMENTS</p>
           <h1 id="home-heading">Build from a conversation.</h1>
-          <p>Choose a Model to shape reusable behavior, or a Project to configure and run a fixed copy.</p>
+          <p>Create a Project, edit its workspace, and run experiments from one durable authority.</p>
         </div>
         <span className="product-status" role="status">
           {!home
             ? "Loading resources…"
-            : `${resourceCount(home.models.length, "Model")} · ${resourceCount(home.projects.length, "Project")}`}
+            : resourceCount(home.projects.length, "Project")}
         </span>
       </section>
       {error && (
@@ -205,22 +204,12 @@ function HomePage({ client }: Readonly<{ client: ProductClient }>) {
       )}
       <div className="product-home-grid">
         <ResourceSection
-          id="home-models"
-          eyebrow="REUSABLE"
-          title="Models"
-          description="Provider-backed modelling workspaces that Projects can copy."
-          action={<NewModelForm client={client} providers={providers} />}
-          empty="No Models yet. Create one to begin."
-        >
-          {home?.models.map((model) => <ModelCard key={model.id} model={model} />)}
-        </ResourceSection>
-        <ResourceSection
           id="home-projects"
-          eyebrow="FIXED COPY"
+          eyebrow="WORKSPACE"
           title="Projects"
-          description="Experiment workspaces bound to an executable Model snapshot."
-          action={<NewProjectForm client={client} home={home} />}
-          empty="No Projects yet. Create one from an executable Model."
+          description="Editable code, execution contract, experiments, Runs, and Conversations."
+          action={<NewProjectForm client={client} home={home} providers={providers} />}
+          empty="No Projects yet. Create a blank Project, use a template, or import one."
         >
           {home?.projects.map((project) => <ProjectCard key={project.id} project={project} />)}
         </ResourceSection>
@@ -264,28 +253,15 @@ function ResourceSection({
   );
 }
 
-function ModelCard({ model }: Readonly<{ model: ModelSummary }>) {
-  return (
-    <article className="product-resource-card" data-testid={`resource-model-${model.id}`}>
-      <div>
-        <span className={`product-badge product-badge-${model.technicalStatus}`}>
-          {model.technicalStatus}
-        </span>
-        <h3>{model.name}</h3>
-        <p>{model.runMode ? `${model.runMode} execution` : "Execution mode not set"}</p>
-      </div>
-      <ResourceLink kind="model" id={model.id}>Open Model</ResourceLink>
-    </article>
-  );
-}
-
 function ProjectCard({ project }: Readonly<{ project: ProjectSummary }>) {
   return (
     <article className="product-resource-card" data-testid={`resource-project-${project.id}`}>
       <div>
-        <span className="product-badge">Project</span>
+        <span className={`product-badge product-badge-${project.technicalStatus}`}>{project.technicalStatus}</span>
         <h3>{project.name}</h3>
-        <p>{project.lastRun ? `Last run: ${project.lastRun.status}` : "No runs yet"}</p>
+        <p>{project.executionLock.state !== "unlocked"
+          ? `Execution locked: ${project.executionLock.state}`
+          : project.lastRun ? `Last run: ${project.lastRun.status}` : "No runs yet"}</p>
       </div>
       <ResourceLink kind="project" id={project.id}>Open Project</ResourceLink>
     </article>
@@ -315,106 +291,50 @@ function ResourceLink({
   );
 }
 
-function NewModelForm({
+function NewProjectForm({
   client,
+  home,
   providers,
-}: Readonly<{ client: ProductClient; providers?: ProviderDiscovery }>) {
+}: Readonly<{ client: ProductClient; home?: HomeDto; providers?: ProviderDiscovery }>) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [sourceKind, setSourceKind] = useState<"blank" | "template" | "import">("blank");
+  const [templateKey, setTemplateKey] = useState("");
+  const [importFile, setImportFile] = useState<File>();
   const [qualifiedId, setQualifiedId] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const titleId = useId();
-  const liveProviders = providers?.mode === "live" ? providers.providerModels : [];
-  const selected = liveProviders.find((model) => model.qualifiedId === qualifiedId)
-    ?? liveProviders[0];
+  const providerOptions = providers?.mode === "live" ? providers.providerModels : [];
+  const selectedProvider = providerOptions.find((item) => item.qualifiedId === qualifiedId) ?? providerOptions[0];
+  const templates = home?.templates ?? [];
+  const selectedTemplate = templates.find((item) => `${item.id}@${item.version}` === templateKey) ?? templates[0];
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!selected || !name.trim()) return;
+    if (!selectedProvider || !name.trim() || sourceKind === "template" && !selectedTemplate
+      || sourceKind === "import" && !importFile) return;
     setPending(true);
     setError(undefined);
     try {
-      const created = await client.createModel({
-        commandId: crypto.randomUUID(),
-        name: name.trim(),
-        providerId: selected.providerId,
-        modelId: selected.modelId,
-      });
-      navigateProduct(workspaceHref("model", created.model.id, created.conversation.id));
-    } catch (cause) {
-      setError(messageOf(cause, "The Model could not be created."));
-      setPending(false);
-    }
-  };
-
-  if (!open) {
-    return <button type="button" className="product-primary" onClick={() => setOpen(true)}>New Model</button>;
-  }
-  return (
-    <form className="product-create-form" aria-labelledby={titleId} onSubmit={(event) => void submit(event)}>
-      <strong id={titleId}>New Model</strong>
-      <label>
-        Name
-        <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
-      </label>
-      <label>
-        Provider / model
-        <select
-          required
-          disabled={liveProviders.length === 0}
-          value={qualifiedId || selected?.qualifiedId || ""}
-          onChange={(event) => setQualifiedId(event.target.value)}
-        >
-          {liveProviders.map((model) => (
-            <option key={model.qualifiedId} value={model.qualifiedId}>{model.qualifiedId}</option>
-          ))}
-        </select>
-      </label>
-      {providers?.mode === "read_only" && (
-        <p className="product-form-note" role="status">
-          OpenCode is unavailable. Existing resources remain readable, but a new Model cannot be created.
-        </p>
-      )}
-      {providers === undefined && (
-        <p className="product-form-note" role="status">Loading provider options…</p>
-      )}
-      {error && <p className="product-form-error" role="alert">{error}</p>}
-      <div>
-        <button type="submit" className="product-primary" disabled={pending || !selected || !name.trim()}>
-          {pending ? "Creating…" : "Create Model"}
-        </button>
-        <button type="button" className="product-secondary" onClick={() => setOpen(false)} disabled={pending}>Cancel</button>
-      </div>
-    </form>
-  );
-}
-
-function NewProjectForm({
-  client,
-  home,
-}: Readonly<{ client: ProductClient; home?: HomeDto }>) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [modelId, setModelId] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
-  const titleId = useId();
-  const options = home?.newProjectModels ?? [];
-  const selectedId = modelId || options[0]?.id || "";
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!selectedId || !name.trim()) return;
-    setPending(true);
-    setError(undefined);
-    try {
+      const source = sourceKind === "blank" ? { kind: "blank" as const }
+        : sourceKind === "template" ? {
+          kind: "template" as const,
+          templateId: selectedTemplate!.id,
+          templateVersion: selectedTemplate!.version,
+        } : {
+          kind: "import" as const,
+          filename: importFile!.name,
+          mediaType: importFile!.type || "application/octet-stream",
+          base64: await fileBase64(importFile!),
+        };
       const created = await client.createProject({
         commandId: crypto.randomUUID(),
         name: name.trim(),
-        modelId: selectedId,
+        provider: { providerId: selectedProvider.providerId, modelId: selectedProvider.modelId },
+        source,
       });
-      navigateProduct(workspaceHref("project", created.project.id));
+      navigateProduct(workspaceHref("project", created.project.id, created.conversation.id));
     } catch (cause) {
       setError(messageOf(cause, "The Project could not be created."));
       setPending(false);
@@ -432,17 +352,27 @@ function NewProjectForm({
         <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
       </label>
       <label>
-        Executable Model
-        <select required disabled={options.length === 0} value={selectedId} onChange={(event) => setModelId(event.target.value)}>
-          {options.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+        Source
+        <select value={sourceKind} onChange={(event) => setSourceKind(event.target.value as typeof sourceKind)}>
+          <option value="blank">Blank Project</option>
+          <option value="template">Project template</option>
+          <option value="import">Import archive</option>
         </select>
       </label>
-      {home && options.length === 0 && (
-        <p className="product-form-note" role="status">Create or prepare an executable Model before creating a Project.</p>
-      )}
+      {sourceKind === "template" && <label>Template<select required value={templateKey || (selectedTemplate ? `${selectedTemplate.id}@${selectedTemplate.version}` : "")}
+        onChange={(event) => setTemplateKey(event.target.value)} disabled={templates.length === 0}>
+        {templates.map((item) => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · {item.version}</option>)}
+      </select></label>}
+      {sourceKind === "import" && <label>Project archive<input required type="file" accept=".zip,application/zip,application/octet-stream"
+        onChange={(event) => setImportFile(event.target.files?.[0])} /></label>}
+      <label>Provider / model<select required value={qualifiedId || selectedProvider?.qualifiedId || ""}
+        disabled={providerOptions.length === 0} onChange={(event) => setQualifiedId(event.target.value)}>
+        {providerOptions.map((item) => <option key={item.qualifiedId} value={item.qualifiedId}>{item.qualifiedId}</option>)}
+      </select></label>
       {error && <p className="product-form-error" role="alert">{error}</p>}
       <div>
-        <button type="submit" className="product-primary" disabled={pending || !selectedId || !name.trim()}>
+        <button type="submit" className="product-primary" disabled={pending || !selectedProvider || !name.trim()
+          || sourceKind === "template" && !selectedTemplate || sourceKind === "import" && !importFile}>
           {pending ? "Creating…" : "Create Project"}
         </button>
         <button type="button" className="product-secondary" onClick={() => setOpen(false)} disabled={pending}>Cancel</button>
@@ -473,7 +403,7 @@ function SharedShell({
     const sequence = ++workspaceRequestSequence.current;
     setError(undefined);
     try {
-      const next = await client.workspace(route.kind, route.id);
+      const next = await client.workspace(route.id);
       if (workspaceRequestSequence.current === sequence) setWorkspace(next);
     } catch (cause) {
       if (workspaceRequestSequence.current === sequence) {
@@ -608,3 +538,10 @@ const messageOf = (cause: unknown, fallback: string): string =>
 
 const resourceCount = (count: number, singular: string): string =>
   `${count} ${singular}${count === 1 ? "" : "s"}`;
+
+const fileBase64 = async (file: File): Promise<string> => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};

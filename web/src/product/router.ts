@@ -16,9 +16,9 @@ export const readProductRoute = (
   location: Pick<Location, "pathname" | "search"> = window.location,
 ): ProductRoute => {
   if (location.pathname === "/") return Object.freeze({ page: "home" });
-  const match = /^\/(models|projects)\/([^/]+)\/?$/u.exec(location.pathname);
+  const match = /^\/projects\/([^/]+)\/?$/u.exec(location.pathname);
   if (!match) return Object.freeze({ page: "not_found" });
-  const id = safeSegment(match[2]!);
+  const id = safeSegment(match[1]!);
   if (!id) return Object.freeze({ page: "not_found" });
   const conversationValues = new URLSearchParams(location.search).getAll("conversation");
   if (conversationValues.length > 1) return Object.freeze({ page: "not_found" });
@@ -30,7 +30,7 @@ export const readProductRoute = (
   }
   return Object.freeze({
     page: "workspace" as const,
-    kind: match[1] === "models" ? "model" as const : "project" as const,
+    kind: "project" as const,
     id,
     ...(conversationId ? { conversationId } : {}),
   });
@@ -41,7 +41,7 @@ export const workspaceHref = (
   id: string,
   conversationId?: string,
 ): string => {
-  const path = `/${kind === "model" ? "models" : "projects"}/${encodeURIComponent(id)}`;
+  const path = `/projects/${encodeURIComponent(id)}`;
   return conversationId
     ? `${path}?conversation=${encodeURIComponent(conversationId)}`
     : path;

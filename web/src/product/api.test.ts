@@ -30,7 +30,8 @@ describe("Product browser client", () => {
     await client.createProject({
       commandId: "command-one",
       name: "Project",
-      modelId: "model-one",
+      provider: { providerId: "provider", modelId: "language-model" },
+      source: { kind: "blank" },
     });
     await client.renameConversation({
       commandId: "rename-one",
@@ -116,18 +117,18 @@ describe("Product browser client", () => {
     }));
     const client = new HttpProductClient();
 
-    await client.generatedViews("model / one");
-    await client.generatedViewRenderable("model / one", "agent view");
-    await client.modelChangeSets("model / one");
-    await client.applyModelChangeSet({
-      modelId: "model / one",
+    await client.projectGeneratedViews("project / one");
+    await client.projectGeneratedViewRenderable("project / one", "agent view");
+    await client.projectChangeSets("project / one");
+    await client.applyProjectChangeSet({
+      projectId: "project / one",
       changeSetId: "change / one",
       commandId: "apply-command",
       expectedChangeSetDigest: "a".repeat(64),
       expectedWorkspaceDigest: "b".repeat(64),
     });
-    await client.rejectModelChangeSet({
-      modelId: "model / one",
+    await client.rejectProjectChangeSet({
+      projectId: "project / one",
       changeSetId: "change / one",
       commandId: "reject-command",
       expectedChangeSetDigest: "a".repeat(64),
@@ -137,11 +138,11 @@ describe("Product browser client", () => {
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/browser-session/bootstrap",
-      "/api/models/model%20%2F%20one/generated-views",
-      "/api/models/model%20%2F%20one/generated-views/agent%20view/renderable",
-      "/api/models/model%20%2F%20one/change-sets",
-      "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/apply",
-      "/api/models/model%20%2F%20one/change-sets/change%20%2F%20one/reject",
+      "/api/projects/project%20%2F%20one/generated-views",
+      "/api/projects/project%20%2F%20one/generated-views/agent%20view/renderable",
+      "/api/projects/project%20%2F%20one/change-sets",
+      "/api/projects/project%20%2F%20one/change-sets/change%20%2F%20one/apply",
+      "/api/projects/project%20%2F%20one/change-sets/change%20%2F%20one/reject",
       "/api/projects/project%20%2F%20one/files/file%20%2F%20ref/renderable",
       "/api/projects/project%20%2F%20one/files/file%20%2F%20ref/workbench-renderable",
     ]);

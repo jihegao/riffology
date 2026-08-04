@@ -20,16 +20,19 @@ type ResourceSummary = Readonly<{
   allowedActions: readonly ResourceAction[];
 }>;
 
-export type ModelSummary = ResourceSummary & Readonly<{
-  kind: "model";
-  technicalStatus: "draft" | "checking" | "executable" | "failed";
-  runMode: "batch" | "visual" | "both" | null;
+export type ProjectTechnicalStatus = "draft" | "checking" | "executable" | "failed";
+
+export type ProjectExecutionLock = Readonly<{
+  state: "unlocked" | "checking" | "queued" | "running" | "cancelling";
+  runId: string | null;
+  sourceDigest: string | null;
 }>;
 
 export type ProjectSummary = ResourceSummary & Readonly<{
   kind: "project";
-  sourceModelId: string;
-  modelSnapshotDigest: string;
+  technicalStatus: ProjectTechnicalStatus;
+  workspaceDigest: string;
+  executionLock: ProjectExecutionLock;
   lastRun: null | Readonly<{
     id: string;
     status: string;
@@ -37,28 +40,28 @@ export type ProjectSummary = ResourceSummary & Readonly<{
   }>;
 }>;
 
-export type ExecutableModelOption = Readonly<{
+export type ProjectTemplateSummary = Readonly<{
   id: string;
   name: string;
-  technicalStatus: "executable";
-  runMode: "batch" | "visual" | "both";
+  version: string;
+  description: string;
+  runMode: "batch" | "visual" | "both" | null;
   updatedAt: string;
-  recordDigest: string;
+  templateDigest: string;
 }>;
 
 export type HomeDto = Readonly<{
   schemaVersion: 1;
   generatedAt: string;
   collectionDigest: string;
-  models: readonly ModelSummary[];
   projects: readonly ProjectSummary[];
+  templates: readonly ProjectTemplateSummary[];
   recentConversations?: readonly Readonly<{
     id: string;
-    owner: Readonly<{ kind: "model" | "project"; id: string; name: string }>;
+    owner: Readonly<{ kind: "project"; id: string; name: string }>;
     name: string;
     updatedAt: string;
   }>[];
-  newProjectModels: readonly ExecutableModelOption[];
   providerAvailability:
     | Readonly<{ mode: "live"; providerModelCount: number }>
     | Readonly<{
@@ -81,7 +84,7 @@ export type ProviderDiscovery =
     providerModels: readonly [];
   }>;
 
-export type ComposerCommandId = "stop" | "retry" | "check-model";
+export type ComposerCommandId = "stop" | "retry" | "check-project";
 
 export type ComposerCapabilities = Readonly<{
   schemaVersion: 1;
@@ -106,7 +109,7 @@ export type WorkspaceBinding = Readonly<{
     name: string;
     provider: Readonly<{ providerId: string; modelId: string }> | null;
   }>;
-  owner: Readonly<{ kind: "model" | "project"; id: string }> | null;
+  owner: Readonly<{ kind: "project"; id: string }> | null;
   generation: number;
   bindingDigest: string;
   state: "unbound" | "bound" | "recovery_required";
@@ -115,7 +118,7 @@ export type WorkspaceBinding = Readonly<{
   providerMode: "live" | "read_only";
   providerReason: "opencode_unavailable" | "opencode_auth_failed" | null;
   ownerProjection: Readonly<{
-    kind: "model" | "project";
+    kind: "project";
     id: string;
     name: string;
     recordDigest: string;
@@ -481,7 +484,7 @@ export type ProjectWorkspaceFile = Readonly<{
   sizeBytes: number;
   sha256: string;
   createdAt: string;
-  readOnly: true;
+  readOnly: boolean;
 }>;
 
 export type GeneratedViewSet = Readonly<{
@@ -501,7 +504,7 @@ export type GeneratedViewSet = Readonly<{
   }>[];
 }>;
 
-export type ModelChangeSet = Readonly<{
+export type ProjectChangeSet = Readonly<{
   id: string;
   baseWorkspaceDigest: string;
   currentWorkspaceDigest: string;
@@ -521,11 +524,11 @@ export type ModelChangeSet = Readonly<{
   }>[];
 }>;
 
-export type ModelMutationReceipt = Readonly<{
+export type ProjectMutationReceipt = Readonly<{
   schemaVersion: 1;
   commandId: string;
   operation: "apply" | "reject" | "direct_apply";
-  modelId: string;
+  projectId: string;
   changeSetId: string | null;
   changeSetDigest: string;
   beforeWorkspaceDigest: string;
@@ -542,7 +545,7 @@ export type ModelMutationReceipt = Readonly<{
 
 export type TechnicalCheck = Readonly<{
   id: string;
-  modelId: string;
+  projectId: string;
   state: "running" | "passed" | "failed" | "cancelled";
   publication: "pending" | "published" | "superseded";
   capturedWorkspaceDigest: string;
@@ -619,6 +622,8 @@ export type ProjectRun = Readonly<{
   stepOrHorizon: string | number | null;
   durationMs: number | null;
   resourceOverview: Readonly<Record<string, number | boolean>> | null;
+  sourceDigest: string;
+  reproducibility: "current_source" | "source_not_retained";
   outputs: readonly RunOutput[];
 }>;
 
@@ -636,43 +641,28 @@ export type DiagnosticEventPage = Readonly<{
   truncated: boolean;
 }>;
 
-type WorkspaceBase<K extends OwnerKind> = Readonly<{
+type WorkspaceBase = Readonly<{
   owner: Readonly<{
     id: string;
     name: string;
-    kind: K;
+    kind: "project";
     lifecycleState: LifecycleState;
-    technicalStatus?: ModelSummary["technicalStatus"];
+    technicalStatus: ProjectTechnicalStatus;
   }>;
   conversations: readonly ConversationSummary[];
 }>;
 
-export type ModelWorkspaceDto = WorkspaceBase<"model"> & Readonly<{
-  digest: string;
-  execution: ExecutionDescription;
-  files: readonly WorkspaceFile[];
-}>;
-
-export type ProjectWorkspaceDto = WorkspaceBase<"project"> & Readonly<{
-  sourceModelId: string;
-  modelSnapshotDigest: string;
+export type ProjectWorkspaceDto = WorkspaceBase & Readonly<{
+  workspaceDigest: string;
   execution: ExecutionDescription;
   executionDescriptionDigest: string;
+  executionLock: ProjectExecutionLock;
   files: readonly ProjectWorkspaceFile[];
   experimentConfigurations: readonly ExperimentConfiguration[];
   runs: readonly ProjectRun[];
 }>;
 
-export type WorkspaceDto = ModelWorkspaceDto | ProjectWorkspaceDto;
-
-export type ModelCreationDto = Readonly<{
-  model: Readonly<{
-    id: string;
-    name: string;
-    lifecycleState: LifecycleState;
-  }>;
-  conversation: ConversationSummary;
-}>;
+export type WorkspaceDto = ProjectWorkspaceDto;
 
 export type ProjectCreationDto = Readonly<{
   project: Readonly<{
@@ -680,9 +670,10 @@ export type ProjectCreationDto = Readonly<{
     name: string;
     lifecycleState: LifecycleState;
   }>;
+  conversation: ConversationSummary;
 }>;
 
-export type OwnerKind = "model" | "project";
+export type OwnerKind = "project";
 
 export type ProductRoute =
   | Readonly<{ page: "home" }>

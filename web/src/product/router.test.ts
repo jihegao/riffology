@@ -4,15 +4,8 @@ import { readProductRoute, workspaceHref } from "./router";
 describe("Product routes", () => {
   afterEach(() => history.replaceState({}, "", "/"));
 
-  it("parses Home and both owner routes without legacy mode state", () => {
+  it("parses Home and the Project route", () => {
     expect(readProductRoute()).toEqual({ page: "home" });
-    history.replaceState({}, "", "/models/model%20one?conversation=conversation%201");
-    expect(readProductRoute()).toEqual({
-      page: "workspace",
-      kind: "model",
-      id: "model one",
-      conversationId: "conversation 1",
-    });
     history.replaceState({}, "", "/projects/project-one");
     expect(readProductRoute()).toEqual({
       page: "workspace",
@@ -23,9 +16,9 @@ describe("Product routes", () => {
 
   it("rejects malformed, duplicate, and unknown routes", () => {
     for (const path of [
-      "/models/",
+      "/models/model-one",
       "/unknown/item",
-      "/models/%2F",
+      "/projects/%2F",
       "/projects/project?conversation=one&conversation=two",
     ]) {
       history.replaceState({}, "", path);
@@ -34,8 +27,7 @@ describe("Product routes", () => {
   });
 
   it("serializes owner identity separately from Conversation state", () => {
-    expect(workspaceHref("model", "model one", "conversation one"))
-      .toBe("/models/model%20one?conversation=conversation%20one");
-    expect(workspaceHref("project", "project-one")).toBe("/projects/project-one");
+    expect(workspaceHref("project", "project one", "conversation one"))
+      .toBe("/projects/project%20one?conversation=conversation%20one");
   });
 });

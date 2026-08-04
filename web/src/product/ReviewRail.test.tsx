@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ModelChangeSet, ModelMutationReceipt } from "./types";
+import type { ProjectChangeSet, ProjectMutationReceipt } from "./types";
 import { ReviewRail } from "./ReviewRail";
 
 const files = [{
@@ -12,7 +12,7 @@ const files = [{
   sha256: "a".repeat(64),
 }];
 
-const changeSet = (freshness: "fresh" | "stale" = "fresh"): ModelChangeSet => ({
+const changeSet = (freshness: "fresh" | "stale" = "fresh"): ProjectChangeSet => ({
   id: `change-${freshness}`,
   baseWorkspaceDigest: "b".repeat(64),
   currentWorkspaceDigest: "c".repeat(64),
@@ -32,11 +32,11 @@ const changeSet = (freshness: "fresh" | "stale" = "fresh"): ModelChangeSet => ({
   }],
 });
 
-const receipt = (operation: "apply" | "reject"): ModelMutationReceipt => ({
+const receipt = (operation: "apply" | "reject"): ProjectMutationReceipt => ({
   schemaVersion: 1,
   commandId: "command-one",
   operation,
-  modelId: "model-one",
+  projectId: "project-one",
   changeSetId: "change-fresh",
   changeSetDigest: "d".repeat(64),
   beforeWorkspaceDigest: "c".repeat(64),

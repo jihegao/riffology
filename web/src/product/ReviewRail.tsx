@@ -9,8 +9,8 @@ import {
 } from "react";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
 import type {
-  ModelChangeSet,
-  ModelMutationReceipt,
+  ProjectChangeSet,
+  ProjectMutationReceipt,
 } from "./types";
 
 export type ReviewFile = Readonly<{
@@ -34,11 +34,11 @@ export function ReviewRail({
 }: Readonly<{
   ownerKey: string;
   files: readonly ReviewFile[];
-  changeSets?: readonly ModelChangeSet[];
+  changeSets?: readonly ProjectChangeSet[];
   sourceTarget?: Readonly<{ relativePath: string; requestId: number }>;
   loadFile: (file: ReviewFile) => Promise<RendererResource>;
-  onApply?: (changeSet: ModelChangeSet) => Promise<ModelMutationReceipt>;
-  onReject?: (changeSet: ModelChangeSet) => Promise<ModelMutationReceipt>;
+  onApply?: (changeSet: ProjectChangeSet) => Promise<ProjectMutationReceipt>;
+  onReject?: (changeSet: ProjectChangeSet) => Promise<ProjectMutationReceipt>;
 }>) {
   const narrow = useNarrowRail();
   const hasFiles = files.length > 0;
@@ -55,7 +55,7 @@ export function ReviewRail({
   const [currentRenderable, setCurrentRenderable] = useState<RendererResource>();
   const [error, setError] = useState<string>();
   const [resolving, setResolving] = useState(false);
-  const [receipt, setReceipt] = useState<ModelMutationReceipt>();
+  const [receipt, setReceipt] = useState<ProjectMutationReceipt>();
   const [reviewed, setReviewed] = useState<Record<string, readonly string[]>>({});
   const railRef = useRef<HTMLElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -236,7 +236,7 @@ export function ReviewRail({
 
   const resolve = async (
     operation: "apply" | "reject",
-    changeSet: ModelChangeSet,
+    changeSet: ProjectChangeSet,
   ) => {
     const action = operation === "apply" ? onApply : onReject;
     if (!action) return;
@@ -435,10 +435,10 @@ function ChangeReview({
   onApply,
   onReject,
 }: Readonly<{
-  changeSets: readonly ModelChangeSet[];
-  selectedChangeSet: ModelChangeSet;
+  changeSets: readonly ProjectChangeSet[];
+  selectedChangeSet: ProjectChangeSet;
   setSelectedChangeSetId: (id: string) => void;
-  selectedItem?: ModelChangeSet["files"][number];
+  selectedItem?: ProjectChangeSet["files"][number];
   setSelectedItemId: (id: string) => void;
   currentRenderable?: RendererResource;
   reviewedItems: ReadonlySet<string>;
@@ -494,7 +494,7 @@ function ChangeReview({
               <small>{selectedItem.priorSha256 ?? "new file"}</small>
               <pre>{renderableText(currentRenderable) ?? (
                 selectedItem.priorSha256 === null
-                  ? "This file does not exist in the current Model."
+                  ? "This file does not exist in the current Project."
                   : "Current text preview is unavailable."
               )}</pre>
             </div>
