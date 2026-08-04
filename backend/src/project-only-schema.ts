@@ -77,6 +77,8 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
     project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     captured_workspace_digest TEXT NOT NULL,
+    captured_file_digest TEXT,
+    execution_description_digest TEXT,
     status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
     diagnostics_json TEXT NOT NULL DEFAULT '[]'
       CHECK (json_valid(diagnostics_json) AND json_type(diagnostics_json) = 'array'),
@@ -131,6 +133,18 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
   ) STRICT;
 
   CREATE UNIQUE INDEX execution_lock_holder ON execution_locks(holder_kind, holder_id);
+
+  CREATE TABLE project_delivery_receipts (
+    command_id TEXT PRIMARY KEY CHECK (length(command_id) BETWEEN 3 AND 128),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    intent_digest TEXT NOT NULL
+      CHECK (length(intent_digest) = 64 AND intent_digest NOT GLOB '*[^0-9a-f]*'),
+    response_json TEXT NOT NULL
+      CHECK (json_valid(response_json) AND json_type(response_json) = 'object'),
+    receipt_digest TEXT NOT NULL
+      CHECK (length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'),
+    committed_at TEXT NOT NULL
+  ) STRICT;
 
   CREATE TRIGGER project_files_blocked_by_execution_lock_insert
   BEFORE INSERT ON project_files

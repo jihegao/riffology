@@ -94,6 +94,12 @@ test("template versions are immutable and blank/template/import are explicit cre
   assert.equal(blank.creationSource, "blank");
   assert.equal(copied.creationSource, "template");
   assert.equal(store.projectFiles(copied.id)[0]?.bytes.toString("utf8"), "print('template')\n");
+  assert.deepEqual(store.experiments(copied.id).map((experiment) => ({ name: experiment.name, configuration: experiment.configuration })), [
+    { name: "Default", configuration: { seed: 1 } },
+  ]);
+  store.updateExperiment({ id: store.experiments(copied.id)[0]!.id, projectId: copied.id, configuration: { seed: 99 }, updatedAt: LATER });
+  const secondCopy = store.createProject({ id: "project_copy_two", name: "Copy two", source: { kind: "template", templateId: template.id, version: template.version }, createdAt: LATER });
+  assert.deepEqual(store.experiments(secondCopy.id)[0]!.configuration, { seed: 1 });
 });
 
 test("restart reconciliation terminates orphaned execution and releases the durable lock", (t) => {

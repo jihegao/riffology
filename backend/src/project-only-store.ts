@@ -59,6 +59,18 @@ export type ProjectFileRecord = Readonly<{
   updatedAt: string;
 }>;
 
+export type ProjectTechnicalCheckRecord = Readonly<{
+  id: string;
+  projectId: string;
+  capturedWorkspaceDigest: string;
+  capturedFileDigest: string;
+  executionDescriptionDigest: string;
+  status: "running" | "succeeded" | "failed" | "interrupted";
+  diagnostics: readonly unknown[];
+  startedAt: string;
+  finishedAt: string | null;
+}>;
+
 export type CreateProjectInput = Readonly<{
   id: string;
   name: string;
@@ -165,9 +177,10 @@ export class ProjectOnlyStore {
     let runMode = input.runMode ?? "batch";
     let executionDescription = input.executionDescription ?? {};
     let sourceRef: string | null = null;
+    let defaultExperiment: Record<string, unknown> | null = null;
     if (input.source.kind === "blank") {
       files = normalizeFiles([{
-        id: `${input.id}_scaffold`,
+        id: stableResourceId("project_file", `${input.id}:scaffold`),
         kind: "project_code",
         relativePath: "model.py",
         mediaType: "text/x-python",
@@ -178,11 +191,12 @@ export class ProjectOnlyStore {
       files = normalizeFiles(input.source.files);
       sourceRef = input.source.importDigest;
     } else {
-      const row = this.#database.prepare(`SELECT run_mode, execution_description_json, files_json, content_digest
+      const row = this.#database.prepare(`SELECT run_mode, execution_description_json, default_experiment_json, files_json, content_digest
         FROM project_templates WHERE id = ? AND version = ?`).get(input.source.templateId, input.source.version) as any;
       if (!row) throw new ProjectOnlyStoreError("template_not_found", "Project template version does not exist.");
       runMode = row.run_mode;
       executionDescription = JSON.parse(row.execution_description_json);
+      defaultExperiment = JSON.parse(row.default_experiment_json);
       files = normalizeFiles((JSON.parse(row.files_json) as any[]).map((file) => ({
         id: `${input.id}_${createHash("sha256").update(file.id).digest("hex").slice(0, 16)}`,
         kind: file.kind,
@@ -206,6 +220,13 @@ export class ProjectOnlyStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const file of files) insert.run(file.id, input.id, file.kind, file.relativePath, file.mediaType,
         file.bytes, file.bytes.byteLength, file.sha256, input.createdAt, input.createdAt);
+      if (defaultExperiment) {
+        this.#database.prepare(`INSERT INTO experiment_configurations
+          (id, project_id, name, configuration_json, created_at, updated_at)
+          VALUES (?, ?, 'Default', ?, ?, ?)`)
+          .run(stableResourceId("experiment", `${input.id}:template-default`), input.id,
+            json(defaultExperiment), input.createdAt, input.createdAt);
+      }
     });
     return this.project(input.id);
   }
@@ -291,6 +312,26 @@ export class ProjectOnlyStore {
     if (result.changes !== 1) throw new ProjectOnlyStoreError("experiment_not_found", "Experiment does not exist.");
   }
 
+  experiments(projectId: string): readonly Readonly<{
+    id: string;
+    projectId: string;
+    name: string;
+    configuration: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+  }>[] {
+    this.#assertOpen();
+    return (this.#database.prepare("SELECT * FROM experiment_configurations WHERE project_id = ? ORDER BY created_at, id").all(projectId) as any[])
+      .map((row) => Object.freeze({
+        id: row.id,
+        projectId: row.project_id,
+        name: row.name,
+        configuration: JSON.parse(row.configuration_json),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+  }
+
   startTechnicalCheck(input: Readonly<{ id: string; projectId: string; expectedWorkspaceDigest: string; startedAt: string }>): void {
     this.#assertOpen();
     assertId(input.id);
@@ -314,6 +355,8 @@ export class ProjectOnlyStore {
     id: string;
     succeeded: boolean;
     diagnostics: readonly unknown[];
+    capturedFileDigest?: string;
+    executionDescriptionDigest?: string;
     finishedAt: string;
   }>): ProjectRecord {
     this.#assertOpen();
@@ -326,14 +369,33 @@ export class ProjectOnlyStore {
       projectId = check.project_id;
       const project = this.project(projectId);
       if (project.workspaceDigest !== check.captured_workspace_digest) throw new ProjectOnlyStoreError("technical_check_digest_drift", "Technical check source digest drifted.");
-      this.#database.prepare(`UPDATE project_technical_checks SET status = ?, diagnostics_json = ?, finished_at = ? WHERE id = ?`)
-        .run(input.succeeded ? "succeeded" : "failed", json(input.diagnostics), input.finishedAt, input.id);
+      this.#database.prepare(`UPDATE project_technical_checks SET status = ?, diagnostics_json = ?,
+        captured_file_digest = ?, execution_description_digest = ?, finished_at = ? WHERE id = ?`)
+        .run(input.succeeded ? "succeeded" : "failed", json(input.diagnostics),
+          input.capturedFileDigest ?? null, input.executionDescriptionDigest ?? null, input.finishedAt, input.id);
       this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'technical_check' AND holder_id = ?")
         .run(projectId, input.id);
       this.#database.prepare("UPDATE projects SET technical_status = ?, updated_at = ? WHERE id = ?")
         .run(input.succeeded ? "executable" : "failed", input.finishedAt, projectId);
     });
     return this.project(projectId);
+  }
+
+  technicalCheck(id: string): ProjectTechnicalCheckRecord {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT * FROM project_technical_checks WHERE id = ?").get(id) as any;
+    if (!row) throw new ProjectOnlyStoreError("technical_check_not_found", "Technical check does not exist.");
+    return Object.freeze({
+      id: row.id,
+      projectId: row.project_id,
+      capturedWorkspaceDigest: row.captured_workspace_digest,
+      capturedFileDigest: row.captured_file_digest ?? "",
+      executionDescriptionDigest: row.execution_description_digest ?? "",
+      status: row.status,
+      diagnostics: JSON.parse(row.diagnostics_json),
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+    });
   }
 
   startRun(input: Readonly<{
@@ -395,6 +457,64 @@ export class ProjectOnlyStore {
       if (terminal) this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'run' AND holder_id = ?")
         .run(run.project_id, input.id);
     });
+  }
+
+  run(id: string): Readonly<{
+    id: string;
+    projectId: string;
+    experimentConfigurationId: string;
+    runKind: "batch" | "visual";
+    status: ProjectRunStatus;
+    sourceWorkspaceDigest: string;
+    frozenConfiguration: Record<string, unknown>;
+    sourceFilesRetained: false;
+    createdAt: string;
+  }> {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT * FROM runs WHERE id = ?").get(id) as any;
+    if (!row) throw new ProjectOnlyStoreError("run_not_found", "Run does not exist.");
+    return Object.freeze({
+      id: row.id,
+      projectId: row.project_id,
+      experimentConfigurationId: row.experiment_configuration_id,
+      runKind: row.run_kind,
+      status: row.status,
+      sourceWorkspaceDigest: row.source_workspace_digest,
+      frozenConfiguration: JSON.parse(row.frozen_configuration_json),
+      sourceFilesRetained: false,
+      createdAt: row.created_at,
+    });
+  }
+
+  deliveryReceipt(commandId: string): Readonly<{
+    projectId: string;
+    intentDigest: string;
+    response: Record<string, unknown>;
+    receiptDigest: string;
+  }> | null {
+    this.#assertOpen();
+    const row = this.#database.prepare("SELECT * FROM project_delivery_receipts WHERE command_id = ?").get(commandId) as any;
+    return row ? Object.freeze({
+      projectId: row.project_id,
+      intentDigest: row.intent_digest,
+      response: JSON.parse(row.response_json),
+      receiptDigest: row.receipt_digest,
+    }) : null;
+  }
+
+  recordDeliveryReceipt(input: Readonly<{
+    commandId: string;
+    projectId: string;
+    intentDigest: string;
+    response: Record<string, unknown>;
+    receiptDigest: string;
+    committedAt: string;
+  }>): void {
+    this.#assertOpen();
+    this.#database.prepare(`INSERT INTO project_delivery_receipts
+      (command_id, project_id, intent_digest, response_json, receipt_digest, committed_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(input.commandId, input.projectId, input.intentDigest, json(input.response), input.receiptDigest, input.committedAt);
   }
 
   reconcileInterruptedExecutions(at: string): Readonly<{ checks: number; runs: number }> {
@@ -504,5 +624,8 @@ const assertRelativePath = (path: string): void => {
     throw new ProjectOnlyStoreError("invalid_project_path", "Project file path is invalid.");
   }
 };
+
+const stableResourceId = (prefix: string, value: string): string =>
+  `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 
 const json = (value: unknown): string => JSON.stringify(value);
