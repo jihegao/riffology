@@ -243,6 +243,8 @@ export type BackendOptions = {
   productStore?: ProductStoreV2;
   projectOnlyRuntime?: Extract<ProjectOnlyServerRuntime, { mode: "ready" }>;
   projectOnlyOpenCode?: OpenCodeConversationPort;
+  projectOnlySkillRoot?: string;
+  projectOnlyAllowedSkills?: string[];
   a2OpenCode?: OpenCodeConversationPort;
   a2TechnicalChecker?: ModelTechnicalCheckerPort;
   a2SkillRoot?: string;
@@ -657,6 +659,18 @@ export class BackendApp {
     this.#recoveryStatus = options.recoveryStatus;
     this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
     if (options.projectOnlyRuntime) {
+      const projectOnlySkillIds = ["simulation-domain-requirements", "simulation-model-visualization"];
+      const projectOnlySkills = options.projectOnlySkillRoot && options.projectOnlyAllowedSkills
+        ? (() => {
+          const catalog = new SimulationSkillCatalog(
+            options.projectOnlySkillRoot,
+            options.projectOnlyAllowedSkills,
+          );
+          return projectOnlySkillIds
+            .filter((id) => options.projectOnlyAllowedSkills?.includes(id))
+            .map((id) => catalog.load(id));
+        })()
+        : [];
       const visualRuntime = new ProjectOnlyVisualRuntime(options.projectOnlyRuntime.store);
       const projectOnlyScratchRoot = join(options.projectOnlyRuntime.store.root, "batch-scratch");
       const batchRuntime = new ProjectOnlyBatchRuntime({
@@ -670,6 +684,7 @@ export class BackendApp {
         openCode: options.projectOnlyOpenCode,
         visualRuntime,
         batchRuntime,
+        loadedSkills: projectOnlySkills,
       });
       this.projectOnlyApi = new ProjectOnlyHttpApi(
         options.projectOnlyRuntime.store,

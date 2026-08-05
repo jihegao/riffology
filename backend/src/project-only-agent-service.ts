@@ -29,6 +29,7 @@ import {
   type ProjectRecord,
 } from "./project-only-store.ts";
 import { ProjectOnlyVisualRuntime } from "./project-only-visual-runtime.ts";
+import type { LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
 
 const MAX_PROJECT_CONTEXT_BYTES = 96 * 1024;
 const OPENCODE_SESSION_SETUP_TIMEOUT_MS = 10_000;
@@ -38,9 +39,8 @@ const STOP_VISUAL_FRAGMENT = /(?:关闭|停止|结束)\s*(?:可视化)?(?:仿真
 const START_BATCH_COMMAND = /(?:启动|开始|运行|执行).{0,16}(?:大样本|批量|批处理)(?:仿真|实验|运行)?|(?:大样本|批量|批处理).{0,16}(?:启动|开始|运行|执行)/u;
 const INTERPRET_RESULTS_COMMAND = /(?:解读|解释|分析|总结).{0,16}(?:实验|仿真|运行)?结果|(?:实验|仿真|运行)?结果.{0,16}(?:解读|解释|分析|总结)/u;
 const UPDATE_AND_RERUN_COMMAND = /(?:修改|改动|调整|更改).{0,32}(?:参数).{0,32}(?:再次|重新|再).{0,16}(?:运行|实验|仿真)/u;
-const MODEL_DESIGN_COMMAND = /(?:生成|创建|编写).{0,12}(?:模型设计|建模设计|设计方案)/u;
 const VISUAL_CONTROLS_COMMAND = /(?:可视化|仿真).{0,24}(?:页面).{0,32}(?:重置|单步).{0,32}(?:开始|暂停)|(?:重置|开始|单步|暂停).{0,48}(?:控制按钮)/u;
-const EXPLICIT_PROJECT_MUTATION = /(?:生成|创建|编写|增加|添加|修改|改动|调整|删除|重写|实现|修复).{0,24}(?:模型|代码|页面|按钮|可视化|参数|设计)|(?:模型|代码|页面|按钮|可视化|参数|设计).{0,24}(?:生成|创建|编写|增加|添加|修改|改动|调整|删除|重写|实现|修复)/u;
+const EXPLICIT_PROJECT_MUTATION = /(?:生成|创建|编写|设计|增加|添加|修改|改动|调整|删除|重写|实现|修复).{0,24}(?:模型|代码|页面|按钮|可视化|参数|设计)|(?:模型|代码|页面|按钮|可视化|参数|设计).{0,24}(?:生成|创建|编写|设计|增加|添加|修改|改动|调整|删除|重写|实现|修复)/u;
 
 type ProjectCommandIntent = Readonly<{
   startVisual: boolean;
@@ -48,7 +48,6 @@ type ProjectCommandIntent = Readonly<{
   startBatch: boolean;
   interpretResults: boolean;
   updateAndRerun: boolean;
-  modelDesign: boolean;
   visualControls: boolean;
   explicitMutation: boolean;
   requiresAgent: boolean;
@@ -91,6 +90,7 @@ export class ProjectOnlyAgentService {
   readonly openCode?: OpenCodeConversationPort;
   readonly visualRuntime: ProjectOnlyVisualRuntime;
   readonly batchRuntime: ProjectOnlyBatchRuntime;
+  readonly loadedSkills: readonly LoadedSimulationSkill[];
   readonly now: () => string;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #providers: readonly OpenCodeProviderModel[] = Object.freeze([]);
@@ -101,6 +101,7 @@ export class ProjectOnlyAgentService {
     openCode?: OpenCodeConversationPort;
     visualRuntime: ProjectOnlyVisualRuntime;
     batchRuntime: ProjectOnlyBatchRuntime;
+    loadedSkills?: readonly LoadedSimulationSkill[];
     now?: () => string;
   }>) {
     this.store = input.store;
@@ -108,6 +109,7 @@ export class ProjectOnlyAgentService {
     this.openCode = input.openCode;
     this.visualRuntime = input.visualRuntime;
     this.batchRuntime = input.batchRuntime;
+    this.loadedSkills = Object.freeze([...(input.loadedSkills ?? [])]);
     this.now = input.now ?? (() => new Date().toISOString());
   }
 
@@ -420,7 +422,12 @@ export class ProjectOnlyAgentService {
       const response = await boundedOperation(
         this.openCode.promptWithModel(sessionId, conversation.provider, {
           text: input.text.trim(),
-          system: projectSystemPrompt(project, this.store.projectFiles(project.id), this.store.experiments(project.id), intent),
+          system: projectSystemPrompt(
+            project,
+            this.store.projectFiles(project.id),
+            this.store.experiments(project.id),
+            this.loadedSkills,
+          ),
           attachments: [],
           ...(input.agentName ? { agentName: input.agentName } : {}),
         }, AbortSignal.timeout(OPENCODE_PROMPT_TIMEOUT_MS), workspace),
@@ -515,13 +522,10 @@ export class ProjectOnlyAgentService {
       return this.#stopVisual({ project: input.project, turn: input.turn, requestKey: input.input.requestKey });
     }
     if (input.instruction.operation === "deliver_design") {
-      if (!input.intent.modelDesign || !input.instruction.designMarkdown?.trim()) {
-        throw new ApiError(502, "opencode_intent_mismatch", "OpenCode returned an unexpected or empty model design.");
+      if (!input.instruction.designMarkdown?.trim()) {
+        throw new ApiError(502, "opencode_invalid_structured_response", "OpenCode omitted designMarkdown for a design delivery.");
       }
       return this.#deliverDesign(input);
-    }
-    if (input.intent.modelDesign && input.instruction.operation !== "deliver_design") {
-      throw new ApiError(502, "opencode_intent_mismatch", "OpenCode omitted the requested model design artifact.");
     }
     if (input.instruction.operation === "update_experiment_and_start_batch") {
       if (!input.intent.updateAndRerun || !input.instruction.experimentConfiguration) {
@@ -1151,14 +1155,18 @@ const projectSystemPrompt = (
   project: ProjectRecord,
   files: readonly ProjectFileRecord[],
   experiments: readonly Readonly<{ id: string; name: string; configuration: Record<string, unknown> }>[],
-  intent: ProjectCommandIntent,
+  loadedSkills: readonly LoadedSimulationSkill[] = [],
 ): string => {
   const fileContext = files.map((file) => {
     const text = file.mediaType.startsWith("text/") || file.relativePath.endsWith(".py")
       || file.relativePath.endsWith(".json") ? file.bytes.toString("utf8").slice(0, 24_000) : "[binary omitted]";
     return `FILE ${file.relativePath}\n${text}`;
   }).join("\n\n").slice(0, MAX_PROJECT_CONTEXT_BYTES);
+  const skillContext = loadedSkills.length > 0
+    ? `\n  The project-local skills listed below are already loaded. Follow the skills relevant to the user's raw request directly. Do not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response. Treat referenced files that are not included here as unavailable source data and mark unresolved choices explicitly.\n${loadedSkills.map((skill) => `  BEGIN LOADED PROJECT SKILL (${skill.id}@${skill.version})\n${skill.instructions.slice(0, 16_000)}\n  END LOADED PROJECT SKILL`).join("\n")}`
+    : "\n  Do not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response.";
   return `You are the modelling agent for one Riff Project. Return exactly one JSON object, no markdown fences and no commentary outside JSON.
+  Choose the operation from the user's message itself. Riff intentionally does not provide a semantic intent label; do not ask for one.
   The schema is {"operation":"deliver_design"|"deliver_project"|"start_visual"|"stop_visual"|"update_experiment_and_start_batch"|"none","assistantText":string,"designMarkdown"?:string,"modelSource"?:string,"inputSchema"?:object,"defaultParameters"?:object,"experimentConfiguration"?:object,"visual"?:{"title"?:string,"summary"?:string,"entities"?:array,"series"?:number[]}}.
   For an explicit request to generate a model design, choose deliver_design and provide a complete Markdown design in designMarkdown: question, scope, entities/agents, state, processes, parameters, outputs, assumptions, validation, and experiment plan. Do not provide executable code for that operation.
   For a concrete modelling requirement, choose deliver_project and provide a complete, valid Python module in modelSource. Use Mesa 3 APIs, define a Mesa Model subclass named SimulationModel with a seed-aware constructor, step(), and snapshot() returning JSON-compatible metrics. Do not use removed mesa.time schedulers. Keep domain semantics in the module; do not start a server or access files/network. Also provide a compact visual specification, a closed JSON Schema 2020-12 inputSchema (additionalProperties=false) containing steps and every user-adjustable constructor parameter, and matching defaultParameters. Every required property must have a value in defaultParameters. The inputSchema profile only supports $schema, $id, $defs, $ref, type, properties, required, additionalProperties, items, minItems, maxItems, enum, const, default, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, and maxLength; omit annotations such as description, title, examples, and $comment.
@@ -1168,7 +1176,7 @@ const projectSystemPrompt = (
   For discussion without a requested change, choose none.
   Never ask for confirmation when the user explicitly requested a Project change. Never return none for an explicit mutation.
   Never claim a file was written, checked, or a Run started; Riff verifies those effects after your response.
-  Current project: ${project.name}; digest=${project.workspaceDigest}; intent=${JSON.stringify(intent)}.
+  Current project: ${project.name}; digest=${project.workspaceDigest}.${skillContext}
   Current authoritative Experiment configurations: ${JSON.stringify(experiments.map(({ id, name, configuration }) => ({ id, name, configuration })))}.
   Authoritative current files follow:\n${fileContext}`;
 };
@@ -1176,7 +1184,7 @@ const projectSystemPrompt = (
 export const parseAgentInstruction = (text: string): AgentInstruction => {
   const candidate = text.trim().replace(/^```(?:json)?\s*/u, "").replace(/\s*```$/u, "");
   let raw: any;
-  try { raw = JSON.parse(candidate); }
+  try { raw = JSON.parse(escapeJsonStringControlCharacters(candidate)); }
   catch { throw new ApiError(502, "opencode_invalid_structured_response", "OpenCode did not return the required JSON object."); }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)
     || !["deliver_design", "deliver_project", "start_visual", "stop_visual", "update_experiment_and_start_batch", "none"].includes(raw.operation)
@@ -1208,13 +1216,52 @@ export const parseAgentInstruction = (text: string): AgentInstruction => {
   });
 };
 
+const escapeJsonStringControlCharacters = (candidate: string): string => {
+  let inString = false;
+  let escaped = false;
+  let normalized = "";
+  for (const character of candidate) {
+    if (!inString) {
+      normalized += character;
+      if (character === '"') inString = true;
+      continue;
+    }
+    if (escaped) {
+      normalized += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      normalized += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      normalized += character;
+      inString = false;
+      continue;
+    }
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 0x1f) {
+      normalized += codePoint === 0x08 ? "\\b"
+        : codePoint === 0x09 ? "\\t"
+          : codePoint === 0x0a ? "\\n"
+            : codePoint === 0x0c ? "\\f"
+              : codePoint === 0x0d ? "\\r"
+                : `\\u${codePoint.toString(16).padStart(4, "0")}`;
+      continue;
+    }
+    normalized += character;
+  }
+  return normalized;
+};
+
 export const projectCommandIntent = (text: string): ProjectCommandIntent => {
   const startVisual = VISUAL_COMMAND.test(text);
   const stopVisual = STOP_VISUAL_FRAGMENT.test(text);
   const startBatch = START_BATCH_COMMAND.test(text);
   const interpretResults = INTERPRET_RESULTS_COMMAND.test(text);
   const updateAndRerun = UPDATE_AND_RERUN_COMMAND.test(text);
-  const modelDesign = MODEL_DESIGN_COMMAND.test(text);
   const visualControls = VISUAL_CONTROLS_COMMAND.test(text);
   const residual = stopVisual
     ? text.replace(STOP_VISUAL_FRAGMENT, "").replace(/[\s，,。.!！、；;：:]/gu, "")
@@ -1231,7 +1278,6 @@ export const projectCommandIntent = (text: string): ProjectCommandIntent => {
     startBatch,
     interpretResults,
     updateAndRerun,
-    modelDesign,
     visualControls,
     explicitMutation,
     requiresAgent: !direct,

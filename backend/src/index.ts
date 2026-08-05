@@ -29,6 +29,8 @@ try {
     ? new BackendApp({
       projectOnlyRuntime: runtime,
       projectOnlyOpenCode: opencodeFromEnvironment(),
+      projectOnlySkillRoot: join(repositoryRoot, ".opencode", "skills"),
+      projectOnlyAllowedSkills: ["simulation-domain-requirements", "simulation-model-visualization"],
       repositoryRoot,
       staticWebRoot,
       recoveryOnlyOnFailure: true,

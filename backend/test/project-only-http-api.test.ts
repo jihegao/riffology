@@ -58,7 +58,11 @@ const openCode: OpenCodeConversationPort = {
   async abort() {},
 };
 
-const start = async (t: test.TestContext) => {
+const start = async (t: test.TestContext, options: Readonly<{
+  openCode?: OpenCodeConversationPort;
+  projectOnlySkillRoot?: string;
+  projectOnlyAllowedSkills?: string[];
+}> = {}) => {
   const temp = mkdtempSync(join(tmpdir(), "riff-project-http-"));
   t.after(() => rmSync(temp, { recursive: true, force: true }));
   const runtime = openProjectOnlyServerRuntime({ root: join(temp, ".riff-product"), checker, now: () => NOW });
@@ -87,7 +91,12 @@ const start = async (t: test.TestContext) => {
     source: { kind: "template", templateId: "template_http", version: "1" },
     createdAt: NOW,
   });
-  const app = new BackendApp({ projectOnlyRuntime: runtime, projectOnlyOpenCode: openCode });
+  const app = new BackendApp({
+    projectOnlyRuntime: runtime,
+    projectOnlyOpenCode: options.openCode ?? openCode,
+    projectOnlySkillRoot: options.projectOnlySkillRoot,
+    projectOnlyAllowedSkills: options.projectOnlyAllowedSkills,
+  });
   await app.initialize();
   const address = await app.listen();
   t.after(() => app.close());
@@ -113,11 +122,79 @@ test("Project-only structured Agent responses accept null optional fields withou
   })), /invalid structured result/u);
 });
 
+test("Project-only repairs only bare JSON control characters inside OpenCode string fields", () => {
+  const instruction = parseAgentInstruction(
+    '{"operation":"deliver_design","assistantText":"已补充设计",'
+      + '"designMarkdown":"# 可视化设计\\n\\n```\n楼层示意\\n```"}',
+  );
+  assert.equal(instruction.operation, "deliver_design");
+  assert.match(instruction.designMarkdown ?? "", /```\n楼层示意/u);
+  assert.throws(
+    () => parseAgentInstruction('{"operation":"deliver_design","assistantText":"已补充设计",]'),
+    /required JSON object/u,
+  );
+});
+
 test("Project-only model mutations mentioning batch capability are not misrouted as batch starts", () => {
   const intent = projectCommandIntent("修改当前模型并交付可批量执行的 Mesa 3 模型");
   assert.equal(intent.explicitMutation, true);
   assert.equal(intent.startBatch, true);
   assert.equal(intent.requiresAgent, true);
+});
+
+test("Project-only routes model-design wording through the Agent without a semantic design label", () => {
+  const intent = projectCommandIntent("补充可视化仿真设计方案，要求能3D查看全部楼层");
+  assert.equal(intent.explicitMutation, true);
+  assert.equal(intent.requiresAgent, true);
+  assert.equal("modelDesign" in intent, false);
+});
+
+test("Project-only accepts OpenCode design delivery for raw visual-design wording with bounded skills preloaded", async (t) => {
+  let capturedPrompt: Parameters<OpenCodeConversationPort["promptWithModel"]>[2] | undefined;
+  const structuredOpenCode: OpenCodeConversationPort = {
+    ...openCode,
+    async promptWithModel(_sessionId, _provider, prompt) {
+      capturedPrompt = prompt;
+      return {
+        messageId: "message_design",
+        text: JSON.stringify({
+          operation: "deliver_design",
+          assistantText: "已补充邮轮3D分层可视化设计。",
+          designMarkdown: "# 邮轮病毒传播模型\n\n## 可视化设计\n支持全部楼层、单层切换和SEIR颜色。\n",
+        }),
+        content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+      };
+    },
+  };
+  const { origin, runtime, project } = await start(t, {
+    openCode: structuredOpenCode,
+    projectOnlySkillRoot: join(import.meta.dirname, "../../.opencode/skills"),
+    projectOnlyAllowedSkills: ["simulation-domain-requirements", "simulation-model-visualization"],
+  });
+  const conversation = runtime.store.createConversation({
+    id: "conversation_design",
+    projectId: project.id,
+    name: "Design",
+    providerId: "provider",
+    modelId: "agent",
+    createdAt: NOW,
+  });
+  const text = "补充可视化仿真设计方案，要求能3D或伪3D查看全部楼层、切换单独楼层显示，能用颜色显示每个人的SEIR状态";
+  const response = await fetch(`${origin}/api/conversations/${conversation.id}/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestKey: "request_design", text, attachmentIds: [] }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(capturedPrompt?.text, text);
+  assert.match(capturedPrompt?.system ?? "", /BEGIN LOADED PROJECT SKILL \(simulation-domain-requirements@local-v1\)/u);
+  assert.match(capturedPrompt?.system ?? "", /Create a reviewable domain brief/u);
+  assert.match(capturedPrompt?.system ?? "", /BEGIN LOADED PROJECT SKILL \(simulation-model-visualization@local-v1\)/u);
+  assert.match(capturedPrompt?.system ?? "", /Simulation model and runtime visualization/u);
+  assert.doesNotMatch(capturedPrompt?.system ?? "", /intent=|"modelDesign"/u);
+  const design = runtime.store.projectFiles(project.id)
+    .find((file) => file.relativePath === "design/model-design.md");
+  assert.match(design?.bytes.toString("utf8") ?? "", /全部楼层、单层切换和SEIR颜色/u);
 });
 
 test("Project-only parameter reruns accept an explicit bounded JSON patch", () => {
