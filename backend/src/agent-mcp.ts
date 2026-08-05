@@ -65,7 +65,8 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     "Start one receipt-backed technical check for the current Model.",
     { requestKey: { type: "string" } }, ["requestKey"],
   ),
-  riff_apply_model_changes: definition("Apply one explicit, validated, atomic Model change set.", {
+  riff_apply_model_changes: definition(
+    "Apply one explicit, validated, atomic Model change set. Omit executionDescription when only file contents change; when present it must be the complete execution-description v2 contract, not a prose change summary.", {
     requestKey: { type: "string" },
     changes: {
       type: "array",
@@ -104,10 +105,10 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
         additionalProperties: false,
       },
     },
-    executionDescription: { type: "object" },
+    executionDescription: executionDescriptionV2Schema(),
   }, ["requestKey", "changes"]),
   riff_propose_model_changes: definition(
-    "Create one digest-bound, reviewable Model change set without modifying Model files.",
+    "Create one digest-bound, reviewable Model change set without modifying Model files. Omit executionDescription when only file contents change; when present it must be the complete execution-description v2 contract, not a prose change summary.",
     {
       requestKey: { type: "string" },
       changes: {
@@ -147,7 +148,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
           additionalProperties: false,
         },
       },
-      executionDescription: { type: "object" },
+      executionDescription: executionDescriptionV2Schema(),
     },
     ["requestKey", "changes"],
   ),
@@ -628,6 +629,7 @@ export class AgentMcpServer {
       const safeRuntimeCode = runtimeCode === "no_active_visual_service"
         || runtimeCode === "project_operations_unavailable"
         || runtimeCode === "invalid_tool_input"
+        || runtimeCode === "execution_protocol_upgrade_required"
         || runtimeCode === "invalid_domain_receipt"
         ? runtimeCode : null;
       const message = denied ? error.message
@@ -637,11 +639,13 @@ export class AgentMcpServer {
             : safeRuntimeCode === "project_operations_unavailable"
               ? "Project operations are unavailable in this runtime."
               : safeRuntimeCode === "invalid_tool_input"
-                ? "The Project operation input is invalid."
+                ? "The Agent tool input does not match the published execution contract."
+                : safeRuntimeCode === "execution_protocol_upgrade_required"
+                  ? "The Agent tool input does not match the published contract. executionDescription must be a complete execution-description v2 contract; omit it when only Model files change."
                 : safeRuntimeCode === "invalid_domain_receipt"
                   ? "The Project operation receipt could not be verified."
           : "The scoped Agent action failed.";
-      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: budgetExhausted ? "operation_budget_exhausted" : denied ? "tool_not_allowed" : staleCapability ? "stale_capability" : safeRuntimeCode ?? "tool_failed", message } }) }] } };
+      return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: budgetExhausted ? "operation_budget_exhausted" : denied ? "tool_not_allowed" : staleCapability ? "stale_capability" : safeRuntimeCode === "execution_protocol_upgrade_required" ? "invalid_tool_input" : safeRuntimeCode ?? "tool_failed", message } }) }] } };
     }
   }
 
@@ -650,6 +654,116 @@ export class AgentMcpServer {
     if (grant && grant.expiresAt <= this.#now()) this.revoke(capability);
     return grant && grant.expiresAt > this.#now() ? grant : undefined;
   }
+}
+
+function executionDescriptionV2Schema(): Record<string, unknown> {
+  const ownedPath = { type: "string", minLength: 1, maxLength: 400 };
+  const output = {
+    type: "object",
+    properties: {
+      logicalName: { type: "string", minLength: 1, maxLength: 128 },
+      relativePath: ownedPath,
+      mediaType: { type: "string", minLength: 1, maxLength: 200 },
+      required: { type: "boolean" },
+      role: { type: "string", enum: ["metric", "table", "document", "data", "diagnostic"] },
+    },
+    required: ["logicalName", "relativePath", "mediaType", "required", "role"],
+    additionalProperties: false,
+  };
+  return {
+    type: "object",
+    description: "Complete execution-description v2 contract. Omit this property for ordinary Model file edits.",
+    properties: {
+      schemaVersion: { type: "integer", enum: [2] },
+      runtime: { type: "string", enum: ["python"] },
+      runMode: { type: "string", enum: ["batch", "visual", "both"] },
+      dependencyFile: ownedPath,
+      inputs: {
+        type: "object",
+        properties: {
+          schemaProfile: { type: "string", enum: ["riff-json-schema-2020-12-v1"] },
+          schema: { type: "object" },
+          smoke: { type: "object" },
+        },
+        required: ["schemaProfile", "schema", "smoke"],
+        additionalProperties: false,
+      },
+      outputs: { type: "array", minItems: 1, maxItems: 64, items: output },
+      overview: {
+        type: "object",
+        properties: {
+          stepOrHorizonPointer: { type: "string" },
+          metricNames: { type: "array", items: { type: "string" } },
+        },
+        additionalProperties: false,
+      },
+      batch: {
+        type: "object",
+        properties: {
+          entryPoint: ownedPath,
+          protocol: { type: "string", enum: ["riff-batch-v1"] },
+          domainEvents: {
+            type: "object",
+            properties: {
+              relativePath: ownedPath,
+              mediaType: { type: "string", enum: ["application/x-ndjson"] },
+              role: { type: "string", enum: ["diagnostic"] },
+              payloadSchema: {
+                type: "object",
+                properties: {
+                  schemaProfile: { type: "string", enum: ["riff-json-schema-2020-12-v1"] },
+                  schema: { type: "object" },
+                },
+                required: ["schemaProfile", "schema"],
+                additionalProperties: false,
+              },
+            },
+            required: ["relativePath", "mediaType", "role"],
+            additionalProperties: false,
+          },
+        },
+        required: ["entryPoint", "protocol"],
+        additionalProperties: false,
+      },
+      visual: {
+        type: "object",
+        properties: {
+          entryPoint: ownedPath,
+          protocol: { type: "string", enum: ["riff-visual-v1"] },
+          healthPath: { type: "string" },
+          structuredInspectionPath: { type: "string" },
+          webSocket: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              subprotocols: { type: "array", items: { type: "string" } },
+              maxFrameBytes: { type: "integer", minimum: 1 },
+              maxConnections: { type: "integer", minimum: 1 },
+              idleTimeoutMs: { type: "integer", minimum: 1 },
+            },
+            required: ["path", "subprotocols", "maxFrameBytes", "maxConnections", "idleTimeoutMs"],
+            additionalProperties: false,
+          },
+        },
+        required: ["entryPoint", "protocol", "healthPath"],
+        additionalProperties: false,
+      },
+      cancellation: {
+        type: "object",
+        properties: {
+          signal: { type: "string", enum: ["SIGTERM"] },
+          graceMs: { type: "integer", minimum: 1 },
+        },
+        required: ["signal", "graceMs"],
+        additionalProperties: false,
+      },
+    },
+    required: [
+      "schemaVersion", "runtime", "runMode", "dependencyFile",
+      "inputs", "outputs", "cancellation",
+    ],
+    additionalProperties: false,
+  };
 }
 
 function experimentConfigurationSchema(): Record<string, unknown> {

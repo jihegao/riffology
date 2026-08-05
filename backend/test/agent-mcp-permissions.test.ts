@@ -179,6 +179,86 @@ test("Experiment MCP definitions publish the closed ExperimentConfigurationV1 en
   }
 });
 
+test("Model mutation MCP definitions publish the complete optional execution-description v2 contract", async () => {
+  const server = new AgentMcpServer({ async execute() { return {}; } });
+  const capability = server.grant({
+    conversationId: "conversation_model_execution_schema",
+    owner: { kind: "model", id: "model_execution_schema" },
+    turnId: "turn_model_execution_schema",
+    externalSessionGeneration: 1,
+    allowedTools: toolsForOwner({ kind: "model", id: "model_execution_schema" }),
+  });
+  const listed = await server.handle(capability, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  const tools = (listed?.result as any).tools as any[];
+  for (const name of ["riff_apply_model_changes", "riff_propose_model_changes"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    const execution = tool?.inputSchema?.properties?.executionDescription;
+    assert.match(tool?.description ?? "", /Omit executionDescription/u);
+    assert.deepEqual(execution?.required, [
+      "schemaVersion",
+      "runtime",
+      "runMode",
+      "dependencyFile",
+      "inputs",
+      "outputs",
+      "cancellation",
+    ]);
+    assert.equal(execution?.additionalProperties, false);
+    assert.deepEqual(execution?.properties?.schemaVersion?.enum, [2]);
+    assert.deepEqual(execution?.properties?.runtime?.enum, ["python"]);
+    assert.deepEqual(execution?.properties?.inputs?.properties?.schemaProfile?.enum, [
+      "riff-json-schema-2020-12-v1",
+    ]);
+    assert.deepEqual(execution?.properties?.batch?.properties?.protocol?.enum, [
+      "riff-batch-v1",
+    ]);
+    assert.deepEqual(execution?.properties?.visual?.properties?.protocol?.enum, [
+      "riff-visual-v1",
+    ]);
+  }
+});
+
+test("Model mutation contract errors stay actionable instead of degrading to tool_failed", async () => {
+  const server = new AgentMcpServer({
+    async execute() {
+      throw Object.assign(new Error("internal execution contract detail"), {
+        code: "execution_protocol_upgrade_required",
+      });
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_model_invalid_execution",
+    owner: { kind: "model", id: "model_invalid_execution" },
+    turnId: "turn_model_invalid_execution",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_propose_model_changes"]),
+  });
+  const response = await server.handle(capability, call(
+    "riff_propose_model_changes",
+    {
+      requestKey: "proposal_without_execution_change",
+      changes: [{
+        objectFileId: "file_model",
+        kind: "model_code",
+        relativePath: "model.py",
+        mediaType: "text/x-python",
+        text: "value = 1\n",
+        expectedPriorSha256: "a".repeat(64),
+      }],
+    },
+  ));
+  const content = (response?.result as any).content[0].text as string;
+  assert.equal((response?.result as any).isError, true);
+  assert.match(content, /invalid_tool_input/u);
+  assert.match(content, /omit it when only Model files change/u);
+  assert.doesNotMatch(content, /internal execution contract detail/u);
+  assert.doesNotMatch(content, /tool_failed/u);
+});
+
 test("one consequential Agent capability is consumed synchronously across concurrent calls", async () => {
   let release!: () => void;
   let entered!: () => void;

@@ -4,7 +4,7 @@
 - Role: normative contract
 - Scope: Riffology 本地单用户 MVP（原交付代号 Milestone A）及已批准的后续产品细化
 - Source of truth: 本文档是产品目标与需求的唯一权威；合并代码与测试是实现状态的权威
-- Last reviewed: 2026-08-01
+- Last reviewed: 2026-08-04
 
 ## 1. 文档权威与职责分工
 
@@ -49,17 +49,17 @@ Riffology 是面向用户的产品名称；Riff 是其保留的本地领域运�
 
 ```text
 左侧：持续、可恢复的仿真对话
-右侧：当前 Model 或 Project 工作区
+右侧：当前 Project 工作区
 ```
 
 已批准的后续工作台方向会以 Riffology 品牌提供 OpenChamber 派生的会话壳、
 受限共享浏览器和最右文件栏；它的阶段合同见
 [`openchamber-browser-workbench-migration-plan.md`](openchamber-browser-workbench-migration-plan.md)。
-这不改变本 PRD 中 Riff Store 对 Model、Project、Experiment、Run 和 outputs 的
-权威，也不把尚未合并的工作台功能表述为当前实现。
+这不改变本 PRD 中 Riff Store 对 Project、Experiment、Run 和 outputs 的权威，
+也不把尚未合并的工作台功能表述为当前实现。
 
-风机维护是第一个普通 Model 和示例 Project，不是独立产品模式、固定页面结构，
-也不能成为通用产品类型命名的来源。
+风机维护是第一个普通 Project Template 和示例 Project，不是独立产品模式、
+固定页面结构，也不能成为通用产品类型命名的来源。
 
 ## 3. 问题与用户
 
@@ -83,29 +83,29 @@ MVP 范围内。
 
 用户必须能够：
 
-1. 创建或打开一个通用仿真 Model；
-2. 通过 OpenCode 驱动的 Agent 讨论并明确修改 Model；
-3. 从一个技术上可执行的 Model 创建拥有固定副本的 Project；
-4. 配置并运行可重复的可视化实验或批量实验；
+1. 通过空白、Template 或导入创建一个通用仿真 Project；
+2. 通过 OpenCode 驱动的 Agent 讨论并明确修改 Project；
+3. 对当前 Project 执行 digest 绑定的技术检查；
+4. 配置并运行可视化实验或批量实验；
 5. 检查运行状态、输出文件和有界诊断事件；
 6. 请求 Agent 分析输出，同时不把 Agent 文本误当作系统事实；
 7. 关闭并重新打开应用后继续使用已支持的产品状态。
 
 ## 4. MVP 目标与成功标准
 
-MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程和通用 New Model
+MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程和通用 New Project
 流程，且不依赖任何风机专用产品界面。
 
 验收必须证明：
 
-- 首页同时提供 Models、Projects、New Model 和 New Project；
+- 首页只提供 Projects 和 New Project；
 - 存在由真实配置的 OpenCode provider/model 支持的持久命名多轮对话；
-- 对话可以完成一次明确的 Model 修改或创建持久临时文档；
-- Project 创建的是固定 Model 副本，之后不受源 Model 修改影响；
+- 对话可以完成一次明确的 Project 修改或创建持久临时文档；
+- Project 可以从空白、不可变 Template version 或受检导入创建；
 - 可以保存实验配置并完成一次产生持久输出的真实批量 Run；
-- 声明 visual 能力的 Model 可以在右栏启动受平台管理的可视化 Run；
+- 声明 visual 能力的 Project 可以在右栏启动受平台管理的可视化 Run；
 - start、cancel、download 和 trash 等直接控制不依赖 Agent 可用性；
-- 重启后能够恢复 Models、Projects、对话、文档、配置和 Runs；
+- 重启后能够恢复 Projects、对话、文档、配置、Runs 和活动 execution lock；
 - OpenCode 不可用时进入明确只读状态，而不是生成伪造 Agent 回复；
 - 界面明确区分“技术上可执行”“运行成功”“科学有效”“已校准”和“适合决策”。
 
@@ -113,7 +113,7 @@ MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程�
 
 1. **对话优先，但不只靠对话。** 对话是主要协作入口，资源管理和 Run 控制仍
    提供直接操作。
-2. **弱文档约定。** 右栏展示当前对象有价值的状态，而不是强迫所有 Model 或
+2. **弱文档约定。** 右栏展示当前 Project 有价值的状态，而不是强迫所有
    Project 使用固定业务标签页。
 3. **显式修改。** 讨论、提问和歧义表达不授权持久修改；明确命令可以授权
    允许范围内的修改。
@@ -121,8 +121,9 @@ MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程�
    screenshot 和可视化子进程状态都只是上下文或投影，不是系统记录。
 5. **平台通用，案例普通。** Core 代码不得假设风机、机组、维修队、仓库、
    飞机、风机指标、固定风机标签页或特定 bundle ID。
-6. **冻结执行上下文。** 每个 Run 都记录实际使用的 Project 副本、执行描述、
-   配置、样本计划和限制。
+6. **运行期稳定执行上下文。** 每个 Run 在受锁 Project 上捕获执行描述、配置、
+   样本计划、限制和 source digest；终态后不保留源码副本，因此 Project 变化后的
+   历史 Run 必须标记为不可重放。
 7. **诚实暴露边界。** provider、能力或恢复证据不可用时必须明确失败，不伪造
    Agent 结果，不推断成功。
 8. **本地且轻量。** MVP 优先服务单用户本地 macOS 流程，不引入云、组织或
@@ -132,22 +133,21 @@ MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程�
 
 ### 6.1 MVP 范围内
 
-- Models 和 Projects 两类独立的一等资源；
-- 两类资源共享的双栏工作区；
-- 每个 Model 或 Project 可以拥有多个持久命名对话；
+- Project 是唯一一等仿真工作区资源；
+- 每个 Project 可以拥有多个持久命名对话；
 - OpenCode provider/model 选择、session 协调和有界上下文；
 - 渐进加载仿真 skill，以及对象范围内的 Agent action；
 - 临时文档和对话附件；
-- 可实际运行的通用 Python/Mesa Model 工作区；
-- 技术可执行性检查和隔离的本地 Model 环境；
-- 固定副本式 Project 创建；
+- 可实际运行的通用 Python/Mesa Project 工作区；
+- 技术可执行性检查和隔离的本地 Project 环境；
+- 空白、Template version 和受检导入式 Project 创建；
 - 命名实验配置、确定性样本计划和冻结 Run；
 - 通用 batch 和 visual 执行；
 - output 索引、下载、有界日志/事件、取消、清理和重启恢复；
 - 有范围的 visual 嵌入，以及显式授权的 Playwright 检查/交互；
 - SQLite 与经过校验的对象目录持久化；
 - 可恢复资源回收站和永久删除前预览；
-- 将已评审风机 Model 和示例 Project 作为普通领域内容导入。
+- 将已评审风机案例作为不可变 Template version 或普通 Project 导入。
 
 ### 6.2 非目标（Non-goals）
 
@@ -158,17 +158,16 @@ MVP 明确不建设：
 - 完整 SaaS、Domain Pack 市场、计费、组织管理或分发平台；
 - 通用低代码/无代码仿真搭建器；
 - 自主科学验证、自动校准或自动证明模型正确性的系统；
-- 面向用户的 Model 或实验版本管理；
-- 一个 Project 内的多 active Model 切换；
+- 面向用户的 Project 发布或实验版本管理；
 - 右栏渲染内容的通用直接编辑器；
 - 自动结果分析、自动优化、人员配置建议或自动决策结论；
 - 固定 validation、issue、attestation、审批或 workflow-policy 产品；
 - 逐帧仿真状态持久化或 batch replay 时间线；
 - 多用户身份、角色、实时协作或云同步；
 - Linux 或托管部署；
-- 面向恶意 Model 代码的容器或虚拟机级强隔离；
-- Model 发布流程；
-- 以第二个用户自建业务 Model 作为 MVP 退出条件。
+- 面向恶意 Project 代码的容器或虚拟机级强隔离；
+- Project 发布流程；
+- 以第二个用户自建业务 Project 作为 MVP 退出条件。
 
 Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力，不是通用
 浏览器自动化平台，也不能获得任意页面、主机、credential 或本机文件权限。
@@ -185,8 +184,8 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 | --- | --- |
 | User / Workspace | 通用用户与工作区边界、对象所有权、存储和未来协作扩展点；MVP 仅实现本地单用户。 |
 | Agent runtime | 对话、provider/session、上下文、skill 路由、工具授权、action 记录和只读降级。 |
-| Model lifecycle | 通用 Model 创建、文件工作区、技术检查、归档、回收站和可执行状态。 |
-| Project lifecycle | 固定 Model 副本、Project 文档、配置、Runs 和 outputs 的通用所有权。 |
+| Project lifecycle | 通用 Project 创建、可编辑文件工作区、技术检查、执行锁、文档、配置、Runs、outputs、归档和回收站。 |
+| Project Template | 不可变、版本化的 Project 种子；包含代码、环境、执行合同和默认实验，不包含对话或 Runs。 |
 | Experiment | 通用输入 schema 承载、配置、seed/sweep 展开、样本计数和冻结计划。 |
 | Run | batch/visual 生命周期、资源限制、取消、恢复、状态、进程监督和输出发布。 |
 | Evidence substrate | output、digest、日志、事件、来源和 Run 绑定的通用存储与检索；不负责领域解释。 |
@@ -201,10 +200,10 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 | Domain schema | 领域输入、业务约束、数据映射和输出语义。 |
 | Domain Agent skills | 领域提示、skill、参考资料和专用分析流程。 |
 | Validation rules | 领域完整性、业务规则、适用范围和科学/工程校验规则。 |
-| Model compiler / adapter | 把领域描述转换或适配为 Platform 执行合同所需的 Model 资产。 |
+| Project compiler / adapter | 把领域描述转换或适配为 Platform 执行合同所需的 Project 或 Template 资产。 |
 | Visualization mapping | 把领域状态、事件和结果映射为领域可视化，而不是修改 Platform frame/broker。 |
 | Domain evidence interpretation | 定义领域指标、证据含义、限制和允许的结论，不改变 Platform 的原始 Run 事实。 |
-| Pack assets | 示例 Model、模板、数据映射、图标、文档和可选示例 Project。 |
+| Pack assets | 示例 Project、Template version、数据映射、图标和文档。 |
 
 ### 7.3 依赖规则
 
@@ -212,7 +211,7 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 2. Domain Pack 只能依赖公开的 Platform 合同；Platform 不反向依赖某个 Pack。
 3. 只服务单一领域的能力默认留在 Domain Pack；只有证明跨领域稳定后才可提炼到
    Platform。
-4. 风机和飞机能力必须以 Pack、Model、Project 或数据存在，不得以 Core 条件
+4. 风机和飞机能力必须以 Pack、Template、Project 或数据存在，不得以 Core 条件
    分支存在。
 5. Platform 负责证据的身份、存储和可追溯性；Domain Pack 负责证据的领域含义
    和验证规则。
@@ -223,18 +222,18 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 
 | 对象 | 产品含义 | 关键所有权规则 |
 | --- | --- | --- |
-| **Model** | 通用仿真源代码、执行描述、输入/输出声明和 Model 文档。 | 拥有自己的文件和对话；只有通过技术检查后才能被 New Project 选择。 |
-| **Project** | 从一个固定 Model 副本创建的决策工作区。 | 拥有复制后的 Model、Project 文档、配置、Runs、outputs 和对话。 |
-| **Conversation** | 属于一个 Model 或 Project 的命名持久用户/Agent 线程。 | 只能属于一个 owner；首个接受的用户 turn 后固定 provider/model。 |
+| **Project** | 可持续编辑的仿真源代码、执行描述、输入/输出声明、实验、Runs、outputs 和文档工作区。 | 是唯一 Conversation owner；同一时间最多一个活动 Run，活动期间锁定可执行工作区。 |
+| **Project Template Version** | 创建 Project 的不可变种子。 | 复制代码、环境、执行合同和默认实验；不复制对话、文档、Runs 或 outputs。 |
+| **Conversation** | 属于一个 Project 的命名持久用户/Agent 线程。 | 首个接受的用户 turn 后固定 provider/model。 |
 | **Message** | Conversation 中的用户、Agent 或平台记录。 | Riff 持久化受支持的完整消息；OpenCode 不是唯一消息存储。 |
 | **Temporary document** | 与消息关联的持久草稿、计划、分析、spec 或变更建议。 | 属于一个 owner，并具有 `draft`、`adopted`、`rejected`、`superseded` 等显式状态。 |
 | **Attachment** | 用户提供、最初附属于 Conversation 的来源文件。 | 正式采用时复制到 owner 存储，并记录来源和用途。 |
-| **Experiment configuration** | Project 中可编辑的命名参数、seeds 和可选 sweep。 | 没有面向用户的版本历史；每个 Run 冻结实际接受的值。 |
-| **Run** | 一次冻结的 visual 或 batch 执行尝试。 | 只属于一个 Project，不跟随之后的配置或源 Model 变化。 |
+| **Experiment configuration** | Project 中可编辑的命名参数、seeds 和可选 sweep。 | 活动 Run 期间仍可编辑；每个 Run 捕获启动时接受的值。 |
+| **Run** | 一次 visual 或 batch 执行尝试。 | 只属于一个 Project；终态保留输出、配置和 source digest，不保留源码副本。 |
 | **Output** | 成功 Run 或诊断 Run 发布的受检文件或有界事件索引。 | 只能通过所属 Project/Run 投影访问，不得使用任意路径访问。 |
 
-一个 Project 只拥有一个 Model 的固定副本。源 Model 后续变化不会修改既有
-Project；删除源 Model 也不会删除 Project 已拥有的副本。
+Project 的可执行工作区在技术检查和非终态 Run 期间保持锁定。Run 终态后释放锁；
+此后修改 Project 会使旧 Run 不可重放，产品必须明确展示该限制。
 
 ## 9. 功能需求
 
@@ -242,32 +241,32 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 
 | ID | 需求 |
 | --- | --- |
-| FR-HOME-01 | 首页必须将 Models 和 Projects 作为两个独立一等集合展示，并显示基本状态和最近活动。 |
-| FR-HOME-02 | 首页必须分别提供 **New model** 和 **New project** 操作。 |
-| FR-HOME-03 | New Model 只必须要求名称和首个 Conversation 使用的 provider/model。 |
-| FR-HOME-04 | New Project 只必须要求名称和一个技术上可执行的 Model。 |
+| FR-HOME-01 | 首页必须只展示 Projects，并显示技术状态、执行锁、最近活动和最后一次 Run。 |
+| FR-HOME-02 | 首页必须提供 **New project**，支持空白、Template version 和受检导入。 |
+| FR-HOME-03 | New Project 必须要求名称和首个 Conversation 使用的 provider/model，并明确选择创建来源。 |
+| FR-HOME-04 | Template 创建必须复制代码、环境、执行合同和默认实验，不得复制 Conversation 或 Run。 |
 | FR-LIFE-01 | rename、archive、restore、trash 和 delete 必须是直接资源操作，不依赖 Agent。 |
 | FR-LIFE-02 | delete 必须先进入本地可恢复回收站；永久删除必须是独立显式操作，并预览受影响数据。 |
-| FR-LIFE-03 | 资源操作必须保持所有权边界；删除源 Model 不得删除 Project 副本或无关本地文件。 |
+| FR-LIFE-03 | 资源操作必须保持 Project 所有权边界，不得删除无关本地文件或 Template version。 |
 
 ### 9.2 共享双栏工作区
 
 | ID | 需求 |
 | --- | --- |
-| FR-SHELL-01 | Models 和 Projects 必须打开在同一 shell 中：左侧为持久 Conversation，右侧为当前对象工作区。 |
-| FR-SHELL-02 | 切换 Conversation 不得切换、重建或丢失当前 Model/Project 工作区。 |
-| FR-SHELL-03 | 右栏必须支持 Markdown、代码、表格、JSON、图表和 Model 自带页面的通用 renderer。 |
+| FR-SHELL-01 | Project 必须打开在统一 shell 中：左侧为持久 Conversation，右侧为当前 Project 工作区。 |
+| FR-SHELL-02 | 切换 Conversation 不得切换、重建或丢失当前 Project 工作区。 |
+| FR-SHELL-03 | 右栏必须支持 Markdown、代码、表格、JSON、图表和 Project 自带页面的通用 renderer。 |
 | FR-SHELL-04 | 右栏必须使用弱约定，不得强制固定的风机、Evidence 或审批标签页。 |
 | FR-SHELL-05 | Agent 只读或不可用时，直接 Run 和资源操作必须仍可使用。 |
-| FR-SHELL-06 | 进入 Model/Project 后，对象名称作为页面/工作区标题必须只在统一顶栏或面包屑中呈现一次；正文、caption 或 receipt 中必要的上下文引用不属于重复标题。桌面双栏或窄屏选中 Conversation 时，Conversation 必须从顶栏下方延伸至视口底部，并使中部内容区独立滚动、输入区保持在左栏底部。 |
+| FR-SHELL-06 | 进入 Project 后，Project 名称作为页面/工作区标题必须只在统一顶栏或面包屑中呈现一次；正文、caption 或 receipt 中必要的上下文引用不属于重复标题。桌面双栏或窄屏选中 Conversation 时，Conversation 必须从顶栏下方延伸至视口底部，并使中部内容区独立滚动、输入区保持在左栏底部。 |
 | FR-SHELL-07 | 文件树、安全预览和当前内容与拟议修改的 diff review 是稳定平台审阅能力；它们必须按当前 owner capability 出现，不得要求所有对象具有固定 Files/Changes 标签。 |
-| FR-SHELL-08 | 右栏可以展示与当前 Model workspace digest 绑定的 Agent 生成视图；视图的名称、数量、顺序和通用 renderer kind 必须动态决定，可以为空，不得要求类图、泳道图、数据流图或特定 spec 文件。 |
+| FR-SHELL-08 | 右栏可以展示与当前 Project workspace digest 绑定的 Agent 生成视图；视图的名称、数量、顺序和通用 renderer kind 必须动态决定，可以为空，不得要求类图、泳道图、数据流图或特定 spec 文件。 |
 
 ### 9.3 对话、Skills、文档与附件
 
 | ID | 需求 |
 | --- | --- |
-| FR-CONV-01 | 每个 Model 和 Project 必须支持多个可创建、重命名、切换、归档、恢复和安全删除的命名 Conversation。 |
+| FR-CONV-01 | 每个 Project 必须支持多个可创建、重命名、切换、归档、恢复和安全删除的命名 Conversation。 |
 | FR-CONV-02 | Riff 必须持久化 messages、受支持附件、document cards 和 action records；浏览器不得接收 provider credential 或 OpenCode session ID。 |
 | FR-CONV-03 | Conversation 创建时必须选择 OpenCode provider/model，并在首个接受的用户 message 后锁定。 |
 | FR-CONV-04 | OpenCode 可用时，Riff 必须绑定 Conversation 与 session；session 丢失时必须能从有界 Riff 上下文重建。 |
@@ -275,51 +274,57 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-CONV-06 | Agent 必须提供仿真 skill catalog，仅在需要时加载完整 skill，并记录实际使用的 skill。 |
 | FR-CONV-07 | provider 或 OpenCode 失败时，Agent 修改能力必须进入明确只读状态，不得伪造回复。 |
 | FR-CONV-08 | 只有明确且允许的指令可以触发直接修改；修改必须 typed、owner-scoped、经过验证且原子提交。 |
-| FR-CONV-09 | OpenCode 的 developer repo-root 与普通 Product 的精确 Model/Project workspace 必须是不同的工作目录 profile；Product backend 必须从 durable owner 派生目录并作用域化所有会话相关请求，前者不得给普通 Product Agent 产品源码、任意文件或命令权限。 |
+| FR-CONV-09 | OpenCode 的 developer repo-root 与普通 Product 的精确 Project workspace 必须是不同的工作目录 profile；Product backend 必须从 durable Project owner 派生目录并作用域化所有会话相关请求，前者不得给普通 Product Agent 产品源码、任意文件或命令权限。 |
 | FR-CONV-10 | OpenCode 第一段 assistant 文本和中间 tool step 只能作为流式证据；Riff 必须在精确 session 不再 busy/retry、该 turn 的完整 assistant messages 均具备完成证据且相关 Riff action 已提交后，才可完成 durable turn 并撤销 scoped MCP capability。 |
 | FR-CONV-11 | Conversation 必须以可恢复的 revisioned public runtime DTO 投影当前 Agent 状态、脱敏 activity 和等待中的 permission/question；SSE 只是便利通道，普通 GET 是断线后的恢复权威。浏览器不得接收上游 session/message/request ID、tool input/output、raw metadata、credential、path 或 capability。 |
 | FR-CONV-12 | Stop、Retry、Resume 必须绑定精确 turn：Stop 仅中止当前 requestKey 并等待持久终态；Retry 使用新 requestKey 且只恢复 Riff 持久化的原始 intent；Resume 只回答该 turn 当前等待的 interaction，不得发起第二个 prompt。 |
 | FR-CONV-13 | 用户可以按 turn 选择已发现的 primary Agent；Agent 选择必须进入 turn intent 与持久消息，active/waiting turn 期间锁定。Provider/model 仍按 Conversation 在首个接受的 message 后锁定。 |
 | FR-CONV-14 | Skill 只能从服务端规范根目录及显式 Riff allowlist 发现，必须固定 catalog version 与 instruction digest，并按需加载、记录实际选择；Skill 文本不能扩大 tool、owner、object、operation、visual 或 credential 权限。OpenCode 的 ambient filesystem-backed `skill` tool 在 Product turn 中必须保持禁用。 |
 | FR-CONV-15 | 每个需要工具的 turn 只能注册一个 opaque loopback Riff MCP，并从同一 owner/session-generation capability 的 sorted exact tool list 逐项启用；`*`、native file/command/Skill built-ins、ambient/plugin MCP 与第三方工具必须 deny-all。唯一 native 例外 `question` 只能经过 FR-CONV-12 的精确当前 turn Resume 边界回答，且不授予 Riff tool/object 权限。bind/prompt MCP 列表不一致、缺失、重复、乱序、伪造、跨 owner 或过期均须在 prompt 或执行前稳定拒绝，capability URL 与 credential 不得进入 prompt、transcript 或 browser DTO。 |
-| FR-CONV-16 | schema v16 下新进入 terminal 的每个 turn 必须具有不可变、digest-bound 的 goal-verification receipt，并与 assistant/failure 和 terminal turn 原子提交；从 v15 迁移的历史 terminal turn 保持可读但不得伪造 receipt。OpenCode `idle` 仅是必要证据；显式修改只有在 action 全部终态、每个 committed action 声明非空 effect、受支持的 goal/action 映射一致、已提交 transaction 的当前 owner 资源一致，且视觉 Model 具有本 turn 的 Model 文件修改并可验证 execution-protocol-v2/run mode 时才能标记 `completed`。 |
+| FR-CONV-16 | 每个新进入 terminal 的 turn 必须具有不可变、digest-bound 的 goal-verification receipt，并与 assistant/failure 和 terminal turn 原子提交。OpenCode `idle` 仅是必要证据；显式修改只有在 action 全部终态、每个 committed action 声明非空 effect、受支持的 goal/action 映射一致、已提交 transaction 的当前 Project 一致，且修改、技术检查和可选 Run 均绑定已声明 digest 时才能标记 `completed`。 |
 | FR-CONV-17 | Goal disposition 必须是 `completed`、`needs_user_input`、`failed`、`read_only`、`outcome_unknown` 或 `budget_exhausted`。发生部分效果、资源漂移或中断后效果不明时不得自动 Retry；Product 层不得在原生 OpenCode tool loop 后再发第二个外层 prompt。公开 runtime 只投影有界 receipt 证据，不得返回原始 goal、goal digest、路径、上游 ID 或 tool payload。 |
-| FR-CONV-18 | 明确修改指令本身可以沿现有授权边界原子提交；探索性或 proposal-only 对话只能创建与 Model workspace digest 绑定的待审变更集，且只有用户通过直接 Product command apply 后才能提交。两条路径都只有在 Store 返回 committed mutation receipt 后，界面才能声明 Model 已修改。 |
+| FR-CONV-18 | 明确修改指令本身可以沿现有授权边界原子提交；探索性或 proposal-only 对话只能创建与 Project workspace digest 绑定的待审变更集，且只有用户通过直接 Product command apply 后才能提交。两条路径都只有在 Store 返回 committed mutation receipt 后，界面才能声明 Project 已修改。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
-| FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Model/Project 权威状态。 |
-| FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Model/Project 并记录来源和用途。 |
+| FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Project 权威状态。 |
+| FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Project 并记录来源和用途。 |
 | FR-ATT-02 | 删除 Conversation 不得删除已经被 owner 采用的附件副本。 |
 
-### 9.4 Model 工作区与技术检查
+### 9.4 Project 工作区、技术检查与 Template
+
+旧 `FR-MODEL-*` ID 作为历史需求保留但已废弃；当前行为由以下 Project-only
+需求定义。
 
 | ID | 需求 |
 | --- | --- |
-| FR-MODEL-01 | New Model 必须创建真实通用 Python/Mesa 工作区，而不是 placeholder 或风机专用模板。 |
-| FR-MODEL-02 | Model 必须声明 inputs、可运行入口、状态/取消行为和 output files；metrics 和有界 domain events 可选。 |
-| FR-MODEL-03 | Model 工作区可以包含 overview、spec、代码、输入/输出、结构或 Model 专属文档，无强制产品 schema。 |
-| FR-MODEL-04 | Model 必须通过 syntax、interface、dependency、smoke-run、resource、cancellation 和 output 检查后才能被 New Project 选择。 |
-| FR-MODEL-05 | “技术上可执行”只能表达薄执行合同已通过，绝不能表达正确、已校准、可信或适合决策。 |
-| FR-MODEL-06 | Model 执行必须使用隔离环境、受限 owner 工作区、清理后的 credential、默认无网络、有限资源和取消能力。 |
-| FR-MODEL-07 | Model 范围 Agent 工具不得访问其他对象、产品源码、任意 home 路径、环境 credential 或未采用引用。 |
-| FR-MODEL-08 | Agent 生成的结构化视图是有界、owner-scoped、可失效的派生投影，不是 Model 文件、执行合同、技术状态或修改完成证据；Model 变化后旧视图必须明确标记 stale。 |
+| FR-PROJ-01 | New Project 必须通过 `blank`、不可变 Template version 或受检 import 三种显式来源之一创建；不得隐式创建缺失领域数据。 |
+| FR-PROJ-02 | Project 必须直接拥有代码、环境/依赖、execution description、技术状态和 workspace digest。 |
+| FR-PROJ-03 | Project 工作区可以包含 overview、spec、代码、输入/输出、结构和 Project 文档，无强制业务 schema。 |
+| FR-PROJ-04 | Project 必须声明 inputs、可运行入口、状态/取消行为和 output files；metrics 和有界 domain events 可选。 |
+| FR-PROJ-05 | 代码、环境/依赖或 execution description 修改后，技术状态必须回到 `draft`；技术检查必须绑定当前 digest。 |
+| FR-PROJ-06 | “技术上可执行”只能表达薄执行合同已通过，绝不能表达正确、已校准、可信或适合决策。 |
+| FR-PROJ-07 | 执行必须使用隔离临时副本、清理后的 credential、默认无网络、有限资源和取消能力；终态后必须删除临时源码副本。 |
+| FR-PROJ-08 | Agent 生成视图是有界、Project-scoped、可失效的派生投影，不是文件、执行合同、技术状态或修改完成证据；Project 变化后旧视图必须标记 stale。 |
+| FR-TPL-01 | Template version 必须不可变，只包含代码、环境/依赖、execution description 和默认实验，不得包含 Conversation、文档、Run 或 output。 |
+| FR-TPL-02 | 从 Project 创建 Template version 必须是独立显式动作；从 Template 创建 Project 必须复制种子内容而不是共享可变实现。 |
 
-### 9.5 Project 与实验配置
+### 9.5 Project 实验配置与执行锁
 
 | ID | 需求 |
 | --- | --- |
-| FR-PROJ-01 | New Project 必须把所选 Model 当前文件和执行描述复制到 Project 自有存储。 |
-| FR-PROJ-02 | Project 不得暴露 active Model 切换或 Model version browser。 |
-| FR-PROJ-03 | Project Conversation 可以管理 Project 文档、配置、Runs 和分析，但不得修改复制后的 Model 代码、输入/输出定义或依赖。 |
 | FR-EXP-01 | Project 必须支持可直接编辑的命名 experiment configuration。 |
 | FR-EXP-02 | 配置可以表示单参数集、多 seed 或 parameter sweep；执行前必须显示预计 sample 数。 |
-| FR-EXP-03 | 启动 Run 必须验证并冻结精确配置值、确定性样本计划、Project 执行身份和服务端限制。 |
-| FR-EXP-04 | Riff 不得自动选择重要指标、推荐最优解或重新解释 Model 定义的值。 |
+| FR-EXP-03 | 启动 Run 必须验证并捕获精确配置值、确定性样本计划、Project digest、execution description 和服务端限制。 |
+| FR-EXP-04 | Riff 不得自动选择重要指标、推荐最优解或重新解释 Project 定义的值。 |
+| FR-LOCK-01 | 每个 Project 同时只允许一个处于 checking、queued、running 或 cancelling 的执行；这些阶段必须持久持有 execution lock。 |
+| FR-LOCK-02 | execution lock 必须阻止代码、环境/依赖和 execution description 修改，但允许 Conversation、文档、名称和实验配置修改。 |
+| FR-LOCK-03 | 活动 Run 使用启动时捕获的实验配置；运行期间的实验修改只影响未来 Run。 |
+| FR-LOCK-04 | 终态和重启恢复必须根据持久证据释放、恢复或回收锁；不能证明一致时 fail closed。 |
 
 ### 9.6 Batch 与 Visual 执行
 
 | ID | 需求 |
 | --- | --- |
-| FR-RUN-01 | Model 可以声明 `batch`、`visual` 或两者；不支持的能力必须明确失败。 |
+| FR-RUN-01 | Project 可以声明 `batch`、`visual` 或两者；不支持的能力必须明确失败。 |
 | FR-RUN-02 | start、cancel、download 和 trash 必须是具有持久、幂等生命周期语义的直接操作。 |
 | FR-RUN-03 | batch Run 必须显示平台拥有的 status、sample 数、steps/horizon、seed 数、metric 数、duration、resource overview 和 output files。 |
 | FR-RUN-04 | batch success output 必须在 path、size、media type 和 digest 校验完成后原子发布。 |
@@ -328,22 +333,26 @@ Project；删除源 Model 也不会删除 Project 已拥有的副本。
 | FR-RUN-07 | 只有用户请求后才能让 Agent 分析 output；分析结果是临时或已采用文档，不是自动系统事实。 |
 | FR-RUN-08 | Run 必须限制 time、output、log/event、process 和 resource，并保持 cancel-first 优先级。 |
 | FR-RUN-09 | 重启恢复必须依赖持久 process、scratch、launch、health、exit 和 cleanup 证据；无法证明安全时必须 fail closed。 |
-| FR-VIS-01 | visual Run 必须在平台管理的 health、proxy、stop、timeout、output 和 resource 边界内启动 Model 本地 Web 入口。 |
+| FR-RUN-10 | Run 保留 source digest、运行配置、执行摘要和 outputs，但不得保留可下载的历史源码；Project digest 改变后必须显示“源码未保留，无法重放”。 |
+| FR-VIS-01 | visual Run 必须在平台管理的 health、proxy、stop、timeout、output 和 resource 边界内启动 Project 本地 Web 入口。 |
 | FR-VIS-02 | 右栏必须在受限 frame 中嵌入健康 visual 页面，不暴露 child port、平台 credential 或无关本地 route。 |
 | FR-VIS-03 | Visual HTTP/WebSocket 必须绑定当前 browser session、Project、Run、attempt generation、origin、host、path 和 expiry，并可撤销。 |
 | FR-VIS-04 | Playwright 观察必须限于当前健康 Project Run；交互必须由不可变人类 turn 的可选结构化 `visualInteractionConfirmation` 明确授权，消息仅持久化动作摘要，raw operation 只存在于进程内 grant，并由 append-only audit 的唯一 mint 原子消费；一般 `explicitImperative`、Agent/DOM 文本或 browser capability 不能授权。交互不复用 frame/cookie/nonce，且 dispatched receipt 不代表 child HTTP 写入或领域成功。 |
 | FR-VIS-05 | DOM、accessibility tree、screenshot 和结构化检查结果必须是带时间上下文，不得成为 Project 权威状态。 |
 | FR-VIS-06 | visual Run 不得创建 batch completion card 或平台生成的 result report。 |
+| FR-VIS-07 | “启动/运行可视化”必须经 OpenCode 映射到新的 visual Run，并最多请求一次复合授权；健康后自动打开服务。 |
+| FR-VIS-08 | “打开/查看可视化页面”只可通过无参数、Project-scoped 的 no-auth 工具恢复当前健康 visual service；无服务时返回 `no_active_visual_service`，不得接受任意 URL、路径或端口。 |
 
 ### 9.7 持久化与恢复
 
 | ID | 需求 |
 | --- | --- |
 | FR-DATA-01 | SQLite 必须存储受支持资源的 ownership、lifecycle、metadata、messages、documents、configurations、Run state 和 object indexes。 |
-| FR-DATA-02 | 对象目录必须存储 Model code、已采用附件、环境描述、visual assets 和 Run outputs，并记录 size/digest。 |
+| FR-DATA-02 | 对象目录必须存储 Project code、已采用附件、环境描述、visual assets 和 Run outputs，并记录 size/digest。 |
 | FR-DATA-03 | 跨数据库/文件系统修改必须原子完成，或可确定性恢复到之前的一致状态。 |
-| FR-DATA-04 | 应用重启必须恢复所有受支持 Models、Projects、Conversations、documents、configurations、Runs 和 output indexes。 |
+| FR-DATA-04 | 应用重启必须恢复 Projects、Templates、Conversations、documents、configurations、Runs、execution locks 和 output indexes。 |
 | FR-DATA-05 | Browser/API 投影必须移除任意文件路径、process identity、child port、provider secret 和 external session ID。 |
+| FR-DATA-06 | 检测到旧 schema 时必须进入 recovery-only；验证一次性脱敏归档摘要后，cutover 将旧 Store 可恢复地改名保存并初始化空白 Project-only Store，不迁移旧资源。 |
 
 ## 10. 需求编号生命周期
 
@@ -366,22 +375,27 @@ NFR-<DOMAIN>-NN
 
 ## 11. 核心用户流程
 
-### 11.1 创建并完善 Model
+### 11.1 创建并完善 Project
 
-1. 用户从 Home 选择 **New model**，输入名称并选择 provider/model。
-2. Riff 创建 Model 工作区和首个 Conversation。
+1. 用户从 Home 选择 **New project**，输入名称、provider/model，并显式选择
+   blank、Template version 或 import 来源。
+2. Riff 原子创建 Project 工作区和首个 Conversation。
 3. 用户描述仿真问题；Agent 使用相关仿真 skill，并可以创建文件或临时计划。
-4. 用户明确授权后，系统原子应用允许的修改。
-5. Riff 运行薄技术检查，只有全部必需检查通过后才标记技术上可执行。
+4. 用户明确授权后，系统原子应用允许的修改并返回写入 receipt。
+5. Riff 对同一 workspace digest 运行薄技术检查，只有全部必需检查通过后才标记
+   技术上可执行。
 
-### 11.2 创建 Project 并运行实验
+### 11.2 配置并运行实验
 
-1. 用户选择 **New project**，输入名称并选择一个可执行 Model。
-2. Riff 创建 Project 自有固定副本。
-3. 用户或 Project Agent 创建命名实验配置。
-4. 用户检查预计 samples，并启动 batch 或 visual Run。
-5. 右栏显示直接状态和操作；Riff 持久化精确冻结的执行上下文。
-6. 成功 batch Run 发布受检 outputs 和一个 completion card。
+1. 用户或 Project Agent 创建命名实验配置。
+2. 用户检查预计 samples，并启动 batch 或 visual Run。
+3. Riff 建立 execution lock，捕获 Project digest、执行合同、配置和样本计划，
+   并从隔离临时副本执行。
+4. 右栏显示直接状态和操作；运行期间实验编辑只影响未来 Run。
+5. 成功 batch Run 发布受检 outputs 和一个 completion card；visual Run 健康后自动
+   提供受限页面。
+6. Run 终态后 Riff 删除临时源码副本并释放锁；Project 后续变化时历史 Run 标记
+   为不可重放。
 7. 用户提出请求后，Agent 检查 outputs 并创建分析文档。
 
 ### 11.3 失败或重启后继续
@@ -397,7 +411,7 @@ NFR-<DOMAIN>-NN
 
 ```text
 React/Vite 浏览器
-  ├─ Models/Projects 首页
+  ├─ Projects 首页
   └─ 共享双栏工作区
        ├─ Conversation client
        ├─ 通用文档/数据 renderer
@@ -409,7 +423,7 @@ Node.js/TypeScript Riff backend（唯一 browser-facing 权威）
   ├─ Conversation/session/context 协调
   │    └─ loopback OpenCode adapter
   ├─ scoped Agent tools 与 simulation-skill loader
-  ├─ Model workspace 与 technical checker
+  ├─ Project workspace、technical checker 与 execution lock
   ├─ ProductStoreV2 mutation/recovery 边界
   ├─ deterministic experiment planner
   ├─ Run dispatcher 与 batch/visual supervisors
@@ -417,8 +431,8 @@ Node.js/TypeScript Riff backend（唯一 browser-facing 权威）
              │
       ┌──────┼──────────────┐
       ▼      ▼              ▼
-   SQLite  受检对象目录    受限 Model/Run 进程
-                           （Python/Mesa 或 Model Web 入口）
+   SQLite  受检对象目录    受限 Project Run 进程
+                           （Python/Mesa 或 Project Web 入口）
 ```
 
 ### 12.2 组件职责
@@ -448,8 +462,8 @@ Node.js/TypeScript Riff backend（唯一 browser-facing 权威）
 - SQLite 记录和 digest 校验对象 bytes 是权威；
 - OpenCode session、Agent 文本、DOM、screenshot 和子进程内存不是权威；
 - 只有 backend 可以把明确用户指令转换成 owner-scoped typed mutation；
-- Project execution 只准入精确 Project Model 副本和冻结配置/计划/限制；
-- Model 和 visual 使用独立受限进程、受限目录、清理环境、有限资源且默认无网络；
+- Project execution 只准入已通过当前 digest 技术检查的工作区，并捕获配置/计划/限制；
+- batch 和 visual 使用独立受限临时副本、受限目录、清理环境、有限资源且默认无网络；
 - Visual access 使用不同 platform/broker origin 和短期 capability；精确 network
   与 cookie 行为由已实现 Stage 3 设计和 ADR 约束，Stage 4 不得弱化。
 
@@ -472,19 +486,20 @@ MVP 在本地 macOS 运行：
 | NFR-REC-01 | Startup 必须先协调未完成 mutation 和 execution attempt，再接受冲突的新任务。 |
 | NFR-FAIL-01 | 缺失、冲突、过期或不支持的权威证据必须 fail closed，并返回明确可见错误。 |
 | NFR-SEC-01 | Provider credential、ambient credential、OpenCode session ID、process identity、任意 path 和 child port 不得投影给 browser。 |
-| NFR-SEC-02 | Model/Run 进程必须获得最小 path 权限、清理环境、默认无网络、取消能力和有限 resource/output/time。 |
+| NFR-SEC-02 | Project Run 进程必须获得最小 path 权限、清理环境、默认无网络、取消能力和有限 resource/output/time。 |
 | NFR-SEC-03 | Playwright 必须在全新隔离 browser context 中仅连接当前健康 Project visual peer；不得接受 caller URL、raw selector、script、download、跨 peer redirect 或共享 browser state，不得发送 credential/cookie/authorization，也不得把页面 artifact 作为工具结果投影。 |
-| NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.11`）；Product backend 必须从 durable Conversation owner 派生精确 Model workspace 或 Project `model-snapshot/`，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
+| NFR-OC-01 | OpenCode 必须具有显式、绝对且规范化的默认 `OPENCODE_WORKDIR`，并显式固定 `OPENCODE_EXPECTED_VERSION`（启动脚本默认 `1.18.11`）；Product backend 必须从 durable Conversation owner 派生精确 Project workspace，并在每个 location-sensitive 请求前重新验证 loopback `/global/health` 版本与 directory-scoped `/path`。缺失、非目录、symlink 歧义、目录或版本漂移必须只让 Agent 明确只读，不能让 Product launcher 退出，也不得回退到调用目录、其他目录或 provider。 |
 | NFR-SCOPE-01 | Conversations、documents、attachments、tools、Runs、outputs、visual capabilities 和 Playwright 必须 owner-scoped，并拒绝跨对象使用。 |
 | NFR-IDEM-01 | 重试 create/start/cancel/finalize command 不得产生重复持久副作用。 |
 | NFR-HONEST-01 | UI 和 Agent 必须区分 target、pending、running、completed、cancelled、failed、read-only 和 recovery-required，不乐观推断。 |
-| NFR-COMPAT-01 | 历史 Gate/wind/queue artifact 可在分阶段替换期间共存，但不得定义当前产品行为或授权删除无关内容。 |
+| NFR-COMPAT-01 | 旧 schema 不得在当前服务中读写；只能先导出脱敏归档，再将旧 Store 可恢复改名并创建空白 Project-only Store。 |
 | NFR-TEST-01 | 每个阶段必须包含 contract test、failure/negative test、适用的 restart check、独立评审和可见行为 browser evidence。 |
 
-## 14. 交付阶段与当前实现快照
+## 14. 历史交付快照与 Project-only cutover
 
-阶段保持顺序依赖，因为后续能力依赖前序权威和持久化合同。以下状态只是
-2026-07-28 的导航快照，不能替代合并代码与 GitHub 证据。
+以下表格仅记录 2026-07-28 旧 Model/Project 架构的交付历史，不定义当前
+Project-only API、DTO、路由、授权或持久化行为。Project-only cutover 必须通过
+fresh Store、旧 schema recovery-only、归档摘要与 merged-main 证据重新验收。
 
 | 阶段 | 产品切片 | 当前快照 |
 | --- | --- | --- |
@@ -500,36 +515,39 @@ MVP 在本地 macOS 运行：
 [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md)、
 仓库 [README](../README.md) 和绑定版本的测试记录中。
 
-## 15. MVP 退出验收
+## 15. Project-only MVP 退出验收
 
 一个真实 browser 场景必须证明：
 
-1. Home 展示 Models、Projects、New Model 和 New Project；
-2. 风机 Model 作为普通 Model 在共享双栏 shell 中打开；
-3. 真实多轮 OpenCode Conversation 修改允许的 Model 状态或创建持久临时文档，
-   右栏反映已提交状态；
+1. fresh Store 的 Home 只展示 Projects、Templates 和 New Project，旧 Model API
+   与 `/workbench/models/*` 不可达；
+2. blank、Template version 和 import 三条路径都能原子创建独立 Project；
+3. 真实多轮 OpenCode Conversation 修改 Project 文件或创建持久临时文档，
+   右栏以 mutation receipt 和当前 digest 反映已提交状态；
 4. 第二个命名 Conversation 使用自己选择的 provider/model，来回切换不丢失
    messages、attachments 或 documents；
-5. New Project 只接受名称和风机 Model，并创建固定副本；
-6. Project Conversation 创建或修改实验配置；
+5. 代码修改使技术状态失效，当前 digest 技术检查通过后才能启动 Run；
+6. Project Conversation 创建或修改实验配置，活动 Run 使用启动时捕获值；
 7. 用户启动真实风机 batch Run，并看到 status、受检 outputs 和有界 domain
    events，不提供逐帧 replay；
 8. 用户请求后，Agent 读取 Run outputs 并创建分析文档；
-9. visual-capable Model 启动受管理 visual Run，页面可在受限右栏 frame 中使用，
-   且不暴露 child endpoint；
-10. 重启恢复受支持 Models、Projects、Conversations、documents、
-    configurations、Runs 和 outputs，并安全协调未完成工作；
+9. “启动可视化仿真”经 OpenCode 一次复合授权启动受管理 visual Run，健康页面
+   自动在受限右栏 frame 中加载；“打开现有可视化”零授权恢复同一服务；
+10. 一个 Project 只有一个活动 Run；锁定期间可编辑 Conversation、文档和实验，
+    但不能修改可执行工作区或启动第二个 Run；终态与重启恢复后正确解锁；
 11. OpenCode 不可用时进入明确只读模式，绝不生成伪 Agent 回复；
-12. New Model 创建可用通用 Model workspace；第二个完整业务 Model 留给
-    post-MVP 验证。
+12. Run 终态清理临时源码；Project 后续改变后旧 Run 显示“源码未保留，无法重放”，
+    且不存在源码下载入口；
+13. 旧 schema 启动 fail closed；导出归档摘要可验证，旧 Store 保留，新 Store
+    空白启动且不导入旧资源。
 
 ## 16. 风险与声明边界
 
 | 风险 | MVP 边界或缓解方式 |
 | --- | --- |
 | Agent 超出用户意图行动 | 要求明确命令、typed owner-scoped tools、capability revocation 和原子验证。 |
-| Model 代码访问本机数据 | 限制 process path/environment/network/resource，并明确这不是恶意代码强隔离。 |
-| Run 结果无法复现 | 冻结 Project copy、execution description、configuration、sample plan、limits 和 outputs。 |
+| Project 代码访问本机数据 | 限制 process path/environment/network/resource，并明确这不是恶意代码强隔离。 |
+| 历史 Run 无法重放 | 明确保存 source digest、configuration、sample plan、limits 和 outputs，但不保存源码；Project 改变后 UI 必须标记不可复现。 |
 | Visual child 接触 Platform 权威 | 使用隔离 loopback topology、不同 origin、短期 capability、不投影 child port 并支持撤销。 |
 | Provider/session 不可用 | 持久化 Riff context，可用时重建 session，不可用时诚实只读。 |
 | 历史 wind/Gate 文档重新主导产品 | 明确标记 historical，所有产品冲突以本 PRD 为准。 |
@@ -543,7 +561,7 @@ MVP 在本地 macOS 运行：
 - [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md)：
   已实现的 Stage 1 存储与 mutation 设计；
 - [`milestone-a2-agent-workspace-design.md`](milestone-a2-agent-workspace-design.md)：
-  已实现的 Stage 2 Agent 与 Model workspace 设计；
+  旧 Stage 2 Agent 与 Model workspace 设计，仅供 cutover 前历史追溯；
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md)：
   已实现并合并的 Stage 3 执行设计和实现台账；
 - [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md)：
@@ -563,7 +581,7 @@ MVP 在本地 macOS 运行：
 - [`adr/README.md`](adr/README.md)：Stage 3 派生决策清单。
 
 历史 Gate 文档和 [`product-roadmap.md`](product-roadmap.md) 只用于追溯和保留
-风机 Model 证据。
+cutover 前风机案例证据。
 
 ## 18. 变更治理
 

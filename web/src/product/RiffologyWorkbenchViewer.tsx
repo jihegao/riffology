@@ -9,7 +9,12 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
-import type { BrowserSessionDto, ProjectWorkspaceDto } from "./types";
+import type {
+  BrowserSessionDto,
+  ConversationRuntimeProjection,
+  ProjectRun,
+  ProjectWorkspaceDto,
+} from "./types";
 
 type WorkspaceWorkbenchFile = Readonly<{
   key: string;
@@ -38,6 +43,15 @@ type MutableFileTreeNode = {
   files: WorkbenchFile[];
 };
 
+type WorkbenchService = Readonly<{
+  key: string;
+  kind: "visual_run" | "visual_preview" | "mcp";
+  label: string;
+  status: string;
+  enabled: boolean;
+  run?: ProjectRun;
+}>;
+
 const RAIL_MIN = 224;
 const RAIL_MAX = 520;
 
@@ -52,6 +66,8 @@ export function RiffologyWorkbenchViewer({
   browserError,
   browserBusy,
   onBrowserReconnect,
+  conversationId,
+  runtime,
 }: Readonly<{
   client: ProductClient;
   workspace: ProjectWorkspaceDto;
@@ -63,6 +79,8 @@ export function RiffologyWorkbenchViewer({
   browserError?: string;
   browserBusy: boolean;
   onBrowserReconnect: () => void;
+  conversationId?: string;
+  runtime?: ConversationRuntimeProjection;
 }>) {
   const runOutputFiles = workspace.runs.flatMap((run) =>
       run.status === "succeeded" ? run.outputs.flatMap((output): WorkbenchFile[] => {
@@ -87,6 +105,14 @@ export function RiffologyWorkbenchViewer({
   const [resource, setResource] = useState<RendererResource>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const [selectedServiceKey, setSelectedServiceKey] = useState("");
+  const [serviceFrame, setServiceFrame] = useState<Readonly<{
+    key: string;
+    sourceRevision?: string;
+    url?: string;
+    loading: boolean;
+    error?: string;
+  }>>({ key: "", loading: false });
   const request = useRef(0);
   const viewerRef = useRef<HTMLElement>(null);
 
@@ -95,7 +121,107 @@ export function RiffologyWorkbenchViewer({
     setSelectedKey("");
     setResource(undefined);
     setError(undefined);
+    setSelectedServiceKey("");
+    setServiceFrame({ key: "", loading: false });
   }, [workspace.owner.id, workspace.workspaceDigest]);
+
+  const services: readonly WorkbenchService[] = [
+    ...(browser?.projectedUrl === "riff-visual://solara/"
+      ? [{
+        key: "visual-preview:solara",
+        kind: "visual_preview" as const,
+        label: "Solara 可视化仿真",
+        status: browser.recoveryState === "ready" ? "运行中" : "不可用",
+        enabled: browser.recoveryState === "ready" && Boolean(conversationId && client.browserServiceFrame),
+      }]
+      : []),
+    ...(workspace.owner.kind === "project"
+      ? (workspace as ProjectWorkspaceDto).runs
+        .filter((run) => run.contractVersion === 4 && run.runKind === "visual"
+          && ["queued", "running", "cancelling"].includes(run.status))
+        .map((run): WorkbenchService => ({
+          key: `visual-run:${run.id}`,
+          kind: "visual_run",
+          label: `可视化 Run ${run.id.slice(-8)}`,
+          status: run.status === "running" ? "运行中"
+            : run.status === "queued" ? "启动中" : "正在停止",
+          enabled: run.status === "running",
+          run,
+        }))
+      : []),
+    {
+      key: "mcp:scoped",
+      kind: "mcp",
+      label: runtime?.mcp.label ?? "Riff scoped MCP",
+      status: runtime?.mcp.state === "connected" ? "已连接"
+        : runtime?.mcp.state === "unavailable" ? "不可用" : "按轮次启用",
+      enabled: false,
+    },
+  ];
+
+  const selectService = async (service: WorkbenchService) => {
+    if (!service.enabled || service.kind === "mcp") return;
+    const operation = request.current + 1;
+    request.current = operation;
+    setSelectedKey("");
+    setResource(undefined);
+    setError(undefined);
+    setLoading(false);
+    setSelectedServiceKey(service.key);
+    const sourceRevision = service.kind === "visual_preview" && browser
+      ? `${browser.conversationGeneration}:${browser.pageGeneration}`
+      : service.run?.lifecycleDigest ?? service.run?.updatedAt;
+    setServiceFrame({ key: service.key, sourceRevision, loading: true });
+    if (compact) {
+      onFilesOpenChange(false);
+      queueMicrotask(() => viewerRef.current?.focus());
+    }
+    try {
+      const issued = service.kind === "visual_run" && service.run
+        ? await client.issueVisualFrame(workspace.owner.id, service.run.id)
+        : browser && conversationId && client.browserServiceFrame
+          ? await client.browserServiceFrame(conversationId, browser)
+          : undefined;
+      if (!issued) throw new Error("可视化服务没有可用的受限页面。");
+      if (operation === request.current) {
+        setServiceFrame({ key: service.key, sourceRevision, url: issued.frameUrl, loading: false });
+      }
+    } catch (cause) {
+      if (operation === request.current) {
+        setServiceFrame({
+          key: service.key,
+          sourceRevision,
+          loading: false,
+          error: cause instanceof Error ? cause.message : "可视化服务页面不可用。",
+        });
+      }
+    }
+  };
+
+  const runningVisualService = services.find((service) =>
+    service.kind === "visual_run" && service.enabled);
+  const runningVisualRevision = runningVisualService?.run?.lifecycleDigest
+    ?? runningVisualService?.run?.updatedAt;
+  useEffect(() => {
+    if (!runningVisualService
+      || (selectedServiceKey === runningVisualService.key
+        && serviceFrame.sourceRevision === runningVisualRevision)) return;
+    void selectService(runningVisualService);
+  }, [runningVisualService?.key, runningVisualRevision, selectedServiceKey,
+    serviceFrame.sourceRevision]);
+
+  const previewService = services.find((service) => service.kind === "visual_preview");
+  const previewRevision = browser
+    ? `${browser.conversationGeneration}:${browser.pageGeneration}`
+    : undefined;
+  useEffect(() => {
+    if (runningVisualService || !previewService?.enabled
+      || (selectedServiceKey === previewService.key
+        && serviceFrame.sourceRevision === previewRevision)) return;
+    void selectService(previewService);
+  }, [browser?.conversationGeneration, browser?.pageGeneration, browser?.projectedUrl,
+    browser?.recoveryState, conversationId, previewService?.enabled, previewService?.key,
+    runningVisualService?.key, selectedServiceKey, serviceFrame.sourceRevision]);
 
   const selected = files.find((file) => file.key === selectedKey);
   const selectFile = async (file: WorkbenchFile) => {
@@ -105,6 +231,8 @@ export function RiffologyWorkbenchViewer({
     setResource(undefined);
     setError(undefined);
     setLoading(true);
+    setSelectedServiceKey("");
+    setServiceFrame({ key: "", loading: false });
     if (compact) {
       onFilesOpenChange(false);
       queueMicrotask(() => viewerRef.current?.focus());
@@ -134,18 +262,20 @@ export function RiffologyWorkbenchViewer({
     setResource(undefined);
     setError(undefined);
     setLoading(false);
+    setSelectedServiceKey("");
+    setServiceFrame({ key: "", loading: false });
     fileToggleRef.current?.focus();
   };
 
   return <>
     <section ref={viewerRef}
-      className={`riffology-stage3-viewer ${selected ? "has-selection" : ""}`}
+      className={`riffology-stage3-viewer ${selected || selectedServiceKey ? "has-selection" : ""}`}
       aria-label="项目文件与页面查看器"
       tabIndex={-1}>
-      {selected && <header className="riffology-viewer-header">
+      {(selected || selectedServiceKey) && <header className="riffology-viewer-header">
         <button type="button" className="riffology-viewer-back" onClick={returnToConversation}>← 返回对话</button>
-        <strong>{selected.relativePath}</strong>
-        <span>{fileKind(selected.mediaType)}</span>
+        <strong>{selected?.relativePath ?? services.find((service) => service.key === selectedServiceKey)?.label}</strong>
+        <span>{selected ? fileKind(selected.mediaType) : "实时服务"}</span>
       </header>}
       {!selected && <BrowserViewer
         ownerName={workspace.owner.name}
@@ -156,6 +286,7 @@ export function RiffologyWorkbenchViewer({
         error={browserError}
         busy={browserBusy}
         onReconnect={onBrowserReconnect}
+        liveFrame={selectedServiceKey ? serviceFrame : undefined}
       />}
       {selected && loading && <ViewerState title="正在读取受限文件投影…" />}
       {selected && !loading && error && <ViewerState title="文件不可用" detail={error} />}
@@ -171,6 +302,9 @@ export function RiffologyWorkbenchViewer({
       compact={compact}
       onOpenChange={onFilesOpenChange}
       onSelect={(file) => void selectFile(file)}
+      services={services}
+      selectedServiceKey={selectedServiceKey}
+      onSelectService={(service) => void selectService(service)}
       fileToggleRef={fileToggleRef}
     />
   </>;
@@ -185,6 +319,7 @@ function BrowserViewer({
   error,
   busy,
   onReconnect,
+  liveFrame,
 }: Readonly<{
   ownerName: string;
   ownerKind: "project";
@@ -194,7 +329,25 @@ function BrowserViewer({
   error?: string;
   busy: boolean;
   onReconnect: () => void;
+  liveFrame?: Readonly<{ key: string; url?: string; loading: boolean; error?: string }>;
 }>) {
+  if (liveFrame?.url && !liveFrame.loading) {
+    return <div className="riffology-live-service">
+      <iframe
+        title="可视化仿真服务"
+        src={liveFrame.url}
+        sandbox="allow-scripts allow-same-origin"
+        referrerPolicy="no-referrer"
+      />
+    </div>;
+  }
+  if (liveFrame?.loading) return <ViewerState title="正在连接可视化仿真服务…" />;
+  if (liveFrame?.error) {
+    return <div className="riffology-viewer-state" role="status">
+      <h2>可视化仿真服务不可用</h2>
+      <p>{liveFrame.error}</p>
+    </div>;
+  }
   if (screenshot && browser?.recoveryState === "ready") {
     return <div className="riffology-browser-observation" role="status">
       <img src={screenshot} alt={`${ownerName} 的受信浏览器页面观察`} />
@@ -241,6 +394,9 @@ function ProjectFileRail({
   compact,
   onOpenChange,
   onSelect,
+  services,
+  selectedServiceKey,
+  onSelectService,
   fileToggleRef,
 }: Readonly<{
   ownerKind: "project";
@@ -250,6 +406,9 @@ function ProjectFileRail({
   compact: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (file: WorkbenchFile) => void;
+  services: readonly WorkbenchService[];
+  selectedServiceKey: string;
+  onSelectService: (service: WorkbenchService) => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
 }>) {
   const [width, setWidth] = useState(RAIL_MIN);
@@ -334,7 +493,26 @@ function ProjectFileRail({
         <FileTree entries={tree} selectedKey={selectedKey} onSelect={onSelect} />
       </ul>}
       {tree.length === 0 && <p className="riffology-file-empty">没有可展示的 Project 文件。</p>}
-      <footer><i aria-hidden="true" />{ownerKind === "project" ? "项目" : "模型"}结构 · 只读投影</footer>
+      <section className="riffology-service-section" aria-labelledby="riffology-service-heading">
+        <div className="riffology-service-heading">
+          <strong id="riffology-service-heading">运行服务</strong>
+          <span>{services.filter((service) => service.status === "运行中" || service.status === "已连接").length} 个在线</span>
+        </div>
+        <ul aria-label="运行服务">
+          {services.map((service) => <li key={service.key}>
+            <button
+              type="button"
+              disabled={!service.enabled}
+              aria-current={selectedServiceKey === service.key ? "page" : undefined}
+              onClick={() => onSelectService(service)}
+            >
+              <i className={`is-${service.kind} ${service.status === "运行中" || service.status === "已连接" ? "is-online" : ""}`} aria-hidden="true" />
+              <span><strong>{service.label}</strong><small>{service.status}</small></span>
+            </button>
+          </li>)}
+        </ul>
+      </section>
+      <footer><i aria-hidden="true" />项目结构 · 只读投影</footer>
     </aside>
   </>;
 }

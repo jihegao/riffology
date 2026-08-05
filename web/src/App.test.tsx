@@ -1210,6 +1210,92 @@ describe("Stage 4 Product entry", () => {
     expect(productClient.browserReload).toHaveBeenCalled();
   });
 
+  it("lists the scoped services below files and opens a live Solara frame instead of a screenshot", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const visual = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 6,
+      pageGeneration: 18,
+      projectedUrl: "riff-visual://solara/",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-07-25T00:15:00.000Z",
+    };
+    productClient.browserState = vi.fn(async () => visual);
+    productClient.browserOpen = vi.fn(async () => visual);
+    productClient.browserScreenshot = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      pageGeneration: visual.pageGeneration,
+      contentType: "image/png" as const,
+      pngBase64: "iVBORw0KGgo=",
+    }));
+    productClient.browserServiceFrame = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      frameUrl: `/browser/visual-service/${"a".repeat(43)}`,
+      expiresAt: "2026-07-25T00:01:00.000Z",
+    }));
+    productClient.conversationRuntime = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      revision: "service-runtime",
+      status: "idle" as const,
+      activeTurn: null,
+      parts: [],
+      pendingInteractions: [],
+      goalVerification: null,
+      agent: { selectedName: null, locked: false },
+      mcp: { state: "connected" as const, label: "Riff Project MCP" },
+    }));
+
+    render(<App client={productClient} />);
+
+    expect(await screen.findByText("运行服务")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Solara 可视化仿真.*运行中/u })).toBeEnabled();
+    expect(await screen.findByText("Riff Project MCP")).toBeInTheDocument();
+    const frame = await screen.findByTitle("可视化仿真服务");
+    expect(frame).toHaveAttribute("src", `/browser/visual-service/${"a".repeat(43)}`);
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(productClient.browserServiceFrame).toHaveBeenCalledWith("conversation-main", visual);
+    expect(screen.queryByRole("img", { name: "General maintenance 的受信浏览器页面观察" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("automatically opens a running Project visual service through the existing Run frame authority", async () => {
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    const visualRun: ProjectWorkspaceDto["runs"][number] = {
+      id: "run-visual-live", projectId: "project-one",
+      experimentConfigurationId: "experiment-visual", status: "running",
+      requestedSampleCount: 1, createdAt: "2026-07-25T00:00:00.000Z",
+      updatedAt: "2026-07-25T00:00:01.000Z", startedAt: "2026-07-25T00:00:01.000Z",
+      finishedAt: null, contractVersion: 4, readOnly: false, legacyDigest: null,
+      runKind: "visual", cancelRequestedAt: null, terminalCode: null,
+      completionCardDisposition: null, terminalStatus: null, terminalClosureDigest: null,
+      lifecycleDigest: "4".repeat(64), seedCount: 1, stepOrHorizon: 10,
+      durationMs: null, resourceOverview: null, outputs: [],
+      sourceDigest: "5".repeat(64),
+      reproducibility: "current_source",
+    };
+    productClient.workspace = vi.fn(async () => ({ ...projectWorkspace, runs: [visualRun] }));
+    productClient.issueVisualFrame = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      frameUrl: `http://localhost:8788/frame/redeem/${"b".repeat(43)}`,
+      expiresAt: "2026-07-25T00:01:00.000Z",
+    }));
+
+    render(<App client={productClient} />);
+
+    expect(await screen.findByRole("button", { name: /可视化 Run.*运行中/u })).toBeEnabled();
+    const frame = await screen.findByTitle("可视化仿真服务");
+    expect(frame).toHaveAttribute("src", `http://localhost:8788/frame/redeem/${"b".repeat(43)}`);
+    expect(productClient.issueVisualFrame).toHaveBeenCalledWith("project-one", "run-visual-live");
+  });
+
   it("polls Browser Agent control and exposes only the header Agent menu controls", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
@@ -1333,57 +1419,27 @@ describe("Stage 4 Product entry", () => {
     expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff-app://projects/project-one");
   });
 
-  it("restores the durable WorkspaceBinding project guide after refresh", async () => {
+  it("creates a Project and first Conversation directly from the workbench", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/workbench/new");
     const productClient = client();
-    let binding: any = {
-      schemaVersion: 1, workspaceKey: "placeholder",
-      conversation: { kind: "bootstrap", id: "bootstrap-conversation", name: "项目引导", provider: null },
-      owner: null, generation: 1, bindingDigest: "a".repeat(64), state: "unbound",
-      draft: "", provider: null, providerMode: "live", providerReason: null,
-      ownerProjection: null, bootstrapMessages: [],
-      createdAt: "2026-08-02T00:00:00.000Z", updatedAt: "2026-08-02T00:00:00.000Z",
-    };
-    productClient.workspaceBinding = vi.fn(async (workspaceKey) => {
-      binding = { ...binding, workspaceKey };
-      return binding;
-    });
-    productClient.updateWorkspaceBinding = vi.fn(async (input) => {
-      binding = {
-        ...binding, generation: binding.generation + 1,
-        bindingDigest: "b".repeat(64), draft: input.draft,
-        provider: input.provider ?? null,
-        conversation: { ...binding.conversation, provider: input.provider ?? null },
-      };
-      return { binding, receipt: { receiptDigest: "c".repeat(64), generation: binding.generation } };
-    });
-    productClient.sendWorkspaceBootstrapTurn = vi.fn(async (input) => {
-      binding = { ...binding, bootstrapMessages: [
-        { id: "bootstrap-user", ordinal: 0, role: "user", status: "complete", text: input.text, createdAt: "2026-08-02T00:00:01.000Z" },
-        { id: "bootstrap-assistant", ordinal: 1, role: "assistant", status: "complete", text: "我会继续完善项目边界。", createdAt: "2026-08-02T00:00:02.000Z" },
-      ] };
-      return { schemaVersion: 1 as const, mode: "live" as const, reason: null, binding, assistantText: "我会继续完善项目边界。" };
-    });
-    const { unmount } = render(<App client={productClient} />);
+    render(<App client={productClient} />);
 
-    const draft = await screen.findByRole("textbox", { name: "项目目标" });
+    const name = await screen.findByRole("textbox", { name: "项目名称" });
+    await user.clear(name);
+    await user.type(name, "维修队列验收");
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }),
       JSON.stringify(["provider", "model"]));
-    await user.type(draft, "比较两种维修队列配置");
-    await user.click(screen.getByRole("button", { name: "发送给 Agent" }));
-    expect(await screen.findByText("我会继续完善项目边界。")).toBeInTheDocument();
-    expect(productClient.sendWorkspaceBootstrapTurn).toHaveBeenCalledWith(expect.objectContaining({
-      expectedGeneration: 2,
-      expectedBindingDigest: "b".repeat(64),
-      text: "比较两种维修队列配置",
-    }));
-    expect(screen.getByText(/只有 Riff receipt 能证明/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
 
-    unmount();
-    render(<App client={productClient} />);
-    expect(await screen.findByDisplayValue("比较两种维修队列配置")).toBeInTheDocument();
-    expect(screen.getByText("我会继续完善项目边界。")).toBeInTheDocument();
+    expect(productClient.createProject).toHaveBeenCalledWith({
+      commandId: expect.any(String),
+      name: "维修队列验收",
+      provider: { providerId: "provider", modelId: "model" },
+      source: { kind: "blank" },
+    });
+    expect(window.location.pathname).toBe("/workbench/projects/created-project");
+    expect(window.location.search).toBe("?conversation=conversation-main");
   });
 
   it("fails the workbench composer and new-session action closed when Provider is read-only", async () => {

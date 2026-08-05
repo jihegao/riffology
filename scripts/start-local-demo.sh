@@ -7,12 +7,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# A caller-supplied workdir is an explicit launch contract. Preserve it across
+# the developer .env load so tests, one-off launches, and read-only degradation
+# can deliberately exercise an invalid override.
+RIFF_CALLER_OPENCODE_WORKDIR_SET="${OPENCODE_WORKDIR+x}"
+RIFF_CALLER_OPENCODE_WORKDIR="${OPENCODE_WORKDIR-}"
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
   # Local developer configuration only; never commit .env.
   source "$ROOT_DIR/.env"
   set +a
 fi
+if [[ "$RIFF_CALLER_OPENCODE_WORKDIR_SET" == "x" ]]; then
+  OPENCODE_WORKDIR="$RIFF_CALLER_OPENCODE_WORKDIR"
+fi
+unset RIFF_CALLER_OPENCODE_WORKDIR_SET RIFF_CALLER_OPENCODE_WORKDIR
 
 export RIFF_PRODUCT_ROOT="${RIFF_PRODUCT_ROOT:-$ROOT_DIR/.riff-product}"
 export RIFF_SKIP_OPENCODE="${RIFF_SKIP_OPENCODE:-true}"

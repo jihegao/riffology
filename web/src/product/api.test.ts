@@ -275,6 +275,50 @@ describe("Product browser client", () => {
     expect(JSON.stringify(calls)).not.toContain("capability");
   });
 
+  it("rebootstraps once when a pending-question answer encounters a stale browser session", async () => {
+    const calls: Array<{ input: string; csrf?: string }> = [];
+    let bootstrapCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ input: path, csrf: new Headers(init?.headers).get("x-riff-csrf") ?? undefined });
+      if (path.endsWith("/bootstrap")) {
+        bootstrapCount += 1;
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: bootstrapCount,
+          csrfToken: `csrf-token-${bootstrapCount}`,
+          platformOrigin: "http://localhost:8787",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-07-25T00:05:00.000Z",
+        }), { status: 201 });
+      }
+      if (bootstrapCount === 1) {
+        return new Response(JSON.stringify({
+          error: {
+            code: "browser_session_denied",
+            message: "The Product API requires a current browser session.",
+          },
+        }), { status: 403 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }));
+
+    await new HttpProductClient().respondConversationInteraction({
+      conversationId: "conversation-one",
+      requestKey: "turn-one",
+      interactionId: "question-one",
+      kind: "question",
+      response: { answers: [["choice-one"]] },
+    });
+
+    expect(calls).toEqual([
+      { input: "/api/browser-session/bootstrap", csrf: undefined },
+      { input: "/api/conversations/conversation-one/turns/turn-one/resume", csrf: "csrf-token-1" },
+      { input: "/api/browser-session/bootstrap", csrf: undefined },
+      { input: "/api/conversations/conversation-one/turns/turn-one/resume", csrf: "csrf-token-2" },
+    ]);
+  });
+
   it("parses only the closed public runtime DTO and rejects the internal service shape", async () => {
     const choiceId = `choice_${"a".repeat(32)}`;
     let runtimeBody: unknown = {
@@ -407,7 +451,7 @@ describe("Product browser client", () => {
             receiptDigest: "a".repeat(64),
             evidence: {
               openCodeTerminal: "idle",
-              intentKind: "project_visual",
+              intentKind: "project_batch",
               actionCount: 2,
               terminalActionCount: 2,
               committedActionCount: 2,
@@ -435,7 +479,7 @@ describe("Product browser client", () => {
       receiptDigest: "a".repeat(64),
       evidence: {
         openCodeTerminal: "idle",
-        intentKind: "project_visual",
+        intentKind: "project_batch",
         actionCount: 2,
         terminalActionCount: 2,
         committedActionCount: 2,
@@ -617,6 +661,53 @@ describe("Product browser client", () => {
     expect(calls[5]?.input).toContain(
       "conversationGeneration=3&pageGeneration=5",
     );
+  });
+
+  it("accepts only an app-local opaque visual service frame path", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init });
+      if (String(input).endsWith("/bootstrap")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          generation: 1,
+          csrfToken: "csrf-token",
+          brokerOrigin: "http://localhost:8788",
+          expiresAt: "2026-08-02T00:15:00.000Z",
+        }), { status: 201 });
+      }
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        frameUrl: `/browser/visual-service/${"a".repeat(43)}`,
+        expiresAt: "2026-08-02T00:01:00.000Z",
+      }), { status: 200 });
+    }));
+    const client = new HttpProductClient();
+    const state = {
+      schemaVersion: 1 as const,
+      conversationGeneration: 3,
+      pageGeneration: 5,
+      projectedUrl: "riff-visual://solara/",
+      trustState: "trusted_riff" as const,
+      controlMode: "observer" as const,
+      remainingBudget: null,
+      recoveryState: "ready" as const,
+      canGoBack: false,
+      canReload: true,
+      expiresAt: "2026-08-02T00:15:00.000Z",
+    };
+
+    const issued = await client.browserServiceFrame("conversation / one", state);
+
+    expect(issued.frameUrl).toBe(`/browser/visual-service/${"a".repeat(43)}`);
+    expect(calls[1]?.input).toBe(
+      "/api/conversations/conversation%20%2F%20one/browser/service-frame",
+    );
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+      conversationGeneration: 3,
+      pageGeneration: 5,
+    });
+    expect(JSON.stringify(issued)).not.toMatch(/localhost|8767|credential|token/iu);
   });
 
   it("rejects Browser control projections with undeclared modes or fields", async () => {

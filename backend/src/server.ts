@@ -103,6 +103,9 @@ import {
 } from "./local-browser-broker.ts";
 import { BrowserAgentAuthority } from "./browser-agent-authority.ts";
 import { ProjectOnlyHttpApi } from "./project-only-http-api.ts";
+import { ProjectOnlyAgentService } from "./project-only-agent-service.ts";
+import { ProjectOnlyBatchRuntime } from "./project-only-batch-runtime.ts";
+import { ProjectOnlyVisualRuntime } from "./project-only-visual-runtime.ts";
 import type { ProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
@@ -239,6 +242,7 @@ export type BackendOptions = {
   a2ProductRoot?: string;
   productStore?: ProductStoreV2;
   projectOnlyRuntime?: Extract<ProjectOnlyServerRuntime, { mode: "ready" }>;
+  projectOnlyOpenCode?: OpenCodeConversationPort;
   a2OpenCode?: OpenCodeConversationPort;
   a2TechnicalChecker?: ModelTechnicalCheckerPort;
   a2SkillRoot?: string;
@@ -281,6 +285,15 @@ export type BackendOptions = {
 type WorkbenchObservationTarget = Readonly<{
   scope: BrowserConversationScope;
   owner: WorkbenchObservationOwner;
+  expiresAtMs: number;
+}>;
+
+type WorkbenchVisualServiceFrame = Readonly<{
+  scope: BrowserConversationScope;
+  owner: WorkbenchObservationOwner;
+  pageGeneration: number;
+  targetUrl: string;
+  projectedUrl: string;
   expiresAtMs: number;
 }>;
 
@@ -340,6 +353,64 @@ export class WorkbenchObservationTargetRegistry {
   }
 
   clear(): void { this.#targets.clear(); }
+}
+
+/** Process-local capability registry for same-origin hosts of declared visual services. */
+export class WorkbenchVisualServiceFrameRegistry {
+  readonly #frames = new Map<string, WorkbenchVisualServiceFrame>();
+  readonly #ttlMs: number;
+  readonly #now: () => number;
+
+  constructor(ttlMs = 60_000, now: () => number = Date.now) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 5 * 60_000) {
+      throw new Error("Workbench visual service frame TTL is invalid.");
+    }
+    this.#ttlMs = ttlMs;
+    this.#now = now;
+  }
+
+  register(input: Omit<WorkbenchVisualServiceFrame, "expiresAtMs">): Readonly<{
+    token: string;
+    expiresAtMs: number;
+  }> {
+    this.revokeConversation(input.scope.conversationId);
+    let token: string;
+    do token = randomBytes(32).toString("base64url"); while (this.#frames.has(token));
+    const expiresAtMs = this.#now() + this.#ttlMs;
+    this.#frames.set(token, Object.freeze({
+      ...input,
+      scope: Object.freeze({ ...input.scope }),
+      owner: Object.freeze({ ...input.owner }),
+      expiresAtMs,
+    }));
+    return Object.freeze({ token, expiresAtMs });
+  }
+
+  resolve(token: string): WorkbenchVisualServiceFrame | null {
+    const frame = this.#frames.get(token);
+    if (!frame || frame.expiresAtMs <= this.#now()) {
+      if (frame) this.#frames.delete(token);
+      return null;
+    }
+    return frame;
+  }
+
+  revoke(scope: BrowserConversationScope): void {
+    for (const [token, frame] of this.#frames) {
+      if (frame.scope.conversationId === scope.conversationId
+        && frame.scope.conversationGeneration === scope.conversationGeneration) {
+        this.#frames.delete(token);
+      }
+    }
+  }
+
+  revokeConversation(conversationId: string): void {
+    for (const [token, frame] of this.#frames) {
+      if (frame.scope.conversationId === conversationId) this.#frames.delete(token);
+    }
+  }
+
+  clear(): void { this.#frames.clear(); }
 }
 
 export const workbenchObservationTargetMatches = (
@@ -559,6 +630,7 @@ export class BackendApp {
   #workbenchBrowserBroker?: LocalBrowserBroker;
   #browserAgentAuthority?: BrowserAgentAuthority;
   readonly #workbenchObservationTargets: WorkbenchObservationTargetRegistry;
+  readonly #workbenchVisualServiceFrames: WorkbenchVisualServiceFrameRegistry;
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
@@ -568,6 +640,7 @@ export class BackendApp {
     this.#workbenchObservationTargets = new WorkbenchObservationTargetRegistry(
       options.workbenchBrowserTtlMs,
     );
+    this.#workbenchVisualServiceFrames = new WorkbenchVisualServiceFrameRegistry();
     this.#productMode = Boolean(
       options.productOnly || options.productStore || options.a2ProductRoot || options.projectOnlyRuntime,
     );
@@ -584,9 +657,24 @@ export class BackendApp {
     this.#recoveryStatus = options.recoveryStatus;
     this.#legacyCloseDrainTimeoutMs = exactLegacyCloseDrainTimeout(options.legacyCloseDrainTimeoutMs ?? 5_000);
     if (options.projectOnlyRuntime) {
+      const visualRuntime = new ProjectOnlyVisualRuntime(options.projectOnlyRuntime.store);
+      const projectOnlyScratchRoot = join(options.projectOnlyRuntime.store.root, "batch-scratch");
+      const batchRuntime = new ProjectOnlyBatchRuntime({
+        store: options.projectOnlyRuntime.store,
+        pythonExecutable: configuredBatchPythonExecutable(options.a3PythonExecutable),
+        scratchRoot: projectOnlyScratchRoot,
+      });
+      const agent = new ProjectOnlyAgentService({
+        store: options.projectOnlyRuntime.store,
+        operations: options.projectOnlyRuntime.projectOperations,
+        openCode: options.projectOnlyOpenCode,
+        visualRuntime,
+        batchRuntime,
+      });
       this.projectOnlyApi = new ProjectOnlyHttpApi(
         options.projectOnlyRuntime.store,
         options.projectOnlyRuntime.projectOperations,
+        agent,
       );
     }
     if (!this.#productMode) {
@@ -780,6 +868,7 @@ export class BackendApp {
   async initialize(): Promise<ProjectState | undefined> {
     if (this.#productMode) {
       if (this.#recoveryStatus) return undefined;
+      await this.projectOnlyApi?.initialize();
       if (this.#a2OpenCode?.initialize) {
         try {
           await this.#a2OpenCode.initialize();
@@ -953,6 +1042,7 @@ export class BackendApp {
         this.#workbenchBrowserBroker = undefined;
         this.#browserAgentAuthority = undefined;
         this.#workbenchObservationTargets.clear();
+        this.#workbenchVisualServiceFrames.clear();
         throw error;
       }
       this.#browserNetwork = network;
@@ -1004,6 +1094,7 @@ export class BackendApp {
           this.#workbenchBrowserBroker = undefined;
           this.#browserAgentAuthority = undefined;
           this.#workbenchObservationTargets.clear();
+          this.#workbenchVisualServiceFrames.clear();
         }
         try {
           await this.#browserNetwork.close();
@@ -1017,7 +1108,7 @@ export class BackendApp {
     }));
     await attempt(() => this.gate2?.close());
     await attempt(() => this.productRunDispatcher?.stop());
-    await attempt(() => this.projectOnlyApi?.store.close());
+    await attempt(() => this.projectOnlyApi?.close());
     await attempt(() => this.productStore?.close());
     if (firstError) throw firstError;
   }
@@ -1039,7 +1130,7 @@ export class BackendApp {
   #productBrowserFrameTargets(): BrowserFrameTargetResolver {
     const store = this.productStore;
     if (!store) {
-      return Object.freeze({
+      return this.projectOnlyApi?.agent?.visualRuntime.targetResolver ?? Object.freeze({
         resolve: async () => null,
         inspect: async () => false,
       });
@@ -1066,7 +1157,7 @@ export class BackendApp {
     } else if (url.pathname !== "/"
       && !(this.options.staticLegacyProductRoutes
         ? /^\/(?:workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?|(?:models|projects)\/[A-Za-z0-9_-]{1,160})\/?$/u
-        : /^\/workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|projects\/[A-Za-z0-9_-]{1,160}))?\/?$/u
+        : /^\/workbench(?:\/(?:home|new(?:\/[A-Za-z0-9_-]{1,80})?|projects\/[A-Za-z0-9_-]{1,160}))?\/?$/u
       ).test(url.pathname)) {
       return false;
     }
@@ -1114,7 +1205,7 @@ export class BackendApp {
           "img-src 'self' data:",
           "font-src 'self'",
           "connect-src 'self'",
-          `frame-src ${brokerOrigin ?? "'none'"}`,
+          `frame-src 'self'${brokerOrigin ? ` ${brokerOrigin}` : ""}`,
           "object-src 'none'",
           "base-uri 'none'",
           "form-action 'none'",
@@ -1151,9 +1242,10 @@ export class BackendApp {
     const url = new URL(request.url ?? "/", address.origin);
       const hostPage = /^\/browser\/projects\/([^/]+)\/runs\/([^/]+)\/visual$/u.exec(url.pathname);
       const observationPage = /^\/browser\/observe\/([A-Za-z0-9_-]{43})$/u.exec(url.pathname);
+      const visualServicePage = /^\/browser\/visual-service\/([A-Za-z0-9_-]{43})$/u.exec(url.pathname);
       const bootstrap = url.pathname === "/api/browser-session/bootstrap";
       const match = /^\/api\/projects\/([^/]+)\/runs\/([^/]+)\/visual-frame-session$/u.exec(url.pathname);
-      if (!hostPage && !observationPage && !bootstrap && !match) return false;
+      if (!hostPage && !observationPage && !visualServicePage && !bootstrap && !match) return false;
       if (this.#recoveryStatus && !bootstrap) {
         privateApiJson(response, 503, {
           accepted: false,
@@ -1165,6 +1257,53 @@ export class BackendApp {
         return true;
       }
     try {
+      if (visualServicePage) {
+        if (url.search !== "" || request.method !== "GET" && request.method !== "HEAD") {
+          throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        }
+        if (request.method === "GET") {
+          const fetchSite = rawBrowserHeader(request, "sec-fetch-site");
+          if (fetchSite !== "same-origin"
+            || rawBrowserHeader(request, "sec-fetch-mode") !== "navigate"
+            || rawBrowserHeader(request, "sec-fetch-dest") !== "iframe") {
+            throw new BrowserFrameCapabilityError(403, "browser_session_denied");
+          }
+        }
+        const declared = this.#workbenchVisualServiceFrames.resolve(visualServicePage[1]!);
+        if (!declared || !this.productStore || !this.#workbenchBrowserBroker) {
+          throw new BrowserFrameCapabilityError(404, "browser_session_denied");
+        }
+        const runtime = await this.productStore.getConversationRuntime(
+          declared.scope.conversationId,
+        );
+        const conversation = this.productStore.getConversation(declared.scope.conversationId);
+        if (!workbenchObservationTargetMatches(
+          declared,
+          runtime.session?.generation ?? null,
+          conversation.owner,
+        ) || !this.#workbenchOwnerExists(conversation.owner)) {
+          this.#workbenchVisualServiceFrames.revoke(declared.scope);
+          throw new BrowserFrameCapabilityError(409, "browser_conversation_stale");
+        }
+        const state = await this.#workbenchBrowserBroker.state(declared.scope);
+        const target = await this.options.workbenchBrowserTargetResolver?.(
+          "riff-visual",
+          declared.scope,
+        );
+        if (state.pageGeneration !== declared.pageGeneration
+          || state.recoveryState !== "ready"
+          || state.trustState !== "trusted_riff"
+          || state.projectedUrl !== declared.projectedUrl
+          || !target || target.alias !== "riff-visual"
+          || target.projectedUrl !== declared.projectedUrl
+          || target.url !== declared.targetUrl
+          || !workbenchVisualServiceTarget(target.url)) {
+          this.#workbenchVisualServiceFrames.revoke(declared.scope);
+          throw new BrowserFrameCapabilityError(409, "browser_session_denied");
+        }
+        browserVisualServiceHostPage(response, request.method, declared.targetUrl);
+        return true;
+      }
       if (observationPage) {
         if (url.search !== "" || request.method !== "GET" && request.method !== "HEAD") {
           throw new BrowserFrameCapabilityError(404, "browser_session_denied");
@@ -1441,7 +1580,7 @@ export class BackendApp {
     const action = parts[4];
     if (parts.length > 5 || action && ![
       "open", "reload", "back", "screenshot", "close", "restart", "reconnect",
-      "takeover", "return",
+      "takeover", "return", "service-frame",
     ].includes(action)) {
       return false;
     }
@@ -1497,10 +1636,55 @@ export class BackendApp {
         const scope = await this.#currentBrowserScope(parts[2]);
         const dto = await broker.open(scope, body.alias as RiffBrowserAlias);
         await this.#revalidateBrowserScope(scope);
+        this.#workbenchVisualServiceFrames.revokeConversation(scope.conversationId);
         privateApiJson(response, 200, dto);
         return true;
       }
       if (!action) throw new ApiError(404, "not_found", "The browser route was not found.");
+      if (action === "service-frame") {
+        const body = await exactWorkbenchBrowserJson(
+          request,
+          ["conversationGeneration", "pageGeneration"],
+        );
+        const conversationGeneration = exactBrowserInteger(
+          body.conversationGeneration,
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const pageGeneration = exactBrowserInteger(body.pageGeneration, 1, Number.MAX_SAFE_INTEGER);
+        const scope = await this.#currentBrowserScope(parts[2], conversationGeneration);
+        const state = await broker.state(scope);
+        const target = await this.options.workbenchBrowserTargetResolver?.("riff-visual", scope);
+        const conversation = this.productStore?.getConversation(scope.conversationId);
+        if (!conversation || state.pageGeneration !== pageGeneration
+          || state.recoveryState !== "ready"
+          || state.trustState !== "trusted_riff"
+          || !state.projectedUrl?.startsWith("riff-visual://")
+          || !target || target.alias !== "riff-visual"
+          || target.projectedUrl !== state.projectedUrl
+          || !workbenchVisualServiceTarget(target.url)
+          || !this.#workbenchOwnerExists(conversation.owner)) {
+          throw new ApiError(
+            409,
+            "browser_visual_service_unavailable",
+            "The declared visual service is unavailable.",
+          );
+        }
+        await this.#revalidateBrowserScope(scope);
+        const issued = this.#workbenchVisualServiceFrames.register({
+          scope,
+          owner: conversation.owner,
+          pageGeneration,
+          targetUrl: target.url,
+          projectedUrl: target.projectedUrl,
+        });
+        privateApiJson(response, 201, {
+          schemaVersion: 1,
+          frameUrl: `/browser/visual-service/${issued.token}`,
+          expiresAt: new Date(issued.expiresAtMs).toISOString(),
+        });
+        return true;
+      }
       const body = await exactWorkbenchBrowserJson(
         request,
         ["conversationGeneration", "pageGeneration"],
@@ -1531,6 +1715,9 @@ export class BackendApp {
             : await broker.reconnect(scope, pageGeneration);
       }
       await this.#revalidateBrowserScope(scope);
+      if (["back", "close", "reload", "restart", "reconnect"].includes(action)) {
+        this.#workbenchVisualServiceFrames.revokeConversation(scope.conversationId);
+      }
       if (action === "close") this.#revokeWorkbenchObservationTargets(scope);
       privateApiJson(response, 200, dto);
       return true;
@@ -1566,6 +1753,7 @@ export class BackendApp {
         conversationId,
         conversationGeneration: expectedGeneration,
       }));
+      this.#workbenchVisualServiceFrames.revokeConversation(conversationId);
       throw new ApiError(409, "browser_conversation_stale", "The conversation generation changed.");
     }
     return Object.freeze({
@@ -1579,6 +1767,7 @@ export class BackendApp {
     if (!runtime?.session || runtime.session.generation !== scope.conversationGeneration) {
       await this.#workbenchBrowserBroker?.revoke(scope);
       this.#revokeWorkbenchObservationTargets(scope);
+      this.#workbenchVisualServiceFrames.revokeConversation(scope.conversationId);
       throw new ApiError(409, "browser_conversation_stale", "The conversation generation changed.");
     }
   }
@@ -2191,6 +2380,57 @@ const browserWorkbenchObservationPage = (
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
+  });
+  response.end(method === "HEAD" ? undefined : bytes);
+};
+
+const workbenchVisualServiceTarget = (raw: string): boolean => {
+  try {
+    const target = new URL(raw);
+    return target.protocol === "http:"
+      && target.hostname === "localhost"
+      && target.port !== ""
+      && target.username === ""
+      && target.password === ""
+      && target.hash === "";
+  } catch {
+    return false;
+  }
+};
+
+const browserVisualServiceHostPage = (
+  response: ServerResponse,
+  method: string | undefined,
+  targetUrl: string,
+): void => {
+  if (!workbenchVisualServiceTarget(targetUrl)) {
+    throw new BrowserFrameCapabilityError(409, "visual_frame_unavailable");
+  }
+  const target = new URL(targetUrl);
+  const nonce = randomBytes(16).toString("hex");
+  const source = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riffology visual service</title>
+<style nonce="${nonce}">html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block;overflow:hidden}body{background:#fff}</style>
+</head>
+<body>
+<iframe title="Running simulation service" src="${escapeObservationHtml(target.href)}" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer"></iframe>
+</body>
+</html>`;
+  const bytes = Buffer.from(source);
+  response.writeHead(200, {
+    "cache-control": "private, no-store",
+    "content-security-policy": `default-src 'none'; style-src 'nonce-${nonce}'; frame-src ${target.origin}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
+    "content-length": bytes.byteLength,
+    "content-type": "text/html; charset=utf-8",
+    "cross-origin-resource-policy": "same-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN",
   });
   response.end(method === "HEAD" ? undefined : bytes);
 };

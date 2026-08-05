@@ -2,6 +2,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ModelTechnicalChecker } from "./model-technical-checker.ts";
 import { openProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
+import { opencodeFromEnvironment } from "./opencode-adapter.ts";
 import { BackendApp } from "./server.ts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -27,6 +28,7 @@ try {
   app = runtime.mode === "ready"
     ? new BackendApp({
       projectOnlyRuntime: runtime,
+      projectOnlyOpenCode: opencodeFromEnvironment(),
       repositoryRoot,
       staticWebRoot,
       recoveryOnlyOnFailure: true,

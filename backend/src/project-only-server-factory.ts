@@ -38,6 +38,7 @@ export const openProjectOnlyServerRuntime = (input: Readonly<{
   const store = ProjectOnlyStore.open(input.root);
   const now = input.now ?? (() => new Date().toISOString());
   store.reconcileInterruptedExecutions(now());
+  store.reconcileInterruptedConversationTurns(now());
   return Object.freeze({
     mode: "ready",
     store,

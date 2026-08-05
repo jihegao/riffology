@@ -173,6 +173,10 @@ export class ProjectOnlyOperationsAdapter {
       expectedWorkspaceDigest: input.expectedWorkspaceDigest,
       changes,
       ...(input.executionDescription ? { executionDescription: { ...input.executionDescription } } : {}),
+      ...(input.executionDescription
+        && ["batch", "visual", "both"].includes(String(input.executionDescription.runMode))
+        ? { runMode: input.executionDescription.runMode as "batch" | "visual" | "both" }
+        : {}),
       updatedAt: this.now(),
     });
     const reread = this.store.project(projectId);

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
-export const PROJECT_ONLY_SCHEMA_VERSION = 1 as const;
+export const PROJECT_ONLY_SCHEMA_VERSION = 3 as const;
 
 export type ProjectOnlyDatabase = DatabaseSync;
 
@@ -10,7 +10,7 @@ const SQL = String.raw;
 export const PROJECT_ONLY_SCHEMA_SQL = SQL`
   CREATE TABLE project_only_schema (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 1),
+    version INTEGER NOT NULL CHECK (version = 3),
     installed_at TEXT NOT NULL
   ) STRICT;
 
@@ -124,6 +124,31 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
     ON runs(project_id)
     WHERE status IN ('queued', 'running', 'cancelling');
 
+  CREATE TABLE run_outputs (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+    sample_id TEXT NOT NULL CHECK (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*'),
+    logical_name TEXT NOT NULL CHECK (length(trim(logical_name)) BETWEEN 1 AND 200),
+    relative_path TEXT NOT NULL CHECK (length(trim(relative_path)) BETWEEN 1 AND 1024),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
+    declared_role TEXT NOT NULL CHECK (declared_role IN ('data', 'diagnostic', 'replay', 'visual', 'document')),
+    bytes BLOB NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0 AND size_bytes = length(bytes)),
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, sample_index, logical_name)
+  ) STRICT;
+
+  CREATE TABLE run_completion_records (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    completion_json TEXT NOT NULL
+      CHECK (json_valid(completion_json) AND json_type(completion_json) = 'object'),
+    completion_digest TEXT NOT NULL
+      CHECK (length(completion_digest) = 64 AND completion_digest NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL
+  ) STRICT;
+
   CREATE TABLE execution_locks (
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     holder_kind TEXT NOT NULL CHECK (holder_kind IN ('technical_check', 'run')),
@@ -145,6 +170,75 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
       CHECK (length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'),
     committed_at TEXT NOT NULL
   ) STRICT;
+
+  CREATE TABLE project_creation_receipts (
+    command_id TEXT PRIMARY KEY CHECK (length(command_id) BETWEEN 3 AND 128),
+    intent_digest TEXT NOT NULL
+      CHECK (length(intent_digest) = 64 AND intent_digest NOT GLOB '*[^0-9a-f]*'),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    conversation_id TEXT NOT NULL,
+    response_json TEXT NOT NULL
+      CHECK (json_valid(response_json) AND json_type(response_json) = 'object'),
+    receipt_digest TEXT NOT NULL
+      CHECK (length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'),
+    committed_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE project_conversations (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    lifecycle_state TEXT NOT NULL DEFAULT 'active'
+      CHECK (lifecycle_state IN ('active', 'archived', 'trashed')),
+    provider_id TEXT NOT NULL CHECK (length(provider_id) BETWEEN 1 AND 200),
+    model_id TEXT NOT NULL CHECK (length(model_id) BETWEEN 1 AND 500),
+    provider_locked INTEGER NOT NULL DEFAULT 0 CHECK (provider_locked IN (0, 1)),
+    session_state TEXT NOT NULL DEFAULT 'none'
+      CHECK (session_state IN ('none', 'connecting', 'available', 'lost', 'read_only')),
+    session_generation INTEGER NOT NULL DEFAULT 1 CHECK (session_generation >= 1),
+    external_session_ref TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (id, project_id)
+  ) STRICT;
+
+  CREATE INDEX project_conversations_by_owner
+    ON project_conversations(project_id, lifecycle_state, updated_at, id);
+
+  CREATE TABLE project_conversation_messages (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL REFERENCES project_conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+    status TEXT NOT NULL CHECK (status IN ('streaming', 'complete', 'failed')),
+    message_kind TEXT NOT NULL DEFAULT 'conversation'
+      CHECK (message_kind IN ('conversation', 'platform_card')),
+    text TEXT NOT NULL CHECK (length(text) <= 262144),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (conversation_id, ordinal)
+  ) STRICT;
+
+  CREATE TABLE project_conversation_turns (
+    request_key TEXT PRIMARY KEY CHECK (length(request_key) BETWEEN 3 AND 128),
+    id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 3 AND 128),
+    conversation_id TEXT NOT NULL REFERENCES project_conversations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    state TEXT NOT NULL CHECK (state IN ('running', 'complete', 'failed', 'read_only')),
+    user_message_id TEXT NOT NULL REFERENCES project_conversation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    assistant_message_id TEXT REFERENCES project_conversation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    agent_name TEXT,
+    actions_json TEXT NOT NULL DEFAULT '[]'
+      CHECK (json_valid(actions_json) AND json_type(actions_json) = 'array'),
+    goal_verification_json TEXT
+      CHECK (goal_verification_json IS NULL OR (json_valid(goal_verification_json) AND json_type(goal_verification_json) = 'object')),
+    failure_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE UNIQUE INDEX one_active_turn_per_project_conversation
+    ON project_conversation_turns(conversation_id)
+    WHERE state = 'running';
 
   CREATE TRIGGER project_files_blocked_by_execution_lock_insert
   BEFORE INSERT ON project_files
@@ -198,18 +292,89 @@ export const initializeProjectOnlySchema = (
   if (tables.some(({ name }) => name === "models")) throw new ProjectOnlyRecoveryRequiredError();
   if (userVersion !== 0 || tables.length !== 0) {
     if (userVersion === PROJECT_ONLY_SCHEMA_VERSION && tables.some(({ name }) => name === "project_only_schema")) return;
+    if (userVersion === 1 && tables.some(({ name }) => name === "project_only_schema")) {
+      migrateProjectOnlySchemaV1ToV2(database, installedAt);
+      migrateProjectOnlySchemaV2ToV3(database, installedAt);
+      return;
+    }
+    if (userVersion === 2 && tables.some(({ name }) => name === "project_only_schema")) {
+      migrateProjectOnlySchemaV2ToV3(database, installedAt);
+      return;
+    }
     throw new Error(`Unsupported Project-only schema state: user_version=${userVersion}`);
   }
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(PROJECT_ONLY_SCHEMA_SQL);
-    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 1, ?)").run(installedAt);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 3, ?)").run(installedAt);
     database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
     const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
     if (foreignKeyViolation) throw new Error("Project-only schema contains a foreign-key violation");
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* preserve initialization error */ }
+    throw error;
+  }
+};
+
+const PROJECT_ONLY_SCHEMA_V3_ADDITIONS_SQL = PROJECT_ONLY_SCHEMA_SQL.slice(
+  PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TABLE run_outputs"),
+  PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TABLE execution_locks"),
+);
+
+const migrateProjectOnlySchemaV2ToV3 = (
+  database: ProjectOnlyDatabase,
+  installedAt: string,
+): void => {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec(PROJECT_ONLY_SCHEMA_V3_ADDITIONS_SQL);
+    database.exec("ALTER TABLE project_only_schema RENAME TO project_only_schema_v2");
+    database.exec(`CREATE TABLE project_only_schema (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      version INTEGER NOT NULL CHECK (version = 3),
+      installed_at TEXT NOT NULL
+    ) STRICT`);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 3, ?)")
+      .run(installedAt);
+    database.exec("DROP TABLE project_only_schema_v2");
+    database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
+    const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
+    if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* preserve migration error */ }
+    throw error;
+  }
+};
+
+const PROJECT_ONLY_SCHEMA_V2_ADDITIONS_SQL = PROJECT_ONLY_SCHEMA_SQL.slice(
+  PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TABLE project_creation_receipts"),
+  PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TRIGGER project_files_blocked_by_execution_lock_insert"),
+);
+
+const migrateProjectOnlySchemaV1ToV2 = (
+  database: ProjectOnlyDatabase,
+  installedAt: string,
+): void => {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec(PROJECT_ONLY_SCHEMA_V2_ADDITIONS_SQL);
+    database.exec("ALTER TABLE project_only_schema RENAME TO project_only_schema_v1");
+    database.exec(`CREATE TABLE project_only_schema (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      version INTEGER NOT NULL CHECK (version = 2),
+      installed_at TEXT NOT NULL
+    ) STRICT`);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 2, ?)")
+      .run(installedAt);
+    database.exec("DROP TABLE project_only_schema_v1");
+    database.exec("PRAGMA user_version = 2");
+    const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
+    if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* preserve migration error */ }
     throw error;
   }
 };

@@ -311,7 +311,7 @@ export type AgentGoalVerification = Readonly<{
   receiptDigest: string;
   evidence: Readonly<{
     openCodeTerminal: "idle" | "not_reached" | "unknown";
-    intentKind: "response_delivery" | "explicit_mutation" | "project_visual";
+    intentKind: "response_delivery" | "explicit_mutation" | "project_visual" | "project_batch";
     actionCount: number;
     terminalActionCount: number;
     committedActionCount: number;

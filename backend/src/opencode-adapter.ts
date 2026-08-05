@@ -470,7 +470,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
           ...(prompt.agentName ? { agent: validatedAgentName(prompt.agentName) } : {}),
           system: prompt.system,
           parts,
-          ...(legacyPromptToolsSafe ? { tools: promptTools } : {}),
+          ...(!prompt.scopedMcpScopeId || legacyPromptToolsSafe ? { tools: promptTools } : {}),
         }),
       }, directory);
       lifecycle.arm();
@@ -951,7 +951,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     // context; OpenCode's ambient filesystem-backed `skill` tool stays denied.
     // The explicit built-in map is retained for compatibility with versions
     // that merge exact names after wildcard rules.
-    const tools = { "*": false, ...disabledBuiltInTools(), question: true };
+    const tools = { "*": false, ...disabledBuiltInTools(), question: Boolean(scopeId) };
     if (!scopeId) {
       if (allowedTools !== undefined) {
         throw new ApiError(503, "opencode_mcp_unbound", "Riff MCP tools require a bound turn scope.");
@@ -992,9 +992,9 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       action: "ask" | "allow" | "deny";
     }> = [
       { permission: "*", pattern: "*", action: "deny" },
-      { permission: "question", pattern: "*", action: "allow" },
     ];
     if (!scopeId) return Object.freeze(rules.map(Object.freeze));
+    rules.push({ permission: "question", pattern: "*", action: "allow" });
     const binding = this.#scopedMcp.get(scopeId);
     if (!binding || binding.directory !== directory) {
       throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");

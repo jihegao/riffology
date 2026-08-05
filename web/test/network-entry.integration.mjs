@@ -93,8 +93,10 @@ test("production entry exact-binds IPv6 while using CSP-compatible localhost aut
     });
     assert.equal(home.status, 200);
     assert.equal(home.body.schemaVersion, 1);
-    assert.ok(Array.isArray(home.body.models));
     assert.ok(Array.isArray(home.body.projects));
+    assert.ok(Array.isArray(home.body.templates));
+    assert.ok(Array.isArray(home.body.recentConversations));
+    assert.equal("models" in home.body, false);
 
     const retired = await httpRequest("::1", appPort, "/api/sessions", {
       ...boundary,

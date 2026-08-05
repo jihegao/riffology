@@ -231,7 +231,7 @@ test("BackendApp completes the one-use frame HTTP flow without leaking browser c
   assert.equal(proxied.headers["access-control-allow-origin"], undefined);
   assert.equal(
     proxied.headers["content-security-policy"],
-    `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors ${network.app.origin}`,
+    `default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors ${network.app.origin}`,
   );
   assert.equal(childHeaders?.host, `127.0.0.1:${target.port}`);
   assert.equal(childHeaders?.cookie, undefined);

@@ -112,6 +112,11 @@ export interface ProductClient {
   projectFileWorkbenchRenderable?(projectId: string, fileRef: string): Promise<RendererResource>;
   browserState?(conversationId: string): Promise<BrowserSessionDto>;
   browserOpen?(conversationId: string, alias: "riff-app" | "riff-visual" | "riff-artifact"): Promise<BrowserSessionDto>;
+  browserServiceFrame?(conversationId: string, state: BrowserSessionDto): Promise<Readonly<{
+    schemaVersion: 1;
+    frameUrl: string;
+    expiresAt: string;
+  }>>;
   browserReload?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserBack?(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto>;
   browserScreenshot?(conversationId: string, state: BrowserSessionDto): Promise<BrowserScreenshotDto>;
@@ -477,6 +482,39 @@ export class HttpProductClient implements ProductClient {
       method: "POST",
       body: JSON.stringify({ alias }),
     }));
+  }
+
+  async browserServiceFrame(
+    conversationId: string,
+    state: BrowserSessionDto,
+  ): Promise<Readonly<{ schemaVersion: 1; frameUrl: string; expiresAt: string }>> {
+    const result = await this.#request<unknown>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/browser/service-frame`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          conversationGeneration: state.conversationGeneration,
+          pageGeneration: state.pageGeneration,
+        }),
+      },
+    );
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      throw new ProductApiError(502, "visual_frame_unavailable", "The visual service frame response is invalid.");
+    }
+    const record = result as Record<string, unknown>;
+    if (Object.keys(record).sort().join("\n") !== ["expiresAt", "frameUrl", "schemaVersion"].sort().join("\n")
+      || record.schemaVersion !== 1
+      || typeof record.frameUrl !== "string"
+      || !/^\/browser\/visual-service\/[A-Za-z0-9_-]{43}$/u.test(record.frameUrl)
+      || typeof record.expiresAt !== "string"
+      || !Number.isFinite(Date.parse(record.expiresAt))) {
+      throw new ProductApiError(502, "visual_frame_unavailable", "The visual service frame response is invalid.");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      frameUrl: record.frameUrl,
+      expiresAt: record.expiresAt,
+    });
   }
 
   browserReload(conversationId: string, state: BrowserSessionDto): Promise<BrowserSessionDto> {
@@ -1085,19 +1123,36 @@ export class HttpProductClient implements ProductClient {
       empty?: boolean;
     }> = {},
   ): Promise<T> {
-    const session = await this.#browserSession();
-    const response = await fetch(path, {
-      method: init.method ?? "GET",
-      credentials: "same-origin",
-      headers: init.method
-        ? {
-          ...(init.empty ? {} : { "content-type": "application/json" }),
-          "x-riff-csrf": session.csrfToken,
+    const request = async (): Promise<T> => {
+      const sessionPromise = this.#browserSession();
+      const session = await sessionPromise;
+      const response = await fetch(path, {
+        method: init.method ?? "GET",
+        credentials: "same-origin",
+        headers: init.method
+          ? {
+            ...(init.empty ? {} : { "content-type": "application/json" }),
+            "x-riff-csrf": session.csrfToken,
+          }
+          : undefined,
+        body: init.body,
+      });
+      try {
+        return await responseJson<T>(response);
+      } catch (error) {
+        if (isBrowserSessionDenied(error) && this.#session === sessionPromise) {
+          this.#session = undefined;
         }
-        : undefined,
-      body: init.body,
-    });
-    return responseJson<T>(response);
+        throw error;
+      }
+    };
+
+    try {
+      return await request();
+    } catch (error) {
+      if (!isBrowserSessionDenied(error)) throw error;
+      return request();
+    }
   }
 
   #browserSession(): Promise<BrowserSession> {
@@ -1140,6 +1195,11 @@ const responseJson = async <T>(
   }
   return body as T;
 };
+
+const isBrowserSessionDenied = (error: unknown): error is ProductApiError =>
+  error instanceof ProductApiError
+  && error.status === 403
+  && error.code === "browser_session_denied";
 
 const normalizeConversationRuntimeProjection = (
   value: unknown,
@@ -1341,6 +1401,7 @@ const normalizeGoalVerification = (
     "response_delivery",
     "explicit_mutation",
     "project_visual",
+    "project_batch",
   ]);
   const count = (item: unknown): item is number =>
     Number.isSafeInteger(item) && Number(item) >= 0 && Number(item) <= 1_000_000;

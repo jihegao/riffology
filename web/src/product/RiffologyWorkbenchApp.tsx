@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type RefObject } from "react";
-import { defaultProductClient, ProductApiError, type ProductClient, type ProductRecoveryStatus } from "./api";
+import { defaultProductClient, type ProductClient, type ProductRecoveryStatus } from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { RiffologyWorkbenchViewer } from "./RiffologyWorkbenchViewer";
 import type {
   BrowserSessionDto,
+  ConversationRuntimeProjection,
   HomeDto,
   ProjectSummary,
   ProviderDiscovery,
-  WorkspaceBinding,
   WorkspaceDto,
 } from "./types";
 
@@ -100,7 +100,6 @@ export function RiffologyWorkbenchApp({
   const [recovery, setRecovery] = useState<ProductRecoveryStatus | "checking">("checking");
   const [home, setHome] = useState<HomeDto>();
   const [workspace, setWorkspace] = useState<WorkspaceDto>();
-  const [workspaceBinding, setWorkspaceBinding] = useState<WorkspaceBinding>();
   const [providers, setProviders] = useState<ProviderDiscovery>();
   const [error, setError] = useState<string>();
   const [filesOpen, setFilesOpen] = useState(() => !compactWorkbench());
@@ -110,6 +109,7 @@ export function RiffologyWorkbenchApp({
   const [browserScreenshot, setBrowserScreenshot] = useState<string>();
   const [browserError, setBrowserError] = useState<string>();
   const [browserBusy, setBrowserBusy] = useState(false);
+  const [conversationRuntime, setConversationRuntime] = useState<ConversationRuntimeProjection>();
   const [agentActionBusy, setAgentActionBusy] = useState(false);
   const [agentMenuChecking, setAgentMenuChecking] = useState(false);
   const [chatPaneWidth, setChatPaneWidth] = useState(readChatPaneWidth);
@@ -158,7 +158,6 @@ export function RiffologyWorkbenchApp({
         setHome(undefined);
         setProviders(undefined);
         setWorkspace(undefined);
-        setWorkspaceBinding(undefined);
         setBrowser(undefined);
         setBrowserConversationId(undefined);
         browserStateRef.current = undefined;
@@ -178,30 +177,11 @@ export function RiffologyWorkbenchApp({
         const nextWorkspace = await client.workspace(route.projectId);
         if (!current()) return;
         setWorkspace(nextWorkspace);
-        setWorkspaceBinding(undefined);
         setBrowserLoadRevision(epoch);
       } else if (route.page === "new") {
-        let binding: WorkspaceBinding;
-        try {
-          binding = await client.workspaceBinding(route.workspaceKey);
-        } catch (cause) {
-          if (!(cause instanceof ProductApiError) || cause.status !== 404) throw cause;
-          binding = (await client.createWorkspaceBinding({
-            commandId: `workspace_create_${route.workspaceKey}`,
-            workspaceKey: route.workspaceKey,
-          })).binding;
-        }
-        if (!current()) return;
-        setWorkspaceBinding(binding);
-        if (binding.state === "bound" && binding.owner) {
-          navigateWorkbench(workbenchOwnerHref(
-            binding.owner.kind, binding.owner.id, binding.conversation.kind === "owner"
-              ? binding.conversation.id : undefined,
-          ));
-        }
+        setWorkspace(undefined);
       } else {
         setWorkspace(undefined);
-        setWorkspaceBinding(undefined);
       }
     } catch (cause) {
       if (current()) {
@@ -227,7 +207,6 @@ export function RiffologyWorkbenchApp({
   useEffect(() => {
     setRecovery("checking");
     setWorkspace(undefined);
-    setWorkspaceBinding(undefined);
     void load();
   }, [load]);
 
@@ -276,6 +255,31 @@ export function RiffologyWorkbenchApp({
     ? ownerWorkspace.conversations.find((item) => item.id === ownerRoute.conversationId)
       ?? ownerWorkspace.conversations[0]
     : undefined;
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    setConversationRuntime(undefined);
+    if (!currentConversation || !client.conversationRuntime) return () => { active = false; };
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const next = await client.conversationRuntime!(currentConversation.id);
+        if (active) setConversationRuntime(next);
+      } catch {
+        if (active) setConversationRuntime(undefined);
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [client, currentConversation?.id]);
   const browserMatchesConversation = Boolean(currentConversation
     && browserConversationId === currentConversation.id);
   const projectedBrowser = browserMatchesConversation ? browser : undefined;
@@ -529,16 +533,11 @@ export function RiffologyWorkbenchApp({
         {recovery !== "checking" && recovery.state === "ready" && !error
           && route.page === "home" && home && <RiffologyHome home={home} currentOwner={lastOwner} />}
         {recovery !== "checking" && recovery.state === "ready" && !error
-          && route.page === "new" && !workspaceBinding && (
-          <WorkbenchState title="正在载入项目引导…" />
-        )}
-        {recovery !== "checking" && recovery.state === "ready" && !error
-          && route.page === "new" && workspaceBinding && (
-          <UnboundProjectWorkspace
+          && route.page === "new" && (
+          <NewProjectWorkspace
             client={client}
-            binding={workspaceBinding}
+            workspaceKey={route.workspaceKey}
             providers={providers}
-            onBindingChange={setWorkspaceBinding}
           />
         )}
         {recovery !== "checking" && recovery.state === "ready" && !error
@@ -582,6 +581,8 @@ export function RiffologyWorkbenchApp({
               browserScreenshot={projectedBrowserScreenshot}
               browserError={browserError}
               browserBusy={browserBusy}
+              conversationId={currentConversation?.id}
+              runtime={conversationRuntime}
               onBrowserReconnect={() => void browserAction("reconnect")} />
           </>
         )}
@@ -857,78 +858,40 @@ function RiffologyHome({ home, currentOwner }: Readonly<{
   );
 }
 
-function UnboundProjectWorkspace({
+function NewProjectWorkspace({
   client,
-  binding,
+  workspaceKey,
   providers,
-  onBindingChange,
 }: Readonly<{
   client: ProductClient;
-  binding: WorkspaceBinding;
+  workspaceKey: string;
   providers?: ProviderDiscovery;
-  onBindingChange(binding: WorkspaceBinding): void;
 }>) {
-  const draftStorageKey = `riffology.workspace-draft.${binding.workspaceKey}`;
-  const readLocalDraft = () => {
-    try { return window.localStorage.getItem(draftStorageKey) ?? ""; }
-    catch { return ""; }
-  };
-  const [draft, setDraft] = useState(() => binding.draft || readLocalDraft());
-  const [savedLocalDraft, setSavedLocalDraft] = useState(() => readLocalDraft());
-  const [provider, setProvider] = useState(() => binding.provider
-    ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
+  const [name, setName] = useState("新仿真项目");
+  const [provider, setProvider] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    const localDraft = readLocalDraft();
-    setDraft(binding.draft || localDraft);
-    setSavedLocalDraft(localDraft);
-    setProvider(binding.provider
-      ? JSON.stringify([binding.provider.providerId, binding.provider.modelId]) : "");
-  }, [binding.bindingDigest, binding.draft, binding.provider]);
-  const saveLocalDraft = () => {
-    const value = draft.trim();
-    if (!value) return;
-    try { window.localStorage.setItem(draftStorageKey, value); }
-    catch { /* the visible non-authoritative draft remains usable this visit */ }
-    setSavedLocalDraft(value);
-  };
+    if (!provider && providers?.mode === "live" && providers.providerModels[0]) {
+      const first = providers.providerModels[0];
+      setProvider(JSON.stringify([first.providerId, first.modelId]));
+    }
+  }, [provider, providers]);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const [providerId, modelId] = provider ? JSON.parse(provider) as string[] : [];
-    if (!providerId || !modelId || !draft.trim() || busy) return;
+    if (!providerId || !modelId || !name.trim() || busy) return;
     setBusy(true); setError(undefined);
     try {
-      const saved = await client.updateWorkspaceBinding({
-        commandId: `workspace_draft_${crypto.randomUUID()}`,
-        workspaceKey: binding.workspaceKey,
-        expectedGeneration: binding.generation,
-        expectedBindingDigest: binding.bindingDigest,
-        draft: draft.trim(),
+      const created = await client.createProject({
+        commandId: `project_create_${workspaceKey}`,
+        name: name.trim(),
         provider: { providerId, modelId },
+        source: { kind: "blank" },
       });
-      onBindingChange(saved.binding);
-      const turn = await client.sendWorkspaceBootstrapTurn({
-        workspaceKey: binding.workspaceKey,
-        requestKey: `bootstrap_turn_${crypto.randomUUID()}`,
-        expectedGeneration: saved.binding.generation,
-        expectedBindingDigest: saved.binding.bindingDigest,
-        text: draft.trim(),
-      });
-      onBindingChange(turn.binding);
-      try { window.localStorage.removeItem(draftStorageKey); }
-      catch { /* authoritative binding already succeeded */ }
-      setSavedLocalDraft("");
-      setDraft("");
-      if (turn.binding.state === "bound" && turn.binding.owner) {
-        navigateWorkbench(workbenchOwnerHref(
-          turn.binding.owner.kind, turn.binding.owner.id,
-          turn.binding.conversation.kind === "owner"
-            ? turn.binding.conversation.id : undefined,
-        ));
-      }
+      navigateWorkbench(workbenchOwnerHref("project", created.project.id, created.conversation.id));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "项目引导暂时不可用。");
+      setError(cause instanceof Error ? cause.message : "项目创建暂时不可用。");
     } finally { setBusy(false); }
   };
   const providerModels = providers?.mode === "live" ? providers.providerModels : [];
@@ -936,59 +899,40 @@ function UnboundProjectWorkspace({
     <>
       <aside className="riffology-chat-pane riffology-unbound-chat" aria-label="新项目引导">
         <header className="riffology-conversation-heading"><div>
-          <strong>新项目</strong><span>{binding.state === "unbound" ? "未绑定 · Agent 项目引导" : "已绑定"}</span>
+          <strong>新项目</strong><span>创建 Project 与首个 Conversation</span>
         </div></header>
         <div className="riffology-unbound-timeline" role="log" aria-label="Agent 项目引导">
           <article><strong>Assistant</strong>
-            <p>先描述要研究的问题。我会通过受限工具建立或选择 Riff 对象，并在收到持久回执后绑定工作区。</p>
+            <p>先创建一个空白 Project。进入工作台后，在首个对话里描述模型需求，OpenCode 会生成并提交模型文件。</p>
           </article>
-          {binding.bootstrapMessages.map((message) => <article key={message.id}
-            className={message.role === "user" ? "riffology-local-draft" : undefined}>
-            <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
-            <p>{message.text}</p>
-          </article>)}
-          {savedLocalDraft && !binding.bootstrapMessages.some((message) =>
-            message.role === "user" && message.text === savedLocalDraft) && <article
-              className="riffology-local-draft">
-            <strong>You</strong><p>{savedLocalDraft}</p>
-          </article>}
         </div>
         <form className="riffology-unbound-composer" onSubmit={submit}>
+          <label htmlFor="new-project-name">项目名称</label>
+          <input id="new-project-name" maxLength={200} value={name} disabled={busy}
+            onChange={(event) => setName(event.target.value)} />
           <label htmlFor="unbound-project-provider">Provider</label>
           <select id="unbound-project-provider" value={provider}
-            disabled={busy || binding.providerMode !== "live"}
+            disabled={busy || providers?.mode !== "live"}
             onChange={(event) => setProvider(event.target.value)}>
             <option value="">选择 Provider / Model…</option>
             {providerModels.map((item) => <option key={item.qualifiedId}
               value={JSON.stringify([item.providerId, item.modelId])}>{item.qualifiedId}</option>)}
           </select>
-          <label htmlFor="unbound-project-draft">项目目标</label>
-          <textarea id="unbound-project-draft" rows={4} value={draft}
-            placeholder="描述要建立的仿真项目…"
-            disabled={busy || binding.state !== "unbound"}
-            onChange={(event) => setDraft(event.target.value)} />
-          <button type="submit" disabled={!draft.trim() || !provider || busy
-            || binding.providerMode !== "live" || binding.state !== "unbound"}>
-            {busy ? "Agent 正在处理…" : "发送给 Agent"}
+          <button type="submit" disabled={!name.trim() || !provider || busy
+            || providers?.mode !== "live"}>
+            {busy ? "正在创建…" : "创建项目"}
           </button>
-          {binding.providerMode === "read_only" && <button type="button"
-            disabled={!draft.trim() || busy} onClick={saveLocalDraft}>
-            保存引导草稿
-          </button>}
           {error && <small role="alert">{error}</small>}
-          {binding.providerMode === "read_only" && <small>
-            OpenCode Provider 不可用；现有引导与绑定只读，未启用隐藏 fallback。
+          {providers?.mode === "read_only" && <small>
+            OpenCode Provider 不可用；Project 创建保持关闭，不会启用隐藏 fallback。
           </small>}
-          {binding.providerMode === "read_only" && <small>
-            本地引导草稿不是 Riff Project 权威数据。
-          </small>}
-          <small>只有 Riff receipt 能证明 Project 已持久写入；对话文本不是权威数据。</small>
+          <small>Project 与首个 Conversation 会在同一持久事务内创建。</small>
         </form>
       </aside>
       <section className="riffology-stage2-viewer riffology-unbound-viewer" aria-label="未绑定项目状态">
-        <p className="product-eyebrow">UNBOUND WORKSPACE</p>
-        <h1>{binding.ownerProjection?.name ?? "等待 Agent 建立并绑定 Riff Project"}</h1>
-        <p>WorkspaceBinding generation {binding.generation} · {binding.state}</p>
+        <p className="product-eyebrow">NEW PROJECT</p>
+        <h1>创建后，在对话中描述模型需求</h1>
+        <p>模型文件、实验配置与 Run 都由 Project 持久拥有。</p>
       </section>
     </>
   );

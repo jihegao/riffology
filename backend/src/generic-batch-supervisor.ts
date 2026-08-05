@@ -541,6 +541,8 @@ export class GenericBatchSupervisor {
         if (!child.pid) throw new GenericBatchSupervisorError("process_spawn_failed", "The batch helper did not receive a PID.");
         scratchLease.groupGoneVerified = false;
         const lifecycle = observeChild(child);
+        child.stdout!.on("data", (chunk: Buffer) => appendStream(mutable, "stdout", Buffer.from(chunk)));
+        child.stderr!.on("data", (chunk: Buffer) => appendStream(mutable, "stderr", Buffer.from(chunk)));
         let identity: BatchProcessIdentity;
         let launchReceipt: BatchLaunchReceipt;
         try {
@@ -571,6 +573,14 @@ export class GenericBatchSupervisor {
           await runGateHook(lifecycle.completion, registrationDeadline, this.#now);
           await runGateHook(lifecycle.closed, registrationDeadline, this.#now);
           scratchLease.groupGoneVerified = true;
+          const bootstrapStderr = boundedDiagnostic(Buffer.concat(mutable.stderr).toString("utf8").trim());
+          if (bootstrapStderr && error instanceof GenericBatchSupervisorError) {
+            throw new GenericBatchSupervisorError(
+              error.code,
+              `${error.message} Launch helper stderr: ${bootstrapStderr}`,
+              { cause: error },
+            );
+          }
           throw error;
         }
         mutable.identity = identity;
@@ -586,9 +596,6 @@ export class GenericBatchSupervisor {
         active.set(identity.pid, tracked);
         activeCount += 1;
         maxConcurrencyObserved = Math.max(maxConcurrencyObserved, activeCount);
-        child.stdout!.on("data", (chunk: Buffer) => appendStream(mutable, "stdout", Buffer.from(chunk)));
-        child.stderr!.on("data", (chunk: Buffer) => appendStream(mutable, "stderr", Buffer.from(chunk)));
-
         this.#faultInjector?.("after_launch_receipt_persisted", { projectRoot, projectCopy });
         await runGateHook(
           input.hooks?.registerProcess?.(identity, launchReceipt) ?? Promise.resolve(),

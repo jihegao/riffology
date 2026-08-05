@@ -9,7 +9,7 @@ const NOW = "2026-08-04T04:00:00.000Z";
 const LATER = "2026-08-04T04:01:00.000Z";
 const EXECUTION = Object.freeze({ schemaVersion: 2, batch: { entrypoint: "model.py" } });
 
-test("fresh Project-only Store contains no Model table or owner columns", (t) => {
+test("fresh Project-only Store contains no Model authority or polymorphic owner columns", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-only-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
@@ -18,10 +18,43 @@ test("fresh Project-only Store contains no Model table or owner columns", (t) =>
   const tables = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map(({ name }) => name);
   assert.equal(tables.includes("models"), false);
   assert.equal(tables.includes("projects"), true);
-  for (const table of tables) {
+  for (const table of ["projects", "project_files", "experiment_configurations", "technical_checks", "runs"]) {
     const columns = (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name);
-    assert.equal(columns.some((name) => /model_id|source_model|model_snapshot/u.test(name)), false, table);
+    assert.equal(columns.some((name) => /owner_kind|owner_id|model_id|source_model|model_snapshot/u.test(name)), false, table);
   }
+  const conversationColumns = (database.prepare("PRAGMA table_info(project_conversations)").all() as Array<{ name: string }>).map(({ name }) => name);
+  assert.equal(conversationColumns.includes("project_id"), true);
+  assert.equal(conversationColumns.includes("provider_id"), true);
+  assert.equal(conversationColumns.includes("model_id"), true);
+});
+
+test("Project and first Conversation creation is atomic, idempotent, and restart-safe", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "riff-project-conversation-create-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let store = ProjectOnlyStore.open(join(root, ".riff-product"));
+  t.after(() => { try { store.close(); } catch { /* already closed */ } });
+  const input = {
+    commandId: "command_project_create",
+    project: { id: "project_create", name: "Created", source: { kind: "blank" as const }, createdAt: NOW },
+    conversation: {
+      id: "conversation_create", name: "模型设计", providerId: "provider", modelId: "agent",
+    },
+  };
+  const created = store.createProjectWithConversation(input);
+  assert.equal(created.project.id, "project_create");
+  assert.equal(created.conversation.projectId, "project_create");
+  assert.match(created.receiptDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(store.createProjectWithConversation(input), created);
+  store.close();
+
+  store = ProjectOnlyStore.open(join(root, ".riff-product"));
+  assert.deepEqual(store.createProjectWithConversation(input), created);
+  assert.equal(store.projects().length, 1);
+  assert.equal(store.conversations("project_create").length, 1);
+  assert.throws(() => store.createProjectWithConversation({
+    ...input,
+    project: { ...input.project, name: "Conflicting intent" },
+  }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "idempotency_conflict");
 });
 
 test("Project workspace status, technical lock, one active Run, and non-retained source are enforced", (t) => {

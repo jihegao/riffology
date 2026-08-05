@@ -56,6 +56,10 @@ test("recovery-only Product startup serves a CSP shell and denies every authorit
   assert.equal(defaultWorkbench.status, 200);
   assert.match(defaultWorkbench.text, /id="root"/u);
 
+  const projectHome = await raw(network.app, "GET", "/workbench/home");
+  assert.equal(projectHome.status, 200);
+  assert.match(projectHome.text, /id="root"/u);
+
   const ownerWorkbench = await raw(network.app, "GET", "/workbench/projects/project_7");
   assert.equal(ownerWorkbench.status, 200);
 

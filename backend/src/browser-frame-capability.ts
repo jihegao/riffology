@@ -13,8 +13,12 @@ const SECRET_BYTES = 32;
 
 export const BROKER_DOCUMENT_CSP = [
   "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self'",
+  // Visual Runs intentionally execute Project-owned presentation code inside
+  // this isolated, capability-scoped broker origin. Same-origin assets were
+  // already executable; permit equivalent inline assets so standalone Mesa
+  // visual documents keep their controls and styling after proxying.
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self'",

@@ -326,7 +326,11 @@ export const macosBatchSandboxProfile = (input: Readonly<{
     input.inputPath,
     input.outputRoot,
     input.tempRoot,
-    ...(input.launchReceiptPath ? [input.launchReceiptPath] : []),
+    // The gate fsyncs the receipt's containing directory before acknowledging
+    // registration. Under /Users, the explicit deny rule would otherwise
+    // reject opening that exact directory even though the receipt file itself
+    // is readable and writable.
+    ...(input.launchReceiptPath ? [dirname(input.launchReceiptPath), input.launchReceiptPath] : []),
   ],
   writableRoots: [
     input.outputRoot,

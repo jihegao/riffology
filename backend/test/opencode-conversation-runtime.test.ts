@@ -394,12 +394,11 @@ test("adapter sends every A2 prompt with its explicit provider/model and disable
   await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, { text: "hello", system: "bounded", attachments: [] });
   assert.deepEqual(bodies[0].model, { providerID: "provider-z", modelID: "model-2" });
   assert.equal("messageID" in bodies[0], false);
-  assert.equal("tools" in bodies[0], false,
-    "legacy prompt tools must not override the session permission ruleset");
+  assert.equal(Object.values(bodies[0].tools).every((enabled) => enabled === false), true,
+    "an unscoped direct prompt must explicitly disable every built-in tool");
   assert.deepEqual(sessionPermissionBodies, [
     { permission: [
       { permission: "*", pattern: "*", action: "deny" },
-      { permission: "question", pattern: "*", action: "allow" },
     ] },
     { permission: [] },
   ]);

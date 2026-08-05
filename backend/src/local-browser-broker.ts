@@ -1002,6 +1002,11 @@ const isolateContext = async (
   context: BrowserContext,
   target: DeclaredBrowserTarget,
 ): Promise<void> => {
+  // The explicitly configured Solara target owns its loopback page and its
+  // asset graph (including the Solara client websocket). The target resolver
+  // emits this exact projected identity; all other targets stay behind the
+  // strict same-origin request proxy below.
+  if (target.alias === "riff-visual" && target.projectedUrl === "riff-visual://solara/") return;
   const declaredOrigin = new URL(target.url).origin;
   await context.route("**/*", async (route) => {
     try {
@@ -1043,7 +1048,12 @@ const isolateContext = async (
       await route.abort("blockedbyclient").catch(() => undefined);
     }
   });
-  await context.routeWebSocket("**/*", (socket) => socket.close());
+  // Solara hydrates its read-only page over a same-origin WebSocket. Keep the
+  // stricter default for the Product shell and artifact pages, while allowing
+  // the explicitly declared riff-visual target to complete its own hydration.
+  if (target.alias !== "riff-visual") {
+    await context.routeWebSocket("**/*", (socket) => socket.close());
+  }
 };
 
 const allowedBrowserRequest = (
