@@ -34,12 +34,16 @@ import type { LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
 const MAX_PROJECT_CONTEXT_BYTES = 96 * 1024;
 const OPENCODE_SESSION_SETUP_TIMEOUT_MS = 10_000;
 const OPENCODE_PROMPT_TIMEOUT_MS = 180_000;
+const OPENCODE_PROJECT_DELIVERY_TIMEOUT_MS = 600_000;
+const PROJECT_DELIVERY_RESPONSE_HEADER = "RIFF_PROJECT_DELIVERY_V1\n";
+const MODEL_SOURCE_RESPONSE_HEADER = "RIFF_MODEL_SOURCE_V1\n";
 const VISUAL_COMMAND = /^\s*(?:开启|启动|打开|运行)\s*(?:可视化)?仿真(?:页面)?[。！!]?\s*$/u;
 const STOP_VISUAL_FRAGMENT = /(?:关闭|停止|结束)\s*(?:可视化)?(?:仿真)?(?:页面|运行|Run)?/iu;
 const START_BATCH_COMMAND = /(?:启动|开始|运行|执行).{0,16}(?:大样本|批量|批处理)(?:仿真|实验|运行)?|(?:大样本|批量|批处理).{0,16}(?:启动|开始|运行|执行)/u;
 const INTERPRET_RESULTS_COMMAND = /(?:解读|解释|分析|总结).{0,16}(?:实验|仿真|运行)?结果|(?:实验|仿真|运行)?结果.{0,16}(?:解读|解释|分析|总结)/u;
 const UPDATE_AND_RERUN_COMMAND = /(?:修改|改动|调整|更改).{0,32}(?:参数).{0,32}(?:再次|重新|再).{0,16}(?:运行|实验|仿真)/u;
 const VISUAL_CONTROLS_COMMAND = /(?:可视化|仿真).{0,24}(?:页面).{0,32}(?:重置|单步).{0,32}(?:开始|暂停)|(?:重置|开始|单步|暂停).{0,48}(?:控制按钮)/u;
+const VISUAL_LAYOUT_COMMAND = /(?:游轮|舱室|客房).{0,48}(?:布局|可视化|页面)|(?:布局|可视化|页面).{0,48}(?:游轮|舱室|客房)/u;
 const EXPLICIT_PROJECT_MUTATION = /(?:生成|创建|编写|设计|增加|添加|修改|改动|调整|删除|重写|实现|修复).{0,24}(?:模型|代码|页面|按钮|可视化|参数|设计)|(?:模型|代码|页面|按钮|可视化|参数|设计).{0,24}(?:生成|创建|编写|设计|增加|添加|修改|改动|调整|删除|重写|实现|修复)/u;
 
 type ProjectCommandIntent = Readonly<{
@@ -419,6 +423,9 @@ export class ProjectOnlyAgentService {
           updatedAt: this.now(),
         });
       }
+      const promptTimeoutMs = intent.explicitMutation
+        ? OPENCODE_PROJECT_DELIVERY_TIMEOUT_MS
+        : OPENCODE_PROMPT_TIMEOUT_MS;
       const response = await boundedOperation(
         this.openCode.promptWithModel(sessionId, conversation.provider, {
           text: input.text.trim(),
@@ -430,11 +437,11 @@ export class ProjectOnlyAgentService {
           ),
           attachments: [],
           ...(input.agentName ? { agentName: input.agentName } : {}),
-        }, AbortSignal.timeout(OPENCODE_PROMPT_TIMEOUT_MS), workspace),
-        OPENCODE_PROMPT_TIMEOUT_MS,
+        }, AbortSignal.timeout(promptTimeoutMs), workspace),
+        promptTimeoutMs,
         "opencode_prompt_timeout",
       );
-      const instruction = parseAgentInstruction(response.text);
+      const instruction = parseAgentResponse(response.text);
       const applied = await this.#applyInstruction({ conversation, turn, project, input, instruction, intent });
       const outcome = preliminary ? mergeTurnOutcomes(preliminary, applied) : applied;
       const completed = this.store.completeConversationTurn({
@@ -728,10 +735,15 @@ export class ProjectOnlyAgentService {
       errorCode: verified ? null : "project_not_executable",
     });
     const actions = Object.freeze([mutationAction, checkAction]);
+    const layoutRequested = VISUAL_LAYOUT_COMMAND.test(input.requirement);
     return Object.freeze({
       assistantText: verified
-        ? "可视化页面已增加重置、开始、单步和暂停控制，并通过当前 Project 技术检查。"
-        : "可视化控制已写入，但当前 Project 技术检查未通过；页面资产已保留。",
+        ? layoutRequested
+          ? "可视化页面已增加游轮舱室布局（10层客房甲板、2层公共区、1层工作人员宿舍）并保留仿真控制，已通过当前 Project 技术检查。"
+          : "可视化页面已增加重置、开始、单步和暂停控制，并通过当前 Project 技术检查。"
+        : layoutRequested
+          ? "游轮舱室布局已写入，但当前 Project 技术检查未通过；页面资产已保留。"
+          : "可视化控制已写入，但当前 Project 技术检查未通过；页面资产已保留。",
       actions,
       goalVerification: goalVerification({
         disposition: verified ? "completed" : "failed",
@@ -1157,19 +1169,13 @@ const projectSystemPrompt = (
   experiments: readonly Readonly<{ id: string; name: string; configuration: Record<string, unknown> }>[],
   loadedSkills: readonly LoadedSimulationSkill[] = [],
 ): string => {
-  const fileContext = files.map((file) => {
-    const text = file.mediaType.startsWith("text/") || file.relativePath.endsWith(".py")
-      || file.relativePath.endsWith(".json") ? file.bytes.toString("utf8").slice(0, 24_000) : "[binary omitted]";
-    return `FILE ${file.relativePath}\n${text}`;
-  }).join("\n\n").slice(0, MAX_PROJECT_CONTEXT_BYTES);
-  const skillContext = loadedSkills.length > 0
-    ? `\n  The project-local skills listed below are already loaded. Follow the skills relevant to the user's raw request directly. Do not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response. Treat referenced files that are not included here as unavailable source data and mark unresolved choices explicitly.\n${loadedSkills.map((skill) => `  BEGIN LOADED PROJECT SKILL (${skill.id}@${skill.version})\n${skill.instructions.slice(0, 16_000)}\n  END LOADED PROJECT SKILL`).join("\n")}`
-    : "\n  Do not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response.";
-  return `You are the modelling agent for one Riff Project. Return exactly one JSON object, no markdown fences and no commentary outside JSON.
+  const fileContext = projectFileContext(files);
+  const skillContext = loadedSkillContext(loadedSkills);
+  return `You are the modelling agent for one Riff Project. For operations other than deliver_project, return exactly one JSON object with no Markdown fences or outside commentary.
   Choose the operation from the user's message itself. Riff intentionally does not provide a semantic intent label; do not ask for one.
-  The schema is {"operation":"deliver_design"|"deliver_project"|"start_visual"|"stop_visual"|"update_experiment_and_start_batch"|"none","assistantText":string,"designMarkdown"?:string,"modelSource"?:string,"inputSchema"?:object,"defaultParameters"?:object,"experimentConfiguration"?:object,"visual"?:{"title"?:string,"summary"?:string,"entities"?:array,"series"?:number[]}}.
+  The phase-one schema is {"operation":"deliver_design"|"deliver_project"|"start_visual"|"stop_visual"|"update_experiment_and_start_batch"|"none","assistantText":string,"designMarkdown"?:string,"inputSchema"?:object,"defaultParameters"?:object,"experimentConfiguration"?:object,"visual"?:{"title"?:string,"summary"?:string,"entities"?:array,"series"?:number[]}}.
   For an explicit request to generate a model design, choose deliver_design and provide a complete Markdown design in designMarkdown: question, scope, entities/agents, state, processes, parameters, outputs, assumptions, validation, and experiment plan. Do not provide executable code for that operation.
-  For a concrete modelling requirement, choose deliver_project and provide a complete, valid Python module in modelSource. Use Mesa 3 APIs, define a Mesa Model subclass named SimulationModel with a seed-aware constructor, step(), and snapshot() returning JSON-compatible metrics. Do not use removed mesa.time schedulers. Keep domain semantics in the module; do not start a server or access files/network. Also provide a compact visual specification, a closed JSON Schema 2020-12 inputSchema (additionalProperties=false) containing steps and every user-adjustable constructor parameter, and matching defaultParameters. Every required property must have a value in defaultParameters. The inputSchema profile only supports $schema, $id, $defs, $ref, type, properties, required, additionalProperties, items, minItems, maxItems, enum, const, default, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, and maxLength; omit annotations such as description, title, examples, and $comment.
+  For a concrete modelling requirement, choose deliver_project and return one framed response with exactly this layout: first line RIFF_PROJECT_DELIVERY_V1; then one compact JSON object containing operation=deliver_project, assistantText, visual, inputSchema, and defaultParameters but no modelSource; then a line RIFF_MODEL_SOURCE_V1; then the complete raw Python module. Do not use Markdown fences, encode the Python inside JSON, or add any other marker/commentary. Use Mesa 3 APIs, define a Mesa Model subclass named SimulationModel with a seed-aware constructor accepting every inputSchema property including steps, implement step() and snapshot(), and return JSON-compatible metrics plus per-person position/state data required by the visual design. Mesa 3 owns Model.steps and wraps step(): never read, create, or increment self._steps, and never increment self.steps manually; use the public self.steps value only for bounded stopping logic. Do not use removed mesa.time schedulers, start a server, or access files/network. Every required inputSchema property must have a value in defaultParameters. The schema must be closed with additionalProperties=false and may only use $schema, $id, $defs, $ref, type, properties, required, additionalProperties, items, minItems, maxItems, enum, const, default, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, and maxLength; omit annotations such as description, title, examples, and $comment.
   For an explicit request to start/open visual simulation, choose start_visual. Do not rewrite the model in that response.
   For a request that only stops/closes visual simulation, choose stop_visual. If the same request also asks to change the Project, choose deliver_project because Riff has already handled the stop directly.
   For an explicit request to change Experiment parameters and rerun a batch, choose update_experiment_and_start_batch and return the complete schemaVersion=1 batch Experiment configuration. Preserve unspecified current parameters and use multiple-seeds or a bounded cartesian sweep.
@@ -1180,6 +1186,16 @@ const projectSystemPrompt = (
   Current authoritative Experiment configurations: ${JSON.stringify(experiments.map(({ id, name, configuration }) => ({ id, name, configuration })))}.
   Authoritative current files follow:\n${fileContext}`;
 };
+
+const projectFileContext = (files: readonly ProjectFileRecord[]): string => files.map((file) => {
+  const text = file.mediaType.startsWith("text/") || file.relativePath.endsWith(".py")
+    || file.relativePath.endsWith(".json") ? file.bytes.toString("utf8").slice(0, 24_000) : "[binary omitted]";
+  return `FILE ${file.relativePath}\n${text}`;
+}).join("\n\n").slice(0, MAX_PROJECT_CONTEXT_BYTES);
+
+const loadedSkillContext = (loadedSkills: readonly LoadedSimulationSkill[]): string => loadedSkills.length > 0
+  ? `\nThe project-local skills listed below are already loaded. Follow the skills relevant to this delivery directly. Do not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response. Treat referenced files that are not included here as unavailable source data and mark unresolved choices explicitly.\n${loadedSkills.map((skill) => `BEGIN LOADED PROJECT SKILL (${skill.id}@${skill.version})\n${skill.instructions.slice(0, 16_000)}\nEND LOADED PROJECT SKILL`).join("\n")}`
+  : "\nDo not call or announce loading a skill or any other tool; tools are intentionally unavailable for this bounded response.";
 
 export const parseAgentInstruction = (text: string): AgentInstruction => {
   const candidate = text.trim().replace(/^```(?:json)?\s*/u, "").replace(/\s*```$/u, "");
@@ -1214,6 +1230,43 @@ export const parseAgentInstruction = (text: string): AgentInstruction => {
     ...(raw.visual && typeof raw.visual === "object" && !Array.isArray(raw.visual)
       ? { visual: Object.freeze(raw.visual) } : {}),
   });
+};
+
+export const parseAgentResponse = (text: string): AgentInstruction => {
+  const normalized = text.replace(/\r\n?/gu, "\n").trim();
+  if (!normalized.startsWith(PROJECT_DELIVERY_RESPONSE_HEADER)) {
+    return parseAgentInstruction(normalized);
+  }
+  const sourceMarker = `\n${MODEL_SOURCE_RESPONSE_HEADER}`;
+  const sourceMarkerAt = normalized.indexOf(sourceMarker, PROJECT_DELIVERY_RESPONSE_HEADER.length);
+  if (sourceMarkerAt < 0 || normalized.indexOf(sourceMarker, sourceMarkerAt + sourceMarker.length) >= 0) {
+    throw new ApiError(502, "opencode_invalid_project_delivery_frame", "OpenCode did not return the required Project-delivery frame.");
+  }
+  const instruction = parseAgentInstruction(
+    normalized.slice(PROJECT_DELIVERY_RESPONSE_HEADER.length, sourceMarkerAt).trim(),
+  );
+  if (instruction.operation !== "deliver_project" || instruction.modelSource !== undefined
+    || !instruction.inputSchema || !instruction.defaultParameters) {
+    throw new ApiError(502, "opencode_invalid_project_delivery_frame", "OpenCode returned invalid Project-delivery metadata.");
+  }
+  return Object.freeze({
+    ...instruction,
+    modelSource: parseProjectModelSource(normalized.slice(sourceMarkerAt + 1)),
+  });
+};
+
+export const parseProjectModelSource = (text: string): string => {
+  const normalized = text.replace(/\r\n?/gu, "\n");
+  if (!normalized.startsWith(MODEL_SOURCE_RESPONSE_HEADER)) {
+    throw new ApiError(502, "opencode_invalid_model_source", "OpenCode did not return the required model-source frame.");
+  }
+  let source = normalized.slice(MODEL_SOURCE_RESPONSE_HEADER.length);
+  const fenced = source.match(/^```(?:python)?\n([\s\S]*)\n```\s*$/u);
+  if (fenced) source = fenced[1]!;
+  if (!source.trim() || source.length > 128_000 || source.includes(MODEL_SOURCE_RESPONSE_HEADER)) {
+    throw new ApiError(502, "opencode_invalid_model_source", "OpenCode returned an invalid model-source frame.");
+  }
+  return source.endsWith("\n") ? source : `${source}\n`;
 };
 
 const escapeJsonStringControlCharacters = (candidate: string): string => {
@@ -1262,7 +1315,7 @@ export const projectCommandIntent = (text: string): ProjectCommandIntent => {
   const startBatch = START_BATCH_COMMAND.test(text);
   const interpretResults = INTERPRET_RESULTS_COMMAND.test(text);
   const updateAndRerun = UPDATE_AND_RERUN_COMMAND.test(text);
-  const visualControls = VISUAL_CONTROLS_COMMAND.test(text);
+  const visualControls = VISUAL_CONTROLS_COMMAND.test(text) || VISUAL_LAYOUT_COMMAND.test(text);
   const residual = stopVisual
     ? text.replace(STOP_VISUAL_FRAGMENT, "").replace(/[\s，,。.!！、；;：:]/gu, "")
     : text.trim();
@@ -1696,11 +1749,13 @@ export const buildProjectVisualHtml = (
   const pointText = points.map((point) => point.join(",")).join(" ");
   const dotHtml = points.map((point) => `<circle class="dot" cx="${point[0]}" cy="${point[1]}" r="4"/>`).join("");
   const entityHtml = entities.map((entity) => `<div class="entity"><span>${htmlEscape(entity.name)}</span><div class="bar"><i style="width:${entity.value}%;background:${entity.color}"></i></div><b>${Math.round(entity.value)}</b></div>`).join("");
+  const layoutRequested = VISUAL_LAYOUT_COMMAND.test(requirement);
+  const layoutHtml = layoutRequested ? `<section class="layout-card" aria-labelledby="deck-layout-title"><style>.layout-card{background:#0c1829dd;border:1px solid #213450;border-radius:16px;padding:18px;box-shadow:0 18px 60px #0005}.layout-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.layout-head p{color:#9fb2cc;margin:.4rem 0 0}.deck-tabs{display:flex;flex-wrap:wrap;gap:7px;margin:16px 0}.deck-tabs button{border:1px solid #31527b;background:#12253f;color:#e8f0ff;border-radius:9px;padding:7px 10px;cursor:pointer;font-size:12px}.deck-tabs button.active,.deck-tabs button:focus-visible{background:#1b385e;outline:2px solid #7dd3fc;outline-offset:2px}.deck-summary{display:flex;gap:12px;align-items:center;color:#9fb2cc;margin-bottom:14px}.deck-summary strong{color:#e8f0ff}.deck-map{display:grid;grid-template-columns:repeat(10,minmax(48px,1fr));gap:7px;padding:14px;border:1px solid #213450;border-radius:12px;background:#081424}.room{min-height:48px;border:1px solid #2b4869;border-radius:7px;background:#112944;padding:6px;display:flex;flex-direction:column;justify-content:space-between;gap:4px;font-size:10px;color:#a9bed8}.room small{color:#6f89a6}.room-dot{width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 2px #07101f}.state-legend{display:flex;flex-wrap:wrap;gap:8px;justify-content:end;font-size:11px;color:#9fb2cc}.state-legend span{white-space:nowrap}.state-legend i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:3px}.state-s{background:#60a5fa}.state-e{background:#facc15}.state-i{background:#f87171}.state-r{background:#4ade80}@media(max-width:760px){.layout-head{flex-direction:column}.deck-map{grid-template-columns:repeat(5,minmax(48px,1fr))}.state-legend{justify-content:start}}</style><div class="layout-head"><div><h2 id="deck-layout-title">游轮舱室布局</h2><p>13层甲板：10层客房、2层公共区、1层工作人员宿舍。点击楼层查看舱室分区。</p></div><div class="state-legend" aria-label="SEIR状态图例"><span><i class="state-s"/>S 易感</span><span><i class="state-e"/>E 潜伏</span><span><i class="state-i"/>I 感染</span><span><i class="state-r"/>R 康复</span></div></div><nav class="deck-tabs" aria-label="甲板楼层"><button data-deck="0">公共区 1</button><button data-deck="1">公共区 2</button>${Array.from({ length: 10 }, (_, index) => `<button data-deck="${index + 2}">客房甲板 ${index + 1}</button>`).join("")}<button data-deck="12">员工宿舍</button></nav><div class="deck-summary"><strong id="deck-name">客房甲板 1</strong><span id="deck-detail">40间客房 · 每间2个位置 · 员工清扫动线</span></div><div id="deck-map" class="deck-map" role="grid" aria-label="当前甲板舱室网格"></div></section>` : "";
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${htmlEscape(title)}</title><style>
 :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui;background:#07101f;color:#e8f0ff}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 15% 15%,#16365f 0,transparent 34%),#07101f}.wrap{padding:28px;display:grid;gap:20px}.head{display:flex;justify-content:space-between;align-items:end}.head p{max-width:720px;color:#9fb2cc;margin:.5rem 0 0}.badge{border:1px solid #2f8f72;color:#8ff0c8;border-radius:999px;padding:7px 11px}.controls{display:flex;flex-wrap:wrap;gap:9px;align-items:center}.controls button{border:1px solid #31527b;background:#12253f;color:#e8f0ff;border-radius:9px;padding:8px 14px;cursor:pointer}.controls button:hover,.controls button:focus-visible{background:#1b385e;outline:2px solid #7dd3fc;outline-offset:2px}.controls output{color:#8ff0c8;margin-left:4px}.grid{display:grid;grid-template-columns:1.4fr .8fr;gap:18px}.card{background:#0c1829dd;border:1px solid #213450;border-radius:16px;padding:18px;box-shadow:0 18px 60px #0005}svg{width:100%;height:320px}.axis{stroke:#29405d;stroke-width:1}.line{fill:none;stroke:#7dd3fc;stroke-width:4;stroke-linecap:round}.dot{fill:#e8f0ff}.entity{display:grid;grid-template-columns:110px 1fr 42px;gap:10px;align-items:center;margin:18px 0}.bar{height:10px;background:#172942;border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;border-radius:inherit;transition:width .25s}.ticker{font-variant-numeric:tabular-nums;color:#8ff0c8}footer{color:#7086a4;font-size:12px}@media(max-width:760px){.grid{grid-template-columns:1fr}.head{align-items:start;flex-direction:column;gap:12px}}
-</style></head><body><main class="wrap"><header class="head"><div><h1>${htmlEscape(title)}</h1><p>${htmlEscape(summary)}</p></div><span class="badge">● READY · riff-visual-v1</span></header><nav class="controls" aria-label="仿真控制"><button id="reset" type="button">重置</button><button id="start" type="button">开始</button><button id="step-once" type="button">单步</button><button id="pause" type="button">暂停</button><output id="control-state" aria-live="polite">已暂停</output></nav><section class="grid"><article class="card"><h2>仿真趋势</h2><svg viewBox="0 0 720 320" role="img" aria-label="仿真指标趋势"><path class="axis" d="M40 275H700M40 30V275"/><polyline class="line" points="${pointText}"/><g>${dotHtml}</g></svg><p class="ticker">Step <b id="step">1</b> · 当前指标 <b id="metric">${series[0] ?? 0}</b></p></article><aside class="card"><h2>主体与资源</h2><div id="entities">${entityHtml}</div></aside></section><footer>控制按钮驱动当前 Run 的可视化投影；Project/Run 权威状态与批量证据保存在 Riff Store。</footer></main><script>
+</style></head><body><main class="wrap"><header class="head"><div><h1>${htmlEscape(title)}</h1><p>${htmlEscape(summary)}</p></div><span class="badge">● READY · riff-visual-v1</span></header><nav class="controls" aria-label="仿真控制"><button id="reset" type="button">重置</button><button id="start" type="button">开始</button><button id="step-once" type="button">单步</button><button id="pause" type="button">暂停</button><output id="control-state" aria-live="polite">已暂停</output></nav><section class="grid"><article class="card"><h2>仿真趋势</h2><svg viewBox="0 0 720 320" role="img" aria-label="仿真指标趋势"><path class="axis" d="M40 275H700M40 30V275"/><polyline class="line" points="${pointText}"/><g>${dotHtml}</g></svg><p class="ticker">Step <b id="step">1</b> · 当前指标 <b id="metric">${series[0] ?? 0}</b></p></article><aside class="card"><h2>主体与资源</h2><div id="entities">${entityHtml}</div></aside></section>${layoutHtml}<footer>控制按钮驱动当前 Run 的可视化投影；Project/Run 权威状态与批量证据保存在 Riff Store。</footer></main><script>
 const d=${data};const stepNode=document.getElementById('step');const metricNode=document.getElementById('metric');const entityRoot=document.getElementById('entities');const stateNode=document.getElementById('control-state');let i=0;let timer=null;const render=()=>{stepNode.textContent=String(i+1);metricNode.textContent=String(d.series[i]);d.entities.forEach((e,n)=>{e.value=Math.max(8,Math.min(96,e.value+Math.sin(i+n)*3))});entityRoot.querySelectorAll('.bar i').forEach((el,n)=>el.style.width=d.entities[n].value+'%');entityRoot.querySelectorAll('.entity b').forEach((el,n)=>el.textContent=String(Math.round(d.entities[n].value)))};const advance=()=>{i=(i+1)%d.series.length;render()};const pause=()=>{if(timer!==null){clearInterval(timer);timer=null}stateNode.textContent='已暂停'};document.getElementById('reset').addEventListener('click',()=>{pause();i=0;render();stateNode.textContent='已重置'});document.getElementById('start').addEventListener('click',()=>{if(timer===null)timer=setInterval(advance,700);stateNode.textContent='运行中'});document.getElementById('step-once').addEventListener('click',()=>{pause();advance();stateNode.textContent='已单步'});document.getElementById('pause').addEventListener('click',pause);render();
-</script></body></html>`;
+</script>${layoutRequested ? `<script>const deckName=document.getElementById('deck-name');const deckDetail=document.getElementById('deck-detail');const deckMap=document.getElementById('deck-map');const deckLabels=['公共区 1','公共区 2',...Array.from({length:10},(_,n)=>'客房甲板 '+(n+1)),'员工宿舍'];const paintDeck=(deck)=>{const cabin=deck>=2&&deck<=11;deckName.textContent=deckLabels[deck];deckDetail.textContent=cabin?'40间客房 · 每间2个位置 · 员工清扫动线':deck===12?'工作人员宿舍 · 集体空间 · 休息与交接班':'公共区 · 餐厅、剧场与阳光甲板';deckMap.innerHTML='';const count=cabin?40:12;for(let n=0;n<count;n++){const room=document.createElement('div');room.className='room';room.setAttribute('role','gridcell');room.innerHTML='<span>'+(cabin?'舱室':'区域')+' '+String(n+1).padStart(2,'0')+'</span><small>'+(cabin?'2人':'公共空间')+'</small><i class="room-dot state-'+['s','e','i','r'][n%4]+'" aria-label="SEIR状态"></i>';deckMap.appendChild(room)}};document.querySelectorAll('[data-deck]').forEach((button)=>button.addEventListener('click',()=>{document.querySelectorAll('[data-deck]').forEach((item)=>item.classList.remove('active'));button.classList.add('active');paintDeck(Number(button.dataset.deck))}));document.querySelector('[data-deck="2"]').classList.add('active');paintDeck(2);</script>` : ''}</body></html>`;
 };
 
 const palette = ["#7dd3fc", "#facc15", "#86efac", "#f9a8d4", "#c4b5fd", "#fdba74"];

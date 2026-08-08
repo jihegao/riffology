@@ -10,8 +10,10 @@ import type { OpenCodeConversationPort } from "../src/opencode-adapter.ts";
 import {
   boundedOperation,
   normalizeAgentInputSchema,
+  parseAgentResponse,
   parseAgentInstruction,
   parseParameterPatch,
+  parseProjectModelSource,
   projectCommandIntent,
   removeStaleProjectionEntries,
 } from "../src/project-only-agent-service.ts";
@@ -133,6 +135,41 @@ test("Project-only repairs only bare JSON control characters inside OpenCode str
     () => parseAgentInstruction('{"operation":"deliver_design","assistantText":"已补充设计",]'),
     /required JSON object/u,
   );
+  assert.throws(
+    () => parseAgentInstruction(
+      '{"operation":"deliver_project","assistantText":"实现模型",'
+        + '"inputSchema":{"type":"object","properties":{"role":{"enum":["guest","staff","random\\"], '
+        + '\\"default\\":\\"random\\"}}}}',
+    ),
+    /required JSON object/u,
+  );
+});
+
+test("Project-only model-source frames keep long Python outside JSON and fail closed on malformed frames", () => {
+  const source = "from mesa import Model\n\nclass SimulationModel(Model):\n    pass\n";
+  assert.equal(parseProjectModelSource(`RIFF_MODEL_SOURCE_V1\n${source}`), source);
+  assert.equal(parseProjectModelSource(`RIFF_MODEL_SOURCE_V1\n\`\`\`python\n${source}\`\`\``), source);
+  assert.throws(() => parseProjectModelSource(source), /required model-source frame/u);
+  assert.throws(
+    () => parseProjectModelSource("RIFF_MODEL_SOURCE_V1\nRIFF_MODEL_SOURCE_V1\nclass SimulationModel: pass"),
+    /invalid model-source frame/u,
+  );
+});
+
+test("Project-only parses one framed Project delivery without placing Python in JSON", () => {
+  const metadata = JSON.stringify({
+    operation: "deliver_project",
+    assistantText: "实现模型",
+    inputSchema: { type: "object", properties: { steps: { type: "integer", default: 2 } }, required: ["steps"], additionalProperties: false },
+    defaultParameters: { steps: 2 },
+  });
+  const parsed = parseAgentResponse(`RIFF_PROJECT_DELIVERY_V1\n${metadata}\nRIFF_MODEL_SOURCE_V1\nclass SimulationModel: pass`);
+  assert.equal(parsed.operation, "deliver_project");
+  assert.equal(parsed.modelSource, "class SimulationModel: pass\n");
+  assert.throws(
+    () => parseAgentResponse(`RIFF_PROJECT_DELIVERY_V1\n${metadata}\nclass SimulationModel: pass`),
+    /required Project-delivery frame/u,
+  );
 });
 
 test("Project-only model mutations mentioning batch capability are not misrouted as batch starts", () => {
@@ -147,6 +184,12 @@ test("Project-only routes model-design wording through the Agent without a seman
   assert.equal(intent.explicitMutation, true);
   assert.equal(intent.requiresAgent, true);
   assert.equal("modelDesign" in intent, false);
+});
+
+test("Project-only routes cruise cabin layout requests to the visual asset owner", () => {
+  const intent = projectCommandIntent("调整可视化页面，体现游轮舱室布局");
+  assert.equal(intent.visualControls, true);
+  assert.equal(intent.requiresAgent, false);
 });
 
 test("Project-only accepts OpenCode design delivery for raw visual-design wording with bounded skills preloaded", async (t) => {
@@ -195,6 +238,94 @@ test("Project-only accepts OpenCode design delivery for raw visual-design wordin
   const design = runtime.store.projectFiles(project.id)
     .find((file) => file.relativePath === "design/model-design.md");
   assert.match(design?.bytes.toString("utf8") ?? "", /全部楼层、单层切换和SEIR颜色/u);
+});
+
+test("Project-only stages Mesa source after validating compact Project metadata", async (t) => {
+  const prompts: Array<Parameters<OpenCodeConversationPort["promptWithModel"]>[2]> = [];
+  const promptSessionIds: string[] = [];
+  const createdSessionIds: string[] = [];
+  const stagedOpenCode: OpenCodeConversationPort = {
+    ...openCode,
+    async createSession(conversationId) {
+      createdSessionIds.push(conversationId);
+      return `session_${createdSessionIds.length}`;
+    },
+    async promptWithModel(sessionId, _provider, prompt) {
+      prompts.push(prompt);
+      promptSessionIds.push(sessionId);
+      const metadata = JSON.stringify({
+        operation: "deliver_project",
+        assistantText: "已实现 Mesa 3 邮轮病毒扩散模型。",
+        inputSchema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            steps: { type: "integer", minimum: 1, maximum: 365, default: 45 },
+            seed: { type: "integer", minimum: 0, maximum: 2147483647, default: 42 },
+          },
+          required: ["steps", "seed"],
+          additionalProperties: false,
+        },
+        defaultParameters: { steps: 45, seed: 42 },
+        visual: { title: "邮轮 SEIR", summary: "分层楼层与 SEIR 颜色" },
+      });
+      return {
+        messageId: "message_project_source",
+        text: `RIFF_PROJECT_DELIVERY_V1
+${metadata}
+RIFF_MODEL_SOURCE_V1
+from mesa import Model
+
+class SimulationModel(Model):
+    def __init__(self, steps=45, seed=42):
+        super().__init__(seed=seed)
+        self.steps = steps
+        self.day = 0
+
+    def step(self):
+        self.day += 1
+
+    def snapshot(self):
+        return {"day": self.day, "S": 999, "E": 0, "I": 1, "R": 0, "person_positions": []}
+`,
+        content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+      };
+    },
+  };
+  const { origin, runtime, project } = await start(t, {
+    openCode: stagedOpenCode,
+    projectOnlySkillRoot: join(import.meta.dirname, "../../.opencode/skills"),
+    projectOnlyAllowedSkills: ["simulation-domain-requirements", "simulation-model-visualization"],
+  });
+  const conversation = runtime.store.createConversation({
+    id: "conversation_project_delivery",
+    projectId: project.id,
+    name: "Project delivery",
+    providerId: "provider",
+    modelId: "agent",
+    createdAt: NOW,
+  });
+  const text = "实现mesa可视化仿真模型";
+  const response = await fetch(`${origin}/api/conversations/${conversation.id}/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestKey: "request_project_delivery", text, attachmentIds: [] }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(prompts.length, 1);
+  assert.equal(createdSessionIds.length, 1);
+  assert.deepEqual(promptSessionIds, ["session_1"]);
+  assert.equal(prompts[0]?.text, text);
+  assert.match(prompts[0]?.system ?? "", /RIFF_PROJECT_DELIVERY_V1/u);
+  assert.match(prompts[0]?.system ?? "", /RIFF_MODEL_SOURCE_V1/u);
+  assert.match(prompts[0]?.system ?? "", /never read, create, or increment self\._steps/u);
+  assert.doesNotMatch(prompts[0]?.system ?? "", /"modelSource"\?:/u);
+  const source = runtime.store.projectFiles(project.id)
+    .find((file) => file.relativePath === "code/model.py");
+  assert.match(source?.bytes.toString("utf8") ?? "", /class SimulationModel\(Model\)/u);
+  const latest = runtime.store.conversationTurns(conversation.id).at(-1);
+  assert.equal(latest?.state, "complete");
+  assert.equal(latest?.goalVerification?.disposition, "completed");
 });
 
 test("Project-only parameter reruns accept an explicit bounded JSON patch", () => {
