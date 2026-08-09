@@ -202,6 +202,13 @@ test("Project-only routes model-design wording through the Agent without a seman
   assert.equal("modelDesign" in intent, false);
 });
 
+test("Project-only treats an existing design preview as discussion rather than a mutation or visual Run", () => {
+  const intent = projectCommandIntent("可以在浏览器预览模型设计吗");
+  assert.equal(intent.startVisual, false);
+  assert.equal(intent.explicitMutation, false);
+  assert.equal(intent.requiresAgent, true);
+});
+
 test("Project-only routes cruise cabin layout requests to the visual asset owner", () => {
   const intent = projectCommandIntent("调整可视化页面，体现游轮舱室布局");
   assert.equal(intent.visualControls, true);
@@ -263,6 +270,55 @@ test("Project-only accepts OpenCode design delivery for raw visual-design wordin
   const design = runtime.store.projectFiles(project.id)
     .find((file) => file.relativePath === "design/model-design.md");
   assert.match(design?.bytes.toString("utf8") ?? "", /全部楼层、单层切换和SEIR颜色/u);
+});
+
+test("Project-only completes a bounded design-preview request without starting a visual Run", async (t) => {
+  let capturedPrompt: Parameters<OpenCodeConversationPort["promptWithModel"]>[2] | undefined;
+  const previewOpenCode: OpenCodeConversationPort = {
+    ...openCode,
+    async promptWithModel(_sessionId, _provider, prompt) {
+      capturedPrompt = prompt;
+      return {
+        messageId: "message_design_preview",
+        text: JSON.stringify({
+          operation: "none",
+          assistantText: "这是模型设计评审请求，不是可视化 Run。请在项目 OpenCode 工作区使用 /model-design-html 港口吞吐量，生成独立 HTML 后再用外部浏览器打开。",
+        }),
+        content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+      };
+    },
+  };
+  const { origin, runtime, project } = await start(t, {
+    openCode: previewOpenCode,
+    projectOnlySkillRoot: join(import.meta.dirname, "../../.opencode/skills"),
+    projectOnlyAllowedSkills: ["simulation-domain-requirements", "simulation-model-visualization"],
+  });
+  const conversation = runtime.store.createConversation({
+    id: "conversation_design_preview",
+    projectId: project.id,
+    name: "Design preview",
+    providerId: "provider",
+    modelId: "agent",
+    createdAt: NOW,
+  });
+  const response = await fetch(`${origin}/api/conversations/${conversation.id}/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestKey: "request_design_preview",
+      text: "可以在浏览器预览模型设计吗",
+      attachmentIds: [],
+    }),
+  });
+  assert.equal(response.status, 202, await response.clone().text());
+  await awaitProjectTurn(origin, conversation.id, "request_design_preview");
+  const latest = runtime.store.conversationTurns(conversation.id).at(-1);
+  assert.equal(latest?.state, "complete");
+  assert.deepEqual(latest?.actions, []);
+  assert.equal(latest?.goalVerification?.disposition, "needs_user_input");
+  assert.equal(runtime.store.runs(project.id).length, 0);
+  assert.match(capturedPrompt?.system ?? "", /Never choose start_visual for a design preview/u);
+  assert.match(capturedPrompt?.system ?? "", /\/model-design-html/u);
 });
 
 test("Project-only stages Mesa source after validating compact Project metadata", async (t) => {
@@ -352,6 +408,7 @@ class SimulationModel(Model):
   assert.match(prompts[0]?.system ?? "", /\$schema to exactly "https:\/\/json-schema\.org\/draft\/2020-12\/schema"/u);
   assert.match(prompts[0]?.system ?? "", /Every Mesa Agent subclass must call super\(\)\.__init__\(model\)/u);
   assert.match(prompts[0]?.system ?? "", /never pass unique_id to Agent\.__init__/u);
+  assert.match(prompts[0]?.system ?? "", /runner accepts steps only as an integer from 1 through 1000/u);
   assert.doesNotMatch(prompts[0]?.system ?? "", /"modelSource"\?:/u);
   const source = runtime.store.projectFiles(project.id)
     .find((file) => file.relativePath === "code/model.py");

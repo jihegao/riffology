@@ -1,8 +1,7 @@
 ---
 name: simulation-model-visualization
-description: Design or review a discrete-event or agent-based simulation model and, by default, create a runnable Solara visualization app. Use the standalone HTML workflow only for model-contract/design review; always write the selected artifact before opening it in a browser.
+description: Design, review, or preview a discrete-event or agent-based simulation model in a browser, including requests to preview an existing model design, open a design document, create a standalone design-review HTML, or start a runnable Solara visualization. Keep design previews separate from executable visual simulation Runs and always write the selected artifact before opening it.
 license: MIT
-compatibility: opencode
 metadata:
   opencode/slash: "true"
 ---
@@ -10,6 +9,27 @@ metadata:
 # Simulation model and runtime visualization
 
 Create an inspectable model contract and a runnable, source-backed visualization. The default runtime visualization is a Solara app. A standalone HTML document remains the required artifact for a model-contract/design review. Do not silently turn a design projection into a simulation result.
+
+## Route the request before acting
+
+Use the requested evidence surface, not the word "visual" alone:
+
+| Request | Required route | Never do |
+| --- | --- | --- |
+| Preview/review/open the existing model design or design document | Generate a standalone HTML design-review artifact from the authoritative design/spec, then open that exact file in the external browser | Do not choose or claim `start_visual`; a design projection is not a Run |
+| Create or materially change the model design | Update the authoritative design first; generate the standalone HTML only as a follow-up projection | Do not turn the design into executable code unless explicitly requested |
+| Implement/generate an executable model with a visual page | Deliver the executable Project first and pass its technical checks | Do not claim a visual Run started in the delivery response |
+| Start/run/open the executable visual simulation | Use the declared visual entry point only after the current Project is technically executable and declares `visual` or `both` capability | Do not synthesize runtime state from design prose |
+
+### Bounded Riff Product turns
+
+In a Riff Project Conversation, this skill may be preloaded into a bounded response where file, command, native `skill`, and browser tools are intentionally unavailable. In that context:
+
+- For a design-preview-only request such as "可以在浏览器预览模型设计吗", return the Product protocol's no-mutation response and explain that the standalone artifact must be generated with `/model-design-html <scope>` in the project OpenCode workspace. Never return `start_visual`.
+- If the same request explicitly changes the design, deliver the design change first and state that HTML generation/opening remains a follow-up projection.
+- If the user asks to implement or generate an executable visual model, return the executable Project delivery. The next explicit "启动可视化仿真" request starts the Run after Riff's technical gate.
+- In the current Riff batch/visual wrapper, declare `steps` as an integer from 1 through 1000 and keep `defaultParameters.steps` in that range. Represent longer domain horizons through a coarser declared time unit or separate experiments, not an out-of-contract smoke default.
+- Never claim that HTML was written, a browser was opened, a technical check passed, or a Run started unless the corresponding owner actually returned evidence.
 
 ## Default: Solara runtime app
 
