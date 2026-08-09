@@ -38,6 +38,47 @@ test("macOS sandbox denies a direct loopback network connection", { skip: proces
   assert.match(result.stderr, /not permitted|permission|operation/iu);
 });
 
+test("Linux namespace sandbox denies loopback and hides host files outside the Model capability", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "riff-process-linux-"));
+  const outside = mkdtempSync(join(tmpdir(), "riff-process-linux-outside-"));
+  const secret = join(outside, "credential.txt");
+  writeFileSync(secret, "do-not-read");
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+  const runner = new RestrictedProcessRunner({
+    workspace: createModelWorkspaceCapability(root, "model:linux-boundary"),
+    command: {
+      executable: python,
+      argv: ["-I", "-c", `
+import json,socket
+from pathlib import Path
+outside = Path(${JSON.stringify(secret)})
+status = Path("/proc/self/status").read_text()
+probe = socket.socket()
+print(json.dumps({
+  "outside_exists": outside.exists(),
+  "connect_errno": probe.connect_ex(("127.0.0.1", 9)),
+  "cap_eff": next(line.split()[1] for line in status.splitlines() if line.startswith("CapEff:")),
+  "cap_bnd": next(line.split()[1] for line in status.splitlines() if line.startswith("CapBnd:")),
+  "no_new_privs": next(line.split()[1] for line in status.splitlines() if line.startswith("NoNewPrivs:")),
+}))
+`],
+    },
+  });
+  const result = await runner.run();
+  assert.equal(result.exitCode, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.outside_exists, false);
+  assert.equal(payload.connect_errno, 101);
+  assert.equal(payload.cap_eff, "0000000000000000");
+  assert.equal(payload.cap_bnd, "0000000000000000");
+  assert.equal(payload.no_new_privs, "1");
+});
+
 test("macOS sandbox cannot read an arbitrary home file outside the Model capability", { skip: process.platform !== "darwin" }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-process-files-"));
   const outside = mkdtempSync(join(homedir(), ".riff-process-outside-"));
@@ -101,5 +142,8 @@ test("default isolation fails closed outside macOS and rejects broad runtime rea
   t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
   const workspace = createModelWorkspaceCapability(root, "model:closed");
   const runner = new RestrictedProcessRunner({ workspace, command: { executable: python, argv: ["-I", "-c", "pass"] }, isolation: { kind: "macos-sandbox", runtimeReadRoots: [outside] } });
-  await assert.rejects(() => runner.run(), (error: unknown) => error instanceof RestrictedProcessError && error.code === "invalid_runtime_root");
+  await assert.rejects(() => runner.run(), (error: unknown) => error instanceof RestrictedProcessError
+    && (process.platform === "darwin"
+      ? error.code === "invalid_runtime_root"
+      : error.code === "network_isolation_unavailable"));
 });

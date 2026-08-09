@@ -204,8 +204,8 @@ export class BrowserFrameCapability {
   readonly #attemptSockets = new Map<string, Set<FrameWebSocketRegistration>>();
 
   constructor(options: BrowserFrameCapabilityOptions) {
-    this.#appOrigin = exactLoopbackOrigin(options.appOrigin);
-    this.#brokerOrigin = exactLoopbackOrigin(options.brokerOrigin);
+    this.#appOrigin = exactBrowserOrigin(options.appOrigin);
+    this.#brokerOrigin = exactBrowserOrigin(options.brokerOrigin);
     if (this.#appOrigin.origin === this.#brokerOrigin.origin) {
       throw new Error("Browser app and broker origins must be distinct.");
     }
@@ -875,12 +875,15 @@ const denied = (
   code: BrowserFrameCapabilityError["code"],
 ): BrowserFrameCapabilityError => new BrowserFrameCapabilityError(status, code);
 
-const exactLoopbackOrigin = (value: string): URL => {
+const exactBrowserOrigin = (value: string): URL => {
   const url = new URL(value);
-  if ((url.protocol !== "http:" && url.protocol !== "https:")
-    || url.hostname !== "localhost" || url.pathname !== "/" || url.search || url.hash
-    || !url.port || url.username || url.password) {
-    throw new Error("Browser origins must use the exact localhost authority with explicit ports.");
+  const local = url.hostname === "localhost" && Boolean(url.port);
+  const publicHttps = url.protocol === "https:" && url.hostname !== "localhost";
+  if ((!local && !publicHttps)
+    || (url.protocol !== "http:" && url.protocol !== "https:")
+    || url.origin !== value || url.pathname !== "/" || url.search || url.hash
+    || url.username || url.password) {
+    throw new Error("Browser origins must use an exact localhost origin with an explicit port or a canonical public HTTPS origin.");
   }
   return url;
 };

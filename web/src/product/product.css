@@ -1788,3 +1788,79 @@ body:has(> #root > .riffology-workbench-app) { min-width: 320px; min-height: 100
   .riffology-context-projection { display: none; }
   .riffology-url-projection { max-width: 22vw; }
 }
+/* Public demo authentication is intentionally independent from the workbench
+   projection. Credentials never enter browser storage or the Product DOM. */
+.riff-auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f4f1e9;
+  color: #18211c;
+}
+
+.riff-auth-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 36px;
+  border: 1px solid #c8c2b4;
+  border-radius: 18px;
+  background: #fffdf8;
+  box-shadow: 0 18px 60px rgb(26 35 29 / 10%);
+}
+
+.riff-auth-card h1,
+.riff-auth-card p { margin: 0; }
+.riff-auth-kicker { font: 600 11px/1.2 ui-monospace, monospace; letter-spacing: .14em; color: #667068; }
+.riff-auth-card label { display: grid; gap: 7px; font-size: 13px; font-weight: 600; }
+.riff-auth-card input { min-height: 44px; padding: 0 12px; border: 1px solid #aaa597; border-radius: 9px; font: inherit; }
+.riff-auth-card button { min-height: 44px; border: 0; border-radius: 9px; background: #183f2c; color: white; font-weight: 700; }
+.riff-auth-card button:disabled { opacity: .6; }
+.riff-auth-error { color: #a32929; font-size: 13px; }
+
+.riff-auth-status {
+  position: fixed;
+  z-index: 1000;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px 7px 12px;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 999px;
+  background: rgb(23 31 27 / 92%);
+  color: #f8f6ef;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  font-size: 11px;
+}
+
+.riff-auth-status button { border: 0; border-radius: 999px; padding: 5px 9px; background: #f8f6ef; color: #1f2d25; }
+
+.riff-admin-shell { min-height: 100vh; padding: 36px max(24px, calc((100vw - 1100px) / 2)); background: #f4f1e9; color: #18211c; }
+.riff-admin-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+.riff-admin-header h1 { margin: 5px 0 0; }
+.riff-admin-header button,
+.riff-admin-create button,
+.riff-admin-key button,
+.riff-admin-actions button { border: 1px solid #918b7d; border-radius: 8px; padding: 9px 13px; background: #fffdf8; color: #18211c; font-weight: 650; }
+.riff-admin-create { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; align-items: end; gap: 14px; padding: 20px; border: 1px solid #cbc5b7; border-radius: 14px; background: #fffdf8; }
+.riff-admin-create label { display: grid; gap: 6px; font-size: 12px; font-weight: 650; }
+.riff-admin-create input,
+.riff-admin-actions input { min-height: 40px; padding: 0 10px; border: 1px solid #aaa597; border-radius: 8px; }
+.riff-admin-key { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; margin: 18px 0; padding: 16px; border: 1px solid #ba8e37; border-radius: 12px; background: #fff7dc; }
+.riff-admin-key strong { grid-column: 1 / -1; }
+.riff-admin-key code { overflow-wrap: anywhere; user-select: all; }
+.riff-admin-users { display: grid; gap: 12px; margin-top: 20px; }
+.riff-admin-users article { padding: 18px 20px; border: 1px solid #cbc5b7; border-radius: 12px; background: #fffdf8; }
+.riff-admin-users article > div:first-child { display: flex; align-items: center; justify-content: space-between; }
+.riff-admin-users h2 { margin: 0; font-size: 18px; }
+.riff-admin-users p { margin: 8px 0; color: #5b625d; font-size: 13px; }
+.riff-admin-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.riff-admin-actions .danger { border-color: #a14d4d; color: #922f2f; }
+
+@media (max-width: 720px) {
+  .riff-admin-create { grid-template-columns: 1fr; }
+  .riff-admin-key { grid-template-columns: 1fr; }
+}

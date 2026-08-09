@@ -4,6 +4,35 @@ import { HttpProductClient } from "./api";
 describe("Product browser client", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("uses HttpOnly-cookie auth endpoints without storing or renaming the administrator-issued login key", async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ path: String(input), init });
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        authenticated: String(input) !== "/api/auth/logout",
+        username: "demo_user",
+        quota: {
+          limitTokens: 1000, usedTokens: 10, reservedTokens: 0,
+          availableTokens: 990, measurement: "estimated",
+        },
+      }), { status: 200 });
+    }));
+    const client = new HttpProductClient();
+    await client.authSession();
+    await client.login("demo_user", "administrator-generated-key");
+    await client.logout();
+    expect(calls.map((call) => call.path)).toEqual([
+      "/api/auth/session", "/api/auth/login", "/api/auth/logout",
+    ]);
+    expect(calls[1]?.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+      username: "demo_user",
+      loginKey: "administrator-generated-key",
+    });
+    expect(String(calls[1]?.init?.body)).not.toContain("password");
+  });
+
   it("bootstraps exactly once and carries the in-memory CSRF token on mutations", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -170,28 +199,43 @@ describe("Product browser client", () => {
           expiresAt: "2026-07-25T00:05:00.000Z",
         }), { status: 201 });
       }
-      return new Response(JSON.stringify({
-        mode: "read_only",
-        reason: "opencode_unavailable",
-        turn: {
+      if (String(input).endsWith("/turns")) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          accepted: true,
           requestKey: "request-one",
-          state: "read_only",
-          userMessageId: "message-one",
-          assistantMessageId: null,
-          skillUses: [],
-          actions: [],
-          failure: { code: "opencode_unavailable", retryable: true },
+          turnId: "turn-one",
+          state: "running",
+          terminal: false,
+          statusUrl: "/api/conversations/conversation-one/turns/request-one",
+        }), { status: 202 });
+      }
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        terminal: true,
+        result: {
+          mode: "read_only",
+          reason: "opencode_unavailable",
+          turn: {
+            requestKey: "request-one",
+            state: "read_only",
+            userMessageId: "message-one",
+            assistantMessageId: null,
+            skillUses: [],
+            actions: [],
+            failure: { code: "opencode_unavailable", retryable: true },
+          },
+          messages: [{
+            id: "message-one",
+            ordinal: 0,
+            role: "user",
+            status: "complete",
+            messageKind: "conversation",
+            text: "Hello",
+            createdAt: "2026-07-25T00:00:00.000Z",
+            updatedAt: "2026-07-25T00:00:00.000Z",
+          }],
         },
-        messages: [{
-          id: "message-one",
-          ordinal: 0,
-          role: "user",
-          status: "complete",
-          messageKind: "conversation",
-          text: "Hello",
-          createdAt: "2026-07-25T00:00:00.000Z",
-          updatedAt: "2026-07-25T00:00:00.000Z",
-        }],
       }), { status: 200 });
     }));
 
@@ -206,6 +250,7 @@ describe("Product browser client", () => {
     expect(result.messages).toHaveLength(1);
     expect(result.messages.some((message) => message.role === "assistant")).toBe(false);
     expect(calls).toContain("/api/conversations/conversation-one/turns");
+    expect(calls).toContain("/api/conversations/conversation-one/turns/request-one");
   });
 
   it("uses typed PR3 turn-control routes without exposing a session identifier", async () => {

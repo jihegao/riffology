@@ -30,6 +30,7 @@ import {
 } from "./project-only-store.ts";
 import { ProjectOnlyVisualRuntime } from "./project-only-visual-runtime.ts";
 import type { LoadedSimulationSkill } from "./simulation-skill-catalog.ts";
+import { estimatedTurnTokens, type TestUserAccess } from "./test-user-access.ts";
 
 const MAX_PROJECT_CONTEXT_BYTES = 96 * 1024;
 const OPENCODE_SESSION_SETUP_TIMEOUT_MS = 10_000;
@@ -95,9 +96,11 @@ export class ProjectOnlyAgentService {
   readonly visualRuntime: ProjectOnlyVisualRuntime;
   readonly batchRuntime: ProjectOnlyBatchRuntime;
   readonly loadedSkills: readonly LoadedSimulationSkill[];
+  readonly testUserAccess?: TestUserAccess;
   readonly now: () => string;
   #readiness: OpenCodeReadiness = { status: "unconfigured", modelId: null };
   #providers: readonly OpenCodeProviderModel[] = Object.freeze([]);
+  readonly #pendingTurns = new Map<string, Promise<unknown>>();
 
   constructor(input: Readonly<{
     store: ProjectOnlyStore;
@@ -106,6 +109,7 @@ export class ProjectOnlyAgentService {
     visualRuntime: ProjectOnlyVisualRuntime;
     batchRuntime: ProjectOnlyBatchRuntime;
     loadedSkills?: readonly LoadedSimulationSkill[];
+    testUserAccess?: TestUserAccess;
     now?: () => string;
   }>) {
     this.store = input.store;
@@ -114,10 +118,23 @@ export class ProjectOnlyAgentService {
     this.visualRuntime = input.visualRuntime;
     this.batchRuntime = input.batchRuntime;
     this.loadedSkills = Object.freeze([...(input.loadedSkills ?? [])]);
+    this.testUserAccess = input.testUserAccess;
     this.now = input.now ?? (() => new Date().toISOString());
   }
 
   async initialize(): Promise<void> {
+    this.testUserAccess?.reconcileTurnReservations((requestKey) => {
+      const turn = this.store.conversationTurn(requestKey);
+      if (!turn) return null;
+      if (turn.state !== "complete") return Object.freeze({ state: turn.state });
+      const messages = this.store.conversationMessages(turn.conversationId);
+      const user = messages.find((message) => message.id === turn.userMessageId)?.text ?? "";
+      const assistant = messages.find((message) => message.id === turn.assistantMessageId)?.text ?? "";
+      return Object.freeze({
+        state: "complete" as const,
+        chargedTokens: estimatedTurnTokens(user, assistant),
+      });
+    });
     if (!this.openCode) return;
     try {
       this.#readiness = await this.openCode.initialize?.()
@@ -199,6 +216,7 @@ export class ProjectOnlyAgentService {
     requestKey: string;
     text: string;
     agentName?: string;
+    testUsername?: string;
   }>): Promise<Readonly<{
     mode: "live" | "read_only";
     reason?: string;
@@ -472,6 +490,113 @@ export class ProjectOnlyAgentService {
       }
       return this.#failTurn(turn, error, intent, preliminary);
     }
+  }
+
+  submitTurn(input: Readonly<{
+    conversationId: string;
+    requestKey: string;
+    text: string;
+    agentName?: string;
+    testUsername?: string;
+  }>): Readonly<{
+    schemaVersion: 1;
+    accepted: true;
+    requestKey: string;
+    turnId: string;
+    state: ProjectConversationTurnRecord["state"];
+    terminal: boolean;
+  }> {
+    if (!input.text.trim() || input.text.length > 64_000) {
+      throw new ApiError(422, "invalid_request", "Conversation text is invalid.");
+    }
+    const existing = this.store.conversationTurn(input.requestKey);
+    if (existing && existing.conversationId !== input.conversationId) {
+      throw new ApiError(409, "idempotency_conflict", "Turn request key belongs to another Conversation.");
+    }
+    if (!existing && !this.#pendingTurns.has(input.requestKey)) {
+      if (this.testUserAccess && !input.testUsername) {
+        throw new ApiError(401, "authentication_required", "A test-user session is required for Agent Turns.");
+      }
+      if (this.testUserAccess && input.testUsername) {
+        this.testUserAccess.reserveTurn(input.testUsername, input.requestKey);
+      }
+      const operation = this.runTurn(input);
+      this.#pendingTurns.set(input.requestKey, operation);
+      void operation.then((result) => {
+        if (!this.testUserAccess || !input.testUsername) return;
+        if (result.turn.state !== "complete") {
+          this.testUserAccess.releaseTurn(input.testUsername, input.requestKey);
+          return;
+        }
+        const assistant = result.messages.find((message) =>
+          message.id === result.turn.assistantMessageId)?.text ?? "";
+        this.testUserAccess.settleTurn(
+          input.testUsername,
+          input.requestKey,
+          estimatedTurnTokens(input.text.trim(), assistant),
+        );
+      }, () => {
+        if (this.testUserAccess && input.testUsername) {
+          this.testUserAccess.releaseTurn(input.testUsername, input.requestKey);
+        }
+      }).catch(() => undefined);
+      void operation.catch((error) => {
+        const current = this.store.conversationTurn(input.requestKey);
+        if (!current || current.state !== "running") return;
+        const code = errorCode(error);
+        this.store.failConversationTurn({
+          requestKey: current.requestKey,
+          state: "failed",
+          code,
+          assistantText: `OpenCode 未能完成其余操作（${code}）。`,
+          actions: Object.freeze([]),
+          goalVerification: goalVerification({
+            disposition: "failed",
+            reasonCode: code,
+            intentKind: "explicit_mutation",
+            actions: Object.freeze([]),
+            affectedResourceCount: 0,
+            partialEffect: false,
+            openCodeTerminal: "unknown",
+          }),
+          failedAt: this.now(),
+        });
+      }).finally(() => {
+        if (this.#pendingTurns.get(input.requestKey) === operation) {
+          this.#pendingTurns.delete(input.requestKey);
+        }
+      });
+    }
+    const turn = this.store.conversationTurn(input.requestKey);
+    if (!turn) {
+      throw new ApiError(503, "turn_submission_failed", "The Agent turn was not durably accepted.");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      accepted: true,
+      requestKey: turn.requestKey,
+      turnId: turn.id,
+      state: turn.state,
+      terminal: turn.state !== "running",
+    });
+  }
+
+  turnResult(conversationId: string, requestKey: string): Readonly<{
+    mode: "live" | "read_only";
+    reason?: string;
+    turn: ProjectConversationTurnRecord;
+    messages: readonly ProjectConversationMessageRecord[];
+  }> {
+    const turn = this.store.conversationTurn(requestKey);
+    if (!turn || turn.conversationId !== conversationId) {
+      throw new ApiError(404, "turn_not_found", "The Conversation turn was not found.");
+    }
+    return Object.freeze({
+      mode: turn.state === "read_only" ? "read_only" : "live",
+      ...(turn.failureCode ? { reason: turn.failureCode } : {}),
+      turn,
+      messages: Object.freeze(this.store.conversationMessages(conversationId)),
+    });
   }
 
   runtime(conversationId: string): Record<string, unknown> {
@@ -1175,7 +1300,7 @@ const projectSystemPrompt = (
   Choose the operation from the user's message itself. Riff intentionally does not provide a semantic intent label; do not ask for one.
   The phase-one schema is {"operation":"deliver_design"|"deliver_project"|"start_visual"|"stop_visual"|"update_experiment_and_start_batch"|"none","assistantText":string,"designMarkdown"?:string,"inputSchema"?:object,"defaultParameters"?:object,"experimentConfiguration"?:object,"visual"?:{"title"?:string,"summary"?:string,"entities"?:array,"series"?:number[]}}.
   For an explicit request to generate a model design, choose deliver_design and provide a complete Markdown design in designMarkdown: question, scope, entities/agents, state, processes, parameters, outputs, assumptions, validation, and experiment plan. Do not provide executable code for that operation.
-  For a concrete modelling requirement, choose deliver_project and return one framed response with exactly this layout: first line RIFF_PROJECT_DELIVERY_V1; then one compact JSON object containing operation=deliver_project, assistantText, visual, inputSchema, and defaultParameters but no modelSource; then a line RIFF_MODEL_SOURCE_V1; then the complete raw Python module. Do not use Markdown fences, encode the Python inside JSON, or add any other marker/commentary. Use Mesa 3 APIs, define a Mesa Model subclass named SimulationModel with a seed-aware constructor accepting every inputSchema property including steps, implement step() and snapshot(), and return JSON-compatible metrics plus per-person position/state data required by the visual design. Mesa 3 owns Model.steps and wraps step(): never read, create, or increment self._steps, and never increment self.steps manually; use the public self.steps value only for bounded stopping logic. Do not use removed mesa.time schedulers, start a server, or access files/network. Every required inputSchema property must have a value in defaultParameters. The schema must be closed with additionalProperties=false and may only use $schema, $id, $defs, $ref, type, properties, required, additionalProperties, items, minItems, maxItems, enum, const, default, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, and maxLength; omit annotations such as description, title, examples, and $comment.
+  For a concrete modelling requirement, choose deliver_project and return one framed response with exactly this layout: first line RIFF_PROJECT_DELIVERY_V1; then one compact JSON object containing operation=deliver_project, assistantText, visual, inputSchema, and defaultParameters but no modelSource; then a line RIFF_MODEL_SOURCE_V1; then the complete raw Python module. Do not use Markdown fences, encode the Python inside JSON, or add any other marker/commentary. Use Mesa 3 APIs, define a Mesa Model subclass named SimulationModel with a seed-aware constructor accepting every inputSchema property including steps, implement step() and snapshot(), and return JSON-compatible metrics plus per-person position/state data required by the visual design. SimulationModel must call super().__init__(seed=seed). Every Mesa Agent subclass must call super().__init__(model); Mesa 3 assigns unique_id itself, so never pass unique_id to Agent.__init__. Mesa 3 owns Model.steps and wraps step(): never read, create, or increment self._steps, and never increment self.steps manually; use the public self.steps value only for bounded stopping logic. Do not use removed mesa.time schedulers, start a server, or access files/network. Every required inputSchema property must have a value in defaultParameters. The root inputSchema must set $schema to exactly "${JSON_SCHEMA_2020_12}"; never use the Draft-07 URI or omit $schema. The schema must be closed with additionalProperties=false and may only use $schema, $id, $defs, $ref, type, properties, required, additionalProperties, items, minItems, maxItems, enum, const, default, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, and maxLength; omit annotations such as description, title, examples, and $comment.
   For an explicit request to start/open visual simulation, choose start_visual. Do not rewrite the model in that response.
   For a request that only stops/closes visual simulation, choose stop_visual. If the same request also asks to change the Project, choose deliver_project because Riff has already handled the stop directly.
   For an explicit request to change Experiment parameters and rerun a batch, choose update_experiment_and_start_batch and return the complete schemaVersion=1 batch Experiment configuration. Preserve unspecified current parameters and use multiple-seeds or a bounded cartesian sweep.

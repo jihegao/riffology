@@ -180,6 +180,23 @@ test("HTTPS mode is explicit and adds Secure to both cookie classes", async () =
   }), /Secure cookie mode/u);
 });
 
+test("canonical public HTTPS origins retain exact Host and Origin admission", () => {
+  const fixture = createFixture({
+    appOrigin: "https://riff-demo.example.com",
+    brokerOrigin: "https://riff-demo-visual.example.com",
+    secureCookies: true,
+  });
+  const result = fixture.capability.bootstrap({
+    ...bootstrapRequest("https://riff-demo.example.com"),
+    host: "riff-demo.example.com",
+  });
+  assert.match(result.setCookie, /; Secure$/u);
+  assert.throws(() => fixture.capability.bootstrap({
+    ...bootstrapRequest("https://riff-demo.example.com"),
+    host: "localhost:8787",
+  }), errorCode("browser_session_denied"));
+});
+
 test("frame session binds exact app cookie, CSRF, target identity, and generation", async () => {
   const fixture = createFixture();
   const bootstrap = fixture.capability.bootstrap(bootstrapRequest());
@@ -943,7 +960,7 @@ test("native transport enforces real header, streaming body, and deadline bounds
 });
 
 test("constructor and injected dependencies fail closed", () => {
-  assert.throws(() => createFixture({ appOrigin: "http://[::1]:8787" }), /exact localhost authority/u);
+  assert.throws(() => createFixture({ appOrigin: "http://[::1]:8787" }), /exact localhost origin/u);
   assert.throws(() => createFixture({ brokerOrigin: APP_ORIGIN }), /must be distinct/u);
   const fixture = createFixture({ random: () => new Uint8Array(31) });
   assert.throws(() => fixture.capability.bootstrap(bootstrapRequest()), /CSPRNG returned an invalid result/u);

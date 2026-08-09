@@ -54,9 +54,10 @@ export class ProjectOnlyHttpApi {
     response: ServerResponse,
     url: URL,
     parts: readonly string[],
+    testUsername?: string,
   ): Promise<boolean> {
     try {
-      return await this.#handle(request, response, url, parts);
+      return await this.#handle(request, response, url, parts, testUsername);
     } catch (error) {
       if (error instanceof ProjectOnlyStoreError) throw projectOnlyErrorBody(error);
       throw error;
@@ -68,6 +69,7 @@ export class ProjectOnlyHttpApi {
     response: ServerResponse,
     url: URL,
     parts: readonly string[],
+    testUsername?: string,
   ): Promise<boolean> {
     if (parts[0] !== "api") return false;
     if (parts[1] === "models") {
@@ -97,7 +99,7 @@ export class ProjectOnlyHttpApi {
       throw unsupported("project_conversation_service_unavailable", "Project Conversations are not available in this Store runtime.");
     }
     if (parts[1] === "objects") return this.#handleObjectConversations(request, response, url, parts);
-    if (parts[1] === "conversations") return this.#handleConversation(request, response, url, parts);
+    if (parts[1] === "conversations") return this.#handleConversation(request, response, url, parts, testUsername);
     if (parts[1] !== "projects") return false;
     if (request.method === "GET" && parts.length === 2) {
       exactQuery(url, []);
@@ -452,6 +454,7 @@ export class ProjectOnlyHttpApi {
     response: ServerResponse,
     url: URL,
     parts: readonly string[],
+    testUsername?: string,
   ): Promise<true> {
     const conversationId = parts[2];
     if (!conversationId) throw new ApiError(404, "resource_not_found", "The Conversation was not found.");
@@ -499,11 +502,36 @@ export class ProjectOnlyHttpApi {
         || body.agentName !== undefined && typeof body.agentName !== "string") {
         throw new ApiError(422, "invalid_request", "Conversation turn input is invalid.");
       }
-      const result = await this.agent.runTurn({
+      const submission = this.agent.submitTurn({
         conversationId, requestKey, text: body.text,
+        ...(testUsername ? { testUsername } : {}),
         ...(typeof body.agentName === "string" ? { agentName: body.agentName } : {}),
       });
-      return sendJson(response, 200, publicTurnResult(result));
+      return sendJson(response, 202, Object.freeze({
+        ...submission,
+        statusUrl: turnStatusUrl(conversationId, requestKey),
+      }));
+    }
+    if (request.method === "GET" && parts.length === 5 && tail === "turns") {
+      exactQuery(url, []);
+      if (!this.agent) throw unsupported("project_conversation_service_unavailable", "Conversation runtime is unavailable.");
+      const result = this.agent.turnResult(conversationId, parts[4]!);
+      if (result.turn.state === "running") {
+        return sendJson(response, 200, Object.freeze({
+          schemaVersion: 1,
+          accepted: true,
+          requestKey: result.turn.requestKey,
+          turnId: result.turn.id,
+          state: result.turn.state,
+          terminal: false,
+          statusUrl: turnStatusUrl(conversationId, result.turn.requestKey),
+        }));
+      }
+      return sendJson(response, 200, Object.freeze({
+        schemaVersion: 1,
+        terminal: true,
+        result: publicTurnResult(result),
+      }));
     }
     if (request.method === "PATCH" && parts.length === 4 && tail === "provider-binding") {
       exactQuery(url, []);
@@ -675,6 +703,9 @@ const publicTurnResult = (result: Readonly<{
   }),
   messages: Object.freeze(result.messages.map(publicMessage)),
 });
+
+const turnStatusUrl = (conversationId: string, requestKey: string): string =>
+  `/api/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(requestKey)}`;
 
 const publicRenderable = (
   relativePath: string,

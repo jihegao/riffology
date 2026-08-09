@@ -6,17 +6,21 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmdirSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { canonicalDigest, canonicalJsonV2, sha256Hex } from "./canonical-json-v2.ts";
@@ -32,6 +36,7 @@ import {
 } from "./execution-protocol-v2.ts";
 import {
   canonicalRestrictedExecutable,
+  linuxIsolatedProcessLaunchSpec,
   macosBatchSandboxProfile,
   trustedPythonRuntimeRoots,
   type ModelWorkspaceCapability,
@@ -355,10 +360,10 @@ export class GenericBatchSupervisor {
   }
 
   async supervise(input: SuperviseBatchInput): Promise<BatchSupervisionResult> {
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" && process.platform !== "linux") {
       throw new GenericBatchSupervisorError(
         "network_isolation_unavailable",
-        "Generic batch execution requires the macOS network-denying process boundary.",
+        "Generic batch execution requires a supported OS isolation boundary.",
       );
     }
     const description = validateExecutionDescriptionV2(input.project.executionDescription);
@@ -547,7 +552,11 @@ export class GenericBatchSupervisor {
         let launchReceipt: BatchLaunchReceipt;
         try {
           await runGateHook(
-            waitForLaunchReceiptSignal(child),
+            Promise.all([
+              waitForLaunchReceiptSignal(child),
+              ...(process.platform === "linux"
+                ? [persistLinuxLaunchReceipt(child, launchReceiptPath)] : []),
+            ]).then(() => undefined),
             registrationDeadline,
             this.#now,
             input.signal,
@@ -985,18 +994,44 @@ export class GenericBatchSupervisor {
       "pid" | "processGroupId" | "processStartToken" | "receiptDigest">,
     modelArgv: readonly string[],
   ): ChildProcess {
-    const sandbox = canonicalRestrictedExecutable("/usr/bin/sandbox-exec");
-    const profile = macosBatchSandboxProfile({
-      projectRoot: cwd,
-      inputPath,
-      outputRoot: outputDirectory,
-      tempRoot: tempDirectory,
-      launchReceiptPath,
-      executable: this.#python,
-      runtimeReadRoots: this.#runtimeReadRoots,
-    });
-    try {
-      return spawn(sandbox, [
+    let sandbox: string;
+    let sandboxArgv: readonly string[];
+    let sandboxRoot: string | undefined;
+    if (process.platform === "linux") {
+      sandboxRoot = mkdtempSync(join(tmpdir(), "riff-linux-batch-"));
+      const spec = linuxIsolatedProcessLaunchSpec({
+        sandboxRoot,
+        cwd,
+        executable: this.#python,
+        runtimeReadRoots: this.#runtimeReadRoots,
+        readableRoots: Object.freeze([cwd]),
+        writableRoots: Object.freeze([outputDirectory, tempDirectory]),
+        readableFiles: Object.freeze([inputPath]),
+        pidNamespace: false,
+        argv: Object.freeze([
+          "-I",
+          "-c",
+          pythonGateWrapper(this.#pythonImportRoots, 6),
+          launchNonce,
+          JSON.stringify(launchReceiptBase),
+          launchReceiptPath,
+          ...modelArgv,
+        ]),
+      });
+      sandbox = spec.executable;
+      sandboxArgv = spec.argv;
+    } else {
+      sandbox = canonicalRestrictedExecutable("/usr/bin/sandbox-exec");
+      const profile = macosBatchSandboxProfile({
+        projectRoot: cwd,
+        inputPath,
+        outputRoot: outputDirectory,
+        tempRoot: tempDirectory,
+        launchReceiptPath,
+        executable: this.#python,
+        runtimeReadRoots: this.#runtimeReadRoots,
+      });
+      sandboxArgv = [
         "-p",
         profile,
         this.#python,
@@ -1007,15 +1042,21 @@ export class GenericBatchSupervisor {
         JSON.stringify(launchReceiptBase),
         launchReceiptPath,
         ...modelArgv,
-      ], {
+      ];
+    }
+    try {
+      const child = spawn(sandbox, sandboxArgv, {
         cwd,
         env: { ...BASE_ENV, TMPDIR: tempDirectory },
         shell: false,
         detached: true,
         windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe", ...(process.platform === "linux" ? ["pipe" as const] : [])],
       });
+      if (sandboxRoot) child.once("close", () => rmSync(sandboxRoot!, { recursive: true, force: true }));
+      return child;
     } catch (error) {
+      if (sandboxRoot) rmSync(sandboxRoot, { recursive: true, force: true });
       throw new GenericBatchSupervisorError("process_spawn_failed", "The launch-gated batch process could not start.", { cause: error });
     }
   }
@@ -1481,12 +1522,20 @@ const writeExclusiveRegular = (path: string, bytes: Uint8Array, mode: number): v
   try {
     descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
     writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
     const info = fstatSync(descriptor);
     if (!info.isFile() || info.nlink !== 1 || info.size !== bytes.byteLength) throw new Error("write verification");
   } catch (error) {
     throw new GenericBatchSupervisorError("unsafe_batch_path", "An application-owned scratch file could not be created safely.", { cause: error });
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+  }
+  let parent: number | undefined;
+  try {
+    parent = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
+    fsyncSync(parent);
+  } finally {
+    if (parent !== undefined) closeSync(parent);
   }
 };
 
@@ -1784,6 +1833,40 @@ const waitForLaunchReceiptSignal = (child: ChildProcess): Promise<void> =>
     stream.once("error", (error) => reject(new GenericBatchSupervisorError("process_registration_failed", "The durable launch-receipt acknowledgement failed.", { cause: error })));
     stream.once("end", () => reject(new GenericBatchSupervisorError("process_registration_failed", "The launch helper closed before persisting its receipt.")));
   });
+
+const persistLinuxLaunchReceipt = (
+  child: ChildProcess,
+  launchReceiptPath: string,
+): Promise<void> => new Promise((resolveReceipt, reject) => {
+  const stream = child.stdio[6];
+  if (!stream || typeof stream === "number" || !("on" in stream)) {
+    reject(new GenericBatchSupervisorError("process_registration_failed", "The Linux launch-receipt pipe is unavailable."));
+    return;
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  stream.on("data", (chunk: Buffer) => {
+    size += chunk.byteLength;
+    if (size > 64 * 1024) {
+      reject(new GenericBatchSupervisorError("process_registration_failed", "The Linux launch receipt exceeded its bound."));
+      stream.destroy();
+      return;
+    }
+    chunks.push(Buffer.from(chunk));
+  });
+  stream.once("error", (error) => reject(new GenericBatchSupervisorError("process_registration_failed", "The Linux launch-receipt pipe failed.", { cause: error })));
+  stream.once("end", () => {
+    try {
+      const bytes = Buffer.concat(chunks);
+      if (!bytes.length) throw new Error("empty receipt");
+      writeExclusiveRegular(launchReceiptPath, bytes, 0o400);
+      resolveReceipt();
+    } catch (error) {
+      reject(error instanceof GenericBatchSupervisorError ? error
+        : new GenericBatchSupervisorError("process_registration_failed", "The Linux launch receipt was invalid.", { cause: error }));
+    }
+  });
+});
 
 const releaseGate = (child: ChildProcess): void => {
   const stream = child.stdio[3];
@@ -2178,7 +2261,7 @@ const pythonImportRoots = (requestedExecutable: string): string[] => {
   }
 };
 
-const pythonGateWrapper = (importRoots: readonly string[]): string => [
+const pythonGateWrapper = (importRoots: readonly string[], receiptFd?: number): string => [
   "import hashlib,json,os,runpy,sys",
   `sys.path[:0]=${JSON.stringify(importRoots)}`,
   "nonce=sys.argv[1]",
@@ -2188,13 +2271,18 @@ const pythonGateWrapper = (importRoots: readonly string[]): string => [
   "payload=json.dumps(unsigned,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')",
   "receipt=dict(unsigned,receiptDigest=hashlib.sha256(payload).hexdigest())",
   "encoded=json.dumps(receipt,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')+b'\\n'",
-  "fd=os.open(receipt_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)",
-  "os.write(fd,encoded)",
-  "os.fsync(fd)",
-  "os.close(fd)",
-  "dirfd=os.open(os.path.dirname(receipt_path),os.O_RDONLY)",
-  "os.fsync(dirfd)",
-  "os.close(dirfd)",
+  ...(receiptFd === undefined ? [
+    "fd=os.open(receipt_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)",
+    "os.write(fd,encoded)",
+    "os.fsync(fd)",
+    "os.close(fd)",
+    "dirfd=os.open(os.path.dirname(receipt_path),os.O_RDONLY)",
+    "os.fsync(dirfd)",
+    "os.close(dirfd)",
+  ] : [
+    `os.write(${receiptFd},encoded)`,
+    `os.close(${receiptFd})`,
+  ]),
   "os.write(5,b'1')",
   "os.close(5)",
   "gate=os.read(3,1)",

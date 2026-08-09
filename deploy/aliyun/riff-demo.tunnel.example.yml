@@ -1,0 +1,12 @@
+tunnel: replace-with-tunnel-uuid
+credentials-file: /home/ubuntu/.cloudflared/replace-with-tunnel-uuid.json
+ingress:
+  - hostname: riff-demo.gaojihe.cn
+    service: http://[::1]:8787
+    originRequest:
+      httpHostHeader: riff-demo.gaojihe.cn
+  - hostname: riff-demo-visual.gaojihe.cn
+    service: http://[::1]:8788
+    originRequest:
+      httpHostHeader: riff-demo-visual.gaojihe.cn
+  - service: http_status:404

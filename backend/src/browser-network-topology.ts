@@ -30,6 +30,8 @@ export type BrowserNetworkUpgradeHandler = (
 export type BrowserNetworkTopologyOptions = {
   appPort?: number;
   brokerPort?: number;
+  appPublicOrigin?: string;
+  brokerPublicOrigin?: string;
   closeDrainTimeoutMs?: number;
   appHandler: BrowserNetworkHandler;
   brokerHandler: BrowserNetworkHandler;
@@ -101,6 +103,24 @@ export class BrowserNetworkTopology {
         "The platform app and visual broker must use different server-owned ports.",
       );
     }
+    if ((options.appPublicOrigin === undefined) !== (options.brokerPublicOrigin === undefined)) {
+      throw new BrowserNetworkTopologyError(
+        "platform_listener_invalid",
+        "Public browser origins must configure both the platform app and visual broker.",
+      );
+    }
+    const appPublicOrigin = options.appPublicOrigin === undefined
+      ? undefined
+      : exactPublicOrigin(options.appPublicOrigin);
+    const brokerPublicOrigin = options.brokerPublicOrigin === undefined
+      ? undefined
+      : exactPublicOrigin(options.brokerPublicOrigin);
+    if (appPublicOrigin && brokerPublicOrigin && appPublicOrigin.origin === brokerPublicOrigin.origin) {
+      throw new BrowserNetworkTopologyError(
+        "platform_listener_invalid",
+        "The public platform app and visual broker origins must be distinct.",
+      );
+    }
 
     let appAddress: BrowserNetworkAddress | undefined;
     let brokerAddress: BrowserNetworkAddress | undefined;
@@ -121,8 +141,14 @@ export class BrowserNetworkTopology {
     let appIpv4Guard: Server | undefined;
     let brokerIpv4Guard: Server | undefined;
     try {
-      appAddress = await listenExact(appServer, appPort, "platform_listener_unavailable");
-      brokerAddress = await listenExact(brokerServer, brokerPort, "broker_listener_unavailable");
+      appAddress = publicAddress(
+        await listenExact(appServer, appPort, "platform_listener_unavailable"),
+        appPublicOrigin,
+      );
+      brokerAddress = publicAddress(
+        await listenExact(brokerServer, brokerPort, "broker_listener_unavailable"),
+        brokerPublicOrigin,
+      );
       if (appAddress.port === brokerAddress.port) {
         throw new BrowserNetworkTopologyError(
           "platform_listener_invalid",
@@ -387,6 +413,30 @@ const exactPort = (value: number): number => {
   }
   return value;
 };
+
+const exactPublicOrigin = (value: string): URL => {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.origin !== value || url.pathname !== "/"
+    || url.search || url.hash || url.username || url.password || !url.hostname
+    || url.hostname === "localhost") {
+    throw new BrowserNetworkTopologyError(
+      "platform_listener_invalid",
+      "Public browser origins must be canonical HTTPS origins without credentials, paths, query, or fragment.",
+    );
+  }
+  return url;
+};
+
+const publicAddress = (
+  address: BrowserNetworkAddress,
+  publicOrigin: URL | undefined,
+): BrowserNetworkAddress => publicOrigin
+  ? Object.freeze({
+    ...address,
+    authority: publicOrigin.host,
+    origin: publicOrigin.origin,
+  })
+  : address;
 
 const exactDrainTimeout = (value: number): number => {
   if (!Number.isSafeInteger(value) || value < 1 || value > 30_000) {

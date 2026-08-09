@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
+    "test-admin:hash": "node --experimental-strip-types scripts/hash-test-admin-password.ts",
     "test": "node --experimental-strip-types --test --test-concurrency=1 test/*.test.ts",
     "project-only:cutover": "node --experimental-strip-types scripts/project-only-cutover.ts"
   },

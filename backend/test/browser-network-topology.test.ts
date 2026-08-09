@@ -68,6 +68,56 @@ test("platform app and broker exact-bind distinct IPv6 loopback sockets with loc
   assert.equal(broker.body.error.code, "broker_route_denied");
 });
 
+test("explicit public HTTPS origins preserve loopback binds and enforce ingress authorities", async (t) => {
+  const topology = await BrowserNetworkTopology.start({
+    appPublicOrigin: "https://riff-demo.example.com",
+    brokerPublicOrigin: "https://riff-demo-visual.example.com",
+    appHandler: (_request, response) => networkJson(response, 204, {}),
+    brokerHandler: (_request, response) => networkJson(response, 204, {}),
+  });
+  t.after(() => topology.close());
+
+  assert.equal(topology.app.host, BROWSER_LOOPBACK_HOST);
+  assert.equal(topology.app.origin, "https://riff-demo.example.com");
+  assert.equal(topology.app.authority, "riff-demo.example.com");
+  assert.equal(topology.broker.origin, "https://riff-demo-visual.example.com");
+  assert.equal((await raw(topology.app, {
+    method: "GET",
+    path: "/",
+    host: topology.app.authority,
+  })).status, 204);
+  assert.equal((await raw(topology.app, {
+    method: "GET",
+    path: "/",
+    host: `localhost:${topology.app.port}`,
+  })).status, 421);
+});
+
+test("public browser origin configuration fails closed unless both canonical HTTPS origins are distinct", async () => {
+  const handler = (_request: unknown, response: any): void => networkJson(response, 204, {});
+  for (const options of [
+    { appPublicOrigin: "https://riff-demo.example.com" },
+    {
+      appPublicOrigin: "https://riff-demo.example.com/",
+      brokerPublicOrigin: "https://riff-demo-visual.example.com",
+    },
+    {
+      appPublicOrigin: "http://riff-demo.example.com",
+      brokerPublicOrigin: "https://riff-demo-visual.example.com",
+    },
+    {
+      appPublicOrigin: "https://riff-demo.example.com",
+      brokerPublicOrigin: "https://riff-demo.example.com",
+    },
+  ]) {
+    await assert.rejects(
+      BrowserNetworkTopology.start({ ...options, appHandler: handler, brokerHandler: handler }),
+      (error: unknown) => error instanceof BrowserNetworkTopologyError
+        && error.code === "platform_listener_invalid",
+    );
+  }
+});
+
 test("Host guards fail before either application handler", async (t) => {
   let appCalls = 0;
   let brokerCalls = 0;

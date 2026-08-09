@@ -107,6 +107,22 @@ const start = async (t: test.TestContext, options: Readonly<{
 
 const body = async (response: Response): Promise<any> => JSON.parse(await response.text());
 
+const awaitProjectTurn = async (
+  origin: string,
+  conversationId: string,
+  requestKey: string,
+): Promise<any> => {
+  const statusUrl = `${origin}/api/conversations/${conversationId}/turns/${requestKey}`;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetch(statusUrl);
+    assert.equal(response.status, 200, await response.clone().text());
+    const status = await body(response);
+    if (status.terminal === true) return status.result;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1));
+  }
+  throw new Error("Project-only Turn did not reach a terminal state.");
+};
+
 test("Project-only structured Agent responses accept null optional fields without weakening operation validation", () => {
   assert.deepEqual(parseAgentInstruction(JSON.stringify({
     operation: "none",
@@ -228,7 +244,16 @@ test("Project-only accepts OpenCode design delivery for raw visual-design wordin
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ requestKey: "request_design", text, attachmentIds: [] }),
   });
-  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(response.status, 202, await response.clone().text());
+  const designSubmission = await body(response);
+  assert.equal(designSubmission.schemaVersion, 1);
+  assert.equal(designSubmission.accepted, true);
+  assert.equal(designSubmission.requestKey, "request_design");
+  assert.match(designSubmission.turnId, /^turn_[0-9a-f]{32}$/u);
+  assert.equal(designSubmission.state, "running");
+  assert.equal(designSubmission.terminal, false);
+  assert.equal(designSubmission.statusUrl, `/api/conversations/${conversation.id}/turns/request_design`);
+  await awaitProjectTurn(origin, conversation.id, "request_design");
   assert.equal(capturedPrompt?.text, text);
   assert.match(capturedPrompt?.system ?? "", /BEGIN LOADED PROJECT SKILL \(simulation-domain-requirements@local-v1\)/u);
   assert.match(capturedPrompt?.system ?? "", /Create a reviewable domain brief/u);
@@ -311,7 +336,12 @@ class SimulationModel(Model):
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ requestKey: "request_project_delivery", text, attachmentIds: [] }),
   });
-  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(response.status, 202, await response.clone().text());
+  const submission = await body(response);
+  assert.equal(submission.accepted, true);
+  assert.equal(submission.requestKey, "request_project_delivery");
+  assert.equal(submission.terminal, false);
+  await awaitProjectTurn(origin, conversation.id, "request_project_delivery");
   assert.equal(prompts.length, 1);
   assert.equal(createdSessionIds.length, 1);
   assert.deepEqual(promptSessionIds, ["session_1"]);
@@ -319,6 +349,9 @@ class SimulationModel(Model):
   assert.match(prompts[0]?.system ?? "", /RIFF_PROJECT_DELIVERY_V1/u);
   assert.match(prompts[0]?.system ?? "", /RIFF_MODEL_SOURCE_V1/u);
   assert.match(prompts[0]?.system ?? "", /never read, create, or increment self\._steps/u);
+  assert.match(prompts[0]?.system ?? "", /\$schema to exactly "https:\/\/json-schema\.org\/draft\/2020-12\/schema"/u);
+  assert.match(prompts[0]?.system ?? "", /Every Mesa Agent subclass must call super\(\)\.__init__\(model\)/u);
+  assert.match(prompts[0]?.system ?? "", /never pass unique_id to Agent\.__init__/u);
   assert.doesNotMatch(prompts[0]?.system ?? "", /"modelSource"\?:/u);
   const source = runtime.store.projectFiles(project.id)
     .find((file) => file.relativePath === "code/model.py");
@@ -326,6 +359,51 @@ class SimulationModel(Model):
   const latest = runtime.store.conversationTurns(conversation.id).at(-1);
   assert.equal(latest?.state, "complete");
   assert.equal(latest?.goalVerification?.disposition, "completed");
+});
+
+test("Project-only Turn submission returns 202 before OpenCode completes and duplicate submissions share one job", async (t) => {
+  let resolvePrompt!: (value: Awaited<ReturnType<OpenCodeConversationPort["promptWithModel"]>>) => void;
+  const deferred = new Promise<Awaited<ReturnType<OpenCodeConversationPort["promptWithModel"]>>>((resolve) => {
+    resolvePrompt = resolve;
+  });
+  let promptCount = 0;
+  const delayedOpenCode: OpenCodeConversationPort = {
+    ...openCode,
+    async promptWithModel() {
+      promptCount += 1;
+      return deferred;
+    },
+  };
+  const { origin, runtime, project } = await start(t, { openCode: delayedOpenCode });
+  const conversation = runtime.store.createConversation({
+    id: "conversation_async_turn",
+    projectId: project.id,
+    name: "Async",
+    providerId: "provider",
+    modelId: "agent",
+    createdAt: NOW,
+  });
+  const submit = () => fetch(`${origin}/api/conversations/${conversation.id}/turns`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestKey: "request_async_turn", text: "请解释当前模型", attachmentIds: [] }),
+  });
+  const first = await submit();
+  assert.equal(first.status, 202);
+  assert.equal((await body(first)).terminal, false);
+  const duplicate = await submit();
+  assert.equal(duplicate.status, 202);
+  assert.equal(promptCount, 1);
+  const running = await fetch(`${origin}/api/conversations/${conversation.id}/turns/request_async_turn`);
+  assert.equal((await body(running)).terminal, false);
+  resolvePrompt({
+    messageId: "message_async",
+    text: JSON.stringify({ operation: "none", assistantText: "当前模型可执行。" }),
+    content: { source: "opencode", textParts: 1, parts: [{ ordinal: 0, kind: "text", state: "complete" }] },
+  });
+  const completed = await awaitProjectTurn(origin, conversation.id, "request_async_turn");
+  assert.equal(completed.turn.state, "complete");
+  assert.equal(promptCount, 1);
 });
 
 test("Project-only parameter reruns accept an explicit bounded JSON patch", () => {

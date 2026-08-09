@@ -43,6 +43,20 @@ type BrowserSession = Readonly<{
   expiresAt: string;
 }>;
 
+export type TestUserAuthSession = Readonly<{
+  schemaVersion: 1;
+  authenticated: boolean;
+  username?: string;
+  expiresAt?: string;
+  quota?: Readonly<{
+    limitTokens: number;
+    usedTokens: number;
+    reservedTokens: number;
+    availableTokens: number;
+    measurement: "estimated";
+  }>;
+}>;
+
 export type ProductRecoveryStatus = Readonly<
   | {
     state: "ready";
@@ -57,6 +71,9 @@ export type ProductRecoveryStatus = Readonly<
 >;
 
 export interface ProductClient {
+  authSession?(): Promise<TestUserAuthSession>;
+  login?(username: string, loginKey: string): Promise<TestUserAuthSession>;
+  logout?(): Promise<TestUserAuthSession>;
   recoveryStatus(): Promise<ProductRecoveryStatus>;
   home(): Promise<HomeDto>;
   providers(): Promise<ProviderDiscovery>;
@@ -289,6 +306,33 @@ export class ProductApiError extends Error {
 
 export class HttpProductClient implements ProductClient {
   #session?: Promise<BrowserSession>;
+
+  authSession(): Promise<TestUserAuthSession> {
+    return fetch("/api/auth/session", { credentials: "same-origin" })
+      .then((response) => responseJson<TestUserAuthSession>(response));
+  }
+
+  async login(username: string, loginKey: string): Promise<TestUserAuthSession> {
+    this.#session = undefined;
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, loginKey }),
+    });
+    return responseJson<TestUserAuthSession>(response);
+  }
+
+  async logout(): Promise<TestUserAuthSession> {
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    this.#session = undefined;
+    return responseJson<TestUserAuthSession>(response);
+  }
 
   recoveryStatus(): Promise<ProductRecoveryStatus> {
     return this.#request<ProductRecoveryStatus>("/api/recovery-status");
@@ -1021,15 +1065,17 @@ export class HttpProductClient implements ProductClient {
     );
   }
 
-  sendTurn(input: Readonly<{
+  async sendTurn(input: Readonly<{
     requestKey: string;
     conversationId: string;
     text: string;
     attachmentIds: readonly string[];
     agentName?: string;
   }>): Promise<AgentTurnResult> {
-    return this.#request(
-      `/api/conversations/${encodeURIComponent(input.conversationId)}/turns`,
+    const root = `/api/conversations/${encodeURIComponent(input.conversationId)}/turns`;
+    const expectedStatusUrl = `${root}/${encodeURIComponent(input.requestKey)}`;
+    const submission = normalizeTurnSubmission(await this.#request(
+      root,
       {
         method: "POST",
         body: JSON.stringify({
@@ -1039,6 +1085,26 @@ export class HttpProductClient implements ProductClient {
           ...(input.agentName ? { agentName: input.agentName } : {}),
         }),
       },
+    ), input.requestKey, expectedStatusUrl);
+    let terminal = submission.terminal;
+    const deadline = Date.now() + 10 * 60_000;
+    while (Date.now() < deadline) {
+      if (!terminal) await delay(750);
+      const status = normalizeTurnPoll(
+        await this.#request(expectedStatusUrl),
+        input.requestKey,
+        expectedStatusUrl,
+      );
+      if (status.terminal) {
+        globalThis.dispatchEvent?.(new Event("riff:quota-updated"));
+        return status.result;
+      }
+      terminal = status.terminal;
+    }
+    throw new ProductApiError(
+      504,
+      "turn_poll_timeout",
+      "The Agent turn is still running; refresh the Conversation to continue following it.",
     );
   }
 
@@ -1187,11 +1253,15 @@ const responseJson = async <T>(
     const record = publicError && typeof publicError === "object"
       ? publicError as { code?: unknown; message?: unknown }
       : body as { code?: unknown; message?: unknown } | undefined;
-    throw new ProductApiError(
+    const error = new ProductApiError(
       response.status,
       typeof record?.code === "string" ? record.code : "request_failed",
       typeof record?.message === "string" ? record.message : "The request could not be completed.",
     );
+    if (error.status === 401 && error.code === "authentication_required") {
+      globalThis.dispatchEvent?.(new Event("riff:authentication-required"));
+    }
+    throw error;
   }
   return body as T;
 };
@@ -1200,6 +1270,52 @@ const isBrowserSessionDenied = (error: unknown): error is ProductApiError =>
   error instanceof ProductApiError
   && error.status === 403
   && error.code === "browser_session_denied";
+
+const normalizeTurnSubmission = (
+  value: unknown,
+  requestKey: string,
+  expectedStatusUrl: string,
+): Readonly<{ terminal: boolean }> => {
+  const record = strictRuntimeRecord(value, [
+    "schemaVersion", "accepted", "requestKey", "turnId", "state", "terminal", "statusUrl",
+  ]);
+  if (record.schemaVersion !== 1
+    || record.accepted !== true
+    || record.requestKey !== requestKey
+    || !boundedRuntimeString(record.turnId, 500)
+    || !["running", "complete", "failed", "read_only"].includes(String(record.state))
+    || typeof record.terminal !== "boolean"
+    || record.statusUrl !== expectedStatusUrl) {
+    throw new ProductApiError(502, "invalid_response", "The server returned an invalid Turn submission receipt.");
+  }
+  return Object.freeze({ terminal: record.terminal });
+};
+
+const normalizeTurnPoll = (
+  value: unknown,
+  requestKey: string,
+  expectedStatusUrl: string,
+): Readonly<{ terminal: false } | { terminal: true; result: AgentTurnResult }> => {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+  if (!record || record.schemaVersion !== 1 || typeof record.terminal !== "boolean") {
+    throw new ProductApiError(502, "invalid_response", "The server returned an invalid Turn status.");
+  }
+  if (record.terminal === true) {
+    const keys = Object.keys(record).sort();
+    if (keys.join("\n") !== ["result", "schemaVersion", "terminal"].sort().join("\n")
+      || !record.result || typeof record.result !== "object" || Array.isArray(record.result)) {
+      throw new ProductApiError(502, "invalid_response", "The server returned an invalid terminal Turn status.");
+    }
+    return Object.freeze({ terminal: true, result: record.result as AgentTurnResult });
+  }
+  normalizeTurnSubmission(record, requestKey, expectedStatusUrl);
+  return Object.freeze({ terminal: false });
+};
+
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolveDelay) => globalThis.setTimeout(resolveDelay, milliseconds));
 
 const normalizeConversationRuntimeProjection = (
   value: unknown,

@@ -107,6 +107,7 @@ import { ProjectOnlyAgentService } from "./project-only-agent-service.ts";
 import { ProjectOnlyBatchRuntime } from "./project-only-batch-runtime.ts";
 import { ProjectOnlyVisualRuntime } from "./project-only-visual-runtime.ts";
 import type { ProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
+import { TestUserAccess } from "./test-user-access.ts";
 
 export const configuredBatchPythonExecutable = (explicit?: string): string => {
   const executable = explicit
@@ -279,6 +280,7 @@ export type BackendOptions = {
   staticWebRoot?: string;
   /** Explicit local rollback only; never inferred from a browser query. */
   staticLegacyProductRoutes?: boolean;
+  testUserAccess?: TestUserAccess;
   workbenchBrowserBroker?: LocalBrowserBroker;
   workbenchBrowserTargetResolver?: BrowserTargetResolver;
   workbenchBrowserTtlMs?: number;
@@ -636,9 +638,12 @@ export class BackendApp {
   #listenerQueue: Promise<void> = Promise.resolve();
   #listenerMode: "idle" | "legacy" | "browser" | "closed" = "idle";
   readonly #legacyCloseDrainTimeoutMs: number;
+  readonly #testUserAccess?: TestUserAccess;
+  readonly #requestTestUsers = new WeakMap<IncomingMessage, string>();
 
   constructor(options: BackendOptions) {
     this.options = options;
+    this.#testUserAccess = options.testUserAccess;
     this.#workbenchObservationTargets = new WorkbenchObservationTargetRegistry(
       options.workbenchBrowserTtlMs,
     );
@@ -685,6 +690,7 @@ export class BackendApp {
         visualRuntime,
         batchRuntime,
         loadedSkills: projectOnlySkills,
+        testUserAccess: options.testUserAccess,
       });
       this.projectOnlyApi = new ProjectOnlyHttpApi(
         options.projectOnlyRuntime.store,
@@ -988,6 +994,7 @@ export class BackendApp {
   async listenBrowserNetwork(
     appPort = 0,
     brokerPort = 0,
+    publicOrigins?: Readonly<{ app: string; broker: string }>,
   ): Promise<{ app: BrowserNetworkAddress; broker: BrowserNetworkAddress }> {
     return this.#withListenerLock(async () => {
       if (this.#listenerMode === "browser" && this.#browserNetwork) {
@@ -999,11 +1006,14 @@ export class BackendApp {
         network = await BrowserNetworkTopology.start({
           appPort,
           brokerPort,
+          appPublicOrigin: publicOrigins?.app,
+          brokerPublicOrigin: publicOrigins?.broker,
           beforeReady: ({ app, broker }) => {
             this.#browserBrokerOrigin = broker.origin;
             this.#browserFrames = new BrowserFrameCapability({
               appOrigin: app.origin,
               brokerOrigin: broker.origin,
+              secureCookies: app.origin.startsWith("https:") && broker.origin.startsWith("https:"),
               targets: this.options.browserFrameTargetResolver ?? this.#productBrowserFrameTargets(),
               authorityIssuanceAllowed: (scope) =>
                 this.#authorityDeletionFence.issuanceAllowed(scope),
@@ -1039,6 +1049,7 @@ export class BackendApp {
             this.#agentTurnRuntime?.configureBrowserAuthority(this.#browserAgentAuthority);
           },
           appHandler: async (request, response, address) => {
+            if (await this.#handleTestUserAccess(request, response, address)) return;
             if (await this.#handleBrowserFramePlatform(request, response, address)) return;
             if (this.#handleStaticProductShell(request, response, address)) return;
             await this.#handle(request, response);
@@ -1125,6 +1136,7 @@ export class BackendApp {
     await attempt(() => this.productRunDispatcher?.stop());
     await attempt(() => this.projectOnlyApi?.close());
     await attempt(() => this.productStore?.close());
+    await attempt(() => this.#testUserAccess?.close());
     if (firstError) throw firstError;
   }
 
@@ -1172,7 +1184,7 @@ export class BackendApp {
     } else if (url.pathname !== "/"
       && !(this.options.staticLegacyProductRoutes
         ? /^\/(?:workbench(?:\/(?:new(?:\/[A-Za-z0-9_-]{1,80})?|(?:models|projects)\/[A-Za-z0-9_-]{1,160}))?|(?:models|projects)\/[A-Za-z0-9_-]{1,160})\/?$/u
-        : /^\/workbench(?:\/(?:home|new(?:\/[A-Za-z0-9_-]{1,80})?|projects\/[A-Za-z0-9_-]{1,160}))?\/?$/u
+        : /^(?:\/admin\/?|\/workbench(?:\/(?:home|new(?:\/[A-Za-z0-9_-]{1,80})?|projects\/[A-Za-z0-9_-]{1,160}))?\/?)$/u
       ).test(url.pathname)) {
       return false;
     }
@@ -1411,6 +1423,171 @@ export class BackendApp {
       this.#browserFrameError(response, error, origin === address.origin ? address.origin : undefined);
       return true;
     }
+  }
+
+  async #handleTestUserAccess(
+    request: IncomingMessage,
+    response: ServerResponse,
+    address: BrowserNetworkAddress,
+  ): Promise<boolean> {
+    const access = this.#testUserAccess;
+    if (!access) return false;
+    const url = new URL(request.url ?? "/", address.origin);
+    const userSessionRoute = url.pathname === "/api/auth/session";
+    const userLoginRoute = url.pathname === "/api/auth/login";
+    const userLogoutRoute = url.pathname === "/api/auth/logout";
+    const adminRoute = url.pathname === "/api/admin/session"
+      || url.pathname === "/api/admin/login"
+      || url.pathname === "/api/admin/logout"
+      || url.pathname === "/api/admin/users"
+      || /^\/api\/admin\/users\/[^/]+\/(?:rotate-key|quota|revoke)$/u.test(url.pathname);
+    const protectedRoute = url.pathname.startsWith("/api/")
+      && url.pathname !== "/api/health" && !url.pathname.startsWith("/api/admin/")
+      || url.pathname.startsWith("/browser/");
+    if (!userSessionRoute && !userLoginRoute && !userLogoutRoute && !adminRoute && !protectedRoute) return false;
+    try {
+      if ((userSessionRoute || userLoginRoute || userLogoutRoute || adminRoute) && url.search !== "") {
+        throw new ApiError(422, "invalid_request", "Authentication query parameters are not accepted.");
+      }
+      if (userSessionRoute) {
+        if (request.method !== "GET") throw new ApiError(405, "method_not_allowed", "Use GET for the authentication session.");
+        const session = access.session(request, "user");
+        privateApiJson(response, 200, session
+          ? { schemaVersion: 1, authenticated: true, username: session.username,
+            expiresAt: new Date(session.expiresAtMs).toISOString(), quota: access.quota(session.username) }
+          : { schemaVersion: 1, authenticated: false });
+        return true;
+      }
+      if (userLoginRoute) {
+        if (request.method !== "POST") throw new ApiError(405, "method_not_allowed", "Use POST to sign in.");
+        requireSameOriginBrowserMutation(request, address.origin);
+        const body = await exactTestUserJson(request, ["username", "loginKey"]);
+        if (typeof body.username !== "string" || typeof body.loginKey !== "string") {
+          throw new ApiError(422, "invalid_request", "Username and login key are required.");
+        }
+        const result = access.userLogin(
+          body.username,
+          body.loginKey,
+          request.socket.remoteAddress ?? "unknown",
+        );
+        networkJsonWithHeaders(response, 200, {
+          schemaVersion: 1,
+          authenticated: true,
+          username: body.username,
+          expiresAt: result.expiresAt,
+          quota: result.quota,
+        }, { "set-cookie": result.setCookie });
+        return true;
+      }
+      if (userLogoutRoute) {
+        if (request.method !== "POST") throw new ApiError(405, "method_not_allowed", "Use POST to sign out.");
+        requireSameOriginBrowserMutation(request, address.origin);
+        await exactTestUserJson(request, []);
+        access.requireUserSession(request);
+        networkJsonWithHeaders(response, 200, {
+          schemaVersion: 1,
+          authenticated: false,
+        }, { "set-cookie": access.logout(request, "user") });
+        return true;
+      }
+      if (adminRoute) {
+        return await this.#handleTestUserAdmin(request, response, url, address, access);
+      }
+      const session = access.requireUserSession(request);
+      this.#requestTestUsers.set(request, session.username);
+      return false;
+    } catch (error) {
+      const apiError = asApiError(error);
+      privateApiJson(response, apiError.status, {
+        accepted: false,
+        error: { code: apiError.code, message: apiError.message },
+      });
+      return true;
+    }
+  }
+
+  async #handleTestUserAdmin(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    address: BrowserNetworkAddress,
+    access: TestUserAccess,
+  ): Promise<true> {
+    if (url.pathname === "/api/admin/session") {
+      if (request.method !== "GET") throw new ApiError(405, "method_not_allowed", "Use GET for the administrator session.");
+      const session = access.session(request, "admin");
+      privateApiJson(response, 200, session
+        ? { schemaVersion: 1, authenticated: true, username: session.username,
+          expiresAt: new Date(session.expiresAtMs).toISOString() }
+        : { schemaVersion: 1, authenticated: false });
+      return true;
+    }
+    if (url.pathname === "/api/admin/login") {
+      if (request.method !== "POST") throw new ApiError(405, "method_not_allowed", "Use POST for administrator sign-in.");
+      requireSameOriginBrowserMutation(request, address.origin);
+      const body = await exactTestUserJson(request, ["username", "password"]);
+      if (typeof body.username !== "string" || typeof body.password !== "string") {
+        throw new ApiError(422, "invalid_request", "Administrator username and password are required.");
+      }
+      const result = access.adminLogin(body.username, body.password, request.socket.remoteAddress ?? "unknown");
+      networkJsonWithHeaders(response, 200, {
+        schemaVersion: 1, authenticated: true, username: access.adminUsername,
+        expiresAt: result.expiresAt,
+      }, { "set-cookie": result.setCookie });
+      return true;
+    }
+    if (url.pathname === "/api/admin/logout") {
+      if (request.method !== "POST") throw new ApiError(405, "method_not_allowed", "Use POST for administrator sign-out.");
+      requireSameOriginBrowserMutation(request, address.origin);
+      await exactTestUserJson(request, []);
+      access.requireAdminSession(request);
+      networkJsonWithHeaders(response, 200, { schemaVersion: 1, authenticated: false }, {
+        "set-cookie": access.logout(request, "admin"),
+      });
+      return true;
+    }
+    access.requireAdminSession(request);
+    if (url.pathname === "/api/admin/users" && request.method === "GET") {
+      privateApiJson(response, 200, { schemaVersion: 1, users: access.users() });
+      return true;
+    }
+    requireSameOriginBrowserMutation(request, address.origin);
+    if (url.pathname === "/api/admin/users" && request.method === "POST") {
+      const body = await exactTestUserJson(request, ["username", "tokenQuota"]);
+      if (typeof body.username !== "string" || !Number.isSafeInteger(body.tokenQuota)) {
+        throw new ApiError(422, "invalid_request", "Test username and token quota are required.");
+      }
+      const created = access.createUser(body.username, body.tokenQuota as number);
+      networkJsonWithHeaders(response, 201, {
+        schemaVersion: 1, user: publicManagedUser(created), loginKey: created.loginKey,
+        loginKeyDisplay: "once",
+      }, {});
+      return true;
+    }
+    const match = /^\/api\/admin\/users\/([^/]+)\/(rotate-key|quota|revoke)$/u.exec(url.pathname);
+    if (!match || request.method !== "POST") throw new ApiError(405, "method_not_allowed", "The administrator operation is not supported.");
+    const username = decodeURIComponent(match[1]!);
+    if (match[2] === "rotate-key") {
+      await exactTestUserJson(request, []);
+      const rotated = access.rotateUserKey(username);
+      networkJsonWithHeaders(response, 200, {
+        schemaVersion: 1, user: publicManagedUser(rotated), loginKey: rotated.loginKey,
+        loginKeyDisplay: "once",
+      }, {});
+      return true;
+    }
+    if (match[2] === "quota") {
+      const body = await exactTestUserJson(request, ["additionalTokens"]);
+      if (!Number.isSafeInteger(body.additionalTokens)) throw new ApiError(422, "invalid_request", "Additional token quota is required.");
+      privateApiJson(response, 200, {
+        schemaVersion: 1,
+        user: publicManagedUser(access.increaseQuota(username, body.additionalTokens as number)),
+      });
+      return true;
+    }
+    await exactTestUserJson(request, []);
+    privateApiJson(response, 200, { schemaVersion: 1, user: publicManagedUser(access.revokeUser(username)) });
+    return true;
   }
 
   async #handleBrowserFrameBroker(
@@ -1835,7 +2012,13 @@ export class BackendApp {
           );
         }
       }
-      if (this.projectOnlyApi && await this.projectOnlyApi.handle(request, response, url, parts)) return;
+      if (this.projectOnlyApi && await this.projectOnlyApi.handle(
+        request,
+        response,
+        url,
+        parts,
+        this.#requestTestUsers.get(request),
+      )) return;
       if (await this.#handleWorkbenchBrowser(request, response, url, parts)) return;
       if (this.a2 && await this.a2.handle(request, response, url, parts)) return;
       if (this.#productMode) {
@@ -2680,6 +2863,40 @@ const exactWorkbenchBrowserJson = async (
   exactObject(value, [...keys]);
   return value;
 };
+
+const exactTestUserJson = async (
+  request: IncomingMessage,
+  keys: readonly string[],
+): Promise<Record<string, unknown>> => {
+  if (rawBrowserHeader(request, "content-type") !== "application/json") {
+    throw new ApiError(415, "unsupported_media_type", "Use application/json.");
+  }
+  let value: unknown;
+  try { value = JSON.parse(await bodyText(request, 4_096)); }
+  catch { throw new ApiError(422, "invalid_request", "The authentication request must be valid JSON."); }
+  exactObject(value, [...keys]);
+  return value as Record<string, unknown>;
+};
+
+const requireSameOriginBrowserMutation = (
+  request: IncomingMessage,
+  origin: string,
+): void => {
+  if (rawBrowserHeader(request, "origin") !== origin
+    || rawBrowserHeader(request, "sec-fetch-site") !== "same-origin"
+    || rawBrowserHeader(request, "sec-fetch-mode") !== "cors"
+    || rawBrowserHeader(request, "sec-fetch-dest") !== "empty") {
+    throw new ApiError(403, "authentication_request_denied", "The authentication request was denied.");
+  }
+};
+
+const publicManagedUser = (user: ReturnType<TestUserAccess["users"]>[number]): Record<string, unknown> => ({
+  username: user.username,
+  state: user.state,
+  quota: user.quota,
+  createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
+});
 
 const exactQueryKeys = (url: URL, allowed: string[]): void => {
   const permitted = new Set(allowed); const seen = new Set<string>();
