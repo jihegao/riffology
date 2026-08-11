@@ -115,9 +115,6 @@ function ProjectWorkspace({
                 ? `${selectedRun?.status} result`
                 : "plan experiment"}
           </span>
-          <span className={`product-badge product-badge-${workspace.owner.technicalStatus}`}>
-            {workspace.owner.technicalStatus}
-          </span>
           <p>
             {runPriority === "active"
               ? "The current Run is active. Direct status and cancellation controls remain available without the Agent."
@@ -128,11 +125,6 @@ function ProjectWorkspace({
           {executionLocked && <p role="status">
             Execution lock: {workspace.executionLock.state}. Code, dependencies, and the execution contract are read-only until the active execution finishes.
           </p>}
-          <button type="button" className="product-secondary"
-            disabled={pending || executionLocked}
-            onClick={() => void act(() => client.startTechnicalCheck(workspace.owner.id, crypto.randomUUID()))}>
-            Run technical check
-          </button>
         </section>
         {error && <p role="alert" className="product-form-error">{error}</p>}
         {runPriority === "planning" ? (

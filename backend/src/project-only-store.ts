@@ -13,9 +13,8 @@ const DATABASE_NAME = "project-only.sqlite3";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;
 const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled", "timed_out", "interrupted"]);
 
-export type ProjectTechnicalStatus = "draft" | "checking" | "executable" | "failed";
 export type ProjectRunMode = "batch" | "visual" | "both";
-export type ProjectFileKind = "project_code" | "project_environment" | "project_visual_asset";
+export type ProjectFileKind = "project_code" | "project_environment" | "project_visual_asset" | "project_artifact";
 export type ProjectRunStatus = "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
 export type ProjectConversationLifecycle = "active" | "archived" | "trashed";
 export type ProjectConversationSessionState = "none" | "connecting" | "available" | "lost" | "read_only";
@@ -32,14 +31,13 @@ export type ProjectRecord = Readonly<{
   id: string;
   name: string;
   lifecycleState: "active" | "archived" | "trashed";
-  technicalStatus: ProjectTechnicalStatus;
   runMode: ProjectRunMode;
   executionDescription: Record<string, unknown>;
   workspaceDigest: string;
   creationSource: "blank" | "template" | "import";
   creationSourceRef: string | null;
   executionLock: null | Readonly<{
-    holderKind: "technical_check" | "run";
+    holderKind: "run";
     holderId: string;
     sourceWorkspaceDigest: string;
     acquiredAt: string;
@@ -59,18 +57,6 @@ export type ProjectFileRecord = Readonly<{
   sha256: string;
   createdAt: string;
   updatedAt: string;
-}>;
-
-export type ProjectTechnicalCheckRecord = Readonly<{
-  id: string;
-  projectId: string;
-  capturedWorkspaceDigest: string;
-  capturedFileDigest: string;
-  executionDescriptionDigest: string;
-  status: "running" | "succeeded" | "failed" | "interrupted";
-  diagnostics: readonly unknown[];
-  startedAt: string;
-  finishedAt: string | null;
 }>;
 
 export type ProjectTemplateRecord = Readonly<{
@@ -292,9 +278,9 @@ export class ProjectOnlyStore {
     const workspaceDigest = calculateWorkspaceDigest(files, runMode, executionDescription);
     this.#transaction(() => {
       this.#database.prepare(`INSERT INTO projects
-        (id, name, technical_status, run_mode, execution_description_json, workspace_digest,
+        (id, name, run_mode, execution_description_json, workspace_digest,
           creation_source, creation_source_ref, created_at, updated_at)
-        VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(input.id, input.name, runMode, json(executionDescription), workspaceDigest,
           input.source.kind, sourceRef, input.createdAt, input.createdAt);
       const insert = this.#database.prepare(`INSERT INTO project_files
@@ -670,7 +656,10 @@ export class ProjectOnlyStore {
   }>): ProjectRecord {
     this.#assertOpen();
     const current = this.project(input.projectId);
-    if (current.executionLock) throw new ProjectOnlyStoreError("project_execution_locked", "Executable Project files are locked by an active check or Run.");
+    if (current.lifecycleState !== "active") {
+      throw new ProjectOnlyStoreError("project_not_writable", "Only an active Project can be changed.");
+    }
+    if (current.executionLock) throw new ProjectOnlyStoreError("project_execution_locked", "Project files are locked by an active Run.");
     if (current.workspaceDigest !== input.expectedWorkspaceDigest) throw new ProjectOnlyStoreError("stale_workspace_digest", "Project workspace changed before the write.");
     const existing = this.projectFiles(input.projectId);
     const next = new Map(existing.map((file) => [file.relativePath, {
@@ -682,10 +671,10 @@ export class ProjectOnlyStore {
       if (change.bytes === null) next.delete(change.relativePath);
       else next.set(change.relativePath, normalizeFiles([change])[0]!);
     }
-    if (next.size === 0) throw new ProjectOnlyStoreError("empty_project_workspace", "Project workspace cannot be empty.");
     const runMode = input.runMode ?? current.runMode;
     const executionDescription = input.executionDescription ?? current.executionDescription;
     const nextFiles = [...next.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+    assertNoProjectPathCollisions(nextFiles.map((file) => file.relativePath));
     const digest = calculateWorkspaceDigest(nextFiles, runMode, executionDescription);
     this.#transaction(() => {
       this.#database.prepare("DELETE FROM project_files WHERE project_id = ?").run(input.projectId);
@@ -694,7 +683,7 @@ export class ProjectOnlyStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const file of nextFiles) insert.run(file.id, input.projectId, file.kind, file.relativePath,
         file.mediaType, file.bytes, file.bytes.byteLength, file.sha256, input.updatedAt, input.updatedAt);
-      const changed = this.#database.prepare(`UPDATE projects SET technical_status = 'draft', run_mode = ?,
+      const changed = this.#database.prepare(`UPDATE projects SET run_mode = ?,
         execution_description_json = ?, workspace_digest = ?, updated_at = ?
         WHERE id = ? AND workspace_digest = ?`).run(runMode, json(executionDescription), digest, input.updatedAt,
           input.projectId, input.expectedWorkspaceDigest);
@@ -739,72 +728,6 @@ export class ProjectOnlyStore {
       }));
   }
 
-  startTechnicalCheck(input: Readonly<{ id: string; projectId: string; expectedWorkspaceDigest: string; startedAt: string }>): void {
-    this.#assertOpen();
-    assertId(input.id);
-    this.#transaction(() => {
-      const project = this.project(input.projectId);
-      if (project.workspaceDigest !== input.expectedWorkspaceDigest) throw new ProjectOnlyStoreError("stale_workspace_digest", "Project workspace changed before technical check.");
-      if (project.executionLock) throw new ProjectOnlyStoreError("project_execution_locked", "Project already has an active check or Run.");
-      this.#database.prepare(`INSERT INTO project_technical_checks
-        (id, project_id, captured_workspace_digest, status, started_at) VALUES (?, ?, ?, 'running', ?)`)
-        .run(input.id, input.projectId, input.expectedWorkspaceDigest, input.startedAt);
-      this.#database.prepare(`INSERT INTO execution_locks
-        (project_id, holder_kind, holder_id, source_workspace_digest, acquired_at)
-        VALUES (?, 'technical_check', ?, ?, ?)`)
-        .run(input.projectId, input.id, input.expectedWorkspaceDigest, input.startedAt);
-      this.#database.prepare("UPDATE projects SET technical_status = 'checking', updated_at = ? WHERE id = ?")
-        .run(input.startedAt, input.projectId);
-    });
-  }
-
-  finishTechnicalCheck(input: Readonly<{
-    id: string;
-    succeeded: boolean;
-    diagnostics: readonly unknown[];
-    capturedFileDigest?: string;
-    executionDescriptionDigest?: string;
-    finishedAt: string;
-  }>): ProjectRecord {
-    this.#assertOpen();
-    let projectId = "";
-    this.#transaction(() => {
-      const check = this.#database.prepare(`SELECT c.*, l.project_id AS locked_project_id FROM project_technical_checks c
-        JOIN execution_locks l ON l.holder_kind = 'technical_check' AND l.holder_id = c.id WHERE c.id = ? AND c.status = 'running'`)
-        .get(input.id) as any;
-      if (!check) throw new ProjectOnlyStoreError("technical_check_not_active", "Technical check is not active.");
-      projectId = check.project_id;
-      const project = this.project(projectId);
-      if (project.workspaceDigest !== check.captured_workspace_digest) throw new ProjectOnlyStoreError("technical_check_digest_drift", "Technical check source digest drifted.");
-      this.#database.prepare(`UPDATE project_technical_checks SET status = ?, diagnostics_json = ?,
-        captured_file_digest = ?, execution_description_digest = ?, finished_at = ? WHERE id = ?`)
-        .run(input.succeeded ? "succeeded" : "failed", json(input.diagnostics),
-          input.capturedFileDigest ?? null, input.executionDescriptionDigest ?? null, input.finishedAt, input.id);
-      this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'technical_check' AND holder_id = ?")
-        .run(projectId, input.id);
-      this.#database.prepare("UPDATE projects SET technical_status = ?, updated_at = ? WHERE id = ?")
-        .run(input.succeeded ? "executable" : "failed", input.finishedAt, projectId);
-    });
-    return this.project(projectId);
-  }
-
-  technicalCheck(id: string): ProjectTechnicalCheckRecord {
-    this.#assertOpen();
-    const row = this.#database.prepare("SELECT * FROM project_technical_checks WHERE id = ?").get(id) as any;
-    if (!row) throw new ProjectOnlyStoreError("technical_check_not_found", "Technical check does not exist.");
-    return Object.freeze({
-      id: row.id,
-      projectId: row.project_id,
-      capturedWorkspaceDigest: row.captured_workspace_digest,
-      capturedFileDigest: row.captured_file_digest ?? "",
-      executionDescriptionDigest: row.execution_description_digest ?? "",
-      status: row.status,
-      diagnostics: JSON.parse(row.diagnostics_json),
-      startedAt: row.started_at,
-      finishedAt: row.finished_at,
-    });
-  }
-
   startRun(input: Readonly<{
     id: string;
     projectId: string;
@@ -817,15 +740,14 @@ export class ProjectOnlyStore {
     assertId(input.id);
     this.#transaction(() => {
       const project = this.project(input.projectId);
-      if (project.executionLock) throw new ProjectOnlyStoreError("project_execution_locked", "Project already has an active check or Run.");
-      if (project.technicalStatus !== "executable" || project.workspaceDigest !== input.expectedWorkspaceDigest) {
-        throw new ProjectOnlyStoreError("project_not_executable", "Run requires the technically checked current Project digest.");
+      if (project.lifecycleState !== "active") {
+        throw new ProjectOnlyStoreError("project_not_writable", "Only an active Project can start a Run.");
+      }
+      if (project.executionLock) throw new ProjectOnlyStoreError("project_execution_locked", "Project already has an active Run.");
+      if (project.workspaceDigest !== input.expectedWorkspaceDigest) {
+        throw new ProjectOnlyStoreError("stale_workspace_digest", "Run requires the current Project workspace digest.");
       }
       if (project.runMode !== "both" && project.runMode !== input.runKind) throw new ProjectOnlyStoreError("run_kind_not_declared", "Run kind is not declared by this Project.");
-      const check = this.#database.prepare(`SELECT 1 FROM project_technical_checks
-        WHERE project_id = ? AND captured_workspace_digest = ? AND status = 'succeeded'
-        ORDER BY finished_at DESC LIMIT 1`).get(input.projectId, input.expectedWorkspaceDigest);
-      if (!check) throw new ProjectOnlyStoreError("technical_check_required", "The current Project digest has not passed technical checks.");
       const experiment = this.#database.prepare(`SELECT configuration_json FROM experiment_configurations
         WHERE id = ? AND project_id = ?`).get(input.experimentConfigurationId, input.projectId) as { configuration_json: string } | undefined;
       if (!experiment) throw new ProjectOnlyStoreError("experiment_not_found", "Experiment does not exist.");
@@ -863,6 +785,39 @@ export class ProjectOnlyStore {
           terminal ? 1 : 0, input.terminalCode ?? null, input.id);
       if (terminal) this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'run' AND holder_id = ?")
         .run(run.project_id, input.id);
+    });
+  }
+
+  failRunStart(input: Readonly<{
+    id: string;
+    code: string;
+    diagnostic: string;
+    at: string;
+  }>): void {
+    this.#assertOpen();
+    const completion = Object.freeze({
+      schemaVersion: 1,
+      status: "failed",
+      code: input.code,
+      diagnostic: input.diagnostic.slice(0, 4_000),
+      phase: "run_start",
+      finishedAt: input.at,
+    });
+    const digest = canonicalDigest(completion);
+    this.#transaction(() => {
+      const run = this.run(input.id);
+      if (!['queued', 'running', 'cancelling'].includes(run.status)) {
+        const existing = this.runCompletion(run.id);
+        if (run.status === "failed" && existing?.digest === digest) return;
+        throw new ProjectOnlyStoreError("run_already_terminal", "Run is already terminal with different diagnostics.");
+      }
+      this.#database.prepare(`INSERT INTO run_completion_records
+        (run_id, completion_json, completion_digest, created_at) VALUES (?, ?, ?, ?)`)
+        .run(run.id, json(completion), digest, input.at);
+      this.#database.prepare(`UPDATE runs SET status = 'failed', updated_at = ?, finished_at = ?, terminal_code = ?
+        WHERE id = ?`).run(input.at, input.at, input.code, run.id);
+      this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'run' AND holder_id = ?")
+        .run(run.projectId, run.id);
     });
   }
 
@@ -983,20 +938,15 @@ export class ProjectOnlyStore {
       .run(input.commandId, input.projectId, input.intentDigest, json(input.response), input.receiptDigest, input.committedAt);
   }
 
-  reconcileInterruptedExecutions(at: string): Readonly<{ checks: number; runs: number }> {
+  reconcileInterruptedExecutions(at: string): Readonly<{ runs: number }> {
     this.#assertOpen();
-    let checks = 0;
     let runs = 0;
     this.#transaction(() => {
-      checks = Number(this.#database.prepare(`UPDATE project_technical_checks SET status = 'interrupted', finished_at = ?
-        WHERE status = 'running' AND id IN (SELECT holder_id FROM execution_locks WHERE holder_kind = 'technical_check')`).run(at).changes);
       runs = Number(this.#database.prepare(`UPDATE runs SET status = 'interrupted', updated_at = ?, finished_at = ?, terminal_code = 'backend_restart'
-        WHERE status IN ('queued', 'running', 'cancelling') AND id IN (SELECT holder_id FROM execution_locks WHERE holder_kind = 'run')`).run(at, at).changes);
-      this.#database.prepare(`UPDATE projects SET technical_status = 'failed', updated_at = ?
-        WHERE id IN (SELECT project_id FROM execution_locks WHERE holder_kind = 'technical_check')`).run(at);
+        WHERE status IN ('queued', 'running', 'cancelling') AND id IN (SELECT holder_id FROM execution_locks)`).run(at, at).changes);
       this.#database.prepare("DELETE FROM execution_locks").run();
     });
-    return Object.freeze({ checks, runs });
+    return Object.freeze({ runs });
   }
 
   reconcileInterruptedConversationTurns(at: string): number {
@@ -1018,6 +968,12 @@ export class ProjectOnlyStore {
 
   /** Test/integration inspection; never expose this handle to browser code. */
   databaseForTesting(): ProjectOnlyDatabase { return this.#database; }
+
+  /** Internal adapter boundary for one receipt-backed Project mutation unit. */
+  atomicProjectMutation<T>(body: () => T): T {
+    this.#assertOpen();
+    return this.#transaction(body);
+  }
 
   #transaction<T>(body: () => T): T {
     if ((this.#database as ProjectOnlyDatabase & { isTransaction?: boolean }).isTransaction) {
@@ -1052,16 +1008,23 @@ export class ProjectOnlyStore {
 }
 
 const normalizeFiles = (files: readonly ProjectFileInput[]) => {
+  assertNoProjectPathCollisions(files.map((file) => file.relativePath));
   const paths = new Set<string>();
   return files.map((file) => {
     assertId(file.id);
     assertRelativePath(file.relativePath);
     if (paths.has(file.relativePath)) throw new ProjectOnlyStoreError("duplicate_project_path", "Project file paths must be unique.");
     paths.add(file.relativePath);
-    if (!["project_code", "project_environment", "project_visual_asset"].includes(file.kind)) {
+    if (!["project_code", "project_environment", "project_visual_asset", "project_artifact"].includes(file.kind)) {
       throw new ProjectOnlyStoreError("invalid_project_file_kind", "Project file kind is invalid.");
     }
     const bytes = Buffer.from(file.bytes);
+    if (bytes.byteLength > 1_048_576) {
+      throw new ProjectOnlyStoreError("project_file_too_large", "Project text files cannot exceed 1 MiB.");
+    }
+    if (typeof file.mediaType !== "string" || !file.mediaType.trim() || file.mediaType.length > 200) {
+      throw new ProjectOnlyStoreError("invalid_project_media_type", "Project file media type is invalid.");
+    }
     return Object.freeze({ ...file, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });
   });
 };
@@ -1082,7 +1045,6 @@ const projectRecord = (row: any): ProjectRecord => Object.freeze({
   id: row.id,
   name: row.name,
   lifecycleState: row.lifecycle_state,
-  technicalStatus: row.technical_status,
   runMode: row.run_mode,
   executionDescription: JSON.parse(row.execution_description_json),
   workspaceDigest: row.workspace_digest,
@@ -1191,9 +1153,30 @@ const assertId = (id: string): void => {
 
 const assertRelativePath = (path: string): void => {
   if (typeof path !== "string" || path.length < 1 || path.length > 1024 || path.includes("\0")
-    || path.includes("\\") || path.startsWith("/") || path.endsWith("/")
+    || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:\//u.test(path) || path.endsWith("/")
+    || path !== path.normalize("NFC")
     || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new ProjectOnlyStoreError("invalid_project_path", "Project file path is invalid.");
+  }
+  const root = path.split("/", 1)[0]!.toLocaleLowerCase("en-US");
+  if (new Set([".git", ".opencode", ".riff", "node_modules"]).has(root)) {
+    throw new ProjectOnlyStoreError("reserved_project_path", "Project file path uses a reserved runtime directory.");
+  }
+};
+
+const assertNoProjectPathCollisions = (paths: readonly string[]): void => {
+  const seen = new Set<string>();
+  for (const path of paths) {
+    assertRelativePath(path);
+    const key = path.normalize("NFC").toLocaleLowerCase("en-US");
+    const segments = key.split("/");
+    const parentCollision = segments.slice(1).some((_segment, index) =>
+      seen.has(segments.slice(0, index + 1).join("/")));
+    const childCollision = [...seen].some((candidate) => candidate.startsWith(`${key}/`));
+    if (seen.has(key) || parentCollision || childCollision) {
+      throw new ProjectOnlyStoreError("project_path_collision", "Project file paths collide after Unicode and case normalization.");
+    }
+    seen.add(key);
   }
 };
 

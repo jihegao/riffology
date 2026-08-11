@@ -4,7 +4,7 @@ import { ApiError } from "./errors.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
 import { planExperiment } from "./experiment-planner.ts";
 import type { ProjectOnlyAgentService } from "./project-only-agent-service.ts";
-import type { ProjectOnlyOperationsAdapter, ProjectTechnicalCheckEnvelope } from "./project-only-operations.ts";
+import type { ProjectOnlyOperationsAdapter } from "./project-only-operations.ts";
 import {
   ProjectOnlyStore,
   ProjectOnlyStoreError,
@@ -71,6 +71,26 @@ export class ProjectOnlyHttpApi {
     parts: readonly string[],
     testUsername?: string,
   ): Promise<boolean> {
+    if (request.method === "POST" && url.pathname === "/project-only/mcp") {
+      exactQuery(url, ["cap"]);
+      if (!this.agent) throw unsupported("project_mcp_unavailable", "Project scoped tools are unavailable.");
+      const capability = url.searchParams.get("cap") ?? undefined;
+      const result = await this.agent.handleMcp(
+        capability,
+        await jsonBody(request) as Readonly<{
+          jsonrpc?: string;
+          id?: string | number | null;
+          method?: string;
+          params?: unknown;
+        }>,
+      );
+      if (result === undefined) {
+        response.writeHead(204, { "cache-control": "no-store" });
+        response.end();
+        return true;
+      }
+      return sendJson(response, 200, result);
+    }
     if (parts[0] !== "api") return false;
     if (parts[1] === "models") {
       throw new ApiError(410, "legacy_model_api_removed", "The Model API was removed. Use Project resources.");
@@ -142,25 +162,6 @@ export class ProjectOnlyHttpApi {
     if (request.method === "GET" && parts.length === 4 && parts[3] === "workspace") {
       exactQuery(url, []);
       return sendJson(response, 200, this.#workspace(projectId));
-    }
-    if (request.method === "POST" && parts.length === 4 && parts[3] === "technical-checks") {
-      exactQuery(url, []);
-      const body = exactRecord(await jsonBody(request), ["commandId"]);
-      const commandId = requiredCommandId(body.commandId);
-      const project = this.store.project(projectId);
-      const envelope = await this.operations.startProjectTechnicalCheck({
-        projectId,
-        commandId,
-        expectedWorkspaceDigest: project.workspaceDigest,
-      });
-      const technicalCheck = (envelope.result as { technicalCheck: ProjectTechnicalCheckEnvelope }).technicalCheck;
-      return sendJson(response, 201, publicTechnicalCheck(technicalCheck));
-    }
-    if (request.method === "GET" && parts.length === 5 && parts[3] === "technical-checks") {
-      exactQuery(url, []);
-      const check = this.store.technicalCheck(parts[4]!);
-      if (check.projectId !== projectId) throw new ApiError(404, "resource_not_found", "The technical check was not found.");
-      return sendJson(response, 200, publicStoredTechnicalCheck(check));
     }
     if (request.method === "GET" && parts.length === 6 && parts[3] === "files"
       && parts[5] === "workbench-renderable") {
@@ -258,7 +259,17 @@ export class ProjectOnlyHttpApi {
         runKind: "batch",
         expectedWorkspaceDigest: project.workspaceDigest,
       });
-      this.agent.batchRuntime.start({ projectId, runId: admitted.runId });
+      try {
+        this.agent.batchRuntime.start({ projectId, runId: admitted.runId });
+      } catch (error) {
+        this.store.failRunStart({
+          id: admitted.runId,
+          code: "batch_runtime_start_failed",
+          diagnostic: error instanceof Error ? error.message : String(error),
+          at: this.now(),
+        });
+        throw error;
+      }
       return sendJson(response, 201, {
         runId: admitted.runId,
         status: "queued",
@@ -359,7 +370,6 @@ export class ProjectOnlyHttpApi {
       id: project.id,
       name: project.name,
       lifecycleState: project.lifecycleState,
-      technicalStatus: project.technicalStatus,
       workspaceDigest: project.workspaceDigest,
       updatedAt: project.updatedAt,
     };
@@ -385,7 +395,6 @@ export class ProjectOnlyHttpApi {
         name: project.name,
         kind: "project",
         lifecycleState: project.lifecycleState,
-        technicalStatus: project.technicalStatus,
       }),
       conversations: Object.freeze(this.store.conversations(projectId).map(publicConversation)),
       workspaceDigest: project.workspaceDigest,
@@ -557,9 +566,6 @@ const publicExecutionLock = (
 ): Record<string, unknown> => {
   const lock = project.executionLock;
   if (!lock) return Object.freeze({ state: "unlocked", runId: null, sourceDigest: null });
-  if (lock.holderKind === "technical_check") {
-    return Object.freeze({ state: "checking", runId: null, sourceDigest: lock.sourceWorkspaceDigest });
-  }
   const run = runs.find((candidate) => candidate.id === lock.holderId);
   const state = run && ["queued", "running", "cancelling"].includes(run.status) ? run.status : "queued";
   return Object.freeze({ state, runId: lock.holderId, sourceDigest: lock.sourceWorkspaceDigest });
@@ -731,34 +737,6 @@ const publicRenderable = (
     sha256, reason: "unsupported_media",
   });
 };
-
-const publicTechnicalCheck = (check: ProjectTechnicalCheckEnvelope): Record<string, unknown> => Object.freeze({
-  id: check.id,
-  projectId: check.projectId,
-  state: check.state === "succeeded" ? "passed" : check.state === "interrupted" ? "cancelled" : "failed",
-  publication: "published",
-  capturedWorkspaceDigest: check.capturedWorkspaceDigest,
-  executionDescriptionDigest: check.executionDescriptionDigest,
-  aggregate: check.aggregate,
-  checks: check.checks,
-  startedAt: check.startedAt,
-  finishedAt: check.finishedAt,
-  claim: check.claim,
-});
-
-const publicStoredTechnicalCheck = (check: ReturnType<ProjectOnlyStore["technicalCheck"]>): Record<string, unknown> => Object.freeze({
-  id: check.id,
-  projectId: check.projectId,
-  state: check.status === "succeeded" ? "passed" : check.status === "interrupted" ? "cancelled" : check.status,
-  publication: check.status === "running" ? "pending" : "published",
-  capturedWorkspaceDigest: check.capturedWorkspaceDigest,
-  executionDescriptionDigest: check.executionDescriptionDigest,
-  aggregate: check.status === "running" ? "pending" : check.status === "succeeded" ? "executable" : check.status === "interrupted" ? "cancelled" : "failed",
-  checks: check.diagnostics,
-  startedAt: check.startedAt,
-  finishedAt: check.finishedAt,
-  claim: "technical_execution_only",
-});
 
 const unsupported = (code: string, message: string): ApiError => new ApiError(501, code, message);
 

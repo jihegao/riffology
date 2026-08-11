@@ -1,6 +1,5 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ModelTechnicalChecker } from "./model-technical-checker.ts";
 import { openProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
 import { opencodeFromEnvironment } from "./opencode-adapter.ts";
 import { BackendApp } from "./server.ts";
@@ -51,10 +50,6 @@ let app: BackendApp;
 try {
   const runtime = openProjectOnlyServerRuntime({
     root: productRoot,
-    checker: new ModelTechnicalChecker({
-      pythonExecutable: process.env.RIFF_MODEL_PYTHON
-        ?? resolve(repositoryRoot, "mesa_service", ".venv", "bin", "python"),
-    }),
   });
   app = runtime.mode === "ready"
     ? new BackendApp({

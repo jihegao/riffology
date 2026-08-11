@@ -36,7 +36,7 @@ const execution: ProjectWorkspaceDto["execution"] = {
 };
 
 const workspace = (runKind: "batch" | "visual" = "batch"): ProjectWorkspaceDto => ({
-  owner: { id: "project-one", name: "Fixed study", kind: "project", lifecycleState: "active", technicalStatus: "executable" },
+  owner: { id: "project-one", name: "Fixed study", kind: "project", lifecycleState: "active" },
   workspaceDigest: "a".repeat(64),
   executionLock: runKind === "visual"
     ? { state: "running", runId: "run-visual", sourceDigest: "a".repeat(64) }
@@ -398,7 +398,7 @@ describe("dynamic Project workspace", () => {
     render(<WorkspacePane client={client()} workspace={workspace("visual")}
       refresh={vi.fn(async () => {})} />);
 
-    expect(screen.getByRole("button", { name: "Run technical check" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Run technical check" })).toBeNull();
     expect(screen.getByRole("button", { name: "Start visual Run" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save configuration" })).toBeEnabled();
     expect(screen.getByText(/Execution lock: running/u)).toBeInTheDocument();

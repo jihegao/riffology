@@ -21,7 +21,6 @@ const home: HomeDto = {
     name: "Baseline study",
     kind: "project",
     lifecycleState: "active",
-    technicalStatus: "executable",
     workspaceDigest: "e".repeat(64),
     executionLock: { state: "unlocked", runId: null, sourceDigest: null },
     lastRun: null,
@@ -53,7 +52,7 @@ const providers: ProviderDiscovery = {
 const workspace: WorkspaceDto = {
   owner: {
     id: "project-one", name: "Baseline study", kind: "project",
-    lifecycleState: "active", technicalStatus: "executable",
+    lifecycleState: "active",
   },
   workspaceDigest: "e".repeat(64),
   executionLock: { state: "unlocked", runId: null, sourceDigest: null },
@@ -107,19 +106,6 @@ const client = (): ProductClient => ({
     conversation: workspace.conversations[0],
   })),
   workspace: vi.fn(async () => projectWorkspace),
-  startTechnicalCheck: vi.fn(async () => ({
-    id: "check-one",
-    projectId: "project-one",
-    state: "passed" as const,
-    publication: "published" as const,
-    capturedWorkspaceDigest: "a".repeat(64),
-    executionDescriptionDigest: "b".repeat(64),
-    aggregate: "executable" as const,
-    checks: [],
-    startedAt: "2026-07-25T00:00:00.000Z",
-    finishedAt: "2026-07-25T00:00:01.000Z",
-    claim: "technical_execution_only" as const,
-  })),
   projectFileRenderable: vi.fn(async () => ({
     kind: "json" as const,
     title: "fixture",
@@ -265,7 +251,7 @@ describe("Stage 4 Product entry", () => {
     expect(conversationControl).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("refreshes the right workspace after a committed Agent owner mutation without remounting it", async () => {
+  it("refreshes the right workspace after a committed Project file write without remounting it", async () => {
     const user = userEvent.setup();
     history.replaceState({}, "", "/projects/project-one?conversation=conversation-main");
     const productClient = client();
@@ -279,7 +265,7 @@ describe("Stage 4 Product entry", () => {
         skillUses: [],
         actions: [{
           id: "action-mutate",
-          actionKind: "model_files_mutate",
+          actionKind: "project_files_write",
           permissionDecision: "allowed" as const,
           state: "committed" as const,
           errorCode: null,
@@ -573,6 +559,42 @@ describe("Stage 4 Product entry", () => {
     expect(applied).toHaveTextContent("1 file committed");
     expect(applied).not.toHaveTextContent("itemId");
     expect(applied).not.toHaveTextContent("objectFileId");
+  });
+
+  it("shows the committed Project file receipt as 文件已保存", async () => {
+    history.replaceState({}, "", "/projects/project-one?conversation=conversation-main");
+    const productClient = client();
+    productClient.conversationBundle = vi.fn(async () => ({
+      conversation: workspace.conversations[0],
+      messages: [],
+      attachments: [],
+      documents: [],
+      skillUses: [],
+      actions: [{
+        id: "action-project-write",
+        actionKind: "project_files_write",
+        permissionDecision: "allowed" as const,
+        state: "committed" as const,
+        errorCode: null,
+        mutationReceipt: {
+          state: "committed" as const,
+          receiptDigest: "4".repeat(64),
+          beforeWorkspaceDigest: "3".repeat(64),
+          afterWorkspaceDigest: "2".repeat(64),
+          committedAt: "2026-08-11T00:00:00.000Z",
+          files: [{
+            relativePath: "notes/result.md",
+            priorSha256: null,
+            afterSha256: "1".repeat(64),
+          }],
+        },
+      }],
+    }));
+    render(<App client={productClient} />);
+
+    const saved = (await screen.findByText("文件已保存")).closest("[role='status']")!;
+    expect(saved).toHaveTextContent("4".repeat(64));
+    expect(saved).toHaveTextContent("1 file committed");
   });
 
   it("shows connecting then durable read-only without fabricating an assistant reply", async () => {
@@ -1100,7 +1122,7 @@ describe("Stage 4 Product entry", () => {
     const productClient = client();
     productClient.workspace = vi.fn(async () => ({
       owner: { id: "project-one", name: "Baseline study", kind: "project" as const,
-        lifecycleState: "active" as const, technicalStatus: "executable" as const },
+        lifecycleState: "active" as const },
       workspaceDigest: "snapshot-digest", executionLock: { state: "unlocked" as const, runId: null, sourceDigest: null },
       execution: workspace.execution,
       executionDescriptionDigest: "execution-digest",

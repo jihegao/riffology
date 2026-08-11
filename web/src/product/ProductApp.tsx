@@ -257,7 +257,7 @@ function ProjectCard({ project }: Readonly<{ project: ProjectSummary }>) {
   return (
     <article className="product-resource-card" data-testid={`resource-project-${project.id}`}>
       <div>
-        <span className={`product-badge product-badge-${project.technicalStatus}`}>{project.technicalStatus}</span>
+        <span className="product-badge">{project.lastRun ? `Run ${project.lastRun.status}` : "Not run"}</span>
         <h3>{project.name}</h3>
         <p>{project.executionLock.state !== "unlocked"
           ? `Execution locked: ${project.executionLock.state}`

@@ -29,6 +29,23 @@ record. Conversation/OpenCode services, scoped MCP/skills, Model workspace
 helpers, technical checkers, HTTP projections, DOM, and Agent prose cannot
 write around that store or become authoritative state.
 
+The local Project-only path uses SQLite schema v4 and a narrower authority flow:
+
+```text
+natural-language Project turn
+  -> one-turn, one-Project scoped MCP capability
+  -> list/read Project files
+  -> riff_write_project_files (workspace CAS + prior-file CAS + idempotent request key)
+  -> one Store transaction publishes bytes, workspace digest, and committed receipt
+  -> optional riff_start_project_run freezes the latest committed workspace digest
+  -> terminal Run/output or bounded persisted failure diagnostics
+```
+
+This path has no Project technical status, technical-check table, technical-check
+HTTP route, Draft Revision, or structured `RIFF_PROJECT_DELIVERY_V1` response
+protocol. A real Run is its only executable-code verdict. A Run failure never
+rolls back Project files and never triggers a background repair or silent retry.
+
 Stage 2 currently adds these implemented boundaries:
 
 ```text

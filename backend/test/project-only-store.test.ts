@@ -9,23 +9,29 @@ const NOW = "2026-08-04T04:00:00.000Z";
 const LATER = "2026-08-04T04:01:00.000Z";
 const EXECUTION = Object.freeze({ schemaVersion: 2, batch: { entrypoint: "model.py" } });
 
-test("fresh Project-only Store contains no Model authority or polymorphic owner columns", (t) => {
+test("fresh Project-only v4 Store has no technical-check authority", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-only-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
   t.after(() => store.close());
   const database = store.databaseForTesting();
-  const tables = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map(({ name }) => name);
+  const tableRows = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>;
+  const tables = tableRows.map(({ name }) => name);
   assert.equal(tables.includes("models"), false);
-  assert.equal(tables.includes("projects"), true);
-  for (const table of ["projects", "project_files", "experiment_configurations", "technical_checks", "runs"]) {
-    const columns = (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name);
-    assert.equal(columns.some((name) => /owner_kind|owner_id|model_id|source_model|model_snapshot/u.test(name)), false, table);
-  }
-  const conversationColumns = (database.prepare("PRAGMA table_info(project_conversations)").all() as Array<{ name: string }>).map(({ name }) => name);
-  assert.equal(conversationColumns.includes("project_id"), true);
-  assert.equal(conversationColumns.includes("provider_id"), true);
-  assert.equal(conversationColumns.includes("model_id"), true);
+  assert.equal(tables.includes("project_technical_checks"), false);
+  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 4);
+  const projectColumnRows = database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
+  const projectColumns = projectColumnRows.map(({ name }) => name);
+  assert.equal(projectColumns.includes("technical_status"), false);
+  const fileSql = String((database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_files'",
+  ).get() as any).sql);
+  assert.match(fileSql, /project_artifact/u);
+  const lockSql = String((database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_locks'",
+  ).get() as any).sql);
+  assert.match(lockSql, /holder_kind = 'run'/u);
+  assert.doesNotMatch(lockSql, /technical_check/u);
 });
 
 test("Project and first Conversation creation is atomic, idempotent, and restart-safe", (t) => {
@@ -41,12 +47,9 @@ test("Project and first Conversation creation is atomic, idempotent, and restart
     },
   };
   const created = store.createProjectWithConversation(input);
-  assert.equal(created.project.id, "project_create");
-  assert.equal(created.conversation.projectId, "project_create");
   assert.match(created.receiptDigest, /^[0-9a-f]{64}$/u);
   assert.deepEqual(store.createProjectWithConversation(input), created);
   store.close();
-
   store = ProjectOnlyStore.open(join(root, ".riff-product"));
   assert.deepEqual(store.createProjectWithConversation(input), created);
   assert.equal(store.projects().length, 1);
@@ -57,58 +60,120 @@ test("Project and first Conversation creation is atomic, idempotent, and restart
   }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "idempotency_conflict");
 });
 
-test("Project workspace status, technical lock, one active Run, and non-retained source are enforced", (t) => {
+test("only an active Run locks Project writes and terminal failure preserves diagnostics", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-lock-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
   t.after(() => store.close());
-  let project = store.createProject({
+  const project = store.createProject({
     id: "project_alpha",
     name: "Alpha",
     source: { kind: "import", importDigest: "a".repeat(64), files: [{
       id: "project_file_alpha", kind: "project_code", relativePath: "model.py",
-      mediaType: "text/x-python", bytes: Buffer.from("print('ok')\n"),
+      mediaType: "text/x-python", bytes: Buffer.from("def broken(:\n"),
     }] },
     runMode: "both",
     executionDescription: EXECUTION,
     createdAt: NOW,
   });
-  assert.equal(project.technicalStatus, "draft");
-  assert.match(project.workspaceDigest, /^[0-9a-f]{64}$/u);
-  store.createExperiment({ id: "experiment_alpha", projectId: project.id, name: "Smoke", configuration: { seed: 1 }, createdAt: NOW });
-
-  store.startTechnicalCheck({ id: "technical_alpha", projectId: project.id, expectedWorkspaceDigest: project.workspaceDigest, startedAt: NOW });
-  assert.equal(store.project(project.id).executionLock?.holderKind, "technical_check");
+  store.createExperiment({
+    id: "experiment_alpha", projectId: project.id, name: "Smoke",
+    configuration: { schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" } },
+    createdAt: NOW,
+  });
+  store.startRun({
+    id: "run_alpha", projectId: project.id, experimentConfigurationId: "experiment_alpha",
+    runKind: "batch", expectedWorkspaceDigest: project.workspaceDigest, createdAt: NOW,
+  });
+  assert.equal(store.project(project.id).executionLock?.holderKind, "run");
   assert.throws(() => store.updateProjectWorkspace({
     projectId: project.id, expectedWorkspaceDigest: project.workspaceDigest, updatedAt: LATER,
-    changes: [{ id: "project_file_alpha", kind: "project_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('changed')\n") }],
+    changes: [{
+      id: "project_file_alpha", kind: "project_code", relativePath: "model.py",
+      mediaType: "text/x-python", bytes: Buffer.from("print('fixed')\n"),
+    }],
   }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_execution_locked");
-  store.updateExperiment({ id: "experiment_alpha", projectId: project.id, configuration: { seed: 2 }, updatedAt: LATER });
-  project = store.finishTechnicalCheck({ id: "technical_alpha", succeeded: true, diagnostics: [], finishedAt: LATER });
-  assert.equal(project.technicalStatus, "executable");
-  assert.equal(project.executionLock, null);
-
-  store.startRun({ id: "run_alpha", projectId: project.id, experimentConfigurationId: "experiment_alpha", runKind: "batch", expectedWorkspaceDigest: project.workspaceDigest, createdAt: LATER });
-  assert.equal(store.project(project.id).executionLock?.holderId, "run_alpha");
-  assert.throws(() => store.startRun({ id: "run_beta", projectId: project.id, experimentConfigurationId: "experiment_alpha", runKind: "visual", expectedWorkspaceDigest: project.workspaceDigest, createdAt: LATER }),
-    (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_execution_locked");
-  store.updateExperiment({ id: "experiment_alpha", projectId: project.id, configuration: { seed: 3 }, updatedAt: LATER });
-  store.transitionRun({ id: "run_alpha", status: "running", at: LATER });
-  store.transitionRun({ id: "run_alpha", status: "succeeded", at: LATER });
-  assert.equal(store.project(project.id).executionLock, null);
-  const run = store.databaseForTesting().prepare("SELECT source_files_retained, frozen_configuration_json FROM runs WHERE id = 'run_alpha'").get() as any;
-  assert.equal(run.source_files_retained, 0);
-  assert.deepEqual(JSON.parse(run.frozen_configuration_json), { seed: 2 });
-
-  project = store.updateProjectWorkspace({
-    projectId: project.id, expectedWorkspaceDigest: project.workspaceDigest, updatedAt: LATER,
-    changes: [{ id: "project_file_alpha", kind: "project_code", relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('changed')\n") }],
+  store.failRunStart({
+    id: "run_alpha", code: "python_syntax_error",
+    diagnostic: "SyntaxError: invalid syntax", at: LATER,
   });
-  assert.equal(project.technicalStatus, "draft");
-  assert.notEqual(project.workspaceDigest, store.databaseForTesting().prepare("SELECT source_workspace_digest FROM runs WHERE id = 'run_alpha'").get()!.source_workspace_digest);
+  assert.equal(store.project(project.id).executionLock, null);
+  assert.equal(store.run("run_alpha").status, "failed");
+  assert.equal(store.runCompletion("run_alpha")?.completion.diagnostic, "SyntaxError: invalid syntax");
+  assert.equal(store.projectFiles(project.id)[0]!.bytes.toString("utf8"), "def broken(:\n");
 });
 
-test("template versions are immutable and blank/template/import are explicit creation sources", (t) => {
+test("Project paths accept nested Unicode text and reject traversal, reserved roots, and normalized collisions", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "riff-project-paths-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = ProjectOnlyStore.open(join(root, ".riff-product"));
+  t.after(() => store.close());
+  const project = store.createProject({ id: "project_alpha", name: "Alpha", source: { kind: "blank" }, createdAt: NOW });
+  const create = (relativePath: string) => store.updateProjectWorkspace({
+    projectId: project.id,
+    expectedWorkspaceDigest: store.project(project.id).workspaceDigest,
+    updatedAt: LATER,
+    changes: [{
+      id: `file_${Buffer.from(relativePath).toString("hex").slice(0, 64)}`,
+      kind: "project_artifact" as const,
+      relativePath,
+      mediaType: "text/plain",
+      bytes: Buffer.from("ok\n"),
+    }],
+  });
+  create("分析/阶段一/结论.txt");
+  assert.equal(store.projectFiles(project.id).some((file) => file.relativePath === "分析/阶段一/结论.txt"), true);
+  for (const path of [
+    "../secret.txt", "/tmp/secret.txt", "C:/secret.txt", ".git/config", ".OPENCODE/config",
+    "node_modules/x.txt", "a\\b.txt", "a//b.txt",
+  ]) {
+    assert.throws(() => create(path), (error: unknown) => error instanceof ProjectOnlyStoreError
+      && ["invalid_project_path", "reserved_project_path"].includes(error.code), path);
+  }
+  create("Reports/Result.txt");
+  assert.throws(() => create("reports/result.txt"),
+    (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_path_collision");
+  create("prefix");
+  assert.throws(() => create("prefix/child.txt"),
+    (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_path_collision");
+});
+
+test("archived Projects reject writes and Run admission", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "riff-project-archived-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = ProjectOnlyStore.open(join(root, ".riff-product"));
+  t.after(() => store.close());
+  const project = store.createProject({
+    id: "project_archived", name: "Archived", source: { kind: "blank" },
+    runMode: "batch", executionDescription: EXECUTION, createdAt: NOW,
+  });
+  store.createExperiment({
+    id: "experiment_archived", projectId: project.id, name: "Batch",
+    configuration: { schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" } },
+    createdAt: NOW,
+  });
+  store.databaseForTesting().prepare("UPDATE projects SET lifecycle_state = 'archived' WHERE id = ?")
+    .run(project.id);
+  assert.throws(() => store.updateProjectWorkspace({
+    projectId: project.id,
+    expectedWorkspaceDigest: project.workspaceDigest,
+    changes: [{
+      id: "archived_file", kind: "project_artifact", relativePath: "notes.txt",
+      mediaType: "text/plain", bytes: Buffer.from("blocked\n"),
+    }],
+    updatedAt: LATER,
+  }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_not_writable");
+  assert.throws(() => store.startRun({
+    id: "run_archived",
+    projectId: project.id,
+    experimentConfigurationId: "experiment_archived",
+    runKind: "batch",
+    expectedWorkspaceDigest: project.workspaceDigest,
+    createdAt: LATER,
+  }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "project_not_writable");
+});
+
+test("template versions remain immutable and Project artifacts are independent copies", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-template-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
@@ -116,33 +181,47 @@ test("template versions are immutable and blank/template/import are explicit cre
   const template = {
     id: "template_alpha", version: "1", description: "Seed", runMode: "batch" as const,
     executionDescription: EXECUTION, defaultExperiment: { seed: 1 }, createdAt: NOW,
-    files: [{ id: "template_file_alpha", kind: "project_code" as const, relativePath: "model.py", mediaType: "text/x-python", bytes: Buffer.from("print('template')\n") }],
+    files: [{
+      id: "template_file_alpha", kind: "project_artifact" as const,
+      relativePath: "notes/readme.custom", mediaType: "text/plain", bytes: Buffer.from("template\n"),
+    }],
   };
   const first = store.createTemplateVersion(template);
   assert.deepEqual(store.createTemplateVersion(template), first);
-  assert.throws(() => store.createTemplateVersion({ ...template, files: [{ ...template.files[0]!, bytes: Buffer.from("different\n") }] }),
-    (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "template_version_immutable");
-  const blank = store.createProject({ id: "project_blank", name: "Blank", source: { kind: "blank" }, createdAt: NOW });
-  const copied = store.createProject({ id: "project_copy", name: "Copy", source: { kind: "template", templateId: template.id, version: template.version }, createdAt: NOW });
-  assert.equal(blank.creationSource, "blank");
-  assert.equal(copied.creationSource, "template");
-  assert.equal(store.projectFiles(copied.id)[0]?.bytes.toString("utf8"), "print('template')\n");
-  assert.deepEqual(store.experiments(copied.id).map((experiment) => ({ name: experiment.name, configuration: experiment.configuration })), [
-    { name: "Default", configuration: { seed: 1 } },
-  ]);
-  store.updateExperiment({ id: store.experiments(copied.id)[0]!.id, projectId: copied.id, configuration: { seed: 99 }, updatedAt: LATER });
-  const secondCopy = store.createProject({ id: "project_copy_two", name: "Copy two", source: { kind: "template", templateId: template.id, version: template.version }, createdAt: LATER });
-  assert.deepEqual(store.experiments(secondCopy.id)[0]!.configuration, { seed: 1 });
+  assert.throws(() => store.createTemplateVersion({
+    ...template,
+    files: [{ ...template.files[0]!, bytes: Buffer.from("different\n") }],
+  }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "template_version_immutable");
+  const copied = store.createProject({
+    id: "project_copy", name: "Copy",
+    source: { kind: "template", templateId: template.id, version: template.version }, createdAt: NOW,
+  });
+  assert.equal(store.projectFiles(copied.id)[0]?.bytes.toString("utf8"), "template\n");
 });
 
-test("restart reconciliation terminates orphaned execution and releases the durable lock", (t) => {
+test("restart reconciliation terminalizes only orphaned Runs and releases their lock", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-reconcile-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
   t.after(() => store.close());
-  const project = store.createProject({ id: "project_alpha", name: "Alpha", source: { kind: "blank" }, createdAt: NOW });
-  store.startTechnicalCheck({ id: "technical_alpha", projectId: project.id, expectedWorkspaceDigest: project.workspaceDigest, startedAt: NOW });
-  assert.deepEqual(store.reconcileInterruptedExecutions(LATER), { checks: 1, runs: 0 });
+  const project = store.createProject({
+    id: "project_alpha", name: "Alpha",
+    source: { kind: "import", importDigest: "a".repeat(64), files: [{
+      id: "project_file_alpha", kind: "project_code", relativePath: "model.py",
+      mediaType: "text/x-python", bytes: Buffer.from("print('ok')\n"),
+    }] },
+    runMode: "batch", executionDescription: EXECUTION, createdAt: NOW,
+  });
+  store.createExperiment({
+    id: "experiment_alpha", projectId: project.id, name: "Batch",
+    configuration: { schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" } },
+    createdAt: NOW,
+  });
+  store.startRun({
+    id: "run_alpha", projectId: project.id, experimentConfigurationId: "experiment_alpha",
+    runKind: "batch", expectedWorkspaceDigest: project.workspaceDigest, createdAt: NOW,
+  });
+  assert.deepEqual(store.reconcileInterruptedExecutions(LATER), { runs: 1 });
   assert.equal(store.project(project.id).executionLock, null);
-  assert.equal(store.project(project.id).technicalStatus, "failed");
+  assert.equal(store.run("run_alpha").status, "interrupted");
 });

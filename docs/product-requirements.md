@@ -85,9 +85,9 @@ MVP 范围内。
 
 1. 通过空白、Template 或导入创建一个通用仿真 Project；
 2. 通过 OpenCode 驱动的 Agent 讨论并明确修改 Project；
-3. 对当前 Project 执行 digest 绑定的技术检查；
-4. 配置并运行可视化实验或批量实验；
-5. 检查运行状态、输出文件和有界诊断事件；
+3. 通过 Project-scoped 工具把 UTF-8 文本产物直接、原子写入当前 Project；
+4. 配置并运行可视化实验或批量实验，以真实 Run 作为代码可执行性的唯一判定；
+5. 检查运行状态、输出文件、有界 stderr 和诊断记录，并在对话中请求修复；
 6. 请求 Agent 分析输出，同时不把 Agent 文本误当作系统事实；
 7. 关闭并重新打开应用后继续使用已支持的产品状态。
 
@@ -184,7 +184,7 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 | --- | --- |
 | User / Workspace | 通用用户与工作区边界、对象所有权、存储和未来协作扩展点；MVP 仅实现本地单用户。 |
 | Agent runtime | 对话、provider/session、上下文、skill 路由、工具授权、action 记录和只读降级。 |
-| Project lifecycle | 通用 Project 创建、可编辑文件工作区、技术检查、执行锁、文档、配置、Runs、outputs、归档和回收站。 |
+| Project lifecycle | 通用 Project 创建、可编辑文件工作区、原子文件回执、Run 执行锁、文档、配置、Runs、outputs、归档和回收站。 |
 | Project Template | 不可变、版本化的 Project 种子；包含代码、环境、执行合同和默认实验，不包含对话或 Runs。 |
 | Experiment | 通用输入 schema 承载、配置、seed/sweep 展开、样本计数和冻结计划。 |
 | Run | batch/visual 生命周期、资源限制、取消、恢复、状态、进程监督和输出发布。 |
@@ -232,7 +232,7 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 | **Run** | 一次 visual 或 batch 执行尝试。 | 只属于一个 Project；终态保留输出、配置和 source digest，不保留源码副本。 |
 | **Output** | 成功 Run 或诊断 Run 发布的受检文件或有界事件索引。 | 只能通过所属 Project/Run 投影访问，不得使用任意路径访问。 |
 
-Project 的可执行工作区在技术检查和非终态 Run 期间保持锁定。Run 终态后释放锁；
+Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态后释放锁；
 此后修改 Project 会使旧 Run 不可重放，产品必须明确展示该限制。
 
 ## 9. 功能需求
@@ -283,13 +283,13 @@ Project 的可执行工作区在技术检查和非终态 Run 期间保持锁定�
 | FR-CONV-15 | 每个需要工具的 turn 只能注册一个 opaque loopback Riff MCP，并从同一 owner/session-generation capability 的 sorted exact tool list 逐项启用；`*`、native file/command/Skill built-ins、ambient/plugin MCP 与第三方工具必须 deny-all。唯一 native 例外 `question` 只能经过 FR-CONV-12 的精确当前 turn Resume 边界回答，且不授予 Riff tool/object 权限。bind/prompt MCP 列表不一致、缺失、重复、乱序、伪造、跨 owner 或过期均须在 prompt 或执行前稳定拒绝，capability URL 与 credential 不得进入 prompt、transcript 或 browser DTO。 |
 | FR-CONV-16 | 每个新进入 terminal 的 turn 必须具有不可变、digest-bound 的 goal-verification receipt，并与 assistant/failure 和 terminal turn 原子提交。OpenCode `idle` 仅是必要证据；显式修改只有在 action 全部终态、每个 committed action 声明非空 effect、受支持的 goal/action 映射一致、已提交 transaction 的当前 Project 一致，且修改、技术检查和可选 Run 均绑定已声明 digest 时才能标记 `completed`。 |
 | FR-CONV-17 | Goal disposition 必须是 `completed`、`needs_user_input`、`failed`、`read_only`、`outcome_unknown` 或 `budget_exhausted`。发生部分效果、资源漂移或中断后效果不明时不得自动 Retry；Product 层不得在原生 OpenCode tool loop 后再发第二个外层 prompt。公开 runtime 只投影有界 receipt 证据，不得返回原始 goal、goal digest、路径、上游 ID 或 tool payload。 |
-| FR-CONV-18 | 明确修改指令本身可以沿现有授权边界原子提交；探索性或 proposal-only 对话只能创建与 Project workspace digest 绑定的待审变更集，且只有用户通过直接 Product command apply 后才能提交。两条路径都只有在 Store 返回 committed mutation receipt 后，界面才能声明 Project 已修改。 |
+| FR-CONV-18 | Project 所有者的每轮自然语言对话隐式授权当前 Project 内的文件修改；OpenCode 必须通过每轮 scoped 工具原子提交，不创建 Draft Revision，也不要求额外确认。只有 Store 返回 committed mutation receipt 后，界面才能声明 Project 已修改。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
 | FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Project 权威状态。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Project 并记录来源和用途。 |
 | FR-ATT-02 | 删除 Conversation 不得删除已经被 owner 采用的附件副本。 |
 
-### 9.4 Project 工作区、技术检查与 Template
+### 9.4 Project 工作区、直接写入与 Template
 
 旧 `FR-MODEL-*` ID 作为历史需求保留但已废弃；当前行为由以下 Project-only
 需求定义。
@@ -297,11 +297,11 @@ Project 的可执行工作区在技术检查和非终态 Run 期间保持锁定�
 | ID | 需求 |
 | --- | --- |
 | FR-PROJ-01 | New Project 必须通过 `blank`、不可变 Template version 或受检 import 三种显式来源之一创建；不得隐式创建缺失领域数据。 |
-| FR-PROJ-02 | Project 必须直接拥有代码、环境/依赖、execution description、技术状态和 workspace digest。 |
+| FR-PROJ-02 | Project 必须直接拥有代码、环境/依赖、通用文本产物、execution description、run mode 和 workspace digest；不保存 technical status。 |
 | FR-PROJ-03 | Project 工作区可以包含 overview、spec、代码、输入/输出、结构和 Project 文档，无强制业务 schema。 |
 | FR-PROJ-04 | Project 必须声明 inputs、可运行入口、状态/取消行为和 output files；metrics 和有界 domain events 可选。 |
-| FR-PROJ-05 | 代码、环境/依赖或 execution description 修改后，技术状态必须回到 `draft`；技术检查必须绑定当前 digest。 |
-| FR-PROJ-06 | “技术上可执行”只能表达薄执行合同已通过，绝不能表达正确、已校准、可信或适合决策。 |
+| FR-PROJ-05 | 文件修改必须使用 workspace digest CAS、文件 prior digest、原子事务和幂等 request key；不得运行语法、依赖、smoke 或 technical check。 |
+| FR-PROJ-06 | 真实 Run 是代码可执行性的唯一判定；Run 成功仍绝不能表达模型正确、已校准、可信或适合决策。 |
 | FR-PROJ-07 | 执行必须使用隔离临时副本、清理后的 credential、默认无网络、有限资源和取消能力；终态后必须删除临时源码副本。 |
 | FR-PROJ-08 | Agent 生成视图是有界、Project-scoped、可失效的派生投影，不是文件、执行合同、技术状态或修改完成证据；Project 变化后旧视图必须标记 stale。 |
 | FR-TPL-01 | Template version 必须不可变，只包含代码、环境/依赖、execution description 和默认实验，不得包含 Conversation、文档、Run 或 output。 |
@@ -382,8 +382,8 @@ NFR-<DOMAIN>-NN
 2. Riff 原子创建 Project 工作区和首个 Conversation。
 3. 用户描述仿真问题；Agent 使用相关仿真 skill，并可以创建文件或临时计划。
 4. 用户明确授权后，系统原子应用允许的修改并返回写入 receipt。
-5. Riff 对同一 workspace digest 运行薄技术检查，只有全部必需检查通过后才标记
-   技术上可执行。
+5. Store 返回 committed receipt 后立即展示文件已保存；如需判断可执行性，用户启动
+   绑定最新 workspace digest 的真实 Run。
 
 ### 11.2 配置并运行实验
 
@@ -462,7 +462,8 @@ Node.js/TypeScript Riff backend（唯一 browser-facing 权威）
 - SQLite 记录和 digest 校验对象 bytes 是权威；
 - OpenCode session、Agent 文本、DOM、screenshot 和子进程内存不是权威；
 - 只有 backend 可以把明确用户指令转换成 owner-scoped typed mutation；
-- Project execution 只准入已通过当前 digest 技术检查的工作区，并捕获配置/计划/限制；
+- Project execution 只检查当前 workspace digest、声明的 Run 类型、已存在的 Experiment
+  configuration 和单一活动 Run 锁，并捕获配置/计划/限制；
 - batch 和 visual 使用独立受限临时副本、受限目录、清理环境、有限资源且默认无网络；
 - Visual access 使用不同 platform/broker origin 和短期 capability；精确 network
   与 cookie 行为由已实现 Stage 3 设计和 ADR 约束，Stage 4 不得弱化。
@@ -526,7 +527,8 @@ fresh Store、旧 schema recovery-only、归档摘要与 merged-main 证据重�
    右栏以 mutation receipt 和当前 digest 反映已提交状态；
 4. 第二个命名 Conversation 使用自己选择的 provider/model，来回切换不丢失
    messages、attachments 或 documents；
-5. 代码修改使技术状态失效，当前 digest 技术检查通过后才能启动 Run；
+5. 用自然语言生成带语法错误的模型仍成功保存；无需技术检查即可启动 Run，Run 失败后
+   保留文件、有界 stderr 和诊断；下一轮自然语言修复并重新运行成功，期间没有自动修改；
 6. Project Conversation 创建或修改实验配置，活动 Run 使用启动时捕获值；
 7. 用户启动真实风机 batch Run，并看到 status、受检 outputs 和有界 domain
    events，不提供逐帧 replay；

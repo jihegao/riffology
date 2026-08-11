@@ -473,6 +473,7 @@ const OWNER_MUTATION_ACTIONS = new Set([
   "attachment_adopt",
   "experiment_configuration_update",
   "model_files_mutate",
+  "project_files_write",
   "run_start",
   "run_cancel",
   "run_trash",
@@ -1250,10 +1251,9 @@ function Transcript({
               <li key={action.id}>
                 <strong>{action.actionKind}</strong>
                 <span>{action.permissionDecision} · {action.state}</span>
-                {action.state === "committed"
-                  && action.mutationReceipt?.operation === "direct_apply" && (
+                {action.state === "committed" && action.mutationReceipt && (
                   <div className="product-action-receipt" role="status">
-                    <strong>Applied</strong>
+                    <strong>{"state" in action.mutationReceipt ? "文件已保存" : "Applied"}</strong>
                     <span>
                       Receipt <code>{action.mutationReceipt.receiptDigest}</code>
                     </span>

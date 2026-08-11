@@ -151,6 +151,22 @@ export class ProjectOnlyBatchRuntime {
       this.supervisor.cleanup(supervision);
       const cancelled = signal.aborted;
       const status = cancelled ? "cancelled" as const : supervision.status;
+      let remainingDiagnosticBytes = 64 * 1024;
+      const sampleDiagnostics = supervision.samples.map((sample) => {
+        const stderr = boundedUtf8(sample.stderr, Math.min(4 * 1024, remainingDiagnosticBytes));
+        remainingDiagnosticBytes -= Buffer.byteLength(stderr, "utf8");
+        return {
+          sampleIndex: sample.sampleIndex,
+          sampleId: sample.sampleId,
+          seed: plan.samples[sample.sampleIndex]?.seed ?? null,
+          status: sample.status,
+          code: sample.code,
+          durationMs: sample.durationMs,
+          stderr,
+          stderrTruncated: sample.stderrTruncated
+            || Buffer.byteLength(sample.stderr, "utf8") > Buffer.byteLength(stderr, "utf8"),
+        };
+      });
       const completion = {
         schemaVersion: 1,
         sampleCount: plan.sampleCount,
@@ -159,14 +175,7 @@ export class ProjectOnlyBatchRuntime {
         status,
         code: cancelled ? "user_cancelled" : supervision.code,
         diagnostic: cancelled ? "The batch Run was cancelled by the user." : supervision.diagnostic,
-        samples: supervision.samples.map((sample) => ({
-          sampleIndex: sample.sampleIndex,
-          sampleId: sample.sampleId,
-          seed: plan.samples[sample.sampleIndex]?.seed ?? null,
-          status: sample.status,
-          code: sample.code,
-          durationMs: sample.durationMs,
-        })),
+        samples: sampleDiagnostics,
         resources: supervision.resources,
         startedAt: supervision.startedAt,
         finishedAt: supervision.finishedAt,
@@ -230,4 +239,13 @@ const safeDiagnostic = (error: unknown): string => {
   const message = error instanceof Error ? error.message : "Batch execution failed before durable output publication.";
   const normalized = message.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
   return normalized ? normalized.slice(0, 1_000) : "Batch execution failed before durable output publication.";
+};
+
+const boundedUtf8 = (value: string, maxBytes: number): string => {
+  if (maxBytes <= 0) return "";
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
 };

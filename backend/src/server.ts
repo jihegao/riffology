@@ -691,6 +691,7 @@ export class BackendApp {
         batchRuntime,
         loadedSkills: projectOnlySkills,
         testUserAccess: options.testUserAccess,
+        scopedMcpUrl: (capability) => this.#projectOnlyMcpUrl(capability),
       });
       this.projectOnlyApi = new ProjectOnlyHttpApi(
         options.projectOnlyRuntime.store,
@@ -2004,7 +2005,8 @@ export class BackendApp {
         });
       }
       if (this.#recoveryStatus) {
-        if (url.pathname.startsWith("/api/") || url.pathname === "/a2/mcp") {
+        if (url.pathname.startsWith("/api/") || url.pathname === "/a2/mcp"
+          || url.pathname === "/project-only/mcp") {
           throw new ApiError(
             503,
             "recovery_required",
@@ -2088,6 +2090,19 @@ export class BackendApp {
     const url = new URL(browserAddress?.origin ?? `http://127.0.0.1:${(legacyAddress as import("node:net").AddressInfo).port}`);
     url.searchParams.set("cap", capability);
     url.pathname = "/a2/mcp";
+    return url.toString();
+  }
+
+  #projectOnlyMcpUrl(capability: string): string {
+    const browserAddress = this.#browserNetwork?.app;
+    const legacyAddress = this.#server?.address();
+    if (!browserAddress && (!legacyAddress || typeof legacyAddress === "string")) {
+      throw new ApiError(503, "project_mcp_unavailable", "The local Project MCP endpoint is not listening.");
+    }
+    const url = new URL(browserAddress?.origin
+      ?? `http://127.0.0.1:${(legacyAddress as import("node:net").AddressInfo).port}`);
+    url.searchParams.set("cap", capability);
+    url.pathname = "/project-only/mcp";
     return url.toString();
   }
 

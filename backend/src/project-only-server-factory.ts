@@ -1,4 +1,3 @@
-import type { ModelTechnicalCheckerPort } from "./model-technical-check-service.ts";
 import { legacyStoreRequiresRecovery } from "./project-only-legacy.ts";
 import { ProjectOnlyOperationsAdapter } from "./project-only-operations.ts";
 import { ProjectOnlyStore } from "./project-only-store.ts";
@@ -23,7 +22,6 @@ export type ProjectOnlyServerRuntime =
  */
 export const openProjectOnlyServerRuntime = (input: Readonly<{
   root: string;
-  checker: ModelTechnicalCheckerPort;
   now?: () => string;
 }>): ProjectOnlyServerRuntime => {
   if (legacyStoreRequiresRecovery(input.root)) {
@@ -42,6 +40,6 @@ export const openProjectOnlyServerRuntime = (input: Readonly<{
   return Object.freeze({
     mode: "ready",
     store,
-    projectOperations: new ProjectOnlyOperationsAdapter(store, input.checker, now),
+    projectOperations: new ProjectOnlyOperationsAdapter(store, now),
   });
 };

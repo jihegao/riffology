@@ -21,7 +21,6 @@ import type {
   ProviderDiscovery,
   DiagnosticEventPage,
   ExperimentConfiguration,
-  TechnicalCheck,
   TemporaryDocumentCard,
   ActionRecord,
   SkillUse,
@@ -105,7 +104,6 @@ export interface ProductClient {
       | Readonly<{ kind: "import"; filename: string; mediaType: string; base64: string }>;
   }>): Promise<ProjectCreationDto>;
   workspace(projectId: string): Promise<WorkspaceDto>;
-  startTechnicalCheck(projectId: string, commandId: string): Promise<TechnicalCheck>;
   projectGeneratedViews?(projectId: string): Promise<GeneratedViewSet | null>;
   projectGeneratedViewRenderable?(projectId: string, viewId: string): Promise<RendererResource>;
   projectChangeSets?(
@@ -430,13 +428,6 @@ export class HttpProductClient implements ProductClient {
       `/api/projects/${encodeURIComponent(id)}/workspace`,
     );
     return normalizeWorkspace(workspace);
-  }
-
-  startTechnicalCheck(projectId: string, commandId: string): Promise<TechnicalCheck> {
-    return this.#request(`/api/projects/${encodeURIComponent(projectId)}/technical-checks`, {
-      method: "POST",
-      body: JSON.stringify({ commandId }),
-    });
   }
 
   projectGeneratedViews(projectId: string): Promise<GeneratedViewSet | null> {
@@ -1697,8 +1688,7 @@ const normalizeWorkspace = (value: unknown): WorkspaceDto => {
   }
   const owner = rawOwner as Record<string, unknown>;
   if (typeof owner.id !== "string" || typeof owner.name !== "string"
-    || !["active", "archived", "trashed"].includes(String(owner.lifecycleState))
-    || !["draft", "checking", "executable", "failed"].includes(String(owner.technicalStatus))) {
+    || !["active", "archived", "trashed"].includes(String(owner.lifecycleState))) {
     throw new ProductApiError(500, "invalid_response", "The workspace owner is invalid.");
   }
   const base = {
@@ -1707,7 +1697,6 @@ const normalizeWorkspace = (value: unknown): WorkspaceDto => {
       name: owner.name,
       kind: "project" as const,
       lifecycleState: owner.lifecycleState as WorkspaceDto["owner"]["lifecycleState"],
-      technicalStatus: owner.technicalStatus as WorkspaceDto["owner"]["technicalStatus"],
     }),
     conversations: Object.freeze(conversations as WorkspaceDto["conversations"]),
   };

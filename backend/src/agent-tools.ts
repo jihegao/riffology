@@ -61,6 +61,9 @@ export type AgentToolName =
   | (typeof MODEL_AGENT_TOOLS)[number]
   | (typeof PROJECT_AGENT_TOOLS)[number]
   | WorkspaceBootstrapToolName
+  | "riff_write_project_files"
+  | "riff_start_project_run"
+  | "riff_read_project_run_diagnostics"
   | "riff_interact_current_visual"
   | BrowserAgentToolName;
 
@@ -136,6 +139,9 @@ export const isAgentToolName = (value: string): value is AgentToolName =>
   (MODEL_AGENT_TOOLS as readonly string[]).includes(value)
   || (PROJECT_AGENT_TOOLS as readonly string[]).includes(value)
   || (WORKSPACE_BOOTSTRAP_TOOLS as readonly string[]).includes(value)
+  || value === "riff_write_project_files"
+  || value === "riff_start_project_run"
+  || value === "riff_read_project_run_diagnostics"
   || value === "riff_interact_current_visual"
   || isBrowserAgentToolName(value);
 

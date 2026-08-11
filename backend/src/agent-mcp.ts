@@ -245,6 +245,60 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     },
     ["requestKey", "expectedWorkspaceDigest", "changes"],
   ),
+  riff_write_project_files: definition(
+    "Atomically write or delete UTF-8 text files in the current Project. The write commits immediately and does not run a technical check.",
+    {
+      requestKey: { type: "string" },
+      expectedWorkspaceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      changes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 64,
+        items: {
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                operation: { const: "upsert" },
+                relativePath: { type: "string" },
+                mediaType: { type: "string" },
+                text: { type: "string" },
+                expectedPriorSha256: { anyOf: [{ type: "string", pattern: "^[0-9a-f]{64}$" }, { type: "null" }] },
+              },
+              required: ["operation", "relativePath", "mediaType", "text", "expectedPriorSha256"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                operation: { const: "delete" },
+                relativePath: { type: "string" },
+                expectedPriorSha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+              },
+              required: ["operation", "relativePath", "expectedPriorSha256"],
+              additionalProperties: false,
+            },
+          ],
+        },
+      },
+      executionDescription: { type: "object" },
+      runMode: { type: "string", enum: ["batch", "visual", "both"] },
+    },
+    ["requestKey", "expectedWorkspaceDigest", "changes"],
+  ),
+  riff_start_project_run: definition(
+    "Start one real Run from the current committed Project digest. Runtime failure is preserved as diagnostics and never rolls back Project files.",
+    {
+      requestKey: { type: "string" },
+      experimentConfigurationId: { type: "string" },
+      runKind: { type: "string", enum: ["batch", "visual"] },
+    },
+    ["requestKey", "experimentConfigurationId", "runKind"],
+  ),
+  riff_read_project_run_diagnostics: definition(
+    "Read bounded terminal diagnostics for one Run in the current Project, or the latest non-successful Run when omitted.",
+    { runRef: { type: "string" } },
+  ),
   riff_create_experiment_configuration: definition(
     "Create one receipt-backed Experiment configuration for the current Project.",
     {
@@ -901,6 +955,9 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_read_project_file: ["fileRef"],
     riff_start_project_technical_check: ["requestKey", "expectedWorkspaceDigest"],
     riff_deliver_project_changes: ["requestKey", "expectedWorkspaceDigest", "changes", "executionDescription", "run"],
+    riff_write_project_files: ["requestKey", "expectedWorkspaceDigest", "changes", "executionDescription", "runMode"],
+    riff_start_project_run: ["requestKey", "experimentConfigurationId", "runKind"],
+    riff_read_project_run_diagnostics: ["runRef"],
     riff_create_experiment_configuration: ["requestKey", "name", "configuration"],
     riff_update_experiment_configuration: [
       "requestKey",
@@ -984,6 +1041,28 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
       }
     }
   }
+  if (name === "riff_write_project_files") {
+    text("requestKey", 256); text("expectedWorkspaceDigest", 64);
+    if (!/^[0-9a-f]{64}$/u.test(String(input.expectedWorkspaceDigest))
+      || !Array.isArray(input.changes) || input.changes.length < 1 || input.changes.length > 64
+      || input.changes.some((change) => !change || typeof change !== "object" || Array.isArray(change))) {
+      throw new AgentToolPermissionError("Agent Project file write input is invalid.");
+    }
+    if (input.executionDescription !== undefined
+      && (!input.executionDescription || typeof input.executionDescription !== "object" || Array.isArray(input.executionDescription))) {
+      throw new AgentToolPermissionError("Agent Project execution description is invalid.");
+    }
+    if (input.runMode !== undefined && !["batch", "visual", "both"].includes(String(input.runMode))) {
+      throw new AgentToolPermissionError("Agent Project Run mode is invalid.");
+    }
+  }
+  if (name === "riff_start_project_run") {
+    text("requestKey", 256); text("experimentConfigurationId", 256); text("runKind", 16);
+    if (!["batch", "visual"].includes(String(input.runKind))) {
+      throw new AgentToolPermissionError("Agent Project Run kind is invalid.");
+    }
+  }
+  if (name === "riff_read_project_run_diagnostics" && input.runRef !== undefined) text("runRef", 256);
   if (name === "riff_create_experiment_configuration") {
     text("requestKey", 256); text("name", 200);
     if (!input.configuration || typeof input.configuration !== "object"

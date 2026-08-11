@@ -1,7 +1,7 @@
 # Project-only simulation workspace domain brief
 
 Status: approved implementation contract
-Approved: 2026-08-04
+Approved: 2026-08-04; revised for direct Project writes: 2026-08-11
 
 ## Decision question and scope
 
@@ -18,7 +18,7 @@ Approved: 2026-08-04
 | --- | --- | --- | --- | --- |
 | policy | Only Project is a public and durable workspace owner | User-approved replacement architecture | Product | approved |
 | policy | A Project admits at most one nonterminal Run | Avoid ambiguous execution locks | Platform | approved |
-| policy | Executable files and execution description are locked during checking and Run execution | Prevent live execution drift | Platform | approved |
+| policy | Executable files and execution description are locked only during a nonterminal Run | Prevent live execution drift | Platform | approved |
 | policy | Experiment configuration may change during a Run and affects only future Runs | User-selected lock scope | Product | approved |
 | policy | Run source bytes are not retained after terminal cleanup | User explicitly accepts non-reproducible historical Runs | Product | approved |
 | fact | A digest without retained bytes cannot reproduce a historical Run after Project edits | Content-addressing limitation | Platform | accepted limitation |
@@ -29,9 +29,9 @@ Approved: 2026-08-04
 - Project: mutable single-user simulation workspace and sole Conversation owner.
 - Project Template Version: immutable seed containing executable files, execution
   description, and default experiments; excludes Conversations and Runs.
-- Technical Check: digest-bound validation of the current executable workspace.
-- Execution Lock: persistent Project state covering technical checking, queued,
-  running, and cancelling. It rejects executable workspace mutations and a second
+- Project Write Receipt: idempotent, CAS-bound proof of one atomic UTF-8 text change set.
+- Execution Lock: persistent Project state covering queued, running, and cancelling
+  Runs. It rejects executable workspace mutations and a second
   Run, but does not block Conversation, document, metadata, or experiment edits.
 - Run: one batch or visual execution using the experiment values captured at start.
 - Visual Service: projection of the current healthy visual Run, opened through a
@@ -55,8 +55,8 @@ Approved: 2026-08-04
 
 ## Validation and claim boundary
 
-- Technical success does not establish calibration, scientific validity, or
-  decision readiness.
+- A successful real Run establishes only that the frozen execution attempt completed;
+  it does not establish calibration, scientific validity, or decision readiness.
 - A healthy visual page proves service availability only.
 - Historical Run outputs remain execution records but cannot be reproduced after
   their source bytes are discarded.

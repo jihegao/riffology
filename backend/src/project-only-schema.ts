@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
-export const PROJECT_ONLY_SCHEMA_VERSION = 3 as const;
+export const PROJECT_ONLY_SCHEMA_VERSION = 4 as const;
 
 export type ProjectOnlyDatabase = DatabaseSync;
 
@@ -10,7 +10,7 @@ const SQL = String.raw;
 export const PROJECT_ONLY_SCHEMA_SQL = SQL`
   CREATE TABLE project_only_schema (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 3),
+    version INTEGER NOT NULL CHECK (version = 4),
     installed_at TEXT NOT NULL
   ) STRICT;
 
@@ -19,8 +19,6 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
     name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
     lifecycle_state TEXT NOT NULL DEFAULT 'active'
       CHECK (lifecycle_state IN ('active', 'archived', 'trashed')),
-    technical_status TEXT NOT NULL DEFAULT 'draft'
-      CHECK (technical_status IN ('draft', 'checking', 'executable', 'failed')),
     run_mode TEXT NOT NULL CHECK (run_mode IN ('visual', 'batch', 'both')),
     execution_description_json TEXT NOT NULL
       CHECK (json_valid(execution_description_json) AND json_type(execution_description_json) = 'object'),
@@ -35,7 +33,9 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
   CREATE TABLE project_files (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
     project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    kind TEXT NOT NULL CHECK (kind IN ('project_code', 'project_environment', 'project_visual_asset')),
+    kind TEXT NOT NULL CHECK (kind IN (
+      'project_code', 'project_environment', 'project_visual_asset', 'project_artifact'
+    )),
     relative_path TEXT NOT NULL CHECK (
       length(relative_path) BETWEEN 1 AND 1024
       AND substr(relative_path, 1, 1) != '/'
@@ -72,19 +72,6 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
     created_at TEXT NOT NULL,
     PRIMARY KEY (id, version)
   ) WITHOUT ROWID, STRICT;
-
-  CREATE TABLE project_technical_checks (
-    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
-    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    captured_workspace_digest TEXT NOT NULL,
-    captured_file_digest TEXT,
-    execution_description_digest TEXT,
-    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
-    diagnostics_json TEXT NOT NULL DEFAULT '[]'
-      CHECK (json_valid(diagnostics_json) AND json_type(diagnostics_json) = 'array'),
-    started_at TEXT NOT NULL,
-    finished_at TEXT
-  ) STRICT;
 
   CREATE TABLE experiment_configurations (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
@@ -151,7 +138,7 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
 
   CREATE TABLE execution_locks (
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    holder_kind TEXT NOT NULL CHECK (holder_kind IN ('technical_check', 'run')),
+    holder_kind TEXT NOT NULL CHECK (holder_kind = 'run'),
     holder_id TEXT NOT NULL,
     source_workspace_digest TEXT NOT NULL,
     acquired_at TEXT NOT NULL
@@ -295,10 +282,16 @@ export const initializeProjectOnlySchema = (
     if (userVersion === 1 && tables.some(({ name }) => name === "project_only_schema")) {
       migrateProjectOnlySchemaV1ToV2(database, installedAt);
       migrateProjectOnlySchemaV2ToV3(database, installedAt);
+      migrateProjectOnlySchemaV3ToV4(database, installedAt);
       return;
     }
     if (userVersion === 2 && tables.some(({ name }) => name === "project_only_schema")) {
       migrateProjectOnlySchemaV2ToV3(database, installedAt);
+      migrateProjectOnlySchemaV3ToV4(database, installedAt);
+      return;
+    }
+    if (userVersion === 3 && tables.some(({ name }) => name === "project_only_schema")) {
+      migrateProjectOnlySchemaV3ToV4(database, installedAt);
       return;
     }
     throw new Error(`Unsupported Project-only schema state: user_version=${userVersion}`);
@@ -306,13 +299,110 @@ export const initializeProjectOnlySchema = (
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(PROJECT_ONLY_SCHEMA_SQL);
-    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 3, ?)").run(installedAt);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 4, ?)").run(installedAt);
     database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
     const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
     if (foreignKeyViolation) throw new Error("Project-only schema contains a foreign-key violation");
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* preserve initialization error */ }
+    throw error;
+  }
+};
+
+const PROJECT_ONLY_V4_PROJECT_FILES_SQL = SQL`
+  CREATE TABLE project_files (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN (
+      'project_code', 'project_environment', 'project_visual_asset', 'project_artifact'
+    )),
+    relative_path TEXT NOT NULL CHECK (
+      length(relative_path) BETWEEN 1 AND 1024
+      AND substr(relative_path, 1, 1) != '/'
+      AND instr(relative_path, char(92)) = 0
+      AND instr(relative_path, char(0)) = 0
+      AND instr('/' || relative_path || '/', '/../') = 0
+      AND instr('/' || relative_path || '/', '/./') = 0
+      AND instr(relative_path, '//') = 0
+      AND substr(relative_path, -1, 1) != '/'
+    ),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
+    bytes BLOB NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0 AND size_bytes = length(bytes)),
+    sha256 TEXT NOT NULL
+      CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, relative_path)
+  ) STRICT;
+`;
+
+const PROJECT_ONLY_V4_EXECUTION_LOCKS_SQL = SQL`
+  CREATE TABLE execution_locks (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    holder_kind TEXT NOT NULL CHECK (holder_kind = 'run'),
+    holder_id TEXT NOT NULL,
+    source_workspace_digest TEXT NOT NULL,
+    acquired_at TEXT NOT NULL
+  ) STRICT;
+  CREATE UNIQUE INDEX execution_lock_holder ON execution_locks(holder_kind, holder_id);
+`;
+
+const PROJECT_ONLY_V4_FILE_TRIGGERS_SQL = PROJECT_ONLY_SCHEMA_SQL.slice(
+  PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TRIGGER project_files_blocked_by_execution_lock_insert"),
+);
+
+const migrateProjectOnlySchemaV3ToV4 = (
+  database: ProjectOnlyDatabase,
+  installedAt: string,
+): void => {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec(`
+      DROP TRIGGER project_files_blocked_by_execution_lock_insert;
+      DROP TRIGGER project_files_blocked_by_execution_lock_update;
+      DROP TRIGGER project_files_blocked_by_execution_lock_delete;
+      DROP TRIGGER project_execution_description_blocked_by_lock;
+      DROP TRIGGER project_file_digest_verified_insert;
+      DROP TRIGGER project_file_digest_verified_update;
+      DELETE FROM execution_locks WHERE holder_kind = 'technical_check';
+      DROP TABLE project_technical_checks;
+      ALTER TABLE projects DROP COLUMN technical_status;
+      ALTER TABLE project_files RENAME TO project_files_v3;
+    `);
+    database.exec(PROJECT_ONLY_V4_PROJECT_FILES_SQL);
+    database.exec(`INSERT INTO project_files
+      (id, project_id, kind, relative_path, media_type, bytes, size_bytes, sha256, created_at, updated_at)
+      SELECT id, project_id, kind, relative_path, media_type, bytes, size_bytes, sha256, created_at, updated_at
+      FROM project_files_v3`);
+    database.exec(`
+      DROP TABLE project_files_v3;
+      DROP INDEX execution_lock_holder;
+      ALTER TABLE execution_locks RENAME TO execution_locks_v3;
+    `);
+    database.exec(PROJECT_ONLY_V4_EXECUTION_LOCKS_SQL);
+    database.exec(`INSERT INTO execution_locks
+      (project_id, holder_kind, holder_id, source_workspace_digest, acquired_at)
+      SELECT project_id, holder_kind, holder_id, source_workspace_digest, acquired_at
+      FROM execution_locks_v3 WHERE holder_kind = 'run'`);
+    database.exec("DROP TABLE execution_locks_v3");
+    database.exec(PROJECT_ONLY_V4_FILE_TRIGGERS_SQL);
+    database.exec("ALTER TABLE project_only_schema RENAME TO project_only_schema_v3");
+    database.exec(`CREATE TABLE project_only_schema (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      version INTEGER NOT NULL CHECK (version = 4),
+      installed_at TEXT NOT NULL
+    ) STRICT`);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 4, ?)")
+      .run(installedAt);
+    database.exec("DROP TABLE project_only_schema_v3");
+    database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
+    const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
+    if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* preserve migration error */ }
     throw error;
   }
 };
@@ -338,7 +428,7 @@ const migrateProjectOnlySchemaV2ToV3 = (
     database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 3, ?)")
       .run(installedAt);
     database.exec("DROP TABLE project_only_schema_v2");
-    database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
+    database.exec("PRAGMA user_version = 3");
     const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
     if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
     database.exec("COMMIT");

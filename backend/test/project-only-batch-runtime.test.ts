@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { PROJECT_ONLY_BATCH_ENTRY_SOURCE } from "../src/project-only-agent-service.ts";
+import { PROJECT_ONLY_BATCH_ENTRY_SOURCE } from "../src/project-only-runtime-assets.ts";
 import { ProjectOnlyBatchRuntime } from "../src/project-only-batch-runtime.ts";
 import { ProjectOnlyOperationsAdapter } from "../src/project-only-operations.ts";
 import { ProjectOnlyStore } from "../src/project-only-store.ts";
@@ -73,18 +73,6 @@ test("Project-only batch runtime executes a frozen multi-seed Mesa plan and publ
     executionDescription: execution,
     createdAt: NOW,
   });
-  store.startTechnicalCheck({
-    id: "batch_check",
-    projectId: project.id,
-    expectedWorkspaceDigest: project.workspaceDigest,
-    startedAt: NOW,
-  });
-  store.finishTechnicalCheck({
-    id: "batch_check",
-    succeeded: true,
-    diagnostics: [],
-    finishedAt: NOW,
-  });
   store.createExperiment({
     id: "batch_experiment",
     projectId: project.id,
@@ -97,7 +85,7 @@ test("Project-only batch runtime executes a frozen multi-seed Mesa plan and publ
     },
     createdAt: NOW,
   });
-  const operations = new ProjectOnlyOperationsAdapter(store, { async check() { throw new Error("unused"); } }, () => NOW);
+  const operations = new ProjectOnlyOperationsAdapter(store, () => NOW);
   const admitted = operations.startRunAdmission({
     commandId: "batch_runtime_run",
     projectId: project.id,

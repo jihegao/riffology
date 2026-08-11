@@ -20,17 +20,14 @@ type ResourceSummary = Readonly<{
   allowedActions: readonly ResourceAction[];
 }>;
 
-export type ProjectTechnicalStatus = "draft" | "checking" | "executable" | "failed";
-
 export type ProjectExecutionLock = Readonly<{
-  state: "unlocked" | "checking" | "queued" | "running" | "cancelling";
+  state: "unlocked" | "queued" | "running" | "cancelling";
   runId: string | null;
   sourceDigest: string | null;
 }>;
 
 export type ProjectSummary = ResourceSummary & Readonly<{
   kind: "project";
-  technicalStatus: ProjectTechnicalStatus;
   workspaceDigest: string;
   executionLock: ProjectExecutionLock;
   lastRun: null | Readonly<{
@@ -260,18 +257,31 @@ export type SkillUse = Readonly<{
   loadState: "selected" | "loaded" | "failed";
 }>;
 
-export type DirectMutationReceipt = Readonly<{
-  operation: "direct_apply";
-  receiptDigest: string;
-  beforeWorkspaceDigest: string;
-  afterWorkspaceDigest: string;
-  committedAt: string;
-  files: readonly Readonly<{
-    relativePath: string;
-    priorSha256: string | null;
-    proposedSha256: string;
-  }>[];
-}>;
+export type DirectMutationReceipt =
+  | Readonly<{
+      operation: "direct_apply";
+      receiptDigest: string;
+      beforeWorkspaceDigest: string;
+      afterWorkspaceDigest: string;
+      committedAt: string;
+      files: readonly Readonly<{
+        relativePath: string;
+        priorSha256: string | null;
+        proposedSha256: string;
+      }>[];
+    }>
+  | Readonly<{
+      state: "committed";
+      receiptDigest: string;
+      beforeWorkspaceDigest: string;
+      afterWorkspaceDigest: string;
+      committedAt: string;
+      files: readonly Readonly<{
+        relativePath: string;
+        priorSha256: string | null;
+        afterSha256: string | null;
+      }>[];
+    }>;
 
 export type ActionRecord = Readonly<{
   id: string;
@@ -543,25 +553,6 @@ export type ProjectMutationReceipt = Readonly<{
   receiptDigest: string;
 }>;
 
-export type TechnicalCheck = Readonly<{
-  id: string;
-  projectId: string;
-  state: "running" | "passed" | "failed" | "cancelled";
-  publication: "pending" | "published" | "superseded";
-  capturedWorkspaceDigest: string;
-  executionDescriptionDigest: string;
-  aggregate: "pending" | "executable" | "failed" | "cancelled";
-  checks: readonly Readonly<{
-    name: string;
-    state: string;
-    code: string;
-    detail: string;
-  }>[];
-  startedAt: string;
-  finishedAt: string | null;
-  claim: "technical_execution_only";
-}>;
-
 export type ExperimentConfiguration = Readonly<{
   id: string;
   projectId: string;
@@ -647,7 +638,6 @@ type WorkspaceBase = Readonly<{
     name: string;
     kind: "project";
     lifecycleState: LifecycleState;
-    technicalStatus: ProjectTechnicalStatus;
   }>;
   conversations: readonly ConversationSummary[];
 }>;
