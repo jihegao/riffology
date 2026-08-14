@@ -676,11 +676,16 @@ export class BackendApp {
             .map((id) => catalog.load(id));
         })()
         : [];
-      const visualRuntime = new ProjectOnlyVisualRuntime(options.projectOnlyRuntime.store);
+      const projectOnlyPythonExecutable = configuredBatchPythonExecutable(options.a3PythonExecutable);
+      const visualRuntime = new ProjectOnlyVisualRuntime({
+        store: options.projectOnlyRuntime.store,
+        pythonExecutable: projectOnlyPythonExecutable,
+        scratchRoot: join(options.projectOnlyRuntime.store.root, "visual-scratch"),
+      });
       const projectOnlyScratchRoot = join(options.projectOnlyRuntime.store.root, "batch-scratch");
       const batchRuntime = new ProjectOnlyBatchRuntime({
         store: options.projectOnlyRuntime.store,
-        pythonExecutable: configuredBatchPythonExecutable(options.a3PythonExecutable),
+        pythonExecutable: projectOnlyPythonExecutable,
         scratchRoot: projectOnlyScratchRoot,
       });
       const agent = new ProjectOnlyAgentService({

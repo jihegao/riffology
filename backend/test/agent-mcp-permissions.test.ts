@@ -8,6 +8,9 @@ import {
   type AgentToolName,
 } from "../src/agent-tools.ts";
 import { McpToolServer as LegacyMcpToolServer } from "../src/mcp.ts";
+import { validateExecutionDescriptionV2 } from "../src/execution-protocol-v2.ts";
+import { JSON_SCHEMA_2020_12 } from "../src/experiment-planner.ts";
+import { createGenericModelScaffold } from "../src/model-workspace.ts";
 import { ProjectStore } from "../src/project-store.ts";
 import { SimulationActions } from "../src/simulation-actions.ts";
 
@@ -60,7 +63,10 @@ test("Project-only MCP publishes composite delivery and no-argument visual-open 
     owner: { kind: "project", id: "project_only" },
     turnId: "turn_project_only",
     externalSessionGeneration: 1,
-    allowedTools: toolsForOwner({ kind: "project", id: "project_only" }),
+    allowedTools: new Set([
+      ...toolsForOwner({ kind: "project", id: "project_only" }),
+      "riff_write_project_files" as const,
+    ]),
   });
   const listed = await server.handle(capability, {
     jsonrpc: "2.0", id: 1, method: "tools/list",
@@ -92,6 +98,18 @@ test("Project-only MCP publishes composite delivery and no-argument visual-open 
     JSON.stringify(delivery),
     /modelId|sourceModelId|modelSnapshotDigest|ownerKind|ownerId/u,
   );
+  for (const name of ["riff_deliver_project_changes", "riff_write_project_files"]) {
+    const execution = tools.find((tool) => tool.name === name)
+      ?.inputSchema?.properties?.executionDescription;
+    const inputSchema = execution?.properties?.inputs?.properties?.schema;
+    assert.deepEqual(inputSchema?.required, ["$schema"]);
+    assert.deepEqual(inputSchema?.properties?.$schema?.enum, [JSON_SCHEMA_2020_12]);
+    assert.match(inputSchema?.description ?? "", /must declare "\$schema" exactly/u);
+    const eventSchema = execution?.properties?.batch?.properties?.domainEvents
+      ?.properties?.payloadSchema?.properties?.schema;
+    assert.deepEqual(eventSchema?.required, ["$schema"]);
+    assert.deepEqual(eventSchema?.properties?.$schema?.enum, [JSON_SCHEMA_2020_12]);
+  }
 });
 
 test("default Agent capability leaves a bounded human review window for large operations", async () => {
@@ -303,6 +321,217 @@ test("one consequential Agent capability is consumed synchronously across concur
   }));
   assert.equal((sequential?.result as any).isError, true);
   assert.match((sequential?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 1);
+});
+
+test("explicit Project-only implicit authority is tool-scoped and synchronously budgeted", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() { calls += 1; return { ok: true }; },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_implicit_budget",
+    owner: { kind: "project", id: "project_implicit_budget" },
+    turnId: "turn_implicit_budget",
+    externalSessionGeneration: 1,
+    allowedTools: new Set([
+      "riff_create_experiment_configuration",
+      "riff_list_project_workspace",
+    ]),
+    implicitConsequentialToolBudgets: new Map([
+      ["riff_create_experiment_configuration", 2],
+    ]),
+    intentAuthority: "explicit",
+  });
+  const experiment = (requestKey: string) => call(
+    "riff_create_experiment_configuration",
+    {
+      requestKey,
+      name: requestKey,
+      configuration: {
+        schemaVersion: 1,
+        runKind: "batch",
+        parameters: {},
+        sampling: { kind: "single" },
+      },
+    },
+  );
+  assert.equal((await server.handle(capability, experiment("experiment_one")))?.result?.isError, undefined);
+  assert.equal((await server.handle(capability, experiment("experiment_two")))?.result?.isError, undefined);
+  const exhausted = await server.handle(capability, experiment("experiment_three"));
+  assert.equal((exhausted?.result as any).isError, true);
+  assert.match((exhausted?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 2);
+  assert.throws(() => server.grant({
+    conversationId: "conversation_proposal_budget",
+    owner: { kind: "project", id: "project_proposal_budget" },
+    turnId: "turn_proposal_budget",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_create_experiment_configuration"]),
+    implicitConsequentialToolBudgets: new Map([
+      ["riff_create_experiment_configuration", 1],
+    ]),
+    intentAuthority: "proposal_only",
+  }), /Implicit Agent tool budgets/u);
+});
+
+test("explicit Project file path authority rejects out-of-scope writes before budget consumption", async () => {
+  for (const [suffix, authority, deniedPath, allowedPath] of [
+    [
+      "exact",
+      [{ kind: "exact", normalizedPath: "requirements/modeling-requirements.md" }],
+      "code/model.py",
+      "Requirements/Modeling-Requirements.md",
+    ],
+    [
+      "prefix",
+      [{ kind: "prefix", normalizedPath: "requirements/" }],
+      "requirements-evil/model.md",
+      "requirements/domain/model.md",
+    ],
+  ] as const) {
+    let calls = 0;
+    const server = new AgentMcpServer({
+      async execute() { calls += 1; return { ok: true }; },
+    });
+    const capability = server.grant({
+      conversationId: `conversation_path_${suffix}`,
+      owner: { kind: "project", id: `project_path_${suffix}` },
+      turnId: `turn_path_${suffix}`,
+      externalSessionGeneration: 1,
+      allowedTools: new Set(["riff_write_project_files"]),
+      implicitConsequentialToolBudgets: new Map([["riff_write_project_files", 1]]),
+      implicitProjectFilePathAuthority: authority,
+      intentAuthority: "explicit",
+    });
+    const write = (requestKey: string, relativePath: string) => call(
+      "riff_write_project_files",
+      {
+        requestKey,
+        expectedWorkspaceDigest: "a".repeat(64),
+        changes: [{
+          operation: "upsert",
+          relativePath,
+          mediaType: "text/markdown",
+          text: "# Authorized artifact\n",
+          expectedPriorSha256: null,
+        }],
+      },
+    );
+
+    const denied = await server.handle(capability, write(`denied_${suffix}`, deniedPath));
+    assert.equal((denied?.result as any).isError, true);
+    assert.match((denied?.result as any).content[0].text, /tool_not_allowed/u);
+    assert.equal(calls, 0);
+
+    const allowed = await server.handle(capability, write(`allowed_${suffix}`, allowedPath));
+    assert.equal((allowed?.result as any).isError, undefined, JSON.stringify(allowed));
+    assert.equal(calls, 1);
+
+    const exhausted = await server.handle(capability, write(`exhausted_${suffix}`, allowedPath));
+    assert.equal((exhausted?.result as any).isError, true);
+    assert.match((exhausted?.result as any).content[0].text, /operation_budget_exhausted/u);
+    assert.equal(calls, 1);
+  }
+});
+
+test("execution-contract validation explains the exact dialect before reserving implicit budget", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute(_grant, _tool, input) {
+      calls += 1;
+      validateExecutionDescriptionV2(input.executionDescription);
+      return { ok: true };
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_execution_retry",
+    owner: { kind: "project", id: "project_execution_retry" },
+    turnId: "turn_execution_retry",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_write_project_files"]),
+    implicitConsequentialToolBudgets: new Map([["riff_write_project_files", 1]]),
+    intentAuthority: "explicit",
+  });
+  const description = structuredClone(
+    createGenericModelScaffold("model_execution_retry").executionDescription,
+  ) as any;
+  delete description.inputs.schema.$schema;
+  const write = (requestKey: string, executionDescription: Record<string, unknown>) => call(
+    "riff_write_project_files",
+    {
+      requestKey,
+      expectedWorkspaceDigest: "a".repeat(64),
+      changes: [{
+        operation: "upsert",
+        relativePath: "code/model.py",
+        mediaType: "text/x-python",
+        text: "value = 1\n",
+        expectedPriorSha256: null,
+      }],
+      executionDescription,
+    },
+  );
+  const rejected = await server.handle(capability, write("write_invalid", description));
+  const rejectedContent = (rejected?.result as any).content[0].text as string;
+  assert.equal((rejected?.result as any).isError, true);
+  assert.match(rejectedContent, /invalid_tool_input/u);
+  assert.match(rejectedContent, /inputs\.schema\.\$schema/u);
+  assert.match(rejectedContent, new RegExp(JSON_SCHEMA_2020_12.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+
+  const corrected = await server.handle(capability, write(
+    "write_corrected",
+    createGenericModelScaffold("model_execution_retry").executionDescription,
+  ));
+  assert.equal((corrected?.result as any).isError, undefined);
+  assert.equal(calls, 1);
+
+  const exhausted = await server.handle(capability, write(
+    "write_after_success",
+    createGenericModelScaffold("model_execution_retry").executionDescription,
+  ));
+  assert.equal((exhausted?.result as any).isError, true);
+  assert.match((exhausted?.result as any).content[0].text, /operation_budget_exhausted/u);
+  assert.equal(calls, 1);
+});
+
+test("untyped invalid-tool failures stay redacted and consume implicit mutation budget", async () => {
+  let calls = 0;
+  const server = new AgentMcpServer({
+    async execute() {
+      calls += 1;
+      throw Object.assign(new Error("secret executor detail"), { code: "invalid_tool_input" });
+    },
+  });
+  const capability = server.grant({
+    conversationId: "conversation_untyped_invalid",
+    owner: { kind: "project", id: "project_untyped_invalid" },
+    turnId: "turn_untyped_invalid",
+    externalSessionGeneration: 1,
+    allowedTools: new Set(["riff_write_project_files"]),
+    implicitConsequentialToolBudgets: new Map([["riff_write_project_files", 1]]),
+    intentAuthority: "explicit",
+  });
+  const input = {
+    requestKey: "write_untyped_invalid",
+    expectedWorkspaceDigest: "a".repeat(64),
+    changes: [{
+      operation: "upsert",
+      relativePath: "notes.txt",
+      mediaType: "text/plain",
+      text: "note\n",
+      expectedPriorSha256: null,
+    }],
+  };
+  const rejected = await server.handle(capability, call("riff_write_project_files", input));
+  const content = (rejected?.result as any).content[0].text as string;
+  assert.match(content, /invalid_tool_input/u);
+  assert.doesNotMatch(content, /secret executor detail/u);
+  const exhausted = await server.handle(capability, call("riff_write_project_files", {
+    ...input,
+    requestKey: "write_after_untyped_invalid",
+  }));
+  assert.match((exhausted?.result as any).content[0].text, /operation_budget_exhausted/u);
   assert.equal(calls, 1);
 });
 

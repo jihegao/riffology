@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, Mesa 3 (locked 3.5.1), pytest 8, uv.
 
-**Source of truth:** [`docs/domain-brief-aircraft-support.md`](../../docs/domain-brief-aircraft-support.md). The model mirrors [`mesa_service/src/mesa_service/models/wind_turbine_maintenance/model.py`](../../mesa_service/src/mesa_service/models/wind_turbine_maintenance/model.py) conventions. This is the **core layer only**; no backend product installation, no API/worker/bundle integration.
+**Source of truth:** [`docs/domain-brief-aircraft-support.md`](../../domain-brief-aircraft-support.md). The model mirrors [`mesa_service/src/mesa_service/models/wind_turbine_maintenance/model.py`](../../../mesa_service/src/mesa_service/models/wind_turbine_maintenance/model.py) conventions. This is the **core layer only**; no backend product installation, no API/worker/bundle integration.
 
 **Claim boundary:** all inputs are synthetic defaults; verbal/experience parameters are not yet quantified. The model claims technical executability only, never calibration or decision readiness.
 

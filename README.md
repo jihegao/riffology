@@ -4,20 +4,33 @@
 - Role: implementation record
 - Scope: repository overview, local operation, milestone status, and verification summary
 - Source of truth: Riff MVP PRD and merged implementation
-- Last reviewed: 2026-07-25
+- Last reviewed: 2026-08-12
 
-本地 Product 入口：Home 分列 Models 与 Projects；对象页左侧保留
-Conversation 上下文，右侧承载当前 Model 或 Project 工作区。
+本地 Product 入口：Home 只展示 Projects；Project 页左侧保留
+Conversation 上下文，右侧承载当前 Project 工作区。
 
 > **MVP target:** the single product requirements authority is
 > [`docs/product-requirements.md`](docs/product-requirements.md).
-> It restores this two-pane interaction as the shared shell for generic Models
-> and Projects and treats wind-turbine maintenance as the first ordinary case.
+> It defines the two-pane interaction as the shared shell for generic Projects
+> and treats wind-turbine maintenance as the first ordinary Example Project
+> Template and example Project.
 > The legacy runtime described below predates that contract. A4-5 removes its
 > browser product entry and keeps any remaining backend code only as an
 > explicit-dependency historical regression harness.
 
-## Milestone A implementation status
+Active domain semantics live inside the Project Modeling Requirements layer and
+project assets, not in an independent Domain Pack. The canonical path is
+`requirements/modeling-requirements.md`. Official immutable Example Project
+Templates must contain that file; Blank Projects do not implicitly create it or
+any other domain record, and Conversation temporary documents are never Template
+contents.
+
+## Historical Milestone A implementation status
+
+The milestone narrative below is retained as implementation history. References
+to Models, fixed-copy Projects, `ProductStoreV2`, or Domain Pack installation are
+compatibility/superseded records; the active Product contract is Project-only and
+is defined by the PRD and the Project Modeling Requirements boundary above.
 
 Stage 1's `ProductStoreV2` foundation is implemented and Stage 2 / #13 is the
 completed Agent/Model-workspace authority. Stage 2 wires schema v3,
@@ -169,6 +182,11 @@ dedicated A4-4 Chromium 1/1, retained A4-2 and A4-3 Chromium 1/1 each,
 retained Chromium 15/15, Visual-Agent Chromium 6/6, production build, and
 27-document governance. Independent A4-4 review results are recorded before
 this branch is published.
+
+The following A4-5 paragraph is retained as a historical implementation record.
+Its former “Domain Pack installation” wording is a compatibility/superseded
+boundary and does not define the active Project Modeling Requirements or Example
+Project Template semantics.
 
 A4-5 switches the production composition root to ProductStoreV2 and serves the
 built Product shell directly from the exact app origin. Startup completes

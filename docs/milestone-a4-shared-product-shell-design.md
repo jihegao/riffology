@@ -1,7 +1,7 @@
 # Milestone A4 shared product shell design
 
 - Status: implemented; A4-0 through A4-6 merged and post-merge closeout complete
-- Role: active design
+- Role: historical implementation record; superseded for active Project-only and Modeling Requirements semantics
 - Scope: Issue #15 Home, shared shell, browser API/lifecycle, Conversation UI,
   workspace rendering, recovery, cutover, precise retirement, and final browser acceptance
 - Source of truth: [`product-requirements.md`](product-requirements.md)
@@ -9,9 +9,10 @@
 
 ## 1. Authority, entry gate, and claim boundary
 
-The Riff MVP PRD is the only product authority. This document defines how
-Stage 4 will satisfy it; it cannot add product scope or turn a target into an
-implementation fact.
+The Riff MVP PRD is the only product authority. This document records how the
+retired Stage 4 design was implemented; it cannot define current product scope.
+In particular, its Model, ProductStoreV2, and Domain Pack installer language is
+superseded by the active Project-only and Project Modeling Requirements contracts.
 
 Stage 4 began only after all hard prerequisites were verified:
 
@@ -568,9 +569,9 @@ Downloads remain attachment-only and no-store. Browser tests cover reload,
 back/forward cache, successful bootstrap rotation, and restart without reuse of
 old responses.
 
-## 10. Startup, recovery, and cutover
+## 10. Startup, recovery, and cutover (historical, superseded)
 
-The target Product startup order is:
+The retired A4-5 ProductStoreV2 startup order was:
 
 1. resolve and validate the explicit Product root;
 2. acquire the ProductStoreV2 writer boundary;
@@ -1028,7 +1029,7 @@ A4-5 startup cutover/recovery/retirement is implemented by the next narrow
 record; the continuous A4-6 browser matrix remains pending. All 69 final trace
 rows remain `pending`, and Issue #15 remains open.
 
-### A4-5 implementation record
+### A4-5 implementation record (historical, superseded)
 
 A4-5 changes startup and retirement without claiming the final browser story:
 

@@ -35,6 +35,18 @@ export type OpenCodePrompt = {
   scopedMcpScopeId?: string;
   /** Exact, sorted tools from the matching Riff capability grant. */
   scopedMcpTools?: readonly AgentToolName[];
+  /**
+   * Exact consequential subset already authorized by this explicit Product
+   * turn.  The adapter uses it only when installing the matching session
+   * permission rules; it never infers this authority from assistant text.
+   */
+  scopedMcpImplicitTools?: readonly AgentToolName[];
+  /**
+   * Whether OpenCode may pause the turn on its built-in question tool. Some
+   * product runtimes do not expose an interaction-response route; those
+   * callers must disable questions so a Provider cannot wait invisibly.
+   */
+  allowQuestions?: boolean;
 };
 
 export type OpenCodeProviderModel = {
@@ -204,6 +216,7 @@ export type OpenCodeConfig = {
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_MAX_EVENT_BUFFER_BYTES = 256_000;
+const IDLE_INCOMPLETE_ASSISTANT_GRACE_MS = 750;
 
 export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversationPort {
   readonly #fetch: typeof fetch;
@@ -440,6 +453,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         prompt.scopedMcpScopeId,
         prompt.scopedMcpTools,
         directory,
+        prompt.allowQuestions,
       );
       // OpenCode 1.18.11 still accepts the legacy prompt-level `tools` map as
       // an availability allowlist. Preserve that compatibility shape only for
@@ -458,6 +472,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
             prompt.scopedMcpScopeId,
             prompt.scopedMcpTools,
             directory,
+            prompt.scopedMcpImplicitTools,
+            prompt.allowQuestions,
           ),
         }),
       }, directory);
@@ -944,6 +960,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     scopeId: string | undefined,
     allowedTools: readonly AgentToolName[] | undefined,
     directory: string,
+    allowQuestions: boolean | undefined = undefined,
   ): Record<string, boolean> {
     // OpenCode may have unrelated local or plugin MCP servers configured.
     // Deny every tool first, then enable only the exact tools in this turn's
@@ -951,7 +968,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     // context; OpenCode's ambient filesystem-backed `skill` tool stays denied.
     // The explicit built-in map is retained for compatibility with versions
     // that merge exact names after wildcard rules.
-    const tools = { "*": false, ...disabledBuiltInTools(), question: Boolean(scopeId) };
+    const tools = {
+      "*": false,
+      ...disabledBuiltInTools(),
+      question: Boolean(scopeId) && allowQuestions !== false,
+    };
     if (!scopeId) {
       if (allowedTools !== undefined) {
         throw new ApiError(503, "opencode_mcp_unbound", "Riff MCP tools require a bound turn scope.");
@@ -981,6 +1002,8 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     scopeId: string | undefined,
     allowedTools: readonly AgentToolName[] | undefined,
     directory: string,
+    implicitTools: readonly AgentToolName[] | undefined = undefined,
+    allowQuestions: boolean | undefined = undefined,
   ): readonly Readonly<{
     permission: string;
     pattern: string;
@@ -994,7 +1017,11 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
       { permission: "*", pattern: "*", action: "deny" },
     ];
     if (!scopeId) return Object.freeze(rules.map(Object.freeze));
-    rules.push({ permission: "question", pattern: "*", action: "allow" });
+    rules.push({
+      permission: "question",
+      pattern: "*",
+      action: allowQuestions === false ? "deny" : "allow",
+    });
     const binding = this.#scopedMcp.get(scopeId);
     if (!binding || binding.directory !== directory) {
       throw new ApiError(503, "opencode_mcp_unbound", "The scoped Riff MCP server is not bound for this turn.");
@@ -1003,13 +1030,27 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     if (!sameAgentTools(binding.allowedTools, exact)) {
       throw new ApiError(503, "opencode_mcp_tools_invalid", "The scoped Riff MCP tool grant is invalid.");
     }
+    const implicit = new Set(
+      implicitTools && implicitTools.length > 0
+        ? validatedScopedMcpTools(implicitTools)
+        : [],
+    );
+    if ([...implicit].some((tool) =>
+      !exact.includes(tool) || !CONSEQUENTIAL_AGENT_TOOLS.has(tool))) {
+      throw new ApiError(
+        503,
+        "opencode_mcp_tools_invalid",
+        "The implicit Riff MCP tool subset is invalid.",
+      );
+    }
     for (const tool of exact) {
       rules.push({
         permission: `${binding.name}_${tool}`,
         pattern: "*",
         // Browser tools enter BrowserAgentAuthority's Riff-owned permission
         // queue; an upstream OpenCode ask would create competing controllers.
-        action: CONSEQUENTIAL_AGENT_TOOLS.has(tool) ? "ask" : "allow",
+        action: CONSEQUENTIAL_AGENT_TOOLS.has(tool) && !implicit.has(tool)
+          ? "ask" : "allow",
       });
     }
     return Object.freeze(rules.map(Object.freeze));
@@ -1145,6 +1186,9 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
     signal: AbortSignal,
     directory: string,
   ): Promise<"busy" | "retry" | "idle"> {
+    // OpenCode status maps are directory-scoped. Keep the exact session-owned
+    // Project directory on this request: an unscoped/root request can return
+    // {} while the same target session is still busy in its canonical scope.
     const result = await this.#request(
       "/session/status",
       { method: "GET", signal },
@@ -1174,6 +1218,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
   ): Promise<OpenCodeAssistantResponse> {
     let userMessageId: string | null = null;
     let failureBoundaryId: string | null = null;
+    let idleIncompleteCandidate: { signature: string; observedAt: number } | null = null;
     const toolEvidence = new AssistantToolEvidenceTracker();
     while (!deadlineSignal.aborted) {
       let status: "busy" | "retry" | "idle";
@@ -1233,6 +1278,7 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         : [];
       assertObservedToolsAllowed(currentAttempt, allowedToolNames);
       toolEvidence.observe(currentAttempt);
+      const toolState = toolEvidence.state();
       // Text is only a streaming observation while the target session remains
       // busy/retrying. Idle (including an absent status-map entry) is terminal
       // only after OpenCode marks the final post-retry sequence complete.
@@ -1244,7 +1290,6 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
         }
         if (currentAttempt.length > 0
           && currentAttempt.every(completedAssistant)) {
-          const toolState = toolEvidence.state();
           if (toolState === "failed") {
             await this.#ensureReady(workspace, deadlineSignal);
             await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
@@ -1269,6 +1314,68 @@ export class HttpOpenCodeAdapter implements OpenCodeAdapter, OpenCodeConversatio
             }
           }
         }
+      }
+      const idleIncompleteSignature = status === "idle" && replayHasFailureBoundary
+        ? stableIdleIncompleteAssistantSignature(currentAttempt, toolState)
+        : null;
+      if (!idleIncompleteSignature) {
+        idleIncompleteCandidate = null;
+      } else if (idleIncompleteCandidate?.signature !== idleIncompleteSignature) {
+        idleIncompleteCandidate = {
+          signature: idleIncompleteSignature,
+          observedAt: Date.now(),
+        };
+      } else if (Date.now() - idleIncompleteCandidate.observedAt
+        >= IDLE_INCOMPLETE_ASSISTANT_GRACE_MS) {
+        // OpenCode 1.18.11 can drop the target from /session/status after a
+        // completed tool while retaining a started-but-unclosed reasoning
+        // part. Revalidate identity and one final canonical status/message
+        // pair before failing the turn instead of holding Riff busy until the
+        // outer prompt deadline.
+        await this.#ensureReady(workspace, deadlineSignal);
+        await this.#assertSessionWorkspace(sessionId, directory, deadlineSignal);
+        const revalidatedStatus = await this.#sessionStatus(
+          sessionId,
+          deadlineSignal,
+          directory,
+        );
+        const revalidatedMessages = await this.#sessionMessages(
+          sessionId,
+          deadlineSignal,
+          directory,
+        );
+        const revalidatedAssistants = uniqueMessages(revalidatedMessages.filter(
+          (entry: any) => entry?.info?.role === "assistant"
+            && entry.info.parentID === userMessageId,
+        ));
+        const revalidatedBoundaryIndex = failureBoundaryId === null
+          ? -1
+          : revalidatedAssistants.findIndex(
+            (assistant) => messageId(assistant) === failureBoundaryId,
+          );
+        const revalidatedHasFailureBoundary = failureBoundaryId === null
+          || revalidatedBoundaryIndex >= 0;
+        const revalidatedAttempt = revalidatedHasFailureBoundary
+          ? revalidatedAssistants.slice(revalidatedBoundaryIndex + 1)
+          : [];
+        assertObservedToolsAllowed(revalidatedAttempt, allowedToolNames);
+        toolEvidence.observe(revalidatedAttempt);
+        const revalidatedSignature = revalidatedStatus === "idle"
+          && revalidatedHasFailureBoundary
+          ? stableIdleIncompleteAssistantSignature(
+              revalidatedAttempt,
+              toolEvidence.state(),
+            )
+          : null;
+        if (revalidatedSignature === idleIncompleteSignature) {
+          throw new ApiError(
+            502,
+            "opencode_idle_incomplete_response",
+            "OpenCode marked the target session idle while its latest assistant part remained incomplete.",
+          );
+        }
+        idleIncompleteCandidate = null;
+        continue;
       }
       await lifecycle.wait(50, deadlineSignal);
     }
@@ -1650,8 +1757,9 @@ const loopbackMcpUrl = (raw: string): URL => {
   try { url = new URL(raw); }
   catch { throw new ApiError(503, "opencode_invalid_url", "Riff MCP URL must be an absolute loopback HTTP URL."); }
   if (url.protocol !== "http:" || url.username || url.password || !isLoopbackHostname(url.hostname)
-    || url.pathname !== "/a2/mcp" || url.hash || url.searchParams.size !== 1 || !url.searchParams.get("cap")) {
-    throw new ApiError(503, "opencode_invalid_url", "Riff MCP URL must be a capability-scoped local A2 MCP endpoint.");
+    || !["/a2/mcp", "/project-only/mcp"].includes(url.pathname)
+    || url.hash || url.searchParams.size !== 1 || !url.searchParams.get("cap")) {
+    throw new ApiError(503, "opencode_invalid_url", "Riff MCP URL must be a capability-scoped local MCP endpoint.");
   }
   return url;
 };
@@ -2579,6 +2687,42 @@ const retryableLifecyclePollError = (error: unknown): boolean =>
 
 const completedAssistant = (payload: Record<string, any>): boolean =>
   Number.isFinite(payload.info?.time?.completed);
+
+const stableIdleIncompleteAssistantSignature = (
+  payloads: Array<Record<string, any>>,
+  toolState: "complete" | "pending" | "failed",
+): string | null => {
+  if (!payloads.length || toolState !== "complete") return null;
+  const incomplete = payloads.filter((payload) => !completedAssistant(payload));
+  if (!incomplete.length) return null;
+  const latest = incomplete.at(-1)!;
+  if (!messageId(latest)) return null;
+  const latestParts = assistantParts(latest);
+  const hasOpenReasoningPart = latestParts.some((part) =>
+    part?.type === "reasoning"
+      && Number.isFinite(part.time?.start)
+      && !Number.isFinite(part.time?.end));
+  const hasNonterminalToolPart = payloads.some((payload) =>
+    assistantParts(payload).some((part) => part?.type === "tool"
+      && !["completed", "error", "failed"].includes(part.state?.status)));
+  if (!hasOpenReasoningPart || hasNonterminalToolPart) return null;
+  const projection = payloads.map((payload) => ({
+    id: messageId(payload),
+    completed: Number.isFinite(payload.info?.time?.completed)
+      ? payload.info.time.completed : null,
+    failed: Boolean(payload.info?.error),
+    parts: assistantParts(payload).map((part) => ({
+      id: boundedOpaqueRuntimeValue(part?.id ?? part?.callID ?? part?.callId, 500),
+      type: boundedOpaqueRuntimeValue(part?.type, 120),
+      status: boundedOpaqueRuntimeValue(part?.state?.status, 120),
+      textDigest: typeof part?.text === "string"
+        ? createHash("sha256").update(part.text).digest("hex") : null,
+      timeStart: Number.isFinite(part?.time?.start) ? part.time.start : null,
+      timeEnd: Number.isFinite(part?.time?.end) ? part.time.end : null,
+    })),
+  }));
+  return createHash("sha256").update(canonicalJsonV2(projection)).digest("hex");
+};
 
 const uniqueMessages = (payloads: Array<Record<string, any>>): Array<Record<string, any>> => {
   const latest = new Map<string, { payload: Record<string, any>; index: number }>();

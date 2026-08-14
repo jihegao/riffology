@@ -538,6 +538,7 @@ export function RiffologyWorkbenchApp({
             client={client}
             workspaceKey={route.workspaceKey}
             providers={providers}
+            home={home}
           />
         )}
         {recovery !== "checking" && recovery.state === "ready" && !error
@@ -577,6 +578,7 @@ export function RiffologyWorkbenchApp({
             <RiffologyWorkbenchViewer client={client} workspace={ownerWorkspace}
               filesOpen={filesOpen} onFilesOpenChange={setFilesOpen}
               fileToggleRef={fileToggleRef}
+              refresh={load}
               browser={projectedBrowser}
               browserScreenshot={projectedBrowserScreenshot}
               browserError={browserError}
@@ -862,13 +864,18 @@ function NewProjectWorkspace({
   client,
   workspaceKey,
   providers,
+  home,
 }: Readonly<{
   client: ProductClient;
   workspaceKey: string;
   providers?: ProviderDiscovery;
+  home?: HomeDto;
 }>) {
   const [name, setName] = useState("新仿真项目");
   const [provider, setProvider] = useState("");
+  const [sourceKind, setSourceKind] = useState<"blank" | "template" | "import">("blank");
+  const [templateKey, setTemplateKey] = useState("");
+  const [importFile, setImportFile] = useState<File>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
@@ -880,14 +887,29 @@ function NewProjectWorkspace({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const [providerId, modelId] = provider ? JSON.parse(provider) as string[] : [];
-    if (!providerId || !modelId || !name.trim() || busy) return;
+    const templates = home?.templates ?? [];
+    const selectedTemplate = templates.find(
+      (item) => `${item.id}@${item.version}` === templateKey,
+    ) ?? templates[0];
+    if (!providerId || !modelId || !name.trim() || busy
+      || sourceKind === "template" && !selectedTemplate
+      || sourceKind === "import" && !importFile) return;
     setBusy(true); setError(undefined);
     try {
       const created = await client.createProject({
         commandId: `project_create_${workspaceKey}`,
         name: name.trim(),
         provider: { providerId, modelId },
-        source: { kind: "blank" },
+        source: sourceKind === "template" ? {
+          kind: "template",
+          templateId: selectedTemplate!.id,
+          templateVersion: selectedTemplate!.version,
+        } : sourceKind === "import" ? {
+          kind: "import",
+          filename: importFile!.name,
+          mediaType: importFile!.type || "application/octet-stream",
+          base64: await fileBase64(importFile!),
+        } : { kind: "blank" },
       });
       navigateWorkbench(workbenchOwnerHref("project", created.project.id, created.conversation.id));
     } catch (cause) {
@@ -895,6 +917,10 @@ function NewProjectWorkspace({
     } finally { setBusy(false); }
   };
   const providerModels = providers?.mode === "live" ? providers.providerModels : [];
+  const templates = home?.templates ?? [];
+  const selectedTemplate = templates.find(
+    (item) => `${item.id}@${item.version}` === templateKey,
+  ) ?? templates[0];
   return (
     <>
       <aside className="riffology-chat-pane riffology-unbound-chat" aria-label="新项目引导">
@@ -903,13 +929,38 @@ function NewProjectWorkspace({
         </div></header>
         <div className="riffology-unbound-timeline" role="log" aria-label="Agent 项目引导">
           <article><strong>Assistant</strong>
-            <p>先创建一个空白 Project。进入工作台后，在首个对话里描述模型需求，OpenCode 会生成并提交模型文件。</p>
+            <p>可以创建空白 Project，也可以复制一个不可变 Example Project Template。建模需求与模型文件都由新 Project 独立持有。</p>
           </article>
         </div>
         <form className="riffology-unbound-composer" onSubmit={submit}>
           <label htmlFor="new-project-name">项目名称</label>
           <input id="new-project-name" maxLength={200} value={name} disabled={busy}
             onChange={(event) => setName(event.target.value)} />
+          <label htmlFor="new-project-source">创建方式</label>
+          <select id="new-project-source" value={sourceKind} disabled={busy}
+            onChange={(event) => setSourceKind(event.target.value as "blank" | "template" | "import")}>
+            <option value="blank">空白 Project</option>
+            <option value="template">Example Project Template</option>
+            <option value="import">导入 Project 归档</option>
+          </select>
+          {sourceKind === "template" && <>
+            <label htmlFor="new-project-template">示例模板</label>
+            <select id="new-project-template"
+              value={templateKey || (selectedTemplate ? `${selectedTemplate.id}@${selectedTemplate.version}` : "")}
+              disabled={busy || templates.length === 0}
+              onChange={(event) => setTemplateKey(event.target.value)}>
+              {templates.map((item) => <option key={`${item.id}@${item.version}`}
+                value={`${item.id}@${item.version}`}>{item.name} · {item.version}</option>)}
+            </select>
+            {selectedTemplate ? <small>{selectedTemplate.description}</small>
+              : <small role="status">当前版本没有可用的官方 Example Project Template。</small>}
+          </>}
+          {sourceKind === "import" && <>
+            <label htmlFor="new-project-import">Project 归档</label>
+            <input id="new-project-import" type="file"
+              accept=".zip,application/zip,application/octet-stream" disabled={busy}
+              onChange={(event) => setImportFile(event.target.files?.[0])} />
+          </>}
           <label htmlFor="unbound-project-provider">Provider</label>
           <select id="unbound-project-provider" value={provider}
             disabled={busy || providers?.mode !== "live"}
@@ -919,7 +970,8 @@ function NewProjectWorkspace({
               value={JSON.stringify([item.providerId, item.modelId])}>{item.qualifiedId}</option>)}
           </select>
           <button type="submit" disabled={!name.trim() || !provider || busy
-            || providers?.mode !== "live"}>
+            || providers?.mode !== "live" || sourceKind === "template" && !selectedTemplate
+            || sourceKind === "import" && !importFile}>
             {busy ? "正在创建…" : "创建项目"}
           </button>
           {error && <small role="alert">{error}</small>}
@@ -949,3 +1001,10 @@ function WorkbenchState({ title, detail, retry }: Readonly<{
 
 const projectInitials = (name: string) => name.split(/\s+/u).filter(Boolean).slice(0, 2)
   .map((part) => part[0]?.toUpperCase()).join("") || "P";
+
+const fileBase64 = async (file: File): Promise<string> => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};

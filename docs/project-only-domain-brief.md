@@ -1,15 +1,19 @@
 # Project-only simulation workspace domain brief
 
 Status: approved implementation contract
-Approved: 2026-08-04; revised for direct Project writes: 2026-08-11
+Approved: 2026-08-04; revised for direct Project writes and Modeling Requirements: 2026-08-12
 
 ## Decision question and scope
 
 - Replace the user-visible Model/Project split with one mutable Project resource.
 - A Project owns executable files, environment declarations, execution description,
-  experiments, Conversations, Runs, outputs, and visual services.
-- Projects are reused through immutable Project Template versions, never through a
-  shared mutable Model.
+  the Project-owned Modeling Requirements layer, experiments, Conversations, Runs,
+  outputs, and visual services.
+- The canonical Modeling Requirements path is
+  `requirements/modeling-requirements.md`; it is a Project artifact, not an
+  independent Domain Pack.
+- Projects are distributed through immutable Example Project Template versions,
+  never through a shared mutable Model or an installable Domain Pack.
 - Existing Product data is exported once and is not imported into the new store.
 
 ## Evidence and assumptions
@@ -21,14 +25,22 @@ Approved: 2026-08-04; revised for direct Project writes: 2026-08-11
 | policy | Executable files and execution description are locked only during a nonterminal Run | Prevent live execution drift | Platform | approved |
 | policy | Experiment configuration may change during a Run and affects only future Runs | User-selected lock scope | Product | approved |
 | policy | Run source bytes are not retained after terminal cleanup | User explicitly accepts non-reproducible historical Runs | Product | approved |
+| policy | Project Modeling Requirements use the canonical path `requirements/modeling-requirements.md` | Project-owned requirements boundary | Product | approved |
+| policy | Official Example Project Template versions must contain the canonical Modeling Requirements file | Immutable template distribution contract | Product | approved |
+| policy | Blank Project creation does not implicitly create Modeling Requirements or other domain records | Explicit add/import/template boundary | Product | approved |
+| policy | Conversation temporary documents are drafts and never Template contents | Conversation lifecycle boundary | Product | approved |
 | fact | A digest without retained bytes cannot reproduce a historical Run after Project edits | Content-addressing limitation | Platform | accepted limitation |
 | policy | Opening an already healthy visual service is an unprivileged scoped Agent operation | No arbitrary target or browser control | Platform | approved |
 
 ## Ontology and behavior
 
 - Project: mutable single-user simulation workspace and sole Conversation owner.
-- Project Template Version: immutable seed containing executable files, execution
-  description, and default experiments; excludes Conversations and Runs.
+- Modeling Requirements: Project-owned, reviewable domain-semantics layer stored at
+  `requirements/modeling-requirements.md`; it records the decision question, scope,
+  ontology, rules, inputs, outputs, validation boundary, and claim limits.
+- Example Project Template Version: immutable seed containing executable files,
+  execution description, default experiments, and the canonical Modeling Requirements
+  file; excludes Conversations, Conversation temporary documents, and Runs.
 - Project Write Receipt: idempotent, CAS-bound proof of one atomic UTF-8 text change set.
 - Execution Lock: persistent Project state covering queued, running, and cancelling
   Runs. It rejects executable workspace mutations and a second
@@ -39,9 +51,13 @@ Approved: 2026-08-04; revised for direct Project writes: 2026-08-11
 
 ## Inputs and uncertainty
 
-- Blank Project creation produces an explicit minimal draft scaffold.
-- Template creation copies one exact immutable version.
+- Blank Project creation produces only the generic Project shell and does not
+  implicitly create `requirements/modeling-requirements.md` or other domain records.
+- Official Example Project Template creation copies one exact immutable version,
+  including its canonical Modeling Requirements file.
 - Import creation validates a bounded archive before committing any Project state.
+- Conversation temporary documents remain outside Template versions; explicit Project
+  add/import/write is required to adopt content into the canonical path.
 - Runtime parameters and seeds are captured at Run admission. Later Experiment
   edits do not affect an admitted Run.
 
@@ -68,5 +84,7 @@ Approved: 2026-08-04; revised for direct Project writes: 2026-08-11
 - [x] One active Run and persistent execution-lock recovery are explicit.
 - [x] Experiment edits during a Run affect future Runs only.
 - [x] Missing historical source and replay limitations are user-visible.
-- [x] Template contents and exclusions are explicit.
+- [x] Canonical Modeling Requirements path, Blank Project behavior, and required
+  official Template contents are explicit.
+- [x] Conversation temporary documents are excluded from Template versions.
 - [x] Visual open and visual start have distinct authorization semantics.

@@ -473,6 +473,7 @@ export type ExecutionDescription = Readonly<{
   visual?: Readonly<{
     entryPoint: string;
     protocol: "riff-visual-v1";
+    healthPath: string;
   }>;
   cancellation: Readonly<{ signal: "SIGTERM"; graceMs: number }>;
 }>;
@@ -644,7 +645,8 @@ type WorkspaceBase = Readonly<{
 
 export type ProjectWorkspaceDto = WorkspaceBase & Readonly<{
   workspaceDigest: string;
-  execution: ExecutionDescription;
+  execution: ExecutionDescription | null;
+  executionReady: boolean;
   executionDescriptionDigest: string;
   executionLock: ProjectExecutionLock;
   files: readonly ProjectWorkspaceFile[];

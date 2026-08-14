@@ -1,0 +1,43 @@
+{
+  "build": {
+    "source": "/Users/gaojihe/apps/riff-demo/docs/manual/Riff_从空白项目到大样本仿真_使用说明书.md",
+    "sourceSha256": "bc4c8f210b9660c345ea571e76888be2f44b2ea9808affb4c4eebda4db0a941f",
+    "output": "/Users/gaojihe/apps/riff-demo/docs/manual/Riff_从空白项目到大样本仿真_使用说明书.docx",
+    "figureCount": 6,
+    "tableCount": 5,
+    "paragraphCount": 200,
+    "namedOverride": {
+      "name": "riff_teal_accent",
+      "teal": "0F766E",
+      "teal_dark": "115E59",
+      "teal_light": "E6F4F1",
+      "ink": "163A3A",
+      "muted": "5B6870",
+      "line": "B8D9D4",
+      "code_fill": "F3F7F6",
+      "warning_fill": "FFF8E8"
+    }
+  },
+  "audit": {
+    "path": "/Users/gaojihe/apps/riff-demo/docs/manual/Riff_从空白项目到大样本仿真_使用说明书.docx",
+    "page": "US Letter portrait",
+    "margins": "1in",
+    "usedStyles": [
+      "Heading 1",
+      "Heading 2",
+      "Manual Callout",
+      "Manual Code",
+      "Manual Cover Meta",
+      "Manual Cover Subtitle",
+      "Manual Cover Title",
+      "Manual Figure Caption",
+      "Manual Kicker",
+      "Manual List",
+      "Normal"
+    ],
+    "tableCount": 5,
+    "imageAltCount": 6,
+    "failures": [],
+    "passed": true
+  }
+}

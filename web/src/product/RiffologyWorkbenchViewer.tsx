@@ -9,6 +9,8 @@ import {
 } from "react";
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
+import { MODELING_REQUIREMENTS_PATH } from "./modeling-requirements";
+import { WorkspacePane } from "./WorkspacePane";
 import type {
   BrowserSessionDto,
   ConversationRuntimeProjection,
@@ -54,7 +56,6 @@ type WorkbenchService = Readonly<{
 
 const RAIL_MIN = 224;
 const RAIL_MAX = 520;
-
 export function RiffologyWorkbenchViewer({
   client,
   workspace,
@@ -68,6 +69,7 @@ export function RiffologyWorkbenchViewer({
   onBrowserReconnect,
   conversationId,
   runtime,
+  refresh,
 }: Readonly<{
   client: ProductClient;
   workspace: ProjectWorkspaceDto;
@@ -81,6 +83,7 @@ export function RiffologyWorkbenchViewer({
   onBrowserReconnect: () => void;
   conversationId?: string;
   runtime?: ConversationRuntimeProjection;
+  refresh: () => Promise<void>;
 }>) {
   const runOutputFiles = workspace.runs.flatMap((run) =>
       run.status === "succeeded" ? run.outputs.flatMap((output): WorkbenchFile[] => {
@@ -106,6 +109,7 @@ export function RiffologyWorkbenchViewer({
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [selectedServiceKey, setSelectedServiceKey] = useState("");
+  const [experimentsOpen, setExperimentsOpen] = useState(false);
   const [serviceFrame, setServiceFrame] = useState<Readonly<{
     key: string;
     sourceRevision?: string;
@@ -124,6 +128,8 @@ export function RiffologyWorkbenchViewer({
     setSelectedServiceKey("");
     setServiceFrame({ key: "", loading: false });
   }, [workspace.owner.id, workspace.workspaceDigest]);
+
+  useEffect(() => setExperimentsOpen(false), [workspace.owner.id]);
 
   const services: readonly WorkbenchService[] = [
     ...(browser?.projectedUrl === "riff-visual://solara/"
@@ -224,6 +230,8 @@ export function RiffologyWorkbenchViewer({
     runningVisualService?.key, selectedServiceKey, serviceFrame.sourceRevision]);
 
   const selected = files.find((file) => file.key === selectedKey);
+  const modelingRequirements = files.find((file) =>
+    file.source === "workspace" && file.relativePath === MODELING_REQUIREMENTS_PATH);
   const selectFile = async (file: WorkbenchFile) => {
     const operation = request.current + 1;
     request.current = operation;
@@ -256,6 +264,14 @@ export function RiffologyWorkbenchViewer({
     }
   };
 
+  const openExperiments = () => {
+    setExperimentsOpen(true);
+    if (compact) {
+      onFilesOpenChange(false);
+      queueMicrotask(() => viewerRef.current?.focus());
+    }
+  };
+
   const returnToConversation = () => {
     request.current += 1;
     setSelectedKey("");
@@ -269,9 +285,25 @@ export function RiffologyWorkbenchViewer({
 
   return <>
     <section ref={viewerRef}
-      className={`riffology-stage3-viewer ${selected || selectedServiceKey ? "has-selection" : ""}`}
+      className={`riffology-stage3-viewer ${selected || selectedServiceKey || experimentsOpen ? "has-selection" : ""}`}
       aria-label="项目文件与页面查看器"
       tabIndex={-1}>
+      {experimentsOpen ? <>
+        <header className="riffology-viewer-header">
+          <button type="button" className="riffology-viewer-return"
+            onClick={() => setExperimentsOpen(false)}>← 返回文件与可视化</button>
+          <strong>实验与运行</strong>
+          <span>Project 操作</span>
+        </header>
+        <div className="riffology-experiment-workspace" role="region" aria-label="实验与运行">
+          <WorkspacePane
+            client={client}
+            workspace={workspace}
+            selectedConversationId={conversationId}
+            refresh={refresh}
+          />
+        </div>
+      </> : <>
       {(selected || selectedServiceKey) && <header className="riffology-viewer-header">
         <button type="button" className="riffology-viewer-back" onClick={returnToConversation}>← 返回对话</button>
         <strong>{selected?.relativePath ?? services.find((service) => service.key === selectedServiceKey)?.label}</strong>
@@ -287,12 +319,15 @@ export function RiffologyWorkbenchViewer({
         busy={browserBusy}
         onReconnect={onBrowserReconnect}
         liveFrame={selectedServiceKey ? serviceFrame : undefined}
+        modelingRequirements={modelingRequirements}
+        onOpenModelingRequirements={(file) => void selectFile(file)}
       />}
       {selected && loading && <ViewerState title="正在读取受限文件投影…" />}
       {selected && !loading && error && <ViewerState title="文件不可用" detail={error} />}
       {selected && !loading && !error && resource && <div className="riffology-renderer-wrap">
         <RendererRegistry resource={resource} />
       </div>}
+      </>}
     </section>
     <ProjectFileRail
       ownerKind={workspace.owner.kind}
@@ -301,10 +336,20 @@ export function RiffologyWorkbenchViewer({
       open={filesOpen}
       compact={compact}
       onOpenChange={onFilesOpenChange}
-      onSelect={(file) => void selectFile(file)}
+      onSelect={(file) => {
+        setExperimentsOpen(false);
+        void selectFile(file);
+      }}
       services={services}
       selectedServiceKey={selectedServiceKey}
-      onSelectService={(service) => void selectService(service)}
+      onSelectService={(service) => {
+        setExperimentsOpen(false);
+        void selectService(service);
+      }}
+      experimentsOpen={experimentsOpen}
+      experimentCount={workspace.experimentConfigurations.length}
+      runCount={workspace.runs.length}
+      onOpenExperiments={openExperiments}
       fileToggleRef={fileToggleRef}
     />
   </>;
@@ -320,6 +365,8 @@ function BrowserViewer({
   busy,
   onReconnect,
   liveFrame,
+  modelingRequirements,
+  onOpenModelingRequirements,
 }: Readonly<{
   ownerName: string;
   ownerKind: "project";
@@ -330,6 +377,8 @@ function BrowserViewer({
   busy: boolean;
   onReconnect: () => void;
   liveFrame?: Readonly<{ key: string; url?: string; loading: boolean; error?: string }>;
+  modelingRequirements?: WorkbenchFile;
+  onOpenModelingRequirements: (file: WorkbenchFile) => void;
 }>) {
   if (liveFrame?.url && !liveFrame.loading) {
     return <div className="riffology-live-service">
@@ -365,19 +414,27 @@ function BrowserViewer({
   if (browser?.recoveryState === "expired") {
     return <ViewerState title="浏览器会话已过期" detail="刷新工作台以创建新的只读观察会话。" />;
   }
-  return <ViewerEmpty ownerName={ownerName} ownerKind={ownerKind} fileCount={fileCount} detail={error} />;
+  return <ViewerEmpty ownerName={ownerName} ownerKind={ownerKind} fileCount={fileCount}
+    detail={error} modelingRequirements={modelingRequirements}
+    onOpenModelingRequirements={onOpenModelingRequirements} />;
 }
 
-function ViewerEmpty({ ownerName, ownerKind, fileCount, detail }: Readonly<{
+function ViewerEmpty({ ownerName, ownerKind, fileCount, detail, modelingRequirements,
+  onOpenModelingRequirements }: Readonly<{
   ownerName: string;
   ownerKind: "project";
   fileCount: number;
   detail?: string;
+  modelingRequirements?: WorkbenchFile;
+  onOpenModelingRequirements: (file: WorkbenchFile) => void;
 }>) {
   return <div className="riffology-viewer-empty" role="status">
     <p className="product-eyebrow">RIFF {ownerKind.toUpperCase()} · READ ONLY</p>
     <h1>{ownerName}</h1>
     <p>{detail ?? "从最右侧文件栏选择一个 Project 工作区文件。"}</p>
+    {modelingRequirements ? <button type="button"
+      onClick={() => onOpenModelingRequirements(modelingRequirements)}>查看建模需求</button>
+      : <p>尚无 <code>{MODELING_REQUIREMENTS_PATH}</code>；可通过 <code>/domain-brief</code> 显式创建。</p>}
     <small>{fileCount} 个可用文件 · 内容由 Riff 的只读 renderable 投影提供。</small>
   </div>;
 }
@@ -397,6 +454,10 @@ function ProjectFileRail({
   services,
   selectedServiceKey,
   onSelectService,
+  experimentsOpen,
+  experimentCount,
+  runCount,
+  onOpenExperiments,
   fileToggleRef,
 }: Readonly<{
   ownerKind: "project";
@@ -409,6 +470,10 @@ function ProjectFileRail({
   services: readonly WorkbenchService[];
   selectedServiceKey: string;
   onSelectService: (service: WorkbenchService) => void;
+  experimentsOpen: boolean;
+  experimentCount: number;
+  runCount: number;
+  onOpenExperiments: () => void;
   fileToggleRef: RefObject<HTMLButtonElement | null>;
 }>) {
   const [width, setWidth] = useState(RAIL_MIN);
@@ -416,6 +481,8 @@ function ProjectFileRail({
   const railRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const tree = buildFileTree(files);
+  const projectFileCount = files.filter((file) => file.source === "workspace").length;
+  const runOutputCount = files.length - projectFileCount;
   const close = () => {
     onOpenChange(false);
     queueMicrotask(() => fileToggleRef.current?.focus());
@@ -486,9 +553,16 @@ function ProjectFileRail({
         aria-label="调整文件栏宽度" aria-valuemin={RAIL_MIN} aria-valuemax={RAIL_MAX}
         aria-valuenow={width} tabIndex={open && !compact ? 0 : -1} onKeyDown={onResizeKeyDown}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} />
-      <header><div><strong>文件</strong><span>{files.length} 个 Project 文件</span></div>
+      <header><div><strong>文件</strong><span>{projectFileCount} 个 Project 文件
+        {runOutputCount > 0 ? ` · ${runOutputCount} 个冻结 Run 输出` : ""}</span></div>
         <button ref={closeRef} type="button" onClick={close} aria-label="收起文件栏">收起</button>
       </header>
+      <button type="button" className="riffology-experiments-entry"
+        aria-pressed={experimentsOpen} onClick={onOpenExperiments}>
+        <i aria-hidden="true" />
+        <span><strong>实验与运行</strong>
+          <small>{experimentCount} 个配置 · {runCount} 次 Run</small></span>
+      </button>
       {tree.length > 0 && <ul className="riffology-file-tree" aria-label="只读项目文件">
         <FileTree entries={tree} selectedKey={selectedKey} onSelect={onSelect} />
       </ul>}
@@ -595,5 +669,5 @@ const fileKind = (mediaType: string) => mediaType === "text/html" ? "HTML"
   : mediaType === "text/markdown" ? "MD"
     : mediaType === "application/json" ? "JSON"
       : mediaType === "text/csv" ? "CSV" : mediaType;
-const fileLabel = (file: WorkbenchFile) => `${fileKind(file.mediaType)} · ${formatBytes(file.sizeBytes)}`;
+const fileLabel = (file: WorkbenchFile) => `${file.source === "run_output" ? "冻结 Run 输出 · " : ""}${fileKind(file.mediaType)} · ${formatBytes(file.sizeBytes)}`;
 const formatBytes = (bytes: number) => bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;

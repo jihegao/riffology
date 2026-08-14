@@ -64,6 +64,7 @@ export type AgentToolName =
   | "riff_write_project_files"
   | "riff_start_project_run"
   | "riff_read_project_run_diagnostics"
+  | "riff_summarize_run_outputs"
   | "riff_interact_current_visual"
   | BrowserAgentToolName;
 
@@ -85,6 +86,7 @@ export const READ_ONLY_AGENT_TOOLS: ReadonlySet<AgentToolName> = new Set([
   "riff_list_runs",
   "riff_list_run_outputs",
   "riff_read_run_output",
+  "riff_summarize_run_outputs",
   "riff_read_run_events",
   "riff_bootstrap_list_objects",
 ]);
@@ -109,6 +111,8 @@ export const CONSEQUENTIAL_AGENT_TOOLS: ReadonlySet<AgentToolName> = new Set([
   "riff_create_analysis_document",
   "riff_transition_temporary_document",
   "riff_adopt_attachment",
+  "riff_write_project_files",
+  "riff_start_project_run",
 ]);
 
 export type AgentToolGrant = {
@@ -121,6 +125,25 @@ export type AgentToolGrant = {
     tool: AgentToolName;
     digest: string;
   }> | null;
+  /**
+   * Consequential calls admitted by an explicit natural-language turn without
+   * a separate permission card. Each tool has a small server-derived call
+   * budget that is reserved synchronously after side-effect-free gateway
+   * validation and before execution. Admitted failures consume it. Ordinary
+   * Product conversations keep this map empty and retain exact allow-once
+   * commitments.
+   */
+  implicitConsequentialToolBudgets: ReadonlyMap<AgentToolName, number>;
+  /**
+   * Optional server-derived restriction for an explicitly authorized
+   * Project-file turn. `null` means the user requested a broad artifact group;
+   * otherwise every changed path must match one of these normalized exact
+   * paths or directory prefixes.
+   */
+  implicitProjectFilePathAuthority: readonly Readonly<{
+    kind: "exact" | "prefix";
+    normalizedPath: string;
+  }>[] | null;
   intentAuthority: "explicit" | "proposal_only";
   attachmentIds: ReadonlySet<string>;
   confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation;
@@ -142,6 +165,7 @@ export const isAgentToolName = (value: string): value is AgentToolName =>
   || value === "riff_write_project_files"
   || value === "riff_start_project_run"
   || value === "riff_read_project_run_diagnostics"
+  || value === "riff_summarize_run_outputs"
   || value === "riff_interact_current_visual"
   || isBrowserAgentToolName(value);
 

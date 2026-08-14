@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { planExperiment } from "./experiment-planner.ts";
 import {
   GenericBatchSupervisor,
+  consumeBatchDiagnosticEventFileCandidate,
+  consumeBatchOutputCandidate,
   verifyProjectExecutionRootCapability,
   type BatchSupervisionResult,
 } from "./generic-batch-supervisor.ts";
@@ -130,12 +132,9 @@ export class ProjectOnlyBatchRuntime {
         signal,
       });
       const outputBytes = supervision.status === "succeeded" && !signal.aborted
-        ? supervision.outputs.map((candidate) => {
-          const bytes = readFileSync(candidate.sourcePath);
-          const sha256 = createHash("sha256").update(bytes).digest("hex");
-          if (sha256 !== candidate.sha256 || bytes.byteLength !== candidate.sizeBytes) {
-            throw new Error("run_output_changed_before_publication");
-          }
+        ? [
+          ...supervision.outputs.map((candidate) => {
+          const bytes = consumeBatchOutputCandidate(candidate);
           return {
             id: stableId("run_output", `${run.id}:${candidate.sampleIndex}:${candidate.logicalName}`),
             sampleIndex: candidate.sampleIndex,
@@ -146,11 +145,26 @@ export class ProjectOnlyBatchRuntime {
             declaredRole: candidate.role,
             bytes,
           };
-        })
+          }),
+          ...(supervision.diagnosticEventFiles ?? []).map((candidate) => {
+            const { bytes } = consumeBatchDiagnosticEventFileCandidate(candidate);
+            return {
+              id: stableId("run_output", `${run.id}:${candidate.sampleIndex}:domainEvents`),
+              sampleIndex: candidate.sampleIndex,
+              sampleId: candidate.sampleId,
+              logicalName: "domainEvents",
+              relativePath: execution.batch.domainEvents.relativePath,
+              mediaType: execution.batch.domainEvents.mediaType,
+              declaredRole: "diagnostic" as const,
+              bytes,
+            };
+          }),
+        ]
         : [];
       this.supervisor.cleanup(supervision);
-      const cancelled = signal.aborted;
-      const status = cancelled ? "cancelled" as const : supervision.status;
+      const aborted = signal.aborted;
+      const status = aborted ? abortStatus(signal.reason) : supervision.status;
+      const cancellationCode = abortCode(signal.reason);
       let remainingDiagnosticBytes = 64 * 1024;
       const sampleDiagnostics = supervision.samples.map((sample) => {
         const stderr = boundedUtf8(sample.stderr, Math.min(4 * 1024, remainingDiagnosticBytes));
@@ -173,8 +187,8 @@ export class ProjectOnlyBatchRuntime {
         samplePlanDigest: plan.samplePlanDigest,
         configurationDigest: plan.configurationDigest,
         status,
-        code: cancelled ? "user_cancelled" : supervision.code,
-        diagnostic: cancelled ? "The batch Run was cancelled by the user." : supervision.diagnostic,
+        code: aborted ? cancellationCode : supervision.code,
+        diagnostic: aborted ? abortDiagnostic(signal.reason) : supervision.diagnostic,
         samples: sampleDiagnostics,
         resources: supervision.resources,
         startedAt: supervision.startedAt,
@@ -194,13 +208,14 @@ export class ProjectOnlyBatchRuntime {
       }
       const run = this.store.run(runId);
       if (["queued", "running", "cancelling"].includes(run.status)) {
-        const cancelled = signal.aborted;
+        const aborted = signal.aborted;
         const finishedAt = this.now();
-        const code = cancelled ? "user_cancelled" : safeCode(error);
-        const diagnostic = cancelled ? "The batch Run was cancelled." : safeDiagnostic(error);
+        const status = aborted ? abortStatus(signal.reason) : "failed";
+        const code = aborted ? abortCode(signal.reason) : safeCode(error);
+        const diagnostic = aborted ? abortDiagnostic(signal.reason) : safeDiagnostic(error);
         this.store.commitBatchRunResult({
           runId,
-          status: cancelled ? "cancelled" : "failed",
+          status,
           terminalCode: code,
           outputs: [],
           completion: {
@@ -208,7 +223,7 @@ export class ProjectOnlyBatchRuntime {
             sampleCount: 0,
             samplePlanDigest: null,
             configurationDigest: null,
-            status: cancelled ? "cancelled" : "failed",
+            status,
             code,
             diagnostic,
             samples: [],
@@ -240,6 +255,17 @@ const safeDiagnostic = (error: unknown): string => {
   const normalized = message.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
   return normalized ? normalized.slice(0, 1_000) : "Batch execution failed before durable output publication.";
 };
+
+const abortCode = (reason: unknown): "user_cancelled" | "backend_shutdown" =>
+  reason instanceof Error && reason.message === "backend_shutdown"
+    ? "backend_shutdown" : "user_cancelled";
+
+const abortStatus = (reason: unknown): "cancelled" | "interrupted" =>
+  abortCode(reason) === "backend_shutdown" ? "interrupted" : "cancelled";
+
+const abortDiagnostic = (reason: unknown): string => abortCode(reason) === "backend_shutdown"
+  ? "The batch Run was interrupted because the backend shut down."
+  : "The batch Run was cancelled by the user.";
 
 const boundedUtf8 = (value: string, maxBytes: number): string => {
   if (maxBytes <= 0) return "";

@@ -11,13 +11,14 @@ import type {
 } from "../src/opencode-adapter.ts";
 import { PROJECT_ONLY_BATCH_ENTRY_SOURCE } from "../src/project-only-runtime-assets.ts";
 import { openProjectOnlyServerRuntime } from "../src/project-only-server-factory.ts";
+import { ProjectOnlyStore } from "../src/project-only-store.ts";
 import { BackendApp } from "../src/server.ts";
 
 const NOW = "2026-08-04T07:00:00.000Z";
 const execution = {
   schemaVersion: 2,
   runtime: "python",
-  runMode: "batch",
+  runMode: "both",
   dependencyFile: "environment/requirements.txt",
   inputs: {
     schemaProfile: "riff-json-schema-2020-12-v1",
@@ -38,6 +39,11 @@ const execution = {
     mediaType: "application/json", required: true, role: "data",
   }],
   batch: { entryPoint: "code/riff_entry.py", protocol: "riff-batch-v1" },
+  visual: {
+    entryPoint: "code/visual.py",
+    protocol: "riff-visual-v1",
+    healthPath: "/health",
+  },
   cancellation: { signal: "SIGTERM", graceMs: 500 },
 };
 const validModelSource = `from mesa import Model
@@ -58,6 +64,46 @@ const experiment = {
   parameters: { steps: 2, demand: 1 },
   sampling: { kind: "single", seed: 7 },
 };
+const visualSource = `from __future__ import annotations
+
+import argparse
+import html
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--riff-input", required=True, type=Path)
+parser.add_argument("--riff-output-dir", required=True, type=Path)
+parser.add_argument("--riff-host", required=True)
+parser.add_argument("--riff-port", required=True, type=int)
+args = parser.parse_args()
+payload = json.loads(args.riff_input.read_text(encoding="utf-8"))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            body = b'{"status":"ok"}\\n'
+            media_type = "application/json"
+        elif self.path in {"/", "/index.html"}:
+            demand = html.escape(str(payload["parameters"]["demand"]))
+            seed = html.escape(str(payload["seed"]))
+            body = f"<!doctype html><html><body><main>Visual demand={demand}; seed={seed}</main></body></html>".encode()
+            media_type = "text/html"
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, _format, *_args):
+        return
+
+HTTPServer((args.riff_host, args.riff_port), Handler).serve_forever()
+`;
 
 class NaturalLanguageOpenCode implements OpenCodeConversationPort {
   mcpUrl: string | null = null;
@@ -77,9 +123,11 @@ class NaturalLanguageOpenCode implements OpenCodeConversationPort {
   async bindScopedMcp(
     _scopeId: string,
     mcpUrl: string,
-    _allowedTools: readonly any[],
+    allowedTools: readonly any[],
     _workspace: OpenCodeWorkspaceBinding,
   ) {
+    assert.deepEqual(allowedTools, [...allowedTools].sort((left, right) =>
+      String(left).localeCompare(String(right), "en")));
     this.mcpUrl = mcpUrl;
     const listed = await this.rpc("tools/list", {});
     this.toolLists.push((listed.tools as Array<{ name: string }>).map(({ name }) => name));
@@ -193,21 +241,22 @@ class VisualRepairOpenCode extends NaturalLanguageOpenCode {
       });
       this.lastFailedStart = failedStart;
       const diagnostics = await this.call("riff_read_project_run_diagnostics", {});
-      assert.equal(diagnostics.completion.code, "visual_document_missing");
-      return response("文件已经保存；可视化 Run 按预期因缺少文档而失败。");
+      assert.equal(diagnostics.status, "failed");
+      assert.equal(typeof diagnostics.completion.code, "string");
+      return response("文件已经保存；可视化 Run 因缺少执行入口而失败。");
     }
 
     const diagnostics = await this.call("riff_read_project_run_diagnostics", {});
     assert.equal(diagnostics.status, "failed");
-    assert.equal(diagnostics.completion.code, "visual_document_missing");
+    assert.equal(typeof diagnostics.completion.code, "string");
     const write = await this.call("riff_write_project_files", {
       requestKey: "visual_repair",
       expectedWorkspaceDigest: workspace.project.workspaceDigest,
       changes: [{
         operation: "upsert",
-        relativePath: "visual.html",
-        mediaType: "text/html",
-        text: "<!doctype html><html><body><main>visual repaired</main></body></html>",
+        relativePath: "code/visual.py",
+        mediaType: "text/x-python",
+        text: visualSource,
         expectedPriorSha256: null,
       }],
     });
@@ -218,7 +267,7 @@ class VisualRepairOpenCode extends NaturalLanguageOpenCode {
       runKind: "visual",
     });
     assert.equal(started.state, "started");
-    return response("已读取可视化失败诊断、补齐文档并重新启动 Run。");
+    return response("已读取可视化失败诊断、补齐真实执行入口并重新启动 Run。");
   }
 }
 
@@ -232,7 +281,7 @@ const start = async (t: test.TestContext, openCode = new NaturalLanguageOpenCode
     id: "template_http",
     version: "1",
     description: "HTTP template",
-    runMode: "batch",
+    runMode: "both",
     executionDescription: execution,
     defaultExperiment: experiment,
     files: [{
@@ -297,6 +346,54 @@ test("Project-only HTTP removes technical-check routes and summarizes latest Run
   assert.equal(removed.status, 404);
 });
 
+test("Experiment projections inherit the parent Project lifecycle and archived Projects reject mutations", async (t) => {
+  const { origin, runtime, project } = await start(t);
+  runtime.store.createExperiment({
+    id: "experiment_lifecycle",
+    projectId: project.id,
+    name: "Lifecycle",
+    configuration: experiment,
+    createdAt: NOW,
+  });
+
+  const activeWorkspace = await fetch(`${origin}/api/projects/${project.id}/workspace`).then((response) => response.json()) as any;
+  const activeExperiment = activeWorkspace.experimentConfigurations
+    .find((item: any) => item.id === "experiment_lifecycle");
+  assert.equal(activeExperiment.lifecycleState, "active");
+  assert.equal(activeExperiment.readOnly, false);
+
+  runtime.store.databaseForTesting().prepare(
+    "UPDATE projects SET lifecycle_state = 'archived' WHERE id = ?",
+  ).run(project.id);
+  const archivedWorkspace = await fetch(`${origin}/api/projects/${project.id}/workspace`).then((response) => response.json()) as any;
+  const archivedExperiment = archivedWorkspace.experimentConfigurations
+    .find((item: any) => item.id === "experiment_lifecycle");
+  assert.equal(archivedExperiment.lifecycleState, "archived");
+  assert.equal(archivedExperiment.readOnly, true);
+
+  const create = await fetch(`${origin}/api/projects/${project.id}/experiment-configs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: "command_archived_create", name: "Blocked", configuration: experiment }),
+  });
+  assert.equal(create.status, 422, await create.clone().text());
+  assert.equal((await create.json() as any).error.code, "project_not_writable");
+
+  const update = await fetch(`${origin}/api/projects/${project.id}/experiment-configs/experiment_lifecycle`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      commandId: "command_archived_update",
+      expectedConfigurationDigest: archivedExperiment.configurationDigest,
+      expectedRecordDigest: archivedExperiment.recordDigest,
+      name: "Blocked update",
+    }),
+  });
+  assert.equal(update.status, 422, await update.clone().text());
+  assert.equal((await update.json() as any).error.code, "project_not_writable");
+  assert.equal(runtime.store.experiments(project.id).find((item) => item.id === "experiment_lifecycle")?.name, "Lifecycle");
+});
+
 test("natural-language turns save a broken model, persist failed Run diagnostics, then repair and succeed", async (t) => {
   const { origin, runtime, conversation, app, openCode } = await start(t);
   const broken = await sendTurn(origin, conversation.id, "turn_broken", "生成一个有 Python 语法故障的模型并启动大样本实验");
@@ -329,7 +426,7 @@ test("natural-language turns save a broken model, persist failed Run diagnostics
     && !tools.includes("riff_start_project_technical_check")), true);
 });
 
-test("natural-language visual startup failure persists diagnostics, unlocks, and can be repaired", async (t) => {
+test("natural-language visual startup failure persists diagnostics, then a real frozen visual entry can be repaired and served", async (t) => {
   const openCode = new VisualRepairOpenCode();
   const { origin, runtime, project, conversation, app } = await start(t, openCode);
   runtime.store.createExperiment({
@@ -349,33 +446,85 @@ test("natural-language visual startup failure persists diagnostics, unlocks, and
     origin,
     conversation.id,
     "turn_visual_failure",
-    "保存可视化准备文件，并启动一个缺少 visual.html 的故障 Run",
+    "保存可视化准备文件，并启动一个缺少 visual 执行入口的故障 Run",
   );
-  assert.equal(failedTurn.turn.state, "complete", JSON.stringify(failedTurn));
+  assert.equal(failedTurn.turn.state, "failed", JSON.stringify(failedTurn));
   assert.equal(openCode.lastFailedStart?.error?.code, "tool_failed", JSON.stringify(openCode.lastFailedStart));
   assert.match(failedTurn.messages.at(-1).text, /文件已保存/u);
   const failedRun = runtime.store.runs(project.id).find((run) => run.runKind === "visual");
   assert.ok(failedRun);
+  const failedRunActions = failedTurn.turn.actions.filter((action: any) =>
+    action.actionKind === "run_start");
+  assert.equal(failedRunActions.length, 1, JSON.stringify(failedTurn.turn.actions));
+  assert.equal(failedRunActions[0].state, "committed");
+  assert.equal(failedRunActions[0].runId, failedRun.id);
+  assert.equal(failedRunActions[0].errorCode, failedTurn.reason);
+  assert.equal(failedTurn.turn.goalVerification.evidence.partialEffect, true);
+  assert.equal(failedTurn.turn.goalVerification.evidence.intentKind, "project_visual");
+  assert.match(failedTurn.messages.at(-1).text, new RegExp(failedRun.id, "u"));
   assert.equal(failedRun.status, "failed");
   assert.equal(runtime.store.project(project.id).executionLock, null);
-  assert.equal(runtime.store.runCompletion(failedRun.id)?.completion.code, "visual_document_missing");
+  assert.equal(typeof runtime.store.runCompletion(failedRun.id)?.completion.code, "string");
 
   const repairedTurn = await sendTurn(
     origin,
     conversation.id,
     "turn_visual_repair",
-    "读取刚才的可视化错误，补齐缺失文件并重新运行",
+    "读取刚才的可视化错误，补齐真实执行入口并重新运行",
   );
-  assert.equal(repairedTurn.turn.state, "complete");
+  assert.equal(repairedTurn.turn.state, "complete", JSON.stringify(repairedTurn));
+  assert.equal(repairedTurn.turn.actions.filter((action: any) =>
+    action.actionKind === "run_start").length, 1, JSON.stringify(repairedTurn.turn.actions));
   assert.match(repairedTurn.messages.at(-1).text, /文件已保存/u);
   const running = runtime.store.runs(project.id)
     .filter((run) => run.runKind === "visual" && run.id !== failedRun.id)[0];
   assert.ok(running);
   assert.equal(running.status, "running");
   assert.equal(runtime.store.project(project.id).executionLock?.holderId, running.id);
+  const target = await app.projectOnlyApi!.agent!.visualRuntime.targetResolver.resolve(project.id, running.id);
+  assert.ok(target);
+  const page = await fetch(`http://127.0.0.1:${target.port}/`);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Visual demand=1; seed=11/u);
   await app.projectOnlyApi!.agent!.cancelVisualRun(project.id, running.id);
-  assert.equal(runtime.store.run(running.id).status, "cancelled");
+  const cancelled = runtime.store.run(running.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.terminalCode, "user_cancelled");
+  assert.equal(runtime.store.runCompletion(running.id)?.completion.status, "cancelled");
+  assert.equal(runtime.store.runCompletion(running.id)?.completion.code, "user_cancelled");
   assert.equal(runtime.store.project(project.id).executionLock, null);
+
+  const interrupted = runtime.projectOperations.startRunAdmission({
+    commandId: "visual_backend_shutdown",
+    projectId: project.id,
+    experimentConfigurationId: "experiment_visual",
+    runKind: "visual",
+    expectedWorkspaceDigest: runtime.store.project(project.id).workspaceDigest,
+  });
+  await app.projectOnlyApi!.agent!.visualRuntime.start({
+    projectId: project.id,
+    runId: interrupted.runId,
+  });
+  assert.equal(runtime.store.run(interrupted.runId).status, "running");
+  const storeRoot = runtime.store.root;
+  await app.close();
+
+  const reopened = ProjectOnlyStore.open(storeRoot);
+  t.after(() => reopened.close());
+  const interruptedRun = reopened.run(interrupted.runId);
+  const interruptedCompletion = reopened.runCompletion(interrupted.runId);
+  assert.equal(interruptedRun.status, "interrupted");
+  assert.equal(interruptedRun.terminalCode, "backend_shutdown");
+  assert.equal(interruptedCompletion?.completion.status, "interrupted");
+  assert.equal(interruptedCompletion?.completion.code, "backend_shutdown");
+  assert.equal(interruptedCompletion?.completion.sampleCount, 1);
+  assert.match(String(interruptedCompletion?.completion.samplePlanDigest), /^[0-9a-f]{64}$/u);
+  assert.match(String(interruptedCompletion?.completion.configurationDigest), /^[0-9a-f]{64}$/u);
+  assert.match(interruptedCompletion?.digest ?? "", /^[0-9a-f]{64}$/u);
+  assert.equal(reopened.project(project.id).executionLock, null);
+  const completionDigest = interruptedCompletion!.digest;
+  assert.deepEqual(reopened.reconcileInterruptedExecutions(NOW), { runs: 0 });
+  assert.equal(reopened.runCompletion(interrupted.runId)?.digest, completionDigest);
 });
 
 const sendTurn = async (

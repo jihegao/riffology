@@ -2,6 +2,7 @@ import { isAbsolute, normalize, resolve, sep } from "node:path";
 import { canonicalDigest, parseCanonicalJsonV2, type CanonicalJson } from "./canonical-json-v2.ts";
 import {
   INPUT_SCHEMA_PROFILE,
+  JSON_SCHEMA_2020_12,
   normalizeInputParameters,
   validateInputSchema,
   type JsonObject,
@@ -104,7 +105,7 @@ export const validateExecutionDescriptionV2 = (input: unknown): ExecutionDescrip
     if (rawInputs.schemaProfile !== INPUT_SCHEMA_PROFILE || !plainRecord(rawInputs.smoke)) {
       invalidDescription("The copied input schema profile is unsupported.");
     }
-    validateInputSchema(rawInputs.schema);
+    validateProfileSchema(rawInputs.schema, "inputs.schema");
     const normalizedSmoke = normalizeInputParameters(rawInputs.schema, rawInputs.smoke);
     if (canonicalDigest(normalizedSmoke) !== canonicalDigest(rawInputs.smoke as JsonObject)) {
       invalidDescription("The copied smoke input must already contain its canonical defaulted values.");
@@ -145,8 +146,9 @@ export const validateExecutionDescriptionV2 = (input: unknown): ExecutionDescrip
     }
 
     const batch = needsBatch ? validateBatchCapability(description.batch) : undefined;
-    if (batch?.domainEvents && outputPaths.has(batch.domainEvents.relativePath)) {
-      invalidDescription("The batch domain-event path must differ from every ordinary output path.");
+    if (batch?.domainEvents && (outputPaths.has(batch.domainEvents.relativePath)
+      || outputNames.has("domainEvents"))) {
+      invalidDescription("The batch domain-event path and reserved domainEvents name must differ from every ordinary output.");
     }
     const visual = needsVisual ? validateVisualCapability(description.visual) : undefined;
     const cancellation = validateCancellation(description.cancellation);
@@ -307,7 +309,7 @@ const validateBatchCapability = (input: unknown): NonNullable<ExecutionDescripti
   if (Object.hasOwn(events, "payloadSchema")) {
     const payload = exactRecord(events.payloadSchema, ["schemaProfile", "schema"], [], "domain event payloadSchema");
     if (payload.schemaProfile !== INPUT_SCHEMA_PROFILE) invalidDescription("The domain-event schema profile is unsupported.");
-    validateInputSchema(payload.schema);
+    validateProfileSchema(payload.schema, "batch.domainEvents.payloadSchema.schema");
     payloadSchema = Object.freeze({
       schemaProfile: INPUT_SCHEMA_PROFILE,
       schema: cloneCanonical(payload.schema, "domain-event schema"),
@@ -471,6 +473,13 @@ const cloneCanonical = (input: unknown, label: string): CanonicalJson => {
 const plainRecord = (input: unknown): input is Record<string, unknown> =>
   input !== null && typeof input === "object" && !Array.isArray(input)
   && [Object.prototype, null].includes(Object.getPrototypeOf(input));
+
+const validateProfileSchema = (input: unknown, label: string): void => {
+  if (!plainRecord(input) || input.$schema !== JSON_SCHEMA_2020_12) {
+    invalidDescription(`${label}.$schema must equal "${JSON_SCHEMA_2020_12}".`);
+  }
+  validateInputSchema(input);
+};
 
 const deepFreeze = <T>(input: T): T => {
   if (input && typeof input === "object" && !Object.isFrozen(input)) {

@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openProjectOnlyServerRuntime } from "./project-only-server-factory.ts";
+import { loadOfficialProjectTemplates } from "./official-project-templates.ts";
 import { opencodeFromEnvironment } from "./opencode-adapter.ts";
 import { BackendApp } from "./server.ts";
 import { TestUserAccess } from "./test-user-access.ts";
@@ -48,8 +49,10 @@ if (publicAppOrigin && !testUserAccess) {
 }
 let app: BackendApp;
 try {
+  const officialTemplates = loadOfficialProjectTemplates(repositoryRoot);
   const runtime = openProjectOnlyServerRuntime({
     root: productRoot,
+    officialTemplates,
   });
   app = runtime.mode === "ready"
     ? new BackendApp({

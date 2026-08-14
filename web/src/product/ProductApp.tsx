@@ -363,6 +363,12 @@ function NewProjectForm({
         onChange={(event) => setTemplateKey(event.target.value)} disabled={templates.length === 0}>
         {templates.map((item) => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · {item.version}</option>)}
       </select></label>}
+      {sourceKind === "template" && selectedTemplate && <p className="product-form-note">
+        {selectedTemplate.description} Immutable digest <code>{selectedTemplate.templateDigest}</code>.
+      </p>}
+      {sourceKind === "template" && templates.length === 0 && <p className="product-form-error" role="status">
+        This version has no available official Example Project Templates.
+      </p>}
       {sourceKind === "import" && <label>Project archive<input required type="file" accept=".zip,application/zip,application/octet-stream"
         onChange={(event) => setImportFile(event.target.files?.[0])} /></label>}
       <label>Provider / model<select required value={qualifiedId || selectedProvider?.qualifiedId || ""}

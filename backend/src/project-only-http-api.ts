@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ApiError } from "./errors.ts";
 import { canonicalDigest } from "./canonical-json-v2.ts";
+import { validateExecutionDescriptionV2 } from "./execution-protocol-v2.ts";
 import { planExperiment } from "./experiment-planner.ts";
 import type { ProjectOnlyAgentService } from "./project-only-agent-service.ts";
 import type { ProjectOnlyOperationsAdapter } from "./project-only-operations.ts";
@@ -389,6 +390,7 @@ export class ProjectOnlyHttpApi {
   #workspace(projectId: string): Record<string, unknown> {
     const project = this.store.project(projectId);
     const runs = this.store.runs(projectId);
+    const execution = publicExecutionDescription(project.executionDescription);
     return Object.freeze({
       project: Object.freeze({
         id: project.id,
@@ -398,7 +400,8 @@ export class ProjectOnlyHttpApi {
       }),
       conversations: Object.freeze(this.store.conversations(projectId).map(publicConversation)),
       workspaceDigest: project.workspaceDigest,
-      execution: Object.freeze({ ...project.executionDescription }),
+      execution,
+      executionReady: execution !== null,
       executionDescriptionDigest: canonicalDigest(project.executionDescription),
       executionLock: publicExecutionLock(project, runs),
       files: Object.freeze(this.store.projectFiles(projectId).map((file) => Object.freeze({
@@ -588,9 +591,9 @@ const publicExperiment = (
   return Object.freeze({
     ...experiment,
     estimatedSampleCount: sampleCount,
-    lifecycleState: "active",
+    lifecycleState: project.lifecycleState,
     contractVersion: 4,
-    readOnly: false,
+    readOnly: project.lifecycleState !== "active",
     legacyDigest: null,
     configurationDigest,
     sampleCount,
@@ -804,6 +807,18 @@ const importSource = (projectId: string, source: Record<string, string>) => {
 
 const stablePublicId = (prefix: string, value: string): string =>
   `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
+
+const publicExecutionDescription = (
+  value: Record<string, unknown>,
+): Readonly<Record<string, unknown>> | null => {
+  try {
+    return Object.freeze({ ...validateExecutionDescriptionV2(value) });
+  } catch {
+    // A blank Project deliberately has no executable contract yet. Keep that
+    // state explicit in the UI projection instead of pretending `{}` is v2.
+    return null;
+  }
+};
 
 const requiredCommandId = (value: unknown): string => {
   if (typeof value !== "string" || !SAFE_COMMAND_ID.test(value)) {

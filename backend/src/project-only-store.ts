@@ -16,6 +16,7 @@ const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled", "timed_
 export type ProjectRunMode = "batch" | "visual" | "both";
 export type ProjectFileKind = "project_code" | "project_environment" | "project_visual_asset" | "project_artifact";
 export type ProjectRunStatus = "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled" | "timed_out" | "interrupted";
+export type ProjectRunOutputRole = "metric" | "table" | "document" | "data" | "diagnostic" | "replay" | "visual";
 export type ProjectConversationLifecycle = "active" | "archived" | "trashed";
 export type ProjectConversationSessionState = "none" | "connecting" | "available" | "lost" | "read_only";
 
@@ -92,7 +93,7 @@ export type ProjectRunOutputRecord = Readonly<{
   logicalName: string;
   relativePath: string;
   mediaType: string;
-  declaredRole: "data" | "diagnostic" | "replay" | "visual" | "document";
+  declaredRole: ProjectRunOutputRole;
   bytes: Buffer;
   sizeBytes: number;
   sha256: string;
@@ -215,6 +216,7 @@ export class ProjectOnlyStore {
       bytesBase64: file.bytes.toString("base64"), sha256: file.sha256,
     }));
     const contentDigest = canonicalDigest({
+      description: input.description,
       runMode: input.runMode,
       executionDescription: input.executionDescription,
       defaultExperiment: input.defaultExperiment,
@@ -695,17 +697,27 @@ export class ProjectOnlyStore {
   createExperiment(input: Readonly<{ id: string; projectId: string; name: string; configuration: Record<string, unknown>; createdAt: string }>): void {
     this.#assertOpen();
     assertId(input.id);
-    this.#database.prepare(`INSERT INTO experiment_configurations
-      (id, project_id, name, configuration_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(input.id, input.projectId, input.name, json(input.configuration), input.createdAt, input.createdAt);
+    this.#transaction(() => {
+      if (this.project(input.projectId).lifecycleState !== "active") {
+        throw new ProjectOnlyStoreError("project_not_writable", "Only an active Project can create an Experiment.");
+      }
+      this.#database.prepare(`INSERT INTO experiment_configurations
+        (id, project_id, name, configuration_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(input.id, input.projectId, input.name, json(input.configuration), input.createdAt, input.createdAt);
+    });
   }
 
   updateExperiment(input: Readonly<{ id: string; projectId: string; name?: string; configuration: Record<string, unknown>; updatedAt: string }>): void {
     this.#assertOpen();
-    const result = this.#database.prepare(`UPDATE experiment_configurations SET name = coalesce(?, name),
-      configuration_json = ?, updated_at = ? WHERE id = ? AND project_id = ?`)
-      .run(input.name ?? null, json(input.configuration), input.updatedAt, input.id, input.projectId);
-    if (result.changes !== 1) throw new ProjectOnlyStoreError("experiment_not_found", "Experiment does not exist.");
+    this.#transaction(() => {
+      if (this.project(input.projectId).lifecycleState !== "active") {
+        throw new ProjectOnlyStoreError("project_not_writable", "Only an active Project can update an Experiment.");
+      }
+      const result = this.#database.prepare(`UPDATE experiment_configurations SET name = coalesce(?, name),
+        configuration_json = ?, updated_at = ? WHERE id = ? AND project_id = ?`)
+        .run(input.name ?? null, json(input.configuration), input.updatedAt, input.id, input.projectId);
+      if (result.changes !== 1) throw new ProjectOnlyStoreError("experiment_not_found", "Experiment does not exist.");
+    });
   }
 
   experiments(projectId: string): readonly Readonly<{
@@ -861,7 +873,7 @@ export class ProjectOnlyStore {
 
   commitBatchRunResult(input: Readonly<{
     runId: string;
-    status: "succeeded" | "failed" | "timed_out" | "cancelled";
+    status: "succeeded" | "failed" | "timed_out" | "cancelled" | "interrupted";
     terminalCode: string;
     outputs: readonly Readonly<{
       id: string;
@@ -870,7 +882,7 @@ export class ProjectOnlyStore {
       logicalName: string;
       relativePath: string;
       mediaType: string;
-      declaredRole: "data" | "diagnostic" | "replay" | "visual" | "document";
+      declaredRole: ProjectRunOutputRole;
       bytes: Uint8Array;
     }>[];
     completion: Record<string, unknown>;
@@ -900,6 +912,63 @@ export class ProjectOnlyStore {
       this.#database.prepare(`INSERT INTO run_completion_records
         (run_id, completion_json, completion_digest, created_at) VALUES (?, ?, ?, ?)`)
         .run(run.id, json(input.completion), completionDigest, input.finishedAt);
+      this.#database.prepare(`UPDATE runs SET status = ?, updated_at = ?, finished_at = ?, terminal_code = ?
+        WHERE id = ?`).run(input.status, input.finishedAt, input.finishedAt, input.terminalCode, run.id);
+      this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'run' AND holder_id = ?")
+        .run(run.projectId, run.id);
+    });
+  }
+
+  commitVisualRunResult(input: Readonly<{
+    runId: string;
+    status: "succeeded" | "failed" | "timed_out" | "cancelled" | "interrupted";
+    terminalCode: string;
+    outputs: readonly Readonly<{
+      id: string;
+      sampleIndex: number;
+      sampleId: string;
+      logicalName: string;
+      relativePath: string;
+      mediaType: string;
+      declaredRole: ProjectRunOutputRole;
+      bytes: Uint8Array;
+    }>[];
+    completion: Record<string, unknown>;
+    finishedAt: string;
+  }>): void {
+    this.#assertOpen();
+    const completionDigest = canonicalDigest(input.completion);
+    this.#transaction(() => {
+      const run = this.run(input.runId);
+      if (run.runKind !== "visual") {
+        throw new ProjectOnlyStoreError("run_kind_mismatch", "Visual completion requires a visual Run.");
+      }
+      if (!["queued", "running", "cancelling"].includes(run.status)) {
+        const existing = this.runCompletion(run.id);
+        if (existing?.digest === completionDigest && run.status === input.status) return;
+        throw new ProjectOnlyStoreError(
+          "run_already_terminal",
+          "Run is already terminal with different completion evidence.",
+        );
+      }
+      const insert = this.#database.prepare(`INSERT INTO run_outputs
+        (id, run_id, sample_index, sample_id, logical_name, relative_path, media_type,
+          declared_role, bytes, size_bytes, sha256, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const output of input.outputs) {
+        const bytes = Buffer.from(output.bytes);
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        insert.run(output.id, run.id, output.sampleIndex, output.sampleId, output.logicalName,
+          output.relativePath, output.mediaType, output.declaredRole, bytes, bytes.byteLength,
+          sha256, input.finishedAt);
+      }
+      this.#database.prepare(`INSERT INTO run_completion_records
+        (run_id, completion_json, completion_digest, created_at) VALUES (?, ?, ?, ?)`).run(
+        run.id,
+        json(input.completion),
+        completionDigest,
+        input.finishedAt,
+      );
       this.#database.prepare(`UPDATE runs SET status = ?, updated_at = ?, finished_at = ?, terminal_code = ?
         WHERE id = ?`).run(input.status, input.finishedAt, input.finishedAt, input.terminalCode, run.id);
       this.#database.prepare("DELETE FROM execution_locks WHERE project_id = ? AND holder_kind = 'run' AND holder_id = ?")
@@ -942,6 +1011,28 @@ export class ProjectOnlyStore {
     this.#assertOpen();
     let runs = 0;
     this.#transaction(() => {
+      const interrupted = this.#database.prepare(`SELECT r.id, r.run_kind, r.started_at
+        FROM runs r JOIN execution_locks l ON l.holder_id = r.id
+        WHERE r.status IN ('queued', 'running', 'cancelling')`).all() as Array<{
+          id: string;
+          run_kind: string;
+          started_at: string | null;
+        }>;
+      const insertCompletion = this.#database.prepare(`INSERT INTO run_completion_records
+        (run_id, completion_json, completion_digest, created_at) VALUES (?, ?, ?, ?)`);
+      for (const run of interrupted) {
+        const completion = Object.freeze({
+          schemaVersion: 1,
+          status: "interrupted",
+          code: "backend_restart",
+          diagnostic: "The Run was interrupted because the backend restarted.",
+          phase: "startup_reconciliation",
+          runKind: run.run_kind,
+          startedAt: run.started_at,
+          finishedAt: at,
+        });
+        insertCompletion.run(run.id, json(completion), canonicalDigest(completion), at);
+      }
       runs = Number(this.#database.prepare(`UPDATE runs SET status = 'interrupted', updated_at = ?, finished_at = ?, terminal_code = 'backend_restart'
         WHERE status IN ('queued', 'running', 'cancelling') AND id IN (SELECT holder_id FROM execution_locks)`).run(at, at).changes);
       this.#database.prepare("DELETE FROM execution_locks").run();

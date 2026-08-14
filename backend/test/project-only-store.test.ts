@@ -9,7 +9,7 @@ const NOW = "2026-08-04T04:00:00.000Z";
 const LATER = "2026-08-04T04:01:00.000Z";
 const EXECUTION = Object.freeze({ schemaVersion: 2, batch: { entrypoint: "model.py" } });
 
-test("fresh Project-only v4 Store has no technical-check authority", (t) => {
+test("fresh Project-only v5 Store has no technical-check authority", (t) => {
   const root = mkdtempSync(join(tmpdir(), "riff-project-only-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = ProjectOnlyStore.open(join(root, ".riff-product"));
@@ -19,7 +19,7 @@ test("fresh Project-only v4 Store has no technical-check authority", (t) => {
   const tables = tableRows.map(({ name }) => name);
   assert.equal(tables.includes("models"), false);
   assert.equal(tables.includes("project_technical_checks"), false);
-  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 4);
+  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 5);
   const projectColumnRows = database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
   const projectColumns = projectColumnRows.map(({ name }) => name);
   assert.equal(projectColumns.includes("technical_status"), false);
@@ -154,6 +154,16 @@ test("archived Projects reject writes and Run admission", (t) => {
   });
   store.databaseForTesting().prepare("UPDATE projects SET lifecycle_state = 'archived' WHERE id = ?")
     .run(project.id);
+  assert.throws(() => store.createExperiment({
+    id: "experiment_archived_new", projectId: project.id, name: "Blocked",
+    configuration: { schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" } },
+    createdAt: NOW,
+  }), /active Project/u);
+  assert.throws(() => store.updateExperiment({
+    id: "experiment_archived", projectId: project.id,
+    configuration: { schemaVersion: 1, runKind: "batch", parameters: {}, sampling: { kind: "single" } },
+    updatedAt: NOW,
+  }), /active Project/u);
   assert.throws(() => store.updateProjectWorkspace({
     projectId: project.id,
     expectedWorkspaceDigest: project.workspaceDigest,
@@ -192,6 +202,10 @@ test("template versions remain immutable and Project artifacts are independent c
     ...template,
     files: [{ ...template.files[0]!, bytes: Buffer.from("different\n") }],
   }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "template_version_immutable");
+  assert.throws(() => store.createTemplateVersion({
+    ...template,
+    description: "Changed description",
+  }), (error: unknown) => error instanceof ProjectOnlyStoreError && error.code === "template_version_immutable");
   const copied = store.createProject({
     id: "project_copy", name: "Copy",
     source: { kind: "template", templateId: template.id, version: template.version }, createdAt: NOW,
@@ -222,6 +236,7 @@ test("restart reconciliation terminalizes only orphaned Runs and releases their 
     runKind: "batch", expectedWorkspaceDigest: project.workspaceDigest, createdAt: NOW,
   });
   assert.deepEqual(store.reconcileInterruptedExecutions(LATER), { runs: 1 });
+  assert.equal(store.runCompletion("run_alpha")?.completion.code, "backend_restart");
   assert.equal(store.project(project.id).executionLock, null);
   assert.equal(store.run("run_alpha").status, "interrupted");
 });

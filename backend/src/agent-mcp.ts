@@ -15,6 +15,12 @@ import {
   browserAgentToolDefinitions,
   isBrowserAgentToolName,
 } from "./browser-agent-tools.ts";
+import { ApiError } from "./errors.ts";
+import {
+  ExecutionProtocolV2Error,
+  validateExecutionDescriptionV2,
+} from "./execution-protocol-v2.ts";
+import { JSON_SCHEMA_2020_12 } from "./experiment-planner.ts";
 
 type RpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: unknown };
 type RpcResponse = { jsonrpc: "2.0"; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
@@ -235,7 +241,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
           additionalProperties: false,
         },
       },
-      executionDescription: { type: "object" },
+      executionDescription: executionDescriptionV2Schema(),
       run: {
         type: "object",
         properties: { configurationId: { type: "string" } },
@@ -281,7 +287,7 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
           ],
         },
       },
-      executionDescription: { type: "object" },
+      executionDescription: executionDescriptionV2Schema(),
       runMode: { type: "string", enum: ["batch", "visual", "both"] },
     },
     ["requestKey", "expectedWorkspaceDigest", "changes"],
@@ -353,13 +359,49 @@ const DEFINITIONS: Readonly<Record<AgentToolName, { description: string; inputSc
     ["requestKey", "runRef", "expectedLifecycleDigest"],
   ),
   riff_list_run_outputs: definition(
-    "List receipt-indexed outputs for one successful Run.",
-    { runRef: { type: "string" } }, ["runRef"],
+    "List one bounded page of receipt-indexed outputs for a successful Run. Optionally include bounded UTF-8 text so large-sample results can be analyzed without one tool call per sample.",
+    {
+      runRef: { type: "string" },
+      afterOutputRef: { type: "string" },
+      limit: { type: "integer", minimum: 1, maximum: 200 },
+      logicalName: { type: "string" },
+      declaredRole: { type: "string", enum: [
+        "metric", "table", "document", "data", "diagnostic", "replay", "visual",
+      ] },
+      includeText: { type: "boolean" },
+    }, ["runRef"],
   ),
   riff_read_run_output: definition(
-    "Read one bounded textual Run output by opaque references.",
-    { runRef: { type: "string" }, outputRef: { type: "string" } },
+    "Read one bounded UTF-8 page from a textual Run output by opaque references.",
+    {
+      runRef: { type: "string" },
+      outputRef: { type: "string" },
+      offset: { type: "integer", minimum: 0 },
+      maxBytes: { type: "integer", minimum: 1, maximum: 262144 },
+    },
     ["runRef", "outputRef"],
+  ),
+  riff_summarize_run_outputs: definition(
+    "Compute receipt-bound descriptive statistics from one complete JSON output series across every frozen sample of a successful Project Run. Fields are RFC 6901 JSON Pointers.",
+    {
+      runRef: { type: "string" },
+      logicalName: { type: "string" },
+      fields: {
+        type: "array",
+        minItems: 1,
+        maxItems: 32,
+        uniqueItems: true,
+        items: { type: "string", pattern: "^/", maxLength: 1024 },
+      },
+      quantiles: {
+        type: "array",
+        minItems: 1,
+        maxItems: 9,
+        uniqueItems: true,
+        items: { type: "number", minimum: 0, maximum: 1 },
+      },
+    },
+    ["runRef", "fields"],
   ),
   riff_read_run_events: definition(
     "Read a bounded page of diagnostic events for one Run.",
@@ -418,6 +460,10 @@ export class AgentMcpServer {
   readonly #grants = new Map<string, AgentToolGrant>();
   readonly #inFlightConsequential = new Set<string>();
   readonly #consumedConsequential = new Set<string>();
+  readonly #implicitConsequentialConsumption = new Map<
+    string,
+    Map<AgentToolName, number>
+  >();
   /**
    * An allow-once commitment may be reached by OpenCode, then rejected before
    * the executor starts because its arguments attempt to override server-owned
@@ -448,6 +494,11 @@ export class AgentMcpServer {
     externalSessionGeneration: number;
     allowedTools: ReadonlySet<AgentToolName>;
     operationCommitment?: AgentToolGrant["operationCommitment"];
+    implicitConsequentialToolBudgets?: ReadonlyMap<AgentToolName, number>;
+    implicitProjectFilePathAuthority?: readonly Readonly<{
+      kind: "exact" | "prefix";
+      normalizedPath: string;
+    }>[] | null;
     intentAuthority?: "explicit" | "proposal_only";
     attachmentIds?: ReadonlySet<string>;
     confirmedVisualInteraction?: import("./agent-visual-authority.ts").VisualAgentOperation;
@@ -456,10 +507,44 @@ export class AgentMcpServer {
       throw new AgentToolPermissionError("Agent capability scope is invalid.");
     }
     const capability = randomUUID();
+    const implicitConsequentialToolBudgets = new Map(
+      input.implicitConsequentialToolBudgets ?? [],
+    );
+    if ((input.intentAuthority !== "explicit"
+      && implicitConsequentialToolBudgets.size > 0)
+      || [...implicitConsequentialToolBudgets].some(([tool, budget]) =>
+        !input.allowedTools.has(tool) || !CONSEQUENTIAL_AGENT_TOOLS.has(tool)
+        || !Number.isSafeInteger(budget) || budget < 1 || budget > 4)) {
+      throw new AgentToolPermissionError(
+        "Implicit Agent tool budgets do not match the explicit capability scope.",
+      );
+    }
+    const implicitProjectFilePathAuthority = input.implicitProjectFilePathAuthority === undefined
+      ? null
+      : input.implicitProjectFilePathAuthority;
+    if (implicitProjectFilePathAuthority !== null
+      && (input.owner.kind !== "project"
+        || input.intentAuthority !== "explicit"
+        || !implicitConsequentialToolBudgets.has("riff_write_project_files")
+        || implicitProjectFilePathAuthority.length < 1
+        || implicitProjectFilePathAuthority.length > 64
+        || implicitProjectFilePathAuthority.some((authority) =>
+          !validProjectFilePathAuthority(authority)))) {
+      throw new AgentToolPermissionError(
+        "Project file path authority does not match the explicit capability scope.",
+      );
+    }
     this.#grants.set(capability, {
       ...input,
       allowedTools: new Set(input.allowedTools),
       operationCommitment: input.operationCommitment ?? null,
+      implicitConsequentialToolBudgets,
+      implicitProjectFilePathAuthority: implicitProjectFilePathAuthority === null
+        ? null
+        : Object.freeze(implicitProjectFilePathAuthority.map((authority) => Object.freeze({
+          kind: authority.kind,
+          normalizedPath: authority.normalizedPath,
+        }))),
       intentAuthority: input.intentAuthority ?? "proposal_only",
       attachmentIds: new Set(input.attachmentIds ?? []),
       expiresAt: this.#now() + this.#ttlMs,
@@ -472,6 +557,7 @@ export class AgentMcpServer {
     this.#inFlightConsequential.delete(capability);
     this.#consumedConsequential.delete(capability);
     this.#rejectedBeforeExecutionConsequential.delete(capability);
+    this.#implicitConsequentialConsumption.delete(capability);
   }
 
   revokeConversation(conversationId: string): void {
@@ -489,6 +575,7 @@ export class AgentMcpServer {
     this.#inFlightConsequential.clear();
     this.#consumedConsequential.clear();
     this.#rejectedBeforeExecutionConsequential.clear();
+    this.#implicitConsequentialConsumption.clear();
   }
 
   authorizeConsequentialOperation(
@@ -556,13 +643,26 @@ export class AgentMcpServer {
       if (!isAgentToolName(name) || !grant.allowedTools.has(name)) throw new AgentToolPermissionError("That Agent tool is not available in this scope.");
       const rawInput = record(params.arguments ?? {});
       const consequential = CONSEQUENTIAL_AGENT_TOOLS.has(name);
+      const implicitBudget = consequential && grant.intentAuthority === "explicit"
+        ? grant.implicitConsequentialToolBudgets.get(name) ?? 0 : 0;
+      const implicit = consequential
+        && grant.intentAuthority === "explicit"
+        && implicitBudget > 0;
       let consequentialCommitment: Readonly<{ tool: AgentToolName; digest: string }> | null = null;
-      if (consequential && this.#consumedConsequential.has(capability!)) {
+      if (implicit) {
+        const consumed = this.#implicitConsequentialConsumption.get(capability!)?.get(name) ?? 0;
+        if (consumed >= implicitBudget) {
+          throw new AgentToolPermissionError(
+            "This explicit turn's implicit operation budget has already been consumed.",
+          );
+        }
+      }
+      if (consequential && !implicit && this.#consumedConsequential.has(capability!)) {
         throw new AgentToolPermissionError(
           "This turn's single consequential operation has already been consumed.",
         );
       }
-      if (consequential) {
+      if (consequential && !implicit) {
         try { consequentialCommitment = agentToolOperationCommitment(name, rawInput); }
         catch { /* stable permission failure below */ }
         if (!consequentialCommitment || grant.operationCommitment?.tool !== name
@@ -577,15 +677,26 @@ export class AgentMcpServer {
         input = normalizeToolInput(name, rawInput);
         assertToolInputCannotOverrideScope(input);
         validateInput(name, input);
+        if (implicit && name === "riff_write_project_files"
+          && grant.implicitProjectFilePathAuthority !== null) {
+          assertProjectFilePathsAuthorized(
+            input,
+            grant.implicitProjectFilePathAuthority,
+          );
+        }
       } catch (error) {
-        if (consequential && consequentialCommitment
+        if (consequential && !implicit && consequentialCommitment
           && grant.operationCommitment?.tool === consequentialCommitment.tool
           && grant.operationCommitment.digest === consequentialCommitment.digest) {
           this.#rejectedBeforeExecutionConsequential.add(capability!);
         }
         throw error;
       }
-      if (consequential) {
+      if (implicit) {
+        const consumed = this.#implicitConsequentialConsumption.get(capability!) ?? new Map();
+        consumed.set(name, (consumed.get(name) ?? 0) + 1);
+        this.#implicitConsequentialConsumption.set(capability!, consumed);
+      } else if (consequential) {
         this.#rejectedBeforeExecutionConsequential.delete(capability!);
         this.#inFlightConsequential.add(capability!);
         this.#consumedConsequential.add(capability!);
@@ -594,10 +705,10 @@ export class AgentMcpServer {
       try {
         result = await this.#executor.execute(grant, name, input);
       } catch (error) {
-        if (consequential) this.#inFlightConsequential.delete(capability!);
+        if (consequential && !implicit) this.#inFlightConsequential.delete(capability!);
         throw error;
       }
-      if (consequential) {
+      if (consequential && !implicit) {
         this.#inFlightConsequential.delete(capability!);
       }
       if (name === "riff_observe_current_visual"
@@ -674,7 +785,7 @@ export class AgentMcpServer {
     } catch (error) {
       const denied = error instanceof AgentToolPermissionError;
       const budgetExhausted = denied
-        && /single consequential operation has already been consumed/u.test(error.message);
+        && /(?:single consequential operation|implicit operation budget) has already been consumed/u.test(error.message);
       const runtimeCode = !denied && error && typeof error === "object"
         && typeof (error as { code?: unknown }).code === "string"
         ? (error as { code: string }).code : null;
@@ -686,6 +797,7 @@ export class AgentMcpServer {
         || runtimeCode === "execution_protocol_upgrade_required"
         || runtimeCode === "invalid_domain_receipt"
         ? runtimeCode : null;
+      const trustedInputFailure = trustedInputFailureMessage(error);
       const message = denied ? error.message
         : staleCapability ? "The Agent capability no longer matches its active durable scope."
           : safeRuntimeCode === "no_active_visual_service"
@@ -693,9 +805,11 @@ export class AgentMcpServer {
             : safeRuntimeCode === "project_operations_unavailable"
               ? "Project operations are unavailable in this runtime."
               : safeRuntimeCode === "invalid_tool_input"
-                ? "The Agent tool input does not match the published execution contract."
+                ? trustedInputFailure
+                  ?? "The Agent tool input does not match the published execution contract."
                 : safeRuntimeCode === "execution_protocol_upgrade_required"
-                  ? "The Agent tool input does not match the published contract. executionDescription must be a complete execution-description v2 contract; omit it when only Model files change."
+                  ? trustedInputFailure
+                    ?? "The Agent tool input does not match the published contract. executionDescription must be a complete execution-description v2 contract; omit it when only Model files change."
                 : safeRuntimeCode === "invalid_domain_receipt"
                   ? "The Project operation receipt could not be verified."
           : "The scoped Agent action failed.";
@@ -710,8 +824,38 @@ export class AgentMcpServer {
   }
 }
 
+const trustedInputFailureMessage = (error: unknown): string | null => {
+  const message = error instanceof ExecutionProtocolV2Error
+    && error.code === "execution_protocol_upgrade_required"
+    ? `Invalid executionDescription: ${error.message}`
+    : error instanceof ApiError
+      && error.code === "invalid_tool_input"
+      && error.status >= 400
+      && error.status < 500
+      ? error.message
+      : null;
+  if (!message || Buffer.byteLength(message, "utf8") > 1_024
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(message)) {
+    return null;
+  }
+  return message;
+};
+
 function executionDescriptionV2Schema(): Record<string, unknown> {
   const ownedPath = { type: "string", minLength: 1, maxLength: 400 };
+  const jsonSchema = {
+    type: "object",
+    description: `Supported JSON Schema profile. The root must declare \"$schema\" exactly as \"${JSON_SCHEMA_2020_12}\"; remaining keywords are validated at runtime.`,
+    properties: {
+      $schema: {
+        type: "string",
+        enum: [JSON_SCHEMA_2020_12],
+        description: "Required exact JSON Schema dialect URI.",
+      },
+    },
+    required: ["$schema"],
+    additionalProperties: true,
+  };
   const output = {
     type: "object",
     properties: {
@@ -736,7 +880,7 @@ function executionDescriptionV2Schema(): Record<string, unknown> {
         type: "object",
         properties: {
           schemaProfile: { type: "string", enum: ["riff-json-schema-2020-12-v1"] },
-          schema: { type: "object" },
+          schema: jsonSchema,
           smoke: { type: "object" },
         },
         required: ["schemaProfile", "schema", "smoke"],
@@ -766,7 +910,7 @@ function executionDescriptionV2Schema(): Record<string, unknown> {
                 type: "object",
                 properties: {
                   schemaProfile: { type: "string", enum: ["riff-json-schema-2020-12-v1"] },
-                  schema: { type: "object" },
+                  schema: jsonSchema,
                 },
                 required: ["schemaProfile", "schema"],
                 additionalProperties: false,
@@ -908,6 +1052,53 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+const validProjectFilePathAuthority = (authority: Readonly<{
+  kind: "exact" | "prefix";
+  normalizedPath: string;
+}>): boolean => {
+  const path = authority.normalizedPath;
+  if (!path || path.length > 1_024 || path.includes("\0") || path.includes("\\")
+    || path.startsWith("/") || path !== path.normalize("NFC")
+    || path !== path.toLocaleLowerCase("en-US")) return false;
+  if (authority.kind === "prefix") {
+    if (!path.endsWith("/")) return false;
+  } else if (authority.kind === "exact") {
+    if (path.endsWith("/")) return false;
+  } else return false;
+  const withoutTrailingSlash = authority.kind === "prefix" ? path.slice(0, -1) : path;
+  return withoutTrailingSlash.length > 0
+    && withoutTrailingSlash.split("/").every((segment) =>
+      segment.length > 0 && segment !== "." && segment !== "..");
+};
+
+const assertProjectFilePathsAuthorized = (
+  input: Readonly<Record<string, unknown>>,
+  authorities: readonly Readonly<{
+    kind: "exact" | "prefix";
+    normalizedPath: string;
+  }>[],
+): void => {
+  if (!Array.isArray(input.changes)) {
+    throw new AgentToolPermissionError("Project file paths exceed the explicit request scope.");
+  }
+  for (const raw of input.changes) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new AgentToolPermissionError("Project file paths exceed the explicit request scope.");
+    }
+    const relativePath = (raw as Record<string, unknown>).relativePath;
+    if (typeof relativePath !== "string" || !relativePath
+      || relativePath !== relativePath.normalize("NFC")) {
+      throw new AgentToolPermissionError("Project file paths exceed the explicit request scope.");
+    }
+    const normalizedPath = relativePath.toLocaleLowerCase("en-US");
+    if (!authorities.some((authority) => authority.kind === "exact"
+      ? normalizedPath === authority.normalizedPath
+      : normalizedPath.startsWith(authority.normalizedPath))) {
+      throw new AgentToolPermissionError("Project file paths exceed the explicit request scope.");
+    }
+  }
+};
+
 /**
  * Some OpenCode providers serialize an array-valued tool argument as its JSON
  * text instead of decoding it before forwarding the MCP request. Accept that
@@ -972,8 +1163,11 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
     riff_cancel_run: ["requestKey", "runRef"],
     riff_trash_run: ["requestKey", "runRef", "expectedLifecycleDigest", "terminalStatus", "terminalClosureDigest"],
     riff_restore_run: ["requestKey", "runRef", "expectedLifecycleDigest"],
-    riff_list_run_outputs: ["runRef"],
-    riff_read_run_output: ["runRef", "outputRef"],
+    riff_list_run_outputs: [
+      "runRef", "afterOutputRef", "limit", "logicalName", "declaredRole", "includeText",
+    ],
+    riff_read_run_output: ["runRef", "outputRef", "offset", "maxBytes"],
+    riff_summarize_run_outputs: ["runRef", "logicalName", "fields", "quantiles"],
     riff_read_run_events: ["runRef", "afterSequence", "limit"],
     riff_transition_owner_lifecycle: ["requestKey", "action", "expectedRecordDigest", "name"],
     riff_create_analysis_document: ["name", "mediaType", "content"],
@@ -1052,6 +1246,9 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
       && (!input.executionDescription || typeof input.executionDescription !== "object" || Array.isArray(input.executionDescription))) {
       throw new AgentToolPermissionError("Agent Project execution description is invalid.");
     }
+    if (input.executionDescription !== undefined) {
+      validateExecutionDescriptionV2(input.executionDescription);
+    }
     if (input.runMode !== undefined && !["batch", "visual", "both"].includes(String(input.runMode))) {
       throw new AgentToolPermissionError("Agent Project Run mode is invalid.");
     }
@@ -1089,9 +1286,53 @@ function validateInput(name: AgentToolName, input: Record<string, unknown>): voi
       }
     }
   }
-  if (name === "riff_list_run_outputs") text("runRef", 256);
+  if (name === "riff_list_run_outputs") {
+    text("runRef", 256);
+    if (input.afterOutputRef !== undefined) text("afterOutputRef", 256);
+    if (input.logicalName !== undefined) text("logicalName", 256);
+    if (input.declaredRole !== undefined
+      && !new Set([
+        "metric", "table", "document", "data", "diagnostic", "replay", "visual",
+      ])
+        .has(String(input.declaredRole))) {
+      throw new AgentToolPermissionError("Agent Run output role is invalid.");
+    }
+    if (input.limit !== undefined && (!Number.isSafeInteger(input.limit)
+      || Number(input.limit) < 1 || Number(input.limit) > 200)) {
+      throw new AgentToolPermissionError("Agent Run output page limit is invalid.");
+    }
+    if (input.includeText !== undefined && typeof input.includeText !== "boolean") {
+      throw new AgentToolPermissionError("Agent Run output inline-text choice is invalid.");
+    }
+  }
   if (name === "riff_read_run_output") {
     text("runRef", 256); text("outputRef", 256);
+    if (input.offset !== undefined && (!Number.isSafeInteger(input.offset)
+      || Number(input.offset) < 0)) {
+      throw new AgentToolPermissionError("Agent Run output offset is invalid.");
+    }
+    if (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes)
+      || Number(input.maxBytes) < 1 || Number(input.maxBytes) > 262_144)) {
+      throw new AgentToolPermissionError("Agent Run output byte limit is invalid.");
+    }
+  }
+  if (name === "riff_summarize_run_outputs") {
+    text("runRef", 256);
+    if (input.logicalName !== undefined) text("logicalName", 256);
+    if (!Array.isArray(input.fields) || input.fields.length < 1 || input.fields.length > 32
+      || input.fields.some((field) => typeof field !== "string"
+        || !field.startsWith("/") || Buffer.byteLength(field, "utf8") > 1_024)
+      || new Set(input.fields).size !== input.fields.length) {
+      throw new AgentToolPermissionError("Agent Run statistic fields are invalid.");
+    }
+    if (input.quantiles !== undefined
+      && (!Array.isArray(input.quantiles) || input.quantiles.length < 1
+        || input.quantiles.length > 9
+        || input.quantiles.some((quantile) => typeof quantile !== "number"
+          || !Number.isFinite(quantile) || quantile < 0 || quantile > 1)
+        || new Set(input.quantiles).size !== input.quantiles.length)) {
+      throw new AgentToolPermissionError("Agent Run statistic quantiles are invalid.");
+    }
   }
   if (name === "riff_read_run_events") {
     text("runRef", 256);

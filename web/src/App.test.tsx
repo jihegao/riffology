@@ -55,6 +55,7 @@ const workspace: WorkspaceDto = {
     lifecycleState: "active",
   },
   workspaceDigest: "e".repeat(64),
+  executionReady: true,
   executionLock: { state: "unlocked", runId: null, sourceDigest: null },
   execution: {
     schemaVersion: 2, runtime: "python", runMode: "batch",
@@ -377,6 +378,8 @@ describe("Stage 4 Product entry", () => {
     expect(source).toHaveTextContent("Import archive");
     await user.selectOptions(source, "template");
     expect(screen.getByRole("combobox", { name: "Template" })).toHaveValue("template-one@1.0.0");
+    expect(screen.getByText(/Seed Project/u)).toBeInTheDocument();
+    expect(screen.getByText(/Immutable digest/u)).toBeInTheDocument();
     await user.selectOptions(source, "import");
     expect(screen.getByLabelText("Project archive")).toHaveAttribute("type", "file");
   });
@@ -1125,8 +1128,10 @@ describe("Stage 4 Product entry", () => {
         lifecycleState: "active" as const },
       workspaceDigest: "snapshot-digest", executionLock: { state: "unlocked" as const, runId: null, sourceDigest: null },
       execution: workspace.execution,
+      executionReady: true,
       executionDescriptionDigest: "execution-digest",
       files: [
+        { fileRef: "requirements-file", relativePath: "requirements/modeling-requirements.md", mediaType: "text/markdown", sizeBytes: 29, sha256: "9".repeat(64), createdAt: "2026-08-12T00:00:00.000Z", readOnly: true as const },
         { fileRef: "snapshot-file", relativePath: "analysis/overview.md", mediaType: "text/markdown", sizeBytes: 19, sha256: "f".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
         { fileRef: "html-file", relativePath: "visuals/replay.html", mediaType: "text/html", sizeBytes: 41, sha256: "e".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
         { fileRef: "invalid-absolute", relativePath: "/Users/example/secret.md", mediaType: "text/markdown", sizeBytes: 1, sha256: "d".repeat(64), createdAt: "2026-07-25T00:00:00.000Z", readOnly: true as const },
@@ -1158,20 +1163,28 @@ describe("Stage 4 Product entry", () => {
         }],
       }],
     }));
-    productClient.projectFileWorkbenchRenderable = vi.fn(async () => ({
-      kind: "markdown" as const, title: "analysis/overview.md", text: "# Snapshot overview",
-    }));
+    productClient.projectFileWorkbenchRenderable = vi.fn(async (_projectId, fileRef) => fileRef === "requirements-file"
+      ? { kind: "markdown" as const, title: "requirements/modeling-requirements.md", text: "# Project modeling requirements" }
+      : { kind: "markdown" as const, title: "analysis/overview.md", text: "# Snapshot overview" });
     render(<App client={productClient} />);
 
     expect(await screen.findByRole("navigation", { name: "浏览器导航" })).toBeInTheDocument();
     expect(screen.getByLabelText("页面地址")).toHaveTextContent("riff://project/project-one");
     expect(screen.getByText("OpenCode 1.18.11")).toBeInTheDocument();
     expect(screen.getByText("analysis")).toBeInTheDocument();
+    expect(screen.getByText("requirements")).toBeInTheDocument();
     expect(screen.getByText("visuals")).toBeInTheDocument();
+    expect(screen.getByText("3 个 Project 文件 · 1 个冻结 Run 输出")).toBeInTheDocument();
     expect(screen.queryByText(/Users|secret/u)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看建模需求" }));
+    expect(await screen.findByRole("heading", { name: "Project modeling requirements" }))
+      .toBeInTheDocument();
+    expect(productClient.projectFileWorkbenchRenderable).toHaveBeenCalledWith("project-one", "requirements-file");
+    await user.click(screen.getByRole("button", { name: "← 返回对话" }));
     await user.click(screen.getByRole("button", { name: /^overview\.md/u }));
     expect(await screen.findByRole("heading", { name: "Snapshot overview" })).toBeInTheDocument();
     expect(productClient.projectFileWorkbenchRenderable).toHaveBeenCalledWith("project-one", "snapshot-file");
+    expect(screen.getByRole("button", { name: /summary\.json-0.*冻结 Run 输出/u })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^summary\.json-0/u }));
     expect(await screen.findByRole("heading", { name: "fixture output" })).toBeInTheDocument();
     expect(productClient.outputRenderable).toHaveBeenCalledWith(
@@ -1179,6 +1192,26 @@ describe("Stage 4 Product entry", () => {
     );
     await user.click(screen.getByRole("button", { name: "收起文件栏" }));
     expect(screen.getByRole("button", { name: "文件 ↗" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens direct Experiment and Run controls in the default Riffology Project viewer", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/projects/project-one?conversation=conversation-main");
+    render(<App client={client()} />);
+
+    const entry = await screen.findByRole("button", { name: /实验与运行.*0 个配置.*0 次 Run/u });
+    expect(entry).toHaveAttribute("aria-pressed", "false");
+    await user.click(entry);
+
+    expect(await screen.findByRole("region", { name: "实验与运行" })).toBeInTheDocument();
+    expect(screen.getByTestId("project-workspace")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Experiments" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create configuration" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start batch Run" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "← 返回文件与可视化" }));
+    await waitFor(() => expect(screen.queryByTestId("project-workspace")).toBeNull());
+    expect(screen.getByRole("region", { name: "项目文件与页面查看器" })).toBeInTheDocument();
   });
 
   it("projects the Stage 4 Browser Broker state into the global header and central viewer", async () => {
@@ -1462,6 +1495,48 @@ describe("Stage 4 Product entry", () => {
     });
     expect(window.location.pathname).toBe("/workbench/projects/created-project");
     expect(window.location.search).toBe("?conversation=conversation-main");
+  });
+
+  it("creates an independent Project from an immutable Example Project Template", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/new");
+    const productClient = client();
+    render(<App client={productClient} />);
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "创建方式" }), "template");
+    expect(screen.getByRole("combobox", { name: "示例模板" }))
+      .toHaveValue("template-one@1.0.0");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }),
+      JSON.stringify(["provider", "model"]));
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(productClient.createProject).toHaveBeenCalledWith(expect.objectContaining({
+      source: { kind: "template", templateId: "template-one", templateVersion: "1.0.0" },
+    }));
+  });
+
+  it("creates a Project from an explicitly selected archive in the default workbench", async () => {
+    const user = userEvent.setup();
+    history.replaceState({}, "", "/workbench/new");
+    const productClient = client();
+    render(<App client={productClient} />);
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "创建方式" }), "import");
+    await user.upload(screen.getByLabelText("Project 归档"), new File(["riff"], "case.zip", {
+      type: "application/zip",
+    }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }),
+      JSON.stringify(["provider", "model"]));
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(productClient.createProject).toHaveBeenCalledWith(expect.objectContaining({
+      source: {
+        kind: "import",
+        filename: "case.zip",
+        mediaType: "application/zip",
+        base64: "cmlmZg==",
+      },
+    }));
   });
 
   it("fails the workbench composer and new-session action closed when Provider is read-only", async () => {

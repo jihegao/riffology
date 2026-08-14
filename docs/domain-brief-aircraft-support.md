@@ -2,9 +2,16 @@
 
 - Status: draft for review
 - Role: reviewable domain brief; not an implementation design
-- Scope: aircraft maintenance & logistics support as the second ordinary Riff Model (post-MVP domain content)
+- Scope: candidate Project-owned Modeling Requirements for an aircraft maintenance
+  & logistics support Example Project Template (post-MVP domain content)
 - Source of truth: [`product-requirements.md`](product-requirements.md)
-- Last reviewed: 2026-07-31
+- Last reviewed: 2026-08-12
+
+This repository review draft is not an independent Domain Pack and is not yet a
+Project Template artifact. If the user explicitly adopts it into a Project, the
+canonical destination is `requirements/modeling-requirements.md`; an official
+immutable Example Project Template must include that file, while Conversation
+temporary documents remain outside the Template.
 
 ## Decision question and scope
 
@@ -41,7 +48,7 @@
 
 | Type | Item | Source or rationale | Owner | Status |
 | --- | --- | --- | --- | --- |
-| fact | Riff treats wind and aircraft capabilities as ordinary Model/Project content, never as Core branches | PRD §7.2/§7.3 | user | accepted |
+| fact | Riff treats wind and aircraft capabilities as Project-owned Modeling Requirements and executable assets, never as Core branches or an independent Domain Pack | PRD §7.2/§7.3 | user | accepted |
 | fact | Daily flight task is the workload driver that converts to flying hours | domain convention | user | accepted |
 | assumption | Fleet is homogeneous (single aircraft type) | simplification for v1 | user | open-to-confirm |
 | assumption | One daily mission block per aircraft with configured flying hours | synthetic default | user | open-to-confirm |
@@ -159,4 +166,7 @@ draw order changes never perturb unrelated mechanisms.
 - [ ] Inputs list units, sources, distributions, named streams, and missing-data treatment.
 - [ ] KPI denominators, warm-up/horizon, seeds, and output schema are specified.
 - [ ] Non-claims are stated: technical run ≠ calibrated ≠ decision-ready.
-- [ ] Riff boundary preserved: no aircraft ontology enters platform Core.
+- [ ] Riff boundary preserved: no aircraft ontology enters platform Core or an independent
+  Domain Pack; if adopted, it uses `requirements/modeling-requirements.md`.
+- [ ] An official immutable Example Project Template includes the adopted requirements
+  file, while Conversation temporary documents remain excluded.

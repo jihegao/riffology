@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalDigest } from "./canonical-json-v2.ts";
+import { validateExecutionDescriptionV2 } from "./execution-protocol-v2.ts";
 import {
   ProjectOnlyStore,
   ProjectOnlyStoreError,
@@ -70,6 +71,9 @@ export class ProjectOnlyOperationsAdapter {
     const commandId = boundedId(input.commandId);
     const projectId = boundedId(input.projectId);
     const parsed = parseChanges(input.changes);
+    const executionDescription = input.executionDescription === undefined
+      ? undefined
+      : validateExecutionDescriptionV2(input.executionDescription);
     const intentDigest = canonicalDigest({
       projectId,
       conversationId: input.conversationId,
@@ -84,7 +88,7 @@ export class ProjectOnlyOperationsAdapter {
             expectedPriorSha256: change.expectedPriorSha256,
             textSha256: createHash("sha256").update(change.text, "utf8").digest("hex"),
           }),
-      executionDescription: input.executionDescription ?? null,
+      executionDescription: executionDescription ?? null,
       runMode: input.runMode ?? null,
     });
     return this.store.atomicProjectMutation(() => {
@@ -122,14 +126,14 @@ export class ProjectOnlyOperationsAdapter {
 
     const beforeFiles = new Map(beforeRecords.map((file) => [file.relativePath, file.sha256]));
     const effectiveRunMode = input.runMode
-      ?? (input.executionDescription && isRunMode(input.executionDescription.runMode)
-        ? input.executionDescription.runMode
+      ?? (executionDescription && isRunMode(executionDescription.runMode)
+        ? executionDescription.runMode
         : undefined);
     const after = this.store.updateProjectWorkspace({
       projectId,
       expectedWorkspaceDigest: input.expectedWorkspaceDigest,
       changes,
-      ...(input.executionDescription ? { executionDescription: { ...input.executionDescription } } : {}),
+      ...(executionDescription ? { executionDescription: { ...executionDescription } } : {}),
       ...(effectiveRunMode ? { runMode: effectiveRunMode } : {}),
       updatedAt: this.now(),
     });

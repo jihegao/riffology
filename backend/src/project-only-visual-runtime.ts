@@ -1,45 +1,97 @@
-import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
 import type {
   BrowserFrameConnectedPeer,
   BrowserFrameTarget,
   BrowserFrameTargetResolver,
+  BrowserFrameWebSocketPolicy,
 } from "./browser-frame-capability.ts";
+import { planExperiment } from "./experiment-planner.ts";
+import {
+  verifyProjectExecutionRootCapability,
+} from "./generic-batch-supervisor.ts";
+import {
+  GenericVisualSupervisor,
+  consumeVisualOutputCandidate,
+  type VisualProcessIdentity,
+  type VisualSupervisionResult,
+} from "./generic-visual-supervisor.ts";
+import { captureWorkspaceDigest, resolveModelWorkspace } from "./model-workspace.ts";
+import type { RunLimitsV1 } from "./product-store-v2.ts";
 import { ProjectOnlyStore } from "./project-only-store.ts";
 
 const LOOPBACK_HOST = "127.0.0.1" as const;
-const MAX_VISUAL_HTML_BYTES = 2 * 1024 * 1024;
+const MAX_VISUAL_SAMPLES = 1;
 const ATTEMPT_TTL_MS = 24 * 60 * 60_000;
+const RUN_LIMITS: RunLimitsV1 = Object.freeze({
+  schemaVersion: 1,
+  wallTimeMs: ATTEMPT_TTL_MS,
+  startupTimeMs: 30_000,
+  terminationGraceMs: 5_000,
+  maxStdoutBytes: 1_000_000,
+  maxStderrBytes: 1_000_000,
+  maxOutputFiles: 100,
+  maxOutputBytes: 64_000_000,
+  maxEventCount: 1,
+  maxEventBytes: 1,
+  maxSamples: MAX_VISUAL_SAMPLES,
+  maxConcurrency: 1,
+});
 
-type ActiveVisual = Readonly<{
+type ActiveVisual = {
   projectId: string;
   runId: string;
   attemptGeneration: number;
-  port: number;
   expiresAtMs: number;
-  server: Server;
-}>;
+  abort: AbortController;
+  port: number | null;
+  healthy: boolean;
+  identity: VisualProcessIdentity | null;
+  webSocket?: BrowserFrameWebSocketPolicy;
+  ready: Promise<void>;
+  resolveReady: () => void;
+  rejectReady: (error: Error) => void;
+  readySettled: boolean;
+  completion: Promise<void>;
+};
 
 /**
- * Project-only visual service lifecycle used by the cutover vertical slice.
+ * Executes the frozen visual capability of one Project-only Run.
  *
- * The Store remains authoritative for Run admission/state. This process-local
- * registry owns only the live HTTP projection and the frame target needed by
- * BrowserFrameCapability. No child port is serialized to Product clients.
+ * The Project source and frozen Experiment remain authoritative. The live
+ * listener is exposed to BrowserFrameCapability only after the generic visual
+ * supervisor has bound it to the launched process and completed its declared
+ * health probe. No Project HTML projection is treated as a Run by this class.
  */
 export class ProjectOnlyVisualRuntime {
   readonly store: ProjectOnlyStore;
+  readonly supervisor: GenericVisualSupervisor;
+  readonly now: () => string;
   readonly #active = new Map<string, ActiveVisual>();
   #generation = 0;
 
-  constructor(store: ProjectOnlyStore) {
-    this.store = store;
+  constructor(input: Readonly<{
+    store: ProjectOnlyStore;
+    pythonExecutable: string;
+    scratchRoot: string;
+    now?: () => string;
+    supervisor?: GenericVisualSupervisor;
+  }>) {
+    this.store = input.store;
+    this.now = input.now ?? (() => new Date().toISOString());
+    mkdirSync(input.scratchRoot, { recursive: true, mode: 0o700 });
+    this.supervisor = input.supervisor ?? new GenericVisualSupervisor({
+      pythonExecutable: input.pythonExecutable,
+      scratchRoot: input.scratchRoot,
+    });
   }
 
   readonly targetResolver: BrowserFrameTargetResolver = Object.freeze({
     resolve: async (projectId: string, runId: string): Promise<BrowserFrameTarget | null> => {
       const active = this.#active.get(runId);
-      if (!active || active.projectId !== projectId || !active.server.listening
-        || active.expiresAtMs <= Date.now()) return null;
+      if (!active || active.projectId !== projectId || !this.#isLive(active)) return null;
       return publicTarget(active);
     },
     inspect: async (target: BrowserFrameTarget): Promise<boolean> =>
@@ -56,101 +108,45 @@ export class ProjectOnlyVisualRuntime {
   async start(input: Readonly<{
     projectId: string;
     runId: string;
-    html: string;
-    at?: string;
   }>): Promise<Readonly<{ runId: string; status: "running" }>> {
     const run = this.store.run(input.runId);
     if (run.projectId !== input.projectId || run.runKind !== "visual") {
-      throw new Error("visual_run_scope_mismatch");
+      throw visualError("visual_run_scope_mismatch", "The visual Run is outside this Project scope.");
     }
-    const existing = this.#active.get(input.runId);
-    if (existing?.server.listening) return Object.freeze({ runId: input.runId, status: "running" });
-    const bytes = Buffer.from(input.html, "utf8");
-    if (bytes.byteLength < 1 || bytes.byteLength > MAX_VISUAL_HTML_BYTES) {
-      throw new Error("visual_document_invalid");
+    const existing = this.#active.get(run.id);
+    if (existing) {
+      await existing.ready;
+      return Object.freeze({ runId: run.id, status: "running" });
     }
-    const server = createServer((request, response) => {
-      const path = new URL(request.url ?? "/", "http://localhost").pathname;
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        response.writeHead(405, { "content-length": "0" });
-        response.end();
-        return;
-      }
-      if (path === "/health") {
-        const health = Buffer.from('{"status":"ok"}\n');
-        response.writeHead(200, {
-          "cache-control": "no-store",
-          "content-length": health.byteLength,
-          "content-type": "application/json; charset=utf-8",
-          "x-content-type-options": "nosniff",
-        });
-        response.end(request.method === "HEAD" ? undefined : health);
-        return;
-      }
-      if (path !== "/" && path !== "/index.html") {
-        response.writeHead(404, { "content-length": "0" });
-        response.end();
-        return;
-      }
-      response.writeHead(200, {
-        "cache-control": "private, no-store",
-        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors *",
-        "content-length": bytes.byteLength,
-        "content-type": "text/html; charset=utf-8",
-        "cross-origin-resource-policy": "same-origin",
-        "permissions-policy": "camera=(), microphone=(), geolocation=()",
-        "referrer-policy": "no-referrer",
-        "x-content-type-options": "nosniff",
-      });
-      response.end(request.method === "HEAD" ? undefined : bytes);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        server.off("listening", onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        server.off("error", onError);
-        resolve();
-      };
-      server.once("error", onError);
-      server.once("listening", onListening);
-      server.listen(0, LOOPBACK_HOST);
-    });
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      await closeServer(server);
-      throw new Error("visual_listener_unavailable");
+    if (run.status !== "queued") {
+      throw visualError("visual_run_not_queued", "The visual Run is not queued for launch.");
     }
-    const active: ActiveVisual = Object.freeze({
+
+    const deferred = readyDeferred();
+    const active: ActiveVisual = {
       projectId: input.projectId,
-      runId: input.runId,
+      runId: run.id,
       attemptGeneration: ++this.#generation,
-      port: address.port,
       expiresAtMs: Date.now() + ATTEMPT_TTL_MS,
-      server,
+      abort: new AbortController(),
+      port: null,
+      healthy: false,
+      identity: null,
+      ready: deferred.promise,
+      resolveReady: deferred.resolve,
+      rejectReady: deferred.reject,
+      readySettled: false,
+      completion: Promise.resolve(),
+    };
+    this.#active.set(run.id, active);
+    active.completion = this.#execute(active).finally(() => {
+      if (this.#active.get(run.id) === active) this.#active.delete(run.id);
     });
-    this.#active.set(input.runId, active);
-    server.once("close", () => {
-      if (this.#active.get(input.runId) === active) this.#active.delete(input.runId);
-    });
-    try {
-      if (run.status === "queued") {
-        this.store.transitionRun({ id: input.runId, status: "running", at: input.at ?? new Date().toISOString() });
-      }
-    } catch (error) {
-      this.#active.delete(input.runId);
-      await closeServer(server);
-      throw error;
-    }
-    return Object.freeze({ runId: input.runId, status: "running" });
+    await active.ready;
+    return Object.freeze({ runId: run.id, status: "running" });
   }
 
-  /**
-   * Stops one visual projection and terminalizes its authoritative Run.
-   * Repeating the same command after terminalization is intentionally
-   * idempotent: the terminal Store record, not the process-local map, wins.
-   */
+  /** Stop one live visual process and wait for its terminal Store record. */
   async stop(input: Readonly<{
     projectId: string;
     runId: string;
@@ -162,9 +158,9 @@ export class ProjectOnlyVisualRuntime {
   }>> {
     const run = this.store.run(input.runId);
     if (run.projectId !== input.projectId || run.runKind !== "visual") {
-      throw new Error("visual_run_scope_mismatch");
+      throw visualError("visual_run_scope_mismatch", "The visual Run is outside this Project scope.");
     }
-    if (!["queued", "running", "cancelling"].includes(run.status)) {
+    if (!isActiveRunStatus(run.status)) {
       return Object.freeze({
         runId: run.id,
         status: "already_terminal",
@@ -173,68 +169,332 @@ export class ProjectOnlyVisualRuntime {
     }
 
     const active = this.#active.get(run.id);
-    if (active) {
-      this.#active.delete(run.id);
-      await closeServer(active.server);
+    if (!active) {
+      const at = input.at ?? this.now();
+      this.store.commitVisualRunResult({
+        runId: run.id,
+        status: "cancelled",
+        terminalCode: "user_cancelled",
+        outputs: [],
+        completion: visualCompletionWithoutProcess(run.id, "cancelled", "user_cancelled", at),
+        finishedAt: at,
+      });
+      return Object.freeze({ runId: run.id, status: "cancelled", terminalStatus: "cancelled" });
     }
 
-    const at = input.at ?? new Date().toISOString();
+    active.healthy = false;
     const current = this.store.run(run.id);
     if (current.status === "running") {
-      this.store.transitionRun({ id: run.id, status: "cancelling", at });
+      this.store.transitionRun({ id: run.id, status: "cancelling", at: input.at ?? this.now() });
     }
-    const cancelling = this.store.run(run.id);
-    if (["queued", "cancelling"].includes(cancelling.status)) {
-      this.store.transitionRun({
-        id: run.id,
-        status: "cancelled",
-        at,
-        terminalCode: "user_cancelled",
-      });
-    }
-    return Object.freeze({ runId: run.id, status: "cancelled", terminalStatus: "cancelled" });
+    active.abort.abort(visualError("user_cancelled", "The visual Run was cancelled by the user."));
+    await active.completion;
+    const terminal = this.store.run(run.id);
+    return Object.freeze({
+      runId: run.id,
+      status: terminal.status === "cancelled" ? "cancelled" : "already_terminal",
+      terminalStatus: terminal.status,
+    });
+  }
+
+  async wait(runId: string): Promise<void> {
+    await this.#active.get(runId)?.completion;
   }
 
   async close(): Promise<void> {
-    const at = new Date().toISOString();
     const active = [...this.#active.values()];
-    this.#active.clear();
     for (const item of active) {
-      await closeServer(item.server);
-      try {
-        const run = this.store.run(item.runId);
-        if (["queued", "running", "cancelling"].includes(run.status)) {
-          this.store.transitionRun({ id: item.runId, status: "interrupted", at, terminalCode: "backend_shutdown" });
-        }
-      } catch { /* Store close/recovery remains authoritative. */ }
+      item.healthy = false;
+      item.abort.abort(visualError("backend_shutdown", "The visual runtime is shutting down."));
     }
+    await Promise.allSettled(active.map((item) => item.completion));
+  }
+
+  async #execute(active: ActiveVisual): Promise<void> {
+    const root = mkdtempSync(resolve(tmpdir(), "riff-project-visual-"));
+    let supervision: VisualSupervisionResult | null = null;
+    let cleaned = false;
+    try {
+      const run = this.store.run(active.runId);
+      const project = this.store.project(run.projectId);
+      if (project.workspaceDigest !== run.sourceWorkspaceDigest) {
+        throw visualError("project_snapshot_digest_drift", "The Project changed after visual Run admission.");
+      }
+      for (const file of this.store.projectFiles(project.id)) {
+        const path = resolve(root, file.relativePath);
+        if (path !== root && !path.startsWith(`${root}/`)) {
+          throw visualError("unsafe_project_path", "A Project file path escaped its execution root.");
+        }
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, file.bytes, { mode: 0o600 });
+      }
+      const execution = this.store.runExecutionDescription(run.id) as any;
+      const plan = planExperiment({
+        configuration: run.frozenConfiguration,
+        inputSchema: execution.inputs?.schema,
+        maxSamples: MAX_VISUAL_SAMPLES,
+      });
+      if (plan.configuration.runKind !== "visual" || plan.samples.length !== 1) {
+        throw visualError("visual_experiment_required", "A visual Run requires one frozen visual sample.");
+      }
+      active.webSocket = execution.visual?.webSocket
+        ? Object.freeze({ ...execution.visual.webSocket }) : undefined;
+      const workspace = resolveModelWorkspace(root, `project-visual:${run.id}`);
+      const digest = captureWorkspaceDigest(workspace).digest;
+      supervision = await this.supervisor.supervise({
+        run: Object.freeze({
+          runId: run.id,
+          runKind: "visual" as const,
+          sample: Object.freeze({ ...plan.samples[0], sampleIndex: 0 as const }),
+          limits: RUN_LIMITS,
+        }),
+        project: Object.freeze({
+          workspace: verifyProjectExecutionRootCapability(workspace, execution, digest),
+          executionDescription: execution,
+        }),
+        signal: active.abort.signal,
+        hooks: Object.freeze({
+          registerProcess: async (identity: VisualProcessIdentity) => {
+            if (this.#active.get(run.id) !== active || active.abort.signal.aborted) {
+              throw visualError("visual_attempt_revoked", "The visual attempt is no longer active.");
+            }
+            active.identity = identity;
+            active.port = identity.loopbackPort;
+          },
+          recordHealth: async (identity: VisualProcessIdentity) => {
+            if (this.#active.get(run.id) !== active || active.abort.signal.aborted
+              || !sameVisualIdentity(active.identity, identity)) {
+              throw visualError("visual_attempt_revoked", "The visual attempt changed before health publication.");
+            }
+            const current = this.store.run(run.id);
+            if (current.status === "queued") {
+              this.store.transitionRun({ id: run.id, status: "running", at: this.now() });
+            } else if (current.status !== "running") {
+              throw visualError("visual_attempt_revoked", "The visual Run cannot publish health in its current state.");
+            }
+            active.healthy = true;
+            this.#resolveReady(active);
+          },
+        }),
+      });
+      active.healthy = false;
+      const outputBytes = supervision.status === "succeeded" && !active.abort.signal.aborted
+        ? supervision.outputs.map((candidate) => ({
+          id: stableId("run_output", `${run.id}:0:${candidate.logicalName}`),
+          sampleIndex: 0,
+          sampleId: plan.samples[0]!.sampleId,
+          logicalName: candidate.logicalName,
+          relativePath: candidate.relativePath,
+          mediaType: candidate.mediaType,
+          declaredRole: candidate.role,
+          bytes: consumeVisualOutputCandidate(candidate),
+        })) : [];
+      this.supervisor.cleanup(supervision);
+      cleaned = true;
+      const aborted = active.abort.signal.aborted;
+      const status = aborted ? abortStatus(active.abort.signal.reason) : supervision.status;
+      const finishedAt = supervision.finishedAt;
+      const completion = Object.freeze({
+        schemaVersion: 1,
+        sampleCount: 1,
+        samplePlanDigest: plan.samplePlanDigest,
+        configurationDigest: plan.configurationDigest,
+        status,
+        code: aborted ? abortCode(active.abort.signal.reason) : supervision.code,
+        diagnostic: aborted
+          ? abortDiagnostic(active.abort.signal.reason)
+          : supervision.diagnostic,
+        sample: Object.freeze({
+          sampleIndex: 0,
+          sampleId: plan.samples[0]!.sampleId,
+          seed: plan.samples[0]!.seed,
+        }),
+        resources: visualResources(supervision),
+        startedAt: supervision.startedAt,
+        finishedAt,
+      });
+      this.store.commitVisualRunResult({
+        runId: run.id,
+        status,
+        terminalCode: completion.code,
+        outputs: outputBytes,
+        completion,
+        finishedAt,
+      });
+      if (!active.readySettled) {
+        this.#rejectReady(active, visualError(completion.code, completion.diagnostic));
+      }
+    } catch (error) {
+      active.healthy = false;
+      if (supervision && !cleaned) {
+        try {
+          this.supervisor.cleanup(supervision);
+          cleaned = true;
+        } catch (cleanupError) {
+          error = cleanupError;
+        }
+      }
+      const current = this.store.run(active.runId);
+      if (isActiveRunStatus(current.status)) {
+        const aborted = active.abort.signal.aborted;
+        const finishedAt = this.now();
+        const status = aborted ? abortStatus(active.abort.signal.reason) : "failed";
+        const code = aborted ? abortCode(active.abort.signal.reason) : safeCode(error);
+        const diagnostic = aborted
+          ? abortDiagnostic(active.abort.signal.reason) : safeDiagnostic(error);
+        this.store.commitVisualRunResult({
+          runId: current.id,
+          status,
+          terminalCode: code,
+          outputs: [],
+          completion: visualCompletionWithoutProcess(
+            current.id,
+            status,
+            code,
+            finishedAt,
+            diagnostic,
+          ),
+          finishedAt,
+        });
+      }
+      if (!active.readySettled) this.#rejectReady(active, asVisualError(error, active.abort.signal.reason));
+    } finally {
+      active.healthy = false;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  #resolveReady(active: ActiveVisual): void {
+    if (active.readySettled) return;
+    active.readySettled = true;
+    active.resolveReady();
+  }
+
+  #rejectReady(active: ActiveVisual, error: Error): void {
+    if (active.readySettled) return;
+    active.readySettled = true;
+    active.rejectReady(error);
+  }
+
+  #isLive(active: ActiveVisual): boolean {
+    return active.healthy && !active.abort.signal.aborted && active.port !== null
+      && active.identity !== null && active.expiresAtMs > Date.now();
   }
 
   #matches(target: BrowserFrameTarget): boolean {
     const active = this.#active.get(target.runId);
-    return Boolean(active
+    return Boolean(active && this.#isLive(active)
       && active.projectId === target.projectId
       && active.attemptGeneration === target.attemptGeneration
       && active.port === target.port
-      && active.expiresAtMs === target.expiresAtMs
-      && active.server.listening
-      && active.expiresAtMs > Date.now());
+      && active.expiresAtMs === target.expiresAtMs);
   }
 }
+
+const readyDeferred = (): Readonly<{
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}> => {
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  return Object.freeze({ promise, resolve: resolveReady, reject: rejectReady });
+};
 
 const publicTarget = (active: ActiveVisual): BrowserFrameTarget => Object.freeze({
   projectId: active.projectId,
   runId: active.runId,
   attemptGeneration: active.attemptGeneration,
-  port: active.port,
+  port: active.port!,
   expiresAtMs: active.expiresAtMs,
+  ...(active.webSocket ? { webSocket: active.webSocket } : {}),
 });
 
-const closeServer = (server: Server): Promise<void> => new Promise((resolve, reject) => {
-  if (!server.listening) {
-    resolve();
-    return;
-  }
-  server.close((error) => error ? reject(error) : resolve());
-  server.closeAllConnections?.();
+const sameVisualIdentity = (
+  left: VisualProcessIdentity | null,
+  right: VisualProcessIdentity,
+): boolean => Boolean(left
+  && left.processAttemptId === right.processAttemptId
+  && left.pid === right.pid
+  && left.processStartToken === right.processStartToken
+  && left.loopbackPort === right.loopbackPort
+  && left.healthPath === right.healthPath);
+
+const isActiveRunStatus = (status: string): boolean =>
+  ["queued", "running", "cancelling"].includes(status);
+
+const visualResources = (result: VisualSupervisionResult): Readonly<Record<string, number | boolean>> =>
+  Object.freeze({
+    stdoutBytes: result.stdoutBytes,
+    stderrBytes: result.stderrBytes,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    healthVerified: result.healthVerified,
+  });
+
+const visualCompletionWithoutProcess = (
+  runId: string,
+  status: "failed" | "cancelled" | "interrupted",
+  code: string,
+  finishedAt: string,
+  diagnostic = status === "cancelled"
+    ? "The visual Run was cancelled before a live process completed."
+    : "The visual Run failed before a live process completed.",
+): Readonly<Record<string, unknown>> => Object.freeze({
+  schemaVersion: 1,
+  runId,
+  sampleCount: 0,
+  samplePlanDigest: null,
+  configurationDigest: null,
+  status,
+  code,
+  diagnostic,
+  sample: null,
+  resources: null,
+  startedAt: null,
+  finishedAt,
 });
+
+const stableId = (prefix: string, value: string): string =>
+  `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
+
+const visualError = (code: string, message: string): Error & { code: string } =>
+  Object.assign(new Error(message), { code });
+
+const safeCode = (error: unknown): string => {
+  const code = error && typeof error === "object" && typeof (error as any).code === "string"
+    ? (error as any).code : error instanceof Error ? error.message : "visual_run_failed";
+  return /^[a-z0-9_]{1,200}$/u.test(code) ? code : "visual_run_failed";
+};
+
+const safeDiagnostic = (error: unknown): string => {
+  const message = error instanceof Error
+    ? error.message : "Visual execution failed before durable output publication.";
+  const normalized = message.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim();
+  return normalized
+    ? normalized.slice(0, 1_000)
+    : "Visual execution failed before durable output publication.";
+};
+
+const abortCode = (reason: unknown): string =>
+  reason && typeof reason === "object" && typeof (reason as any).code === "string"
+    && ["user_cancelled", "backend_shutdown"].includes((reason as any).code)
+    ? (reason as any).code : "user_cancelled";
+
+const abortStatus = (reason: unknown): "cancelled" | "interrupted" =>
+  abortCode(reason) === "backend_shutdown" ? "interrupted" : "cancelled";
+
+const abortDiagnostic = (reason: unknown): string =>
+  abortCode(reason) === "backend_shutdown"
+    ? "The visual Run was interrupted because the backend shut down."
+    : "The visual Run was cancelled by the user.";
+
+const asVisualError = (error: unknown, abortReason: unknown): Error => {
+  if (abortReason) return visualError(abortCode(abortReason), abortDiagnostic(abortReason));
+  if (error instanceof Error) return error;
+  return visualError("visual_run_failed", "The visual Run failed before health publication.");
+};

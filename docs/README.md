@@ -4,7 +4,7 @@
 - Role: normative contract
 - Scope: repository documentation roles, authority, navigation, and maintenance rules
 - Source of truth: this index for documentation governance; linked documents for their declared scope
-- Last reviewed: 2026-08-01
+- Last reviewed: 2026-08-12
 
 ## Authority order
 
@@ -132,11 +132,16 @@ A4-6 revision-scoped evidence is retained through the stable
 [`a4-6-exit-evidence.md`](a4-6-exit-evidence.md) redirect. PR #55 merged as
 `d333580`, the merged-main rerun passed, and Issue #15 is closed.
 
-## Active product and stage documents
+## Active product authority and historical stage records
 
 - [`product-requirements.md`](product-requirements.md): the Chinese single MVP
-  PRD, including Platform/Domain Pack ownership, requirement-ID lifecycle, and
+  PRD, including the Project-owned Modeling Requirements layer,
+  `requirements/modeling-requirements.md` canonical path, immutable Example
+  Project Template distribution, requirement-ID lifecycle, and
   PRD/Roadmap/Architecture/Code authority boundaries.
+- [`project-only-domain-brief.md`](project-only-domain-brief.md): the approved
+  Project-only contract for Modeling Requirements, Blank Project behavior,
+  official Template contents, and Conversation temporary-document exclusions.
 - [`milestone-a1-data-foundation-design.md`](milestone-a1-data-foundation-design.md):
   implemented Stage 1 SQLite/object-directory, atomic mutation, lifecycle,
   recovery, and fixed-copy Project design.
@@ -146,7 +151,7 @@ A4-6 revision-scoped evidence is retained through the stable
 - [`milestone-a3-project-execution-design.md`](milestone-a3-project-execution-design.md):
   implemented Stage 3 execution design and implementation ledger.
 - [`milestone-a4-shared-product-shell-design.md`](milestone-a4-shared-product-shell-design.md):
-  A4-0 design gate, A4-1 Product API record, A4-2 Home/shared-shell record, and
+  historical/superseded A4-0 design gate, A4-1 Product API record, A4-2 Home/shared-shell record, and
   A4-3 Conversation, A4-4 dynamic workspace/execution, and A4-5
   recovery/cutover/retirement implementation records; final exit remains
   pending.

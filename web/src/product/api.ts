@@ -1701,8 +1701,10 @@ const normalizeWorkspace = (value: unknown): WorkspaceDto => {
     conversations: Object.freeze(conversations as WorkspaceDto["conversations"]),
   };
   if (!Array.isArray(record.files) || !Array.isArray(record.experimentConfigurations)
-    || !Array.isArray(record.runs) || !record.execution
-    || typeof record.execution !== "object"
+    || !Array.isArray(record.runs)
+    || (record.execution !== null && typeof record.execution !== "object")
+    || typeof record.executionReady !== "boolean"
+    || record.executionReady !== (record.execution !== null)
     || typeof record.executionDescriptionDigest !== "string"
     || typeof record.workspaceDigest !== "string"
     || !record.executionLock || typeof record.executionLock !== "object") {
@@ -1712,6 +1714,7 @@ const normalizeWorkspace = (value: unknown): WorkspaceDto => {
     ...base,
     workspaceDigest: record.workspaceDigest,
     execution: record.execution,
+    executionReady: record.executionReady,
     executionDescriptionDigest: record.executionDescriptionDigest,
     executionLock: Object.freeze(record.executionLock),
     files: Object.freeze(record.files),

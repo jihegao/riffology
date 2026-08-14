@@ -1,6 +1,12 @@
 # Architecture contracts
 
-## Milestone A2 authority and A3 execution architecture
+## Historical Milestone A2 authority and A3 execution architecture
+
+Compatibility boundary: the Milestone A2-A4 narrative in this section is retained
+as implementation history. Its Model/Project split, fixed-copy Project,
+`ProductStoreV2`, and Domain Pack terminology is superseded by the active
+Project-only authority flow and Modeling Requirements boundary below; it must not
+be read as the current product object model.
 
 The current product authority is the
 [`Riff MVP PRD`](product-requirements.md). The
@@ -40,6 +46,15 @@ natural-language Project turn
   -> optional riff_start_project_run freezes the latest committed workspace digest
   -> terminal Run/output or bounded persisted failure diagnostics
 ```
+
+The active domain-semantic boundary is inside the Project. When present, the
+Project Modeling Requirements layer uses the canonical path
+`requirements/modeling-requirements.md`; it is not an independently installed
+Domain Pack. An official immutable Example Project Template must include that
+file together with its executable assets and baseline experiment. A Blank
+Project creates no Modeling Requirements or other domain record implicitly, and
+Conversation temporary documents remain drafts outside Template versions until an
+explicit Project write adopts content at the canonical path.
 
 This path has no Project technical status, technical-check table, technical-check
 HTTP route, Draft Revision, or structured `RIFF_PROJECT_DELIVERY_V1` response
@@ -177,9 +192,10 @@ and browser event payloads are replaced by a closed content-free
 shape/node-count/truncation summary.
 A4-1 implements the common API/admission/lifecycle/delete boundary. A4-5 makes
 the production composition root Product-only: it opens ProductStoreV2, completes
-mutation and prior-dispatch recovery, installs registered Domain Packs, runs a
-read-only legacy preflight, activates a fresh dispatcher generation, and only
-then binds the browser network. Gate2/Gate3, legacy ProjectStore/MCP, and legacy
+mutation and prior-dispatch recovery, registers official immutable Example Project
+Templates, runs a read-only legacy preflight, activates a fresh dispatcher
+generation, and only then binds the browser network. There is no independent
+Domain Pack installer in the active product. Gate2/Gate3, legacy ProjectStore/MCP, and legacy
 OpenCode event bridges are not constructed by that entry.
 If Product recovery fails closed, A4-5 permits only the exact-app static shell,
 browser bootstrap, health, and one closed path-free recovery-status DTO; all
@@ -359,7 +375,10 @@ generation capability that is revoked and unbound at completion. Lost sessions
 rebuild from bounded Riff-owned context; provider failure is explicit read-only.
 Tool execution rechecks the running turn and latest available session
 generation. Proposal-only turns may create draft temporary documents but cannot
-perform any other durable mutation or lifecycle transition. All direct Model
+perform any other durable mutation or lifecycle transition. Such Conversation
+temporary documents are never Template contents and are not Modeling Requirements
+until an explicit Project write to `requirements/modeling-requirements.md`.
+All direct Model
 changes use typed owner-scoped tools and Stage 1 database/filesystem recovery.
 Project conversations cannot change copied Model code, schema, or dependencies.
 OpenCode prompt-tool policy denies `*` by default and enables only the exact

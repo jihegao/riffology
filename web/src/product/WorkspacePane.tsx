@@ -9,6 +9,7 @@ import {
 import type { ProductClient } from "./api";
 import { RendererRegistry, type RendererResource } from "./RendererRegistry";
 import { ReviewRail, type ReviewFile } from "./ReviewRail";
+import { MODELING_REQUIREMENTS_PATH } from "./modeling-requirements";
 import type {
   DiagnosticEventPage,
   ExperimentConfiguration,
@@ -29,6 +30,7 @@ export function WorkspacePane({
   refresh: () => Promise<void>;
 }>) {
   return <ProjectWorkspace
+    key={workspace.owner.id}
     client={client}
     workspace={workspace}
     selectedConversationId={selectedConversationId}
@@ -47,12 +49,14 @@ function ProjectWorkspace({
   selectedConversationId?: string;
   refresh: () => Promise<void>;
 }>) {
+  const initialRun = workspace.runs.at(-1);
   const [selectedExperimentId, setSelectedExperimentId] = useState(
-    workspace.experimentConfigurations[0]?.id ?? "",
+    initialRun?.experimentConfigurationId ?? workspace.experimentConfigurations[0]?.id ?? "",
   );
-  const [selectedRunId, setSelectedRunId] = useState(workspace.runs.at(-1)?.id ?? "");
+  const [selectedRunId, setSelectedRunId] = useState(initialRun?.id ?? "");
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
+  const [requirementsRequestId, setRequirementsRequestId] = useState(0);
   const selectedExperiment = workspace.experimentConfigurations.find(
     (item) => item.id === selectedExperimentId,
   );
@@ -72,13 +76,35 @@ function ProjectWorkspace({
     sizeBytes: file.sizeBytes,
     sha256: file.sha256,
   })), [workspace.files]);
+  const modelingRequirements = projectFiles.find(
+    (file) => file.relativePath === MODELING_REQUIREMENTS_PATH,
+  );
+
+  const selectExperimentId = useCallback((id: string) => {
+    setSelectedExperimentId(id);
+    const matchingRun = [...workspace.runs].reverse().find(
+      (run) => run.experimentConfigurationId === id,
+    );
+    setSelectedRunId(matchingRun?.id ?? "");
+  }, [workspace.runs]);
+
+  const selectRunId = useCallback((id: string) => {
+    setSelectedRunId(id);
+    const run = workspace.runs.find((candidate) => candidate.id === id);
+    if (run && workspace.experimentConfigurations.some(
+      (experiment) => experiment.id === run.experimentConfigurationId,
+    )) {
+      setSelectedExperimentId(run.experimentConfigurationId);
+    }
+  }, [workspace.experimentConfigurations, workspace.runs]);
 
   useEffect(() => {
-    if (!selectedExperimentId && workspace.experimentConfigurations[0]) {
+    if (!workspace.experimentConfigurations.some((item) => item.id === selectedExperimentId)
+      && workspace.experimentConfigurations[0]) {
       setSelectedExperimentId(workspace.experimentConfigurations[0].id);
     }
-    if (!selectedRunId && workspace.runs.at(-1)) {
-      setSelectedRunId(workspace.runs.at(-1)!.id);
+    if (selectedRunId && !workspace.runs.some((item) => item.id === selectedRunId)) {
+      setSelectedRunId("");
     }
   }, [selectedExperimentId, selectedRunId, workspace]);
 
@@ -127,14 +153,43 @@ function ProjectWorkspace({
           </p>}
         </section>
         {error && <p role="alert" className="product-form-error">{error}</p>}
-        {runPriority === "planning" ? (
+        <section className="product-workspace-card" aria-labelledby="modeling-requirements-heading">
+          <h2 id="modeling-requirements-heading">Modeling requirements</h2>
+          {modelingRequirements ? <>
+            <p>
+              This Project owns its domain question, assumptions, ontology, KPI semantics,
+              validation boundary, and decision limits as an editable source file.
+            </p>
+            <button
+              type="button"
+              className="product-secondary"
+              disabled={!client.projectFileRenderable}
+              onClick={() => setRequirementsRequestId((value) => value + 1)}
+            >
+              Review modeling requirements
+            </button>
+          </> : <p className="product-empty" role="status">
+            No modeling requirements file exists. Use <code>/domain-brief</code> or an
+            Example Project Template to create <code>{MODELING_REQUIREMENTS_PATH}</code> explicitly.
+          </p>}
+        </section>
+        {!workspace.executionReady || !workspace.execution ? (
+          <section className="product-workspace-card" aria-labelledby="execution-setup-heading">
+            <h3 id="execution-setup-heading">Execution setup required</h3>
+            <p className="product-empty" role="status">
+              This blank Project does not have an execution-description v2 contract yet.
+              Describe the modelling requirements in the selected Conversation so the Agent
+              can commit the model, dependency file, batch or visual entry points, and contract.
+            </p>
+          </section>
+        ) : runPriority === "planning" ? (
           <>
             <ExperimentEditor
               client={client}
               workspace={workspace}
               selected={selectedExperiment}
               selectedId={selectedExperimentId}
-              setSelectedId={setSelectedExperimentId}
+              setSelectedId={selectExperimentId}
               pending={pending}
               act={act}
             />
@@ -145,7 +200,7 @@ function ProjectWorkspace({
               selectedConversationId={selectedConversationId}
               selectedRun={selectedRun}
               selectedRunId={selectedRunId}
-              setSelectedRunId={setSelectedRunId}
+              setSelectedRunId={selectRunId}
               pending={pending}
               act={act}
             />
@@ -159,7 +214,7 @@ function ProjectWorkspace({
               selectedConversationId={selectedConversationId}
               selectedRun={selectedRun}
               selectedRunId={selectedRunId}
-              setSelectedRunId={setSelectedRunId}
+              setSelectedRunId={selectRunId}
               pending={pending}
               act={act}
             />
@@ -168,7 +223,7 @@ function ProjectWorkspace({
               workspace={workspace}
               selected={selectedExperiment}
               selectedId={selectedExperimentId}
-              setSelectedId={setSelectedExperimentId}
+              setSelectedId={selectExperimentId}
               pending={pending}
               act={act}
             />
@@ -181,7 +236,7 @@ function ProjectWorkspace({
           </p>
           <dl className="product-facts">
             <div><dt>Workspace digest</dt><dd><code>{workspace.workspaceDigest}</code></dd></div>
-            <div><dt>Execution</dt><dd>{workspace.execution.runMode}</dd></div>
+            <div><dt>Execution</dt><dd>{workspace.execution?.runMode ?? "not configured"}</dd></div>
             <div><dt>Files</dt><dd>{workspace.files.length}</dd></div>
           </dl>
         </details>
@@ -190,6 +245,10 @@ function ProjectWorkspace({
         <ReviewRail
           ownerKey={`project:${workspace.owner.id}:${workspace.workspaceDigest}`}
           files={projectFiles}
+          sourceTarget={modelingRequirements && requirementsRequestId > 0 ? {
+            relativePath: MODELING_REQUIREMENTS_PATH,
+            requestId: requirementsRequestId,
+          } : undefined}
           loadFile={(file) => client.projectFileRenderable!(workspace.owner.id, file.key)}
         />
       )}
@@ -325,8 +384,9 @@ function RunWorkspace({
   useEffect(() => () => { requestEpoch.current += 1; }, []);
   const currentRequest = (epoch: number, runId: string): boolean =>
     requestEpoch.current === epoch && selectedRunIdRef.current === runId;
+  const visualConversationOnly = experiment?.configuration.runKind === "visual";
   const start = () => {
-    if (!experiment) return;
+    if (!experiment || visualConversationOnly) return;
     void act(async () => {
       const result = await client.startRun({
         projectId: workspace.owner.id,
@@ -340,14 +400,18 @@ function RunWorkspace({
     });
   };
   const terminal = selectedRun?.terminalStatus !== null && selectedRun?.terminalStatus !== undefined;
+  const rerunnable = terminal
+    && selectedRun.status !== "trashed"
+    && selectedRun.experimentConfigurationId === experiment?.id
+    && selectedRun.sourceDigest === workspace.workspaceDigest;
   return (
     <section className="product-workspace-card" aria-labelledby="runs-heading">
       <div className="product-section-heading">
         <div><p className="product-eyebrow">PLATFORM EXECUTION</p><h3 id="runs-heading">Runs</h3></div>
         <div>
           <button type="button" className="product-primary" disabled={pending || !experiment || experiment.readOnly
-            || workspace.executionLock.state !== "unlocked"} onClick={start}>
-            Start {String(experiment?.configuration.runKind ?? "batch")} Run
+            || workspace.executionLock.state !== "unlocked" || visualConversationOnly} onClick={start}>
+            {rerunnable ? "Rerun" : "Start"} {String(experiment?.configuration.runKind ?? "batch")} Run
           </button>
         </div>
       </div>
@@ -355,6 +419,9 @@ function RunWorkspace({
         Runs freeze the accepted configuration, sample plan, Project execution identity,
         and platform limits. Results are not automatically analyzed or recommended.
       </p>
+      {visualConversationOnly && <p role="note" className="product-form-note">
+        Start visual Runs through the Project Conversation so admission and startup evidence stay with the Turn.
+      </p>}
       {detailError && <p role="alert" className="product-form-error">{detailError}</p>}
       <select aria-label="Run" value={selectedRunId} onChange={(event) => {
         requestEpoch.current += 1;
@@ -378,7 +445,7 @@ function RunWorkspace({
             <div><dt>Samples</dt><dd>{selectedRun.requestedSampleCount}</dd></div>
             <div><dt>Steps / horizon</dt><dd>{selectedRun.stepOrHorizon ?? "not declared"}</dd></div>
             <div><dt>Seeds</dt><dd>{selectedRun.seedCount}</dd></div>
-            <div><dt>Metrics</dt><dd>{workspace.execution.overview?.metricNames?.length ?? 0}</dd></div>
+            <div><dt>Metrics</dt><dd>{workspace.execution?.overview?.metricNames?.length ?? 0}</dd></div>
             <div><dt>Duration</dt><dd>{selectedRun.durationMs === null ? "pending" : `${selectedRun.durationMs} ms`}</dd></div>
             <div><dt>Outputs</dt><dd>{selectedRun.outputs.length}</dd></div>
             {terminal && (
@@ -404,13 +471,14 @@ function RunWorkspace({
               Cancel Run
             </button>
           )}
-          {terminal && selectedRun.status !== "trashed" && (
+          {terminal && selectedRun.status !== "trashed"
+            && selectedRun.lifecycleDigest && selectedRun.terminalClosureDigest && (
             <button type="button" className="product-danger" disabled={pending} onClick={() =>
               void act(() => client.trashRun({ projectId: workspace.owner.id, run: selectedRun, commandId: crypto.randomUUID() }))}>
               Trash Run
             </button>
           )}
-          {selectedRun.status === "trashed" && (
+          {selectedRun.status === "trashed" && selectedRun.lifecycleDigest && (
             <button type="button" className="product-secondary" disabled={pending} onClick={() =>
               void act(() => client.restoreRun({ projectId: workspace.owner.id, run: selectedRun, commandId: crypto.randomUUID() }))}>
               Restore Run
@@ -717,8 +785,8 @@ function RunWorkspace({
 
 const defaultConfiguration = (workspace: ProjectWorkspaceDto): Record<string, unknown> => ({
   schemaVersion: 1,
-  runKind: workspace.execution.runMode === "visual" ? "visual" : "batch",
-  parameters: workspace.execution.inputs.smoke,
+  runKind: workspace.execution?.runMode === "visual" ? "visual" : "batch",
+  parameters: workspace.execution?.inputs.smoke ?? {},
   sampling: { kind: "single", seed: 1 },
 });
 

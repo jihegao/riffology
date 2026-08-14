@@ -408,8 +408,8 @@ export class AgentTurnRuntime implements AgentToolExecutor {
       case "riff_cancel_run": return this.#cancelRun(grant, input);
       case "riff_trash_run": return this.#trashRun(grant, input);
       case "riff_restore_run": return this.#restoreRun(grant, input);
-      case "riff_list_run_outputs": return this.#listRunOutputs(grant, String(input.runRef));
-      case "riff_read_run_output": return this.#readRunOutput(grant, String(input.runRef), String(input.outputRef));
+      case "riff_list_run_outputs": return this.#listRunOutputs(grant, input);
+      case "riff_read_run_output": return this.#readRunOutput(grant, input);
       case "riff_read_run_events": return this.#readRunEvents(grant, input);
       case "riff_transition_owner_lifecycle": return this.#transitionOwnerLifecycle(grant, input);
       case "riff_create_analysis_document":
@@ -881,33 +881,99 @@ export class AgentTurnRuntime implements AgentToolExecutor {
     );
   }
 
-  #listRunOutputs(grant: AgentToolGrant, runRef: string) {
+  #listRunOutputs(grant: AgentToolGrant, input: Readonly<Record<string, unknown>>) {
     this.#requireProject(grant);
+    const runRef = boundedText(input.runRef, 256);
+    const run = this.#resolveRunRef(grant, runRef);
+    if (run.status !== "succeeded") throw new AgentRuntimeError(
+      "output_not_available", "Run outputs are available only after a successful receipt-backed Run.",
+    );
+    const limit = input.limit === undefined ? 50 : Number(input.limit);
+    const afterOutputRef = input.afterOutputRef === undefined
+      ? null : boundedText(input.afterOutputRef, 256);
+    const logicalName = input.logicalName === undefined
+      ? null : boundedText(input.logicalName, 256);
+    const declaredRole = input.declaredRole === undefined
+      ? null : boundedText(input.declaredRole, 64);
+    const all = this.store.listRunOutputs(run.id).map((output) => ({
+      outputRef: scopedRef("output", run.id, output.id, output.file.sha256),
+      logicalName: output.logicalName,
+      sampleIndex: output.contractVersion === 4 ? output.sampleIndex : null,
+      mediaType: output.file.mediaType,
+      declaredRole: output.contractVersion === 4 ? output.declaredRole : output.outputType,
+      sizeBytes: output.file.sizeBytes,
+      sha256: output.file.sha256,
+    })).filter((output) => (!logicalName || output.logicalName === logicalName)
+      && (!declaredRole || output.declaredRole === declaredRole));
+    const pagedRequest = [
+      "afterOutputRef", "limit", "logicalName", "declaredRole", "includeText",
+    ].some((key) => input[key] !== undefined);
+    if (!pagedRequest) return all;
+    const afterIndex = afterOutputRef
+      ? all.findIndex((output) => output.outputRef === afterOutputRef) : -1;
+    if (afterOutputRef && afterIndex < 0) throw new AgentRuntimeError(
+      "invalid_output_cursor", "The Run output cursor is not in this filtered result set.",
+    );
+    const outputs = all.slice(afterIndex + 1, afterIndex + 1 + limit).map((output) => {
+      if (input.includeText !== true || !isTextualMediaType(output.mediaType)) return output;
+      const stored = this.store.listRunOutputs(run.id).find((candidate) =>
+        scopedRef("output", run.id, candidate.id, candidate.file.sha256) === output.outputRef);
+      if (!stored) throw new AgentRuntimeError(
+        "stale_output_ref", "The Run output reference is stale.",
+      );
+      const bytes = this.store.readObjectFile(stored.file.id);
+      const page = boundedUtf8Page(bytes, 0, 32 * 1024);
+      return { ...output, text: page.text, textTruncated: page.truncated };
+    });
+    const hasMore = afterIndex + 1 + outputs.length < all.length;
+    return {
+      runRef,
+      outputs,
+      matchedOutputCount: all.length,
+      nextOutputRef: hasMore ? outputs.at(-1)?.outputRef ?? null : null,
+      hasMore,
+    };
+  }
+
+  #readRunOutput(grant: AgentToolGrant, input: Readonly<Record<string, unknown>>) {
+    const runRef = boundedText(input.runRef, 256);
+    const outputRef = boundedText(input.outputRef, 256);
     const run = this.#resolveRunRef(grant, boundedText(runRef, 256));
     if (run.status !== "succeeded") throw new AgentRuntimeError(
       "output_not_available", "Run outputs are available only after a successful receipt-backed Run.",
     );
-    return this.store.listRunOutputs(run.id).map((output) => ({
-      outputRef: scopedRef("output", run.id, output.id, output.file.sha256),
-      logicalName: output.logicalName,
-      mediaType: output.file.mediaType,
-      sizeBytes: output.file.sizeBytes,
-      sha256: output.file.sha256,
-    }));
-  }
-
-  #readRunOutput(grant: AgentToolGrant, runRef: string, outputRef: string) {
-    const run = this.#resolveRunRef(grant, boundedText(runRef, 256));
-    const outputs = this.#listRunOutputs(grant, runRef);
-    const selected = outputs.find((output) => output.outputRef === outputRef);
-    if (!selected || selected.sizeBytes > 1_000_000
-      || !isTextualMediaType(selected.mediaType)) {
-      throw new AgentRuntimeError("output_not_renderable", "The Run output is not a bounded textual artifact.");
-    }
     const stored = this.store.listRunOutputs(run.id).find((output) =>
       scopedRef("output", run.id, output.id, output.file.sha256) === outputRef);
-    if (!stored) throw new AgentRuntimeError("stale_output_ref", "The Run output reference is stale.");
-    return { ...selected, content: this.store.readObjectFile(stored.file.id).toString("utf8") };
+    if (!stored || stored.file.sizeBytes > 1_000_000
+      || !isTextualMediaType(stored.file.mediaType)) {
+      throw new AgentRuntimeError("output_not_renderable", "The Run output is not a bounded textual artifact.");
+    }
+    const bytes = this.store.readObjectFile(stored.file.id);
+    const selected = {
+      outputRef,
+      logicalName: stored.logicalName,
+      sampleIndex: stored.contractVersion === 4 ? stored.sampleIndex : null,
+      mediaType: stored.file.mediaType,
+      declaredRole: stored.contractVersion === 4 ? stored.declaredRole : stored.outputType,
+      sizeBytes: stored.file.sizeBytes,
+      sha256: stored.file.sha256,
+    };
+    if (input.offset === undefined && input.maxBytes === undefined) {
+      return { ...selected, content: bytes.toString("utf8") };
+    }
+    const offset = input.offset === undefined ? 0 : Number(input.offset);
+    const maxBytes = input.maxBytes === undefined ? 64 * 1024 : Number(input.maxBytes);
+    if (offset > bytes.byteLength) throw new AgentRuntimeError(
+      "invalid_output_offset", "The Run output offset exceeds the output size.",
+    );
+    const page = boundedUtf8Page(bytes, offset, maxBytes);
+    return {
+      ...selected,
+      offset,
+      content: page.text,
+      truncated: page.truncated,
+      nextOffset: page.truncated ? page.endOffset : null,
+    };
   }
 
   #readRunEvents(grant: AgentToolGrant, input: Readonly<Record<string, unknown>>) {
@@ -2270,6 +2336,24 @@ const boundedDigest = (value: unknown): string => {
   return value;
 };
 const boundedText = (value: unknown, max: number, empty = false): string => { if (typeof value !== "string" || (!empty && !value.trim()) || Buffer.byteLength(value) > max || value.includes("\0")) throw new AgentRuntimeError("invalid_tool_input", "Agent tool text is invalid."); return empty ? value : value.trim(); };
+const boundedUtf8Page = (
+  bytes: Buffer,
+  offset: number,
+  maxBytes: number,
+): Readonly<{ text: string; endOffset: number; truncated: boolean }> => {
+  let endOffset = Math.min(bytes.byteLength, offset + maxBytes);
+  while (endOffset > offset && endOffset < bytes.byteLength
+    && (bytes[endOffset]! & 0xc0) === 0x80) endOffset -= 1;
+  if (endOffset === offset && endOffset < bytes.byteLength) {
+    endOffset = Math.min(bytes.byteLength, offset + maxBytes);
+    while (endOffset < bytes.byteLength && (bytes[endOffset]! & 0xc0) === 0x80) endOffset += 1;
+  }
+  const text = bytes.subarray(offset, endOffset).toString("utf8");
+  if (Buffer.from(text, "utf8").byteLength !== endOffset - offset) {
+    throw new AgentRuntimeError("output_not_renderable", "The requested byte page is not valid UTF-8.");
+  }
+  return Object.freeze({ text, endOffset, truncated: endOffset < bytes.byteLength });
+};
 const safeLogicalName = (value: string): string => { if (value.startsWith("/") || value.includes("\\") || value.split("/").some((part) => !part || part === "." || part === "..")) throw new AgentRuntimeError("invalid_logical_path", "Agent logical path is invalid."); return value; };
 const stripOwnedPrefix = (kind: string, value: string): string => {
   const prefix = kind === "model_code" ? "code/" : kind === "model_environment" ? "environment/" : "visuals/";

@@ -1,4 +1,8 @@
 import { legacyStoreRequiresRecovery } from "./project-only-legacy.ts";
+import {
+  installOfficialProjectTemplates,
+  type OfficialProjectTemplateDefinition,
+} from "./official-project-templates.ts";
 import { ProjectOnlyOperationsAdapter } from "./project-only-operations.ts";
 import { ProjectOnlyStore } from "./project-only-store.ts";
 
@@ -23,6 +27,7 @@ export type ProjectOnlyServerRuntime =
 export const openProjectOnlyServerRuntime = (input: Readonly<{
   root: string;
   now?: () => string;
+  officialTemplates?: readonly OfficialProjectTemplateDefinition[];
 }>): ProjectOnlyServerRuntime => {
   if (legacyStoreRequiresRecovery(input.root)) {
     return Object.freeze({
@@ -35,8 +40,14 @@ export const openProjectOnlyServerRuntime = (input: Readonly<{
   }
   const store = ProjectOnlyStore.open(input.root);
   const now = input.now ?? (() => new Date().toISOString());
-  store.reconcileInterruptedExecutions(now());
-  store.reconcileInterruptedConversationTurns(now());
+  try {
+    installOfficialProjectTemplates({ store, templates: input.officialTemplates ?? [] });
+    store.reconcileInterruptedExecutions(now());
+    store.reconcileInterruptedConversationTurns(now());
+  } catch (error) {
+    store.close();
+    throw error;
+  }
   return Object.freeze({
     mode: "ready",
     store,

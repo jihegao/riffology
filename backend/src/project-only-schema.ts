@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
-export const PROJECT_ONLY_SCHEMA_VERSION = 4 as const;
+export const PROJECT_ONLY_SCHEMA_VERSION = 5 as const;
 
 export type ProjectOnlyDatabase = DatabaseSync;
 
@@ -10,7 +10,7 @@ const SQL = String.raw;
 export const PROJECT_ONLY_SCHEMA_SQL = SQL`
   CREATE TABLE project_only_schema (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 4),
+    version INTEGER NOT NULL CHECK (version = 5),
     installed_at TEXT NOT NULL
   ) STRICT;
 
@@ -119,7 +119,9 @@ export const PROJECT_ONLY_SCHEMA_SQL = SQL`
     logical_name TEXT NOT NULL CHECK (length(trim(logical_name)) BETWEEN 1 AND 200),
     relative_path TEXT NOT NULL CHECK (length(trim(relative_path)) BETWEEN 1 AND 1024),
     media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
-    declared_role TEXT NOT NULL CHECK (declared_role IN ('data', 'diagnostic', 'replay', 'visual', 'document')),
+    declared_role TEXT NOT NULL CHECK (declared_role IN (
+      'metric', 'table', 'document', 'data', 'diagnostic', 'replay', 'visual'
+    )),
     bytes BLOB NOT NULL,
     size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0 AND size_bytes = length(bytes)),
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -283,15 +285,22 @@ export const initializeProjectOnlySchema = (
       migrateProjectOnlySchemaV1ToV2(database, installedAt);
       migrateProjectOnlySchemaV2ToV3(database, installedAt);
       migrateProjectOnlySchemaV3ToV4(database, installedAt);
+      migrateProjectOnlySchemaV4ToV5(database, installedAt);
       return;
     }
     if (userVersion === 2 && tables.some(({ name }) => name === "project_only_schema")) {
       migrateProjectOnlySchemaV2ToV3(database, installedAt);
       migrateProjectOnlySchemaV3ToV4(database, installedAt);
+      migrateProjectOnlySchemaV4ToV5(database, installedAt);
       return;
     }
     if (userVersion === 3 && tables.some(({ name }) => name === "project_only_schema")) {
       migrateProjectOnlySchemaV3ToV4(database, installedAt);
+      migrateProjectOnlySchemaV4ToV5(database, installedAt);
+      return;
+    }
+    if (userVersion === 4 && tables.some(({ name }) => name === "project_only_schema")) {
+      migrateProjectOnlySchemaV4ToV5(database, installedAt);
       return;
     }
     throw new Error(`Unsupported Project-only schema state: user_version=${userVersion}`);
@@ -299,7 +308,7 @@ export const initializeProjectOnlySchema = (
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(PROJECT_ONLY_SCHEMA_SQL);
-    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 4, ?)").run(installedAt);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 5, ?)").run(installedAt);
     database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
     const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
     if (foreignKeyViolation) throw new Error("Project-only schema contains a foreign-key violation");
@@ -353,6 +362,60 @@ const PROJECT_ONLY_V4_FILE_TRIGGERS_SQL = PROJECT_ONLY_SCHEMA_SQL.slice(
   PROJECT_ONLY_SCHEMA_SQL.indexOf("CREATE TRIGGER project_files_blocked_by_execution_lock_insert"),
 );
 
+const PROJECT_ONLY_V5_RUN_OUTPUTS_SQL = SQL`
+  CREATE TABLE run_outputs (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 3 AND 128),
+    run_id TEXT NOT NULL REFERENCES runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    sample_index INTEGER NOT NULL CHECK (sample_index >= 0),
+    sample_id TEXT NOT NULL CHECK (length(sample_id) = 64 AND sample_id NOT GLOB '*[^0-9a-f]*'),
+    logical_name TEXT NOT NULL CHECK (length(trim(logical_name)) BETWEEN 1 AND 200),
+    relative_path TEXT NOT NULL CHECK (length(trim(relative_path)) BETWEEN 1 AND 1024),
+    media_type TEXT NOT NULL CHECK (length(trim(media_type)) BETWEEN 1 AND 200),
+    declared_role TEXT NOT NULL CHECK (declared_role IN (
+      'metric', 'table', 'document', 'data', 'diagnostic', 'replay', 'visual'
+    )),
+    bytes BLOB NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0 AND size_bytes = length(bytes)),
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, sample_index, logical_name)
+  ) STRICT;
+`;
+
+const migrateProjectOnlySchemaV4ToV5 = (
+  database: ProjectOnlyDatabase,
+  installedAt: string,
+): void => {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec("ALTER TABLE run_outputs RENAME TO run_outputs_v4");
+    database.exec(PROJECT_ONLY_V5_RUN_OUTPUTS_SQL);
+    database.exec(`INSERT INTO run_outputs
+      (id, run_id, sample_index, sample_id, logical_name, relative_path, media_type,
+        declared_role, bytes, size_bytes, sha256, created_at)
+      SELECT id, run_id, sample_index, sample_id, logical_name, relative_path, media_type,
+        declared_role, bytes, size_bytes, sha256, created_at
+      FROM run_outputs_v4`);
+    database.exec("DROP TABLE run_outputs_v4");
+    database.exec("ALTER TABLE project_only_schema RENAME TO project_only_schema_v4");
+    database.exec(`CREATE TABLE project_only_schema (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      version INTEGER NOT NULL CHECK (version = 5),
+      installed_at TEXT NOT NULL
+    ) STRICT`);
+    database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 5, ?)")
+      .run(installedAt);
+    database.exec("DROP TABLE project_only_schema_v4");
+    database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
+    const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
+    if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* preserve migration error */ }
+    throw error;
+  }
+};
+
 const migrateProjectOnlySchemaV3ToV4 = (
   database: ProjectOnlyDatabase,
   installedAt: string,
@@ -397,7 +460,7 @@ const migrateProjectOnlySchemaV3ToV4 = (
     database.prepare("INSERT INTO project_only_schema (singleton, version, installed_at) VALUES (1, 4, ?)")
       .run(installedAt);
     database.exec("DROP TABLE project_only_schema_v3");
-    database.exec(`PRAGMA user_version = ${PROJECT_ONLY_SCHEMA_VERSION}`);
+    database.exec("PRAGMA user_version = 4");
     const foreignKeyViolation = database.prepare("PRAGMA foreign_key_check").get();
     if (foreignKeyViolation) throw new Error("Project-only schema migration contains a foreign-key violation");
     database.exec("COMMIT");

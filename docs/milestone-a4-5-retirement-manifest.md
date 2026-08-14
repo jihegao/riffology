@@ -21,7 +21,7 @@ It does **not** authorize deleting or rewriting `.riff-workspace`,
 environments, caches, `.DS_Store`, ignored files, or unrelated untracked files.
 Preflight for those paths is read-only.
 
-The ordinary wind domain pack, `wind_turbine_maintenance` Model assets,
+At that historical cutover, the then-named ordinary wind domain pack, `wind_turbine_maintenance` Model assets,
 preinstalled wind installer, ProductStoreV2, generic batch/visual supervisors,
 browser broker/WebSocket/frame authority, Visual-Agent authority, and Git
 history are preserved.

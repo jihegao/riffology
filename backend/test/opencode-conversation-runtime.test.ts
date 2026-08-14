@@ -986,6 +986,57 @@ test("adapter binds one uniquely named scoped MCP and enables only that server f
   await assert.rejects(() => adapter.bindScopedMcp("turn_external", "http://example.com/a2/mcp?cap=x"), /capability-scoped local/u);
 });
 
+test("scoped MCP can deny built-in questions when the Product has no interaction route", async (t) => {
+  const calls: Array<{ path: string; body: any }> = [];
+  let scopedName = "";
+  let prompted = false;
+  const adapter = await readyAdapter(t, {
+    allowedProviders: ["provider-z"],
+    onSessionPermissionUpdate: (body: any) => calls.push({
+      path: "/session/opaque-session", body,
+    }),
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      calls.push({ path, body });
+      if (path === "/mcp" && init?.method === "POST") {
+        scopedName = body.name;
+        return Response.json({});
+      }
+      if (path === "/mcp") {
+        return Response.json(scopedName ? { [scopedName]: { status: "connected" } } : {});
+      }
+      if (path.includes("/mcp/")) return Response.json({});
+      if (path.endsWith("/prompt_async")) { prompted = true; return new Response(null, { status: 204 }); }
+      return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "inspect" }] },
+        { info: { id: "ok", role: "assistant", parentID: "server-user", time: { completed: 1 } }, parts: [{ type: "text", text: "done" }] },
+      ] : []);
+    },
+  });
+  const scopeId = "turn_no_questions";
+  const exactTools = ["riff_list_model_workspace"] as const;
+  await adapter.bindScopedMcp(
+    scopeId,
+    "http://127.0.0.1:8787/a2/mcp?cap=opaque-capability",
+    exactTools,
+  );
+  await adapter.promptWithModel("opaque-session", { providerId: "provider-z", modelId: "model-2" }, {
+    text: "inspect",
+    system: "bounded",
+    attachments: [],
+    scopedMcpScopeId: scopeId,
+    scopedMcpTools: exactTools,
+    allowQuestions: false,
+  });
+  const permission = calls.find((call) =>
+    call.path === "/session/opaque-session" && call.body?.permission)?.body.permission;
+  assert.deepEqual(permission?.slice(0, 2), [
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "question", pattern: "*", action: "deny" },
+  ]);
+});
+
 test("scoped MCP binding waits for connected and reconciles a retained upstream name", async (t) => {
   const calls: Array<{ method: string; path: string; url?: string }> = [];
   let name = "";
@@ -1304,6 +1355,57 @@ test("first assistant text cannot complete while the target session is busy or r
   assert.ok(statusPolls >= 1);
 });
 
+test("session status is reconciled in the exact Project workspace scope", async (t) => {
+  let prompted = false;
+  let terminal = false;
+  let scopedBusyObserved!: () => void;
+  const scopedBusy = new Promise<void>((resolve) => { scopedBusyObserved = resolve; });
+  const adapter = await readyAdapter(t, {
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) return Response.json(prompted ? [
+        { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        {
+          info: {
+            id: "assistant",
+            role: "assistant",
+            parentID: "server-user",
+            time: { completed: 1 },
+          },
+          parts: [{ type: "text", text: "scoped completion" }],
+        },
+      ] : []);
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async (input) => {
+    const directory = new URL(String(input)).searchParams.get("directory");
+    // OpenCode status maps are directory-scoped. The same request without this
+    // Project directory may return {}, which is not evidence that this turn is
+    // idle in its canonical workspace.
+    if (!directory) return Response.json({});
+    if (!terminal) {
+      scopedBusyObserved();
+      return Response.json({ "opaque-session": { type: "busy" } });
+    }
+    return Response.json({});
+  });
+
+  const operation = adapter.promptWithModel(
+    "opaque-session",
+    { providerId: "provider-z", modelId: "model-2" },
+    { text: "continue", system: "bounded", attachments: [] },
+  );
+  await scopedBusy;
+  assert.equal(await remainsPending(operation), true,
+    "an unscoped empty map must not override canonical Project busy state");
+  terminal = true;
+  assert.equal((await operation).text, "scoped completion");
+});
+
 test("retry with an errored attempt stays nonterminal and accepts the later successful attempt", async (t) => {
   let prompted = false;
   let allowSuccess = false;
@@ -1575,6 +1677,71 @@ test("an absent target status does not complete until the new assistant message 
   assert.equal(await remainsPending(operation), true);
   assistantComplete = true;
   assert.equal((await operation).text, "complete only after reconciliation");
+});
+
+test("stable canonical idle with a completed tool and unclosed reasoning part fails fast", async (t) => {
+  let prompted = false;
+  let postPromptMessageReads = 0;
+  let statusReads = 0;
+  const adapter = await readyAdapter(t, {
+    requestTimeoutMs: 2_000,
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/prompt_async")) {
+        prompted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith("/message")) {
+        if (!prompted) return Response.json([]);
+        postPromptMessageReads += 1;
+        return Response.json([
+          { info: { id: "server-user", role: "user" }, parts: [{ type: "text", text: "inspect" }] },
+          {
+            info: {
+              id: "tool-segment",
+              role: "assistant",
+              parentID: "server-user",
+              time: { completed: 1 },
+            },
+            parts: [{
+              id: "workspace-list",
+              type: "tool",
+              tool: "riff_list_project_workspace",
+              state: { status: "completed" },
+            }],
+          },
+          {
+            info: {
+              id: "orphaned-reasoning",
+              role: "assistant",
+              parentID: "server-user",
+            },
+            parts: [
+              { id: "step-start", type: "step-start" },
+              { id: "reasoning", type: "reasoning", text: "", time: { start: 2 } },
+            ],
+          },
+        ]);
+      }
+      throw new Error(`unexpected OpenCode endpoint ${path}`);
+    },
+  }, async () => {
+    statusReads += 1;
+    return Response.json({});
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => adapter.promptWithModel(
+      "opaque-session",
+      { providerId: "provider-z", modelId: "model-2" },
+      { text: "inspect", system: "bounded", attachments: [] },
+    ),
+    (error: any) => error.code === "opencode_idle_incomplete_response",
+  );
+  assert.ok(Date.now() - startedAt < 1_900, "the incomplete idle replay must fail before the outer prompt timeout");
+  assert.ok(statusReads >= 2, "canonical idle must remain stable across the grace period");
+  assert.ok(postPromptMessageReads >= 2, "the incomplete assistant replay must be observed more than once");
 });
 
 test("transient status reconnects, duplicate messages are deduped, and late unrelated generations are ignored", async (t) => {

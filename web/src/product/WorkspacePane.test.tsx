@@ -31,13 +31,14 @@ const execution: ProjectWorkspaceDto["execution"] = {
   }],
   overview: { stepOrHorizonPointer: "/demand", metricNames: ["processed"] },
   batch: { entryPoint: "code/riff_entry.py", protocol: "riff-batch-v1" },
-  visual: { entryPoint: "code/visual.py", protocol: "riff-visual-v1" },
+  visual: { entryPoint: "code/visual.py", protocol: "riff-visual-v1", healthPath: "/health" },
   cancellation: { signal: "SIGTERM", graceMs: 500 },
 };
 
 const workspace = (runKind: "batch" | "visual" = "batch"): ProjectWorkspaceDto => ({
   owner: { id: "project-one", name: "Fixed study", kind: "project", lifecycleState: "active" },
   workspaceDigest: "a".repeat(64),
+  executionReady: true,
   executionLock: runKind === "visual"
     ? { state: "running", runId: "run-visual", sourceDigest: "a".repeat(64) }
     : { state: "unlocked", runId: null, sourceDigest: null },
@@ -164,6 +165,24 @@ const client = (): ProductClient => ({
 } as unknown as ProductClient);
 
 describe("dynamic Project workspace", () => {
+  it("keeps a blank Project in explicit execution setup until a v2 contract is committed", () => {
+    const blank: ProjectWorkspaceDto = {
+      ...workspace(),
+      execution: null,
+      executionReady: false,
+      experimentConfigurations: [],
+      runs: [],
+    };
+    render(<WorkspacePane client={client()} workspace={blank}
+      refresh={vi.fn(async () => {})} />);
+
+    expect(screen.getByRole("heading", { name: "Execution setup required" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Experiments" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Runs" })).not.toBeInTheDocument();
+    expect(screen.getByText("not configured")).toBeInTheDocument();
+  });
+
   it("prioritizes configuration in a Project with no Experiment and keeps Run start disabled", () => {
     const empty: ProjectWorkspaceDto = {
       ...workspace(),
@@ -182,6 +201,38 @@ describe("dynamic Project workspace", () => {
     const runHeading = screen.getByRole("heading", { name: "Runs" });
     expect(experimentHeading.compareDocumentPosition(runHeading)
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/No modeling requirements file exists/u)).toBeInTheDocument();
+  });
+
+  it("opens the canonical Project modeling requirements in the review rail", async () => {
+    const productClient = client();
+    productClient.projectFileRenderable = vi.fn(async () => ({
+      kind: "markdown" as const,
+      title: "requirements/modeling-requirements.md",
+      text: "# Modeling requirements",
+    }));
+    const value: ProjectWorkspaceDto = {
+      ...workspace(),
+      files: [{
+        fileRef: "requirements-file",
+        relativePath: "requirements/modeling-requirements.md",
+        mediaType: "text/markdown",
+        sizeBytes: 24,
+        sha256: "9".repeat(64),
+        createdAt: "2026-08-12T00:00:00.000Z",
+        readOnly: true,
+      }],
+    };
+    render(<WorkspacePane client={productClient} workspace={value}
+      refresh={vi.fn(async () => {})} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Review modeling requirements" }));
+    expect((await screen.findAllByRole("heading", { name: "Modeling requirements" })).length)
+      .toBeGreaterThanOrEqual(2);
+    expect(productClient.projectFileRenderable).toHaveBeenCalledWith(
+      "project-one",
+      "requirements-file",
+    );
   });
 
   it.each([
@@ -256,12 +307,67 @@ describe("dynamic Project workspace", () => {
       {},
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Start batch Run" }));
+    await userEvent.click(screen.getByRole("button", { name: "Rerun batch Run" }));
     expect(productClient.startRun).toHaveBeenCalledWith(expect.objectContaining({
       projectId: "project-one",
       experimentConfigId: "experiment-one",
       completionConversationId: "conversation-one",
     }));
+  });
+
+  it("keeps the selected Run and its owning Experiment synchronized", async () => {
+    const productClient = client();
+    const base = workspace();
+    const batchExperiment = {
+      ...base.experimentConfigurations[0]!,
+      id: "experiment-batch",
+      name: "Batch owner",
+    };
+    const visualExperiment = {
+      ...base.experimentConfigurations[0]!,
+      id: "experiment-visual",
+      name: "Visual owner",
+      configuration: {
+        ...base.experimentConfigurations[0]!.configuration,
+        runKind: "visual" as const,
+      },
+    };
+    const batchRun = {
+      ...base.runs[0]!,
+      id: "run-batch",
+      experimentConfigurationId: batchExperiment.id,
+    };
+    const visualRun = {
+      ...base.runs[0]!,
+      id: "run-visual-terminal",
+      experimentConfigurationId: visualExperiment.id,
+      runKind: "visual" as const,
+    };
+    render(<WorkspacePane
+      client={productClient}
+      workspace={{
+        ...base,
+        experimentConfigurations: [visualExperiment, batchExperiment],
+        runs: [visualRun, batchRun],
+      }}
+      selectedConversationId="conversation-one"
+      refresh={vi.fn(async () => {})}
+    />);
+
+    expect(screen.getByRole("combobox", { name: "Experiment configuration" }))
+      .toHaveValue(batchExperiment.id);
+    await userEvent.click(screen.getByRole("button", { name: "Rerun batch Run" }));
+    expect(productClient.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      experimentConfigId: batchExperiment.id,
+    }));
+
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Run" }),
+      visualRun.id,
+    );
+    expect(screen.getByRole("combobox", { name: "Experiment configuration" }))
+      .toHaveValue(visualExperiment.id);
+    expect(screen.getByRole("button", { name: "Rerun visual Run" })).toBeDisabled();
   });
 
   it("hands the development proxy off to the exact restricted visual host", async () => {
@@ -402,6 +508,22 @@ describe("dynamic Project workspace", () => {
     expect(screen.getByRole("button", { name: "Start visual Run" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save configuration" })).toBeEnabled();
     expect(screen.getByText(/Execution lock: running/u)).toBeInTheDocument();
+  });
+
+  it("routes visual Run starts through the Project Conversation", async () => {
+    const productClient = client();
+    const visual = workspace("visual");
+    render(<WorkspacePane client={productClient} workspace={{
+      ...visual,
+      executionLock: { state: "unlocked", runId: null, sourceDigest: null },
+      runs: [],
+    }} refresh={vi.fn(async () => {})} />);
+
+    const directStart = screen.getByRole("button", { name: "Start visual Run" });
+    expect(directStart).toBeDisabled();
+    expect(screen.getByRole("note")).toHaveTextContent(/through the Project Conversation/u);
+    await userEvent.click(directStart);
+    expect(productClient.startRun).not.toHaveBeenCalled();
   });
 
   it("labels a historical Run whose source was not retained as non-replayable", () => {

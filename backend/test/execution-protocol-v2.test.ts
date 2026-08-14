@@ -11,7 +11,7 @@ import {
   validateExecutionDescriptionV2,
   visualProcessArguments,
 } from "../src/execution-protocol-v2.ts";
-import { planExperiment } from "../src/experiment-planner.ts";
+import { JSON_SCHEMA_2020_12, planExperiment } from "../src/experiment-planner.ts";
 import { createGenericModelScaffold } from "../src/model-workspace.ts";
 
 const validDescription = () => structuredClone(
@@ -43,6 +43,12 @@ test("execution-description v2 is strict, canonical, and deeply frozen", () => {
       error instanceof ExecutionProtocolV2Error && error.code === "execution_protocol_upgrade_required");
   }
 
+  const missingDialect = validDescription();
+  delete (missingDialect.inputs.schema as any).$schema;
+  assert.throws(() => validateExecutionDescriptionV2(missingDialect), (error: unknown) =>
+    error instanceof ExecutionProtocolV2Error
+      && error.message === `inputs.schema.$schema must equal "${JSON_SCHEMA_2020_12}".`);
+
   const collidingDomainEvents = validDescription();
   collidingDomainEvents.batch.domainEvents = {
     relativePath: collidingDomainEvents.outputs[0].relativePath,
@@ -50,6 +56,16 @@ test("execution-description v2 is strict, canonical, and deeply frozen", () => {
     role: "diagnostic",
   };
   assert.throws(() => validateExecutionDescriptionV2(collidingDomainEvents), (error: unknown) =>
+    error instanceof ExecutionProtocolV2Error && error.code === "execution_protocol_upgrade_required");
+
+  const collidingDomainEventName = validDescription();
+  collidingDomainEventName.batch.domainEvents = {
+    relativePath: "domain-events.ndjson",
+    mediaType: "application/x-ndjson",
+    role: "diagnostic",
+  };
+  collidingDomainEventName.outputs[0].logicalName = "domainEvents";
+  assert.throws(() => validateExecutionDescriptionV2(collidingDomainEventName), (error: unknown) =>
     error instanceof ExecutionProtocolV2Error && error.code === "execution_protocol_upgrade_required");
 });
 

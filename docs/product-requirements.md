@@ -4,7 +4,7 @@
 - Role: normative contract
 - Scope: Riffology 本地单用户 MVP（原交付代号 Milestone A）及已批准的后续产品细化
 - Source of truth: 本文档是产品目标与需求的唯一权威；合并代码与测试是实现状态的权威
-- Last reviewed: 2026-08-04
+- Last reviewed: 2026-08-12
 
 ## 1. 文档权威与职责分工
 
@@ -58,8 +58,9 @@ Riffology 是面向用户的产品名称；Riff 是其保留的本地领域运�
 这不改变本 PRD 中 Riff Store 对 Project、Experiment、Run 和 outputs 的权威，
 也不把尚未合并的工作台功能表述为当前实现。
 
-风机维护是第一个普通 Project Template 和示例 Project，不是独立产品模式、
-固定页面结构，也不能成为通用产品类型命名的来源。
+风机维护是第一个官方不可变 Example Project Template 及其分发的示例 Project。
+它的领域语义由 Project 内 Modeling Requirements 层和可执行项目资产承载，
+不是独立产品模式、Domain Pack、固定页面结构，也不能成为通用产品类型命名的来源。
 
 ## 3. 问题与用户
 
@@ -83,7 +84,7 @@ MVP 范围内。
 
 用户必须能够：
 
-1. 通过空白、Template 或导入创建一个通用仿真 Project；
+1. 通过空白、不可变 Example Project Template 或导入创建一个通用仿真 Project；
 2. 通过 OpenCode 驱动的 Agent 讨论并明确修改 Project；
 3. 通过 Project-scoped 工具把 UTF-8 文本产物直接、原子写入当前 Project；
 4. 配置并运行可视化实验或批量实验，以真实 Run 作为代码可执行性的唯一判定；
@@ -120,7 +121,8 @@ MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程�
 4. **持久权威留在 Riff。** Agent 文本、OpenCode 状态、渲染文档、DOM、
    screenshot 和可视化子进程状态都只是上下文或投影，不是系统记录。
 5. **平台通用，案例普通。** Core 代码不得假设风机、机组、维修队、仓库、
-   飞机、风机指标、固定风机标签页或特定 bundle ID。
+   飞机、风机指标、固定风机标签页或特定 bundle ID；领域语义必须留在
+   Project 内 Modeling Requirements 和项目资产中。
 6. **运行期稳定执行上下文。** 每个 Run 在受锁 Project 上捕获执行描述、配置、
    样本计划、限制和 source digest；终态后不保留源码副本，因此 Project 变化后的
    历史 Run 必须标记为不可重放。
@@ -140,14 +142,15 @@ MVP 完成的定义是：共享双栏产品可以完整执行风机示例流程�
 - 临时文档和对话附件；
 - 可实际运行的通用 Python/Mesa Project 工作区；
 - 技术可执行性检查和隔离的本地 Project 环境；
-- 空白、Template version 和受检导入式 Project 创建；
+- 空白、不可变 Example Project Template version 和受检导入式 Project 创建；
 - 命名实验配置、确定性样本计划和冻结 Run；
 - 通用 batch 和 visual 执行；
 - output 索引、下载、有界日志/事件、取消、清理和重启恢复；
 - 有范围的 visual 嵌入，以及显式授权的 Playwright 检查/交互；
 - SQLite 与经过校验的对象目录持久化；
 - 可恢复资源回收站和永久删除前预览；
-- 将已评审风机案例作为不可变 Template version 或普通 Project 导入。
+- 将已评审风机案例作为官方不可变 Example Project Template version 或普通
+  Project 导入。
 
 ### 6.2 非目标（Non-goals）
 
@@ -155,7 +158,7 @@ MVP 明确不建设：
 
 - 通用 CAD 或专业几何建模系统；
 - 万能浏览器 Agent 或可任意访问本机/互联网的 Playwright Agent；
-- 完整 SaaS、Domain Pack 市场、计费、组织管理或分发平台；
+- 完整 SaaS、独立 Domain Pack 市场/安装机制、计费、组织管理或分发平台；
 - 通用低代码/无代码仿真搭建器；
 - 自主科学验证、自动校准或自动证明模型正确性的系统；
 - 面向用户的 Project 发布或实验版本管理；
@@ -172,11 +175,13 @@ MVP 明确不建设：
 Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力，不是通用
 浏览器自动化平台，也不能获得任意页面、主机、credential 或本机文件权限。
 
-## 7. Platform 与 Domain Pack 能力归属边界
+## 7. Platform 与 Project Modeling Requirements 能力归属边界
 
-该边界用于阻止风机、飞机等领域概念重新进入 Riff Core。它定义长期能力归属，
-不表示所有列出的 Platform 能力都已在 MVP 中交付；例如 Platform 长期拥有
-协作基础能力，但 MVP 仍然只支持单用户本地模式。
+活跃产品不把领域语义建模为独立 Domain Pack。风机、飞机等领域的决策问题、
+假设、ontology、规则、输入、输出、验证边界和允许的结论，属于 Project 内的
+Modeling Requirements 层及其可执行项目资产；Platform 只提供通用的 Project、
+Template、Conversation、Run 和 evidence 合同。本文后文对 Domain Pack 的提及若
+出现在旧实施记录中，仅作为 compatibility/superseded 边界，不定义当前产品。
 
 ### 7.1 Platform（Riff Core）负责
 
@@ -185,48 +190,51 @@ Playwright 在 MVP 中只是一项有边界的当前 Project visual 检查能力
 | User / Workspace | 通用用户与工作区边界、对象所有权、存储和未来协作扩展点；MVP 仅实现本地单用户。 |
 | Agent runtime | 对话、provider/session、上下文、skill 路由、工具授权、action 记录和只读降级。 |
 | Project lifecycle | 通用 Project 创建、可编辑文件工作区、原子文件回执、Run 执行锁、文档、配置、Runs、outputs、归档和回收站。 |
-| Project Template | 不可变、版本化的 Project 种子；包含代码、环境、执行合同和默认实验，不包含对话或 Runs。 |
+| Example Project Template | 官方不可变、版本化的 Project 种子；包含代码、环境、execution contract、默认实验和 `requirements/modeling-requirements.md`，不包含 Conversation 或 Runs。 |
 | Experiment | 通用输入 schema 承载、配置、seed/sweep 展开、样本计数和冻结计划。 |
 | Run | batch/visual 生命周期、资源限制、取消、恢复、状态、进程监督和输出发布。 |
 | Evidence substrate | output、digest、日志、事件、来源和 Run 绑定的通用存储与检索；不负责领域解释。 |
 | Visual transport | 通用 visual health、broker、frame、WebSocket、撤销和有界 Playwright 能力。 |
 | Collaboration substrate | 未来通用共享、权限和协作基础能力的归属；不属于当前 MVP 实现范围。 |
 
-### 7.2 Domain Pack 负责
+### 7.2 Project 内 Modeling Requirements 负责
 
-| 能力 | Domain Pack 责任 |
+| 能力 | Project 内 Modeling Requirements / 项目资产责任 |
 | --- | --- |
-| Ontology | 领域实体、关系、术语和语义，例如风机、飞机、维修队或备件。 |
-| Domain schema | 领域输入、业务约束、数据映射和输出语义。 |
-| Domain Agent skills | 领域提示、skill、参考资料和专用分析流程。 |
-| Validation rules | 领域完整性、业务规则、适用范围和科学/工程校验规则。 |
-| Project compiler / adapter | 把领域描述转换或适配为 Platform 执行合同所需的 Project 或 Template 资产。 |
-| Visualization mapping | 把领域状态、事件和结果映射为领域可视化，而不是修改 Platform frame/broker。 |
-| Domain evidence interpretation | 定义领域指标、证据含义、限制和允许的结论，不改变 Platform 的原始 Run 事实。 |
-| Pack assets | 示例 Project、Template version、数据映射、图标和文档。 |
+| Canonical Modeling Requirements | 每个需要持久化的 Project Modeling Requirements 文档使用 `requirements/modeling-requirements.md`；它记录决策问题、范围、ontology、规则、输入、输出、验证边界和 claim boundary。 |
+| Ontology and rules | 领域实体、关系、术语、状态、事件、资源、队列和业务规则写入该 Project 的 requirements 与可执行资产，例如风机、飞机、维修队或备件。 |
+| Inputs and outputs | 领域输入、单位、随机流、业务约束、数据映射、KPI 定义和输出语义由 Project 自身声明。 |
+| Validation and interpretation | Project requirements 记录领域完整性、适用范围、微案例、比较依据、限制和允许的结论；不改变 Platform 的原始 Run 事实。 |
+| Skills and references | Agent 可以按 owner scope 加载领域 skill/reference 作为上下文，但它们不是独立领域资源，也不能替代 Project requirements 或持久写入回执。 |
+| Example Project Template | 官方不可变 Template version 分发一份可执行示例及其完整的 `requirements/modeling-requirements.md`；Template 不承载 Conversation 临时文档。 |
 
 ### 7.3 依赖规则
 
-1. Riff Core 不得导入 Domain Pack 的 ontology、schema、字段名、指标或固定页面。
-2. Domain Pack 只能依赖公开的 Platform 合同；Platform 不反向依赖某个 Pack。
-3. 只服务单一领域的能力默认留在 Domain Pack；只有证明跨领域稳定后才可提炼到
-   Platform。
-4. 风机和飞机能力必须以 Pack、Template、Project 或数据存在，不得以 Core 条件
-   分支存在。
-5. Platform 负责证据的身份、存储和可追溯性；Domain Pack 负责证据的领域含义
-   和验证规则。
-6. Domain Pack 不得绕过 ProductStoreV2、Run 冻结、资源限制、visual broker
-   或 Agent 工具授权。
+1. Riff Core 不得导入领域 ontology、schema、字段名、指标或固定页面，也不得以
+   风机、飞机等领域条件分支改变通用 Platform 行为。
+2. `requirements/modeling-requirements.md` 是 Project Modeling Requirements 的
+   canonical path；不存在该文件时，系统不得把 Agent 文本、HTML、DOM、截图或
+   Conversation 临时文档隐式提升为 Modeling Requirements。
+3. 官方不可变 Example Project Template 必须包含 canonical Modeling Requirements
+   文件；Blank Project 只创建通用 Project shell，不隐式创建领域 requirements 或
+   其他领域记录，必须经用户明确 add、import 或 template 动作才可产生。
+4. Conversation 临时文档始终属于 Conversation/Project 的草稿生命周期，不属于
+   Template version；只有明确的 Project 写入动作才能将内容写入 canonical path。
+5. Platform 负责 Project、Template、Run、output、digest 和 evidence 的身份、存储、
+   冻结与可追溯性；Project requirements 负责领域含义、验证边界和允许的结论。
+6. 旧实施记录中的 Domain Pack install/ownership 术语保留为 compatibility/superseded
+   记录，不得在活跃运行时被解释为独立 Pack 安装机制。
 
 ## 8. 信息模型
 
 | 对象 | 产品含义 | 关键所有权规则 |
 | --- | --- | --- |
-| **Project** | 可持续编辑的仿真源代码、执行描述、输入/输出声明、实验、Runs、outputs 和文档工作区。 | 是唯一 Conversation owner；同一时间最多一个活动 Run，活动期间锁定可执行工作区。 |
-| **Project Template Version** | 创建 Project 的不可变种子。 | 复制代码、环境、执行合同和默认实验；不复制对话、文档、Runs 或 outputs。 |
+| **Project** | 可持续编辑的仿真源代码、执行描述、Modeling Requirements、输入/输出声明、实验、Runs、outputs 和文档工作区。 | 是唯一 Conversation owner；同一时间最多一个活动 Run，活动期间锁定可执行工作区。 |
+| **Example Project Template Version** | 官方创建 Project 的不可变种子。 | 必须复制代码、环境、执行合同、默认实验和 `requirements/modeling-requirements.md`；不复制 Conversation、Conversation 临时文档、Runs 或 outputs。 |
+| **Modeling Requirements** | Project 内描述领域问题、假设、ontology、输入、输出和验证/claim boundary 的可审查层。 | canonical path 固定为 `requirements/modeling-requirements.md`；只有明确 Project 写入才改变它。 |
 | **Conversation** | 属于一个 Project 的命名持久用户/Agent 线程。 | 首个接受的用户 turn 后固定 provider/model。 |
 | **Message** | Conversation 中的用户、Agent 或平台记录。 | Riff 持久化受支持的完整消息；OpenCode 不是唯一消息存储。 |
-| **Temporary document** | 与消息关联的持久草稿、计划、分析、spec 或变更建议。 | 属于一个 owner，并具有 `draft`、`adopted`、`rejected`、`superseded` 等显式状态。 |
+| **Temporary document** | 与 Conversation 消息关联的持久草稿、计划、分析、spec 或变更建议。 | 属于 Conversation/Project owner，并具有 `draft`、`adopted`、`rejected`、`superseded` 等显式状态；永远不属于 Template version。 |
 | **Attachment** | 用户提供、最初附属于 Conversation 的来源文件。 | 正式采用时复制到 owner 存储，并记录来源和用途。 |
 | **Experiment configuration** | Project 中可编辑的命名参数、seeds 和可选 sweep。 | 活动 Run 期间仍可编辑；每个 Run 捕获启动时接受的值。 |
 | **Run** | 一次 visual 或 batch 执行尝试。 | 只属于一个 Project；终态保留输出、配置和 source digest，不保留源码副本。 |
@@ -242,9 +250,9 @@ Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态
 | ID | 需求 |
 | --- | --- |
 | FR-HOME-01 | 首页必须只展示 Projects，并显示技术状态、执行锁、最近活动和最后一次 Run。 |
-| FR-HOME-02 | 首页必须提供 **New project**，支持空白、Template version 和受检导入。 |
+| FR-HOME-02 | 首页必须提供 **New project**，支持空白、不可变 Example Project Template version 和受检导入。 |
 | FR-HOME-03 | New Project 必须要求名称和首个 Conversation 使用的 provider/model，并明确选择创建来源。 |
-| FR-HOME-04 | Template 创建必须复制代码、环境、执行合同和默认实验，不得复制 Conversation 或 Run。 |
+| FR-HOME-04 | Example Project Template 创建必须复制代码、环境、执行合同、默认实验和 canonical Modeling Requirements，不得复制 Conversation、Conversation 临时文档或 Run。 |
 | FR-LIFE-01 | rename、archive、restore、trash 和 delete 必须是直接资源操作，不依赖 Agent。 |
 | FR-LIFE-02 | delete 必须先进入本地可恢复回收站；永久删除必须是独立显式操作，并预览受影响数据。 |
 | FR-LIFE-03 | 资源操作必须保持 Project 所有权边界，不得删除无关本地文件或 Template version。 |
@@ -285,7 +293,7 @@ Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态
 | FR-CONV-17 | Goal disposition 必须是 `completed`、`needs_user_input`、`failed`、`read_only`、`outcome_unknown` 或 `budget_exhausted`。发生部分效果、资源漂移或中断后效果不明时不得自动 Retry；Product 层不得在原生 OpenCode tool loop 后再发第二个外层 prompt。公开 runtime 只投影有界 receipt 证据，不得返回原始 goal、goal digest、路径、上游 ID 或 tool payload。 |
 | FR-CONV-18 | Project 所有者的每轮自然语言对话隐式授权当前 Project 内的文件修改；OpenCode 必须通过每轮 scoped 工具原子提交，不创建 Draft Revision，也不要求额外确认。只有 Store 返回 committed mutation receipt 后，界面才能声明 Project 已修改。 |
 | FR-DOC-01 | Agent 输出可以创建链接在 message card 上的持久临时文档，但每次变更不得强制先创建临时文档。 |
-| FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Project 权威状态。 |
+| FR-DOC-02 | 临时文档必须具有显式生命周期；仅被渲染不得使其成为 Project 权威状态，也不得成为 Template 内容。 |
 | FR-ATT-01 | 附件最初必须属于 Conversation；采用时必须复制到 Project 并记录来源和用途。 |
 | FR-ATT-02 | 删除 Conversation 不得删除已经被 owner 采用的附件副本。 |
 
@@ -296,7 +304,7 @@ Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态
 
 | ID | 需求 |
 | --- | --- |
-| FR-PROJ-01 | New Project 必须通过 `blank`、不可变 Template version 或受检 import 三种显式来源之一创建；不得隐式创建缺失领域数据。 |
+| FR-PROJ-01 | New Project 必须通过 `blank`、不可变 Example Project Template version 或受检 import 三种显式来源之一创建；Blank Project 不得隐式创建 `requirements/modeling-requirements.md` 或其他领域数据。 |
 | FR-PROJ-02 | Project 必须直接拥有代码、环境/依赖、通用文本产物、execution description、run mode 和 workspace digest；不保存 technical status。 |
 | FR-PROJ-03 | Project 工作区可以包含 overview、spec、代码、输入/输出、结构和 Project 文档，无强制业务 schema。 |
 | FR-PROJ-04 | Project 必须声明 inputs、可运行入口、状态/取消行为和 output files；metrics 和有界 domain events 可选。 |
@@ -304,8 +312,12 @@ Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态
 | FR-PROJ-06 | 真实 Run 是代码可执行性的唯一判定；Run 成功仍绝不能表达模型正确、已校准、可信或适合决策。 |
 | FR-PROJ-07 | 执行必须使用隔离临时副本、清理后的 credential、默认无网络、有限资源和取消能力；终态后必须删除临时源码副本。 |
 | FR-PROJ-08 | Agent 生成视图是有界、Project-scoped、可失效的派生投影，不是文件、执行合同、技术状态或修改完成证据；Project 变化后旧视图必须标记 stale。 |
-| FR-TPL-01 | Template version 必须不可变，只包含代码、环境/依赖、execution description 和默认实验，不得包含 Conversation、文档、Run 或 output。 |
-| FR-TPL-02 | 从 Project 创建 Template version 必须是独立显式动作；从 Template 创建 Project 必须复制种子内容而不是共享可变实现。 |
+| FR-REQ-01 | Project Modeling Requirements 的唯一 canonical path 是 `requirements/modeling-requirements.md`；该层必须记录可追溯的决策问题、范围、ontology、输入、输出、验证和 claim boundary。 |
+| FR-REQ-02 | 官方不可变 Example Project Template version 必须包含 `requirements/modeling-requirements.md`，并与其可执行资产、默认实验和 source provenance 一起分发。 |
+| FR-REQ-03 | Blank Project 只创建通用 Project shell，不隐式创建 Modeling Requirements、领域 ontology 或其他领域记录；add、import 和 template 必须是显式动作。 |
+| FR-REQ-04 | Conversation 临时文档不属于 Template version；只有明确 Project 写入/采用动作才能把内容持久化到 canonical path。 |
+| FR-TPL-01 | Example Project Template version 必须不可变，包含代码、环境/依赖、execution description、默认实验和 canonical Modeling Requirements，不得包含 Conversation、Conversation 临时文档、Run 或 output。 |
+| FR-TPL-02 | 当前 MVP 只注册仓库维护、评审并随版本发布的官方 Example Project Template version；从 Template 创建 Project 必须复制种子内容而不是共享可变实现。用户把任意 Project 发布为 Template、远程注册表和市场均延期。 |
 
 ### 9.5 Project 实验配置与执行锁
 
@@ -348,7 +360,7 @@ Project 的可执行工作区只在非终态 Run 期间保持锁定。Run 终态
 | ID | 需求 |
 | --- | --- |
 | FR-DATA-01 | SQLite 必须存储受支持资源的 ownership、lifecycle、metadata、messages、documents、configurations、Run state 和 object indexes。 |
-| FR-DATA-02 | 对象目录必须存储 Project code、已采用附件、环境描述、visual assets 和 Run outputs，并记录 size/digest。 |
+| FR-DATA-02 | 对象目录必须存储 Project code、canonical Modeling Requirements、已采用附件、环境描述、visual assets 和 Run outputs，并记录 size/digest。 |
 | FR-DATA-03 | 跨数据库/文件系统修改必须原子完成，或可确定性恢复到之前的一致状态。 |
 | FR-DATA-04 | 应用重启必须恢复 Projects、Templates、Conversations、documents、configurations、Runs、execution locks 和 output indexes。 |
 | FR-DATA-05 | Browser/API 投影必须移除任意文件路径、process identity、child port、provider secret 和 external session ID。 |
@@ -378,9 +390,10 @@ NFR-<DOMAIN>-NN
 ### 11.1 创建并完善 Project
 
 1. 用户从 Home 选择 **New project**，输入名称、provider/model，并显式选择
-   blank、Template version 或 import 来源。
+   blank、不可变 Example Project Template version 或 import 来源。
 2. Riff 原子创建 Project 工作区和首个 Conversation。
-3. 用户描述仿真问题；Agent 使用相关仿真 skill，并可以创建文件或临时计划。
+3. 用户描述仿真问题；Agent 使用相关仿真 skill，并可以创建文件或 Conversation
+   临时计划；这不会隐式创建 Modeling Requirements。
 4. 用户明确授权后，系统原子应用允许的修改并返回写入 receipt。
 5. Store 返回 committed receipt 后立即展示文件已保存；如需判断可执行性，用户启动
    绑定最新 workspace digest 的真实 Run。
@@ -520,9 +533,11 @@ fresh Store、旧 schema recovery-only、归档摘要与 merged-main 证据重�
 
 一个真实 browser 场景必须证明：
 
-1. fresh Store 的 Home 只展示 Projects、Templates 和 New Project，旧 Model API
+1. fresh Store 的 Home 只展示 Projects、官方 Example Project Templates 和 New Project，旧 Model API
    与 `/workbench/models/*` 不可达；
-2. blank、Template version 和 import 三条路径都能原子创建独立 Project；
+2. blank、官方 Example Project Template version 和 import 三条路径都能原子创建独立
+   Project；Blank Project 不生成 Modeling Requirements，官方 Template 必须包含
+   `requirements/modeling-requirements.md`；
 3. 真实多轮 OpenCode Conversation 修改 Project 文件或创建持久临时文档，
    右栏以 mutation receipt 和当前 digest 反映已提交状态；
 4. 第二个命名 Conversation 使用自己选择的 provider/model，来回切换不丢失
@@ -553,7 +568,7 @@ fresh Store、旧 schema recovery-only、归档摘要与 merged-main 证据重�
 | Visual child 接触 Platform 权威 | 使用隔离 loopback topology、不同 origin、短期 capability、不投影 child port 并支持撤销。 |
 | Provider/session 不可用 | 持久化 Riff context，可用时重建 session，不可用时诚实只读。 |
 | 历史 wind/Gate 文档重新主导产品 | 明确标记 historical，所有产品冲突以本 PRD 为准。 |
-| Domain Pack 概念渗入 Core | 执行 Platform/Domain Pack 依赖规则，并禁止 Core 使用领域 schema/条件分支。 |
+| 领域语义漂移或 Domain Pack 旧术语重新成为活动机制 | 以 Project 内 canonical Modeling Requirements、官方不可变 Example Project Template 和 Project-owned assets 为准；旧 Domain Pack 记录只作为 compatibility/superseded 边界。 |
 | 成功执行被误当作有效决策 | 明确区分技术、执行、科学、校准和决策声明。 |
 
 ## 17. 支撑文档
